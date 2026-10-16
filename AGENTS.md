@@ -18,6 +18,10 @@ sistema. É um downscale da Carna, não uma continuação dela.
 | Fatos e limites do runtime tinyjs | `docs/tinyjs.md` |
 | O que foi herdado e abandonado da Carna | `docs/downscale-carna.md` |
 | Vocabulário canônico | `CONTEXT.md` |
+| Epics (what and why) and effort blocks with story points | `docs/epics/` (`blocks.md` for points and blocks) |
+| Exact contracts: schemas, endpoints, payloads, key formats | `docs/specs/` |
+| Role and rules of each part of the code | `context.md` in each folder: `host/`, `backend/`, `shared/`, `src/`, `test/` |
+| Story issues for blocks 1–2 (status lives there, not in the docs) | GitHub issues of `CaioFaSoares/Bond`, milestones "Block 1" and "Block 2" |
 | Código (quando existir) | raiz do projeto, conforme a fase do roadmap |
 | Processo do dono (proposta, issue, frente) | `_research/_Guia/` do `_Aleph` (`/Users/caio/_Eclaire/_Workspace/Projects/_Aleph/`) — vale para trabalho lá dentro; aqui o registro é este repositório |
 

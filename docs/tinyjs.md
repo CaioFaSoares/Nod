@@ -160,6 +160,11 @@ caminho real é `template/types/tiny.d.ts`.
   (`docs.html`).
 - Mic/câmera só são concedidos sem prompt às páginas do próprio app; uma origin externa precisa de
   uma chave em `api.origins` que permita `media.*` (`docs.html`).
+- **Observed by execution (owner, 2026-10-16):** Jitsi opened in a Bond tool window and the camera
+  worked "sem problemas". OS and exact config not recorded; the generated `tinyjs.json` in the repo
+  at that time had no tool origin in `api.origins` and no `"permissions"` block (`leitura`). Reading:
+  the `media.*` key above gates the `tiny` media API, not WebRTC `getUserMedia` in the page —
+  `[INFERENCE]`, to confirm on Windows and Linux and in a built release.
 - `tiny.fetch` roda **no backend**: sem CORS, sem CSP, sem limite de mixed content, com
   `{ stream: true }`; certos casos caem no `curl` do sistema (`docs.html`).
 - `tiny.system.capabilities()` lista **apenas as exceções** — testar `caps.x !== false`, nunca

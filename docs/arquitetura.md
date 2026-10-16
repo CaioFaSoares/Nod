@@ -7,8 +7,8 @@ Mudar uma assinatura daqui é decisão do coordenador.
 **v2 (2026-10-15), por decisão do dono:** (1) uma janela só para gerenciar e usar o Bond — o rail de
 ícones, a tela inicial, a paleta e as configurações vivem na janela `main`; as ferramentas abrem em
 janelas próprias a partir dela; (2) **todo o app em inglês** — interface, mensagens, identificadores,
-nomes de método, tipos, testes e comentários. Os documentos de projeto continuam em pt-BR. O
-vocabulário pt-BR ↔ identificador está em `CONTEXT.md`.
+nomes de método, tipos, testes e comentários. From 2026-10-16, project documents are written in
+English too; the pt-BR ↔ identifier vocabulary is in `CONTEXT.md`.
 
 Runtime: tinyjs `v0.57.2` (txiki.js `26.6.0`), template `vanilla-ts` com Vite e bun. API exata do
 runtime: `backend/tiny.d.ts` (backend) e `src/tiny.d.ts` (página). Não invente API.

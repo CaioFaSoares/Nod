@@ -1,0 +1,217 @@
+# Builds the Bond for every OS and publishes the zips + auto-update manifest as a GitHub Release
+# whenever a branch named release-* is pushed. Process and caveats: docs/distribuicao.md §8.
+name: release
+
+on:
+  push:
+    branches: ['release-*']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  # Pinned runtime (docs/canonico.md §19: TINYJS_VERSION fixed per release).
+  TINYJS_VERSION: v0.57.2
+  BUN_VERSION: 1.4.3
+
+jobs:
+  prepare:
+    name: check version and tests
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: version
+        name: read version
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          version=$(jq -r '.version' tinyjs.base.json)
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]]; then
+            echo "::error file=tinyjs.base.json::version '$version' is not semver"
+            exit 1
+          fi
+          # release-1.2.3 must match tinyjs.base.json; other release-* names skip the check.
+          suffix="${BRANCH#release-}"
+          if [[ "$suffix" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]] && [[ "${suffix#v}" != "$version" ]]; then
+            echo "::error file=tinyjs.base.json::branch $BRANCH says ${suffix#v} but tinyjs.base.json says $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test test/
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: macos, os: macos-15 }
+          - { target: linux-x86_64, os: ubuntu-24.04 }
+          - { target: linux-arm64, os: ubuntu-24.04-arm }
+          - { target: windows, os: windows-2025 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: install WebKitGTK (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-0
+
+      - name: install tinyjs (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL https://tinyjs.app/install | TINYJS_NO_MODIFY_PATH=1 sh
+          echo "$HOME/.tinyjs" >> "$GITHUB_PATH"
+
+      - name: install tinyjs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://tinyjs.app/install.ps1 | iex
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:LOCALAPPDATA 'tinyjs')
+
+      - run: bun install --frozen-lockfile
+
+      # The private seed (and any icon it references) never enters git (AGENTS.md). It arrives as
+      # the BOND_PRIVATE_RESOURCES secret: base64 of a tar.gz whose paths are relative to resources/.
+      - name: restore private resources
+        env:
+          BOND_PRIVATE_RESOURCES: ${{ secrets.BOND_PRIVATE_RESOURCES }}
+        run: |
+          if [ -z "$BOND_PRIVATE_RESOURCES" ]; then
+            echo "::error::secret BOND_PRIVATE_RESOURCES is missing (docs/distribuicao.md §8)"
+            exit 1
+          fi
+          printf '%s' "$BOND_PRIVATE_RESOURCES" | base64 -d | tar -xzf - -C resources
+          test -f resources/seed.json || { echo "::error::BOND_PRIVATE_RESOURCES has no seed.json"; exit 1; }
+
+      - name: generate tinyjs.json
+        run: bun scripts/gen-config.ts build
+
+      - name: release notes
+        env:
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          mkdir -p .build
+          printf '%s\n' "${MESSAGE:-Bond ${{ needs.prepare.outputs.version }}}" > .build/release-notes.md
+
+      - name: publish (macOS arm64 + x86_64)
+        if: runner.os == 'macOS'
+        run: |
+          tinyjs version
+          tinyjs publish --arch arm64 --notes-file .build/release-notes.md
+          tinyjs publish --arch x86_64 --notes-file .build/release-notes.md
+
+      - name: publish (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          tinyjs version
+          tinyjs publish --notes-file .build/release-notes.md
+
+      - name: publish (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          tinyjs version
+          tinyjs publish --notes-file .build/release-notes.md
+
+      - name: check manifest version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          got=$(bun -e 'console.log(JSON.parse(await Bun.file("dist/publish/manifest.json").text()).version)')
+          [ "$got" = "$VERSION" ] || { echo "::error::manifest says $got, expected $VERSION"; exit 1; }
+          ls -la dist/publish
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: publish-${{ matrix.target }}
+          path: dist/publish/
+          if-no-files-found: error
+          retention-days: 3
+
+  release:
+    name: publish GitHub release
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      # Where the release goes: this repository unless vars.BOND_RELEASE_REPO names another one
+      # (then secrets.BOND_RELEASE_TOKEN needs contents:write on it).
+      RELEASE_REPO: ${{ vars.BOND_RELEASE_REPO || github.repository }}
+      GH_TOKEN: ${{ secrets.BOND_RELEASE_TOKEN || github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: publish-*
+          path: parts
+
+      # Each OS writes its own manifest (mac: url/sha256 + "mac" block; Linux: "linux".<arch>;
+      # Windows: "win"). They coexist, so a recursive merge gives the one manifest every OS reads.
+      - name: merge manifests
+        run: |
+          mkdir -p out
+          versions=$(jq -s '[.[].version] | unique | length' parts/*/manifest.json)
+          [ "$versions" = 1 ] || { echo "::error::manifests disagree on version"; jq -s '[.[].version]' parts/*/manifest.json; exit 1; }
+          jq -s 'reduce .[] as $m ({}; . * $m)' parts/*/manifest.json > out/manifest.json
+          find parts -type f ! -name manifest.json -exec cp {} out/ \;
+          ls -la out
+          {
+            echo "### Bond $VERSION"
+            echo
+            echo '```json'
+            jq 'del(.notes)' out/manifest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: check update url
+        run: |
+          expected="https://github.com/$RELEASE_REPO/releases/latest/download/manifest.json"
+          url=$(jq -r '.url // empty' out/manifest.json)
+          case "$url" in
+            https://github.com/$RELEASE_REPO/releases/latest/download/*) ;;
+            *) echo "::warning::download urls ($url) don't point at $RELEASE_REPO latest release; set the seed's update.url to $expected for auto-update from GitHub Releases" ;;
+          esac
+
+      - name: create or update release
+        run: |
+          if gh release view "$TAG" --repo "$RELEASE_REPO" > /dev/null 2>&1; then
+            echo "::warning::release $TAG already exists: assets replaced. Installed apps only auto-update when tinyjs.base.json version goes up."
+            gh release upload "$TAG" out/* --repo "$RELEASE_REPO" --clobber
+            gh release edit "$TAG" --repo "$RELEASE_REPO" --notes-file <(jq -r '.notes // empty' out/manifest.json) --latest
+          else
+            target=()
+            [ "$RELEASE_REPO" = "${{ github.repository }}" ] && target=(--target "${{ github.sha }}")
+            gh release create "$TAG" out/* --repo "$RELEASE_REPO" "${target[@]}" \
+              --title "Bond $VERSION" \
+              --notes-file <(jq -r '.notes // empty' out/manifest.json) \
+              --latest
+          fi

@@ -1,8 +1,8 @@
 # Bond
 
-O vocabulário do produto. Os documentos de projeto são em português; **o app é todo em inglês**
-(decisão do dono, 2026-10-15), então cada termo traz o identificador usado no código e na
-interface. Um termo novo espera leitura do dono antes de virar canônico.
+O vocabulário do produto. **Everything is in English from 2026-10-16** (owner decision; the app was
+already English since 2026-10-15). The pt-BR terms below remain until this file is rewritten; each
+term carries the identifier used in code and UI. A new term waits for the owner's reading.
 
 ## A janela e o que ela abre
 

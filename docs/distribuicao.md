@@ -96,3 +96,55 @@ o dono quiser; o app verifica checksum e assinatura antes de trocar a release.
 
 Ambos já estão no `.gitignore`. O versionado no lugar deles é só `resources/seed.example.json`, com
 dados falsos.
+
+## 8. Automated release (GitHub Actions)
+
+`.github/workflows/release.yml` builds and publishes on every push to a branch named `release-*`
+(and on demand with "Run workflow").
+
+1. **Check**: reads `version` from `tinyjs.base.json`. A branch named `release-X.Y.Z` must match
+   it; other `release-*` names skip this check. Then `bun run typecheck` and `bun test test/`.
+2. **Build**, one job per target, with tinyjs and bun pinned (`TINYJS_VERSION`, `BUN_VERSION` at the
+   top of the workflow):
+
+   | Target | Runner | Output |
+   | --- | --- | --- |
+   | macOS | `macos-15` | `bond-<v>-macos-arm64.zip` and `bond-<v>-macos-x86_64.zip` (`publish --arch` twice) |
+   | Linux x86_64 | `ubuntu-24.04` | `bond-<v>-linux-x86_64.tar.gz` |
+   | Linux arm64 | `ubuntu-24.04-arm` | `bond-<v>-linux-arm64.tar.gz` |
+   | Windows | `windows-2025` | `bond-<v>-win.zip` |
+
+3. **Release**: merges the per-OS `manifest.json` files into one, then creates release `v<version>`
+   with every archive and the merged manifest, marked as latest.
+
+**One-time setup:**
+
+- Secret `BOND_PRIVATE_RESOURCES`: the private files of `resources/` (§1, §7) as base64 of a
+  tar.gz, with paths relative to `resources/`. With `seed.json` plus any icons it references:
+
+  ```
+  tar -czf - -C resources seed.json icons | base64 | gh secret set BOND_PRIVATE_RESOURCES
+  ```
+
+  GitHub caps a secret at 48 KB. If the icons don't fit, put them in the seed as data URIs.
+- Auto-update from GitHub Releases: the seed's `update.url` must be
+  `https://github.com/<release repo>/releases/latest/download/manifest.json`. `tinyjs publish`
+  derives every download URL from that address, and the release job warns when they don't point at
+  the release repository.
+
+**Caveats:**
+
+- **Version bump.** Pushing again with the same `version` replaces the release's files. Installed
+  apps only update when `version` in `tinyjs.base.json` goes up.
+- **Private repository: no auto-update.** This repository is private, so its release files need
+  authentication to download, and installed apps can't fetch them. The release still serves for
+  sending by hand (§3). For auto-update, set the variable `BOND_RELEASE_REPO` to another repository
+  and the secret `BOND_RELEASE_TOKEN` to a token with `contents: write` on it.
+- **Public release repository: the seed becomes public.** Every archive carries the seed (§1):
+  addresses, roles, grants and invite hashes. `docs/canonico.md` §19 accepts that people who
+  receive the release can read the seed, not the whole internet. Prefer a host the owner controls
+  for the manifest and archives before making releases public.
+- **Unsigned.** macOS builds are signed ad hoc, so the release step in §3 still applies. Windows
+  builds are unsigned (§4).
+- **macOS runner cost.** On a private repository, macOS runner minutes cost more than Linux ones
+  (`https://docs.github.com/en/billing/reference/actions-runner-pricing`).

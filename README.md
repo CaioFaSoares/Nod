@@ -13,7 +13,7 @@ webview do sistema, ~6 MB, sem Electron e sem servidor HTTP embutido.
 
 v2 entregue (épico B01–B04 fechado em 2026-10-16): janela única de gerenciar/usar, ferramentas em
 janelas próprias, cascata de login, cofre no chaveiro, papéis e concessões, auditoria, release com seed
-privado. App em inglês; docs de projeto em português. Leia `docs/canonico.md` e `docs/arquitetura.md`.
+privado. Everything in English from 2026-10-16 (app and new docs). Leia `docs/canonico.md` e `docs/arquitetura.md`.
 
 ### Pendências
 

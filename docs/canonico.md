@@ -49,6 +49,9 @@ Dentro:
 Fora (não-objetivos do v1):
 
 - Ser navegador: não há barra de endereço livre. Só o catálogo abre janelas de ferramenta.
+  **Relaxed on 2026-10-16** (owner: "abrir link no bond e/ou salvar link novo na barra lateral mais
+  rápido"): any `http(s)` link may open in an ad-hoc tab and be saved to the sidebar
+  (`docs/epics/E03-docked-tabs.md` §5). Still no history, bookmarks bar or extensions.
 - Ser provedor de identidade: SSO/OIDC por ferramenta é fase posterior, com o host.
 - Ser VPN ou túnel: quem exige rede privada resolve isso fora do Bond.
 - Ser gerenciador de senhas: o cofre guarda credenciais **das ferramentas cadastradas**, não um
@@ -105,6 +108,11 @@ seja tudo em uma janela só para o lado de gerenciar/usar, aí abrimos as janela
 substitui o desenho anterior de rail ancorado + palcos encostados (que tinha, além disso, a moldura
 dimensionada errado — observado por execução: a barra de título somava altura e o palco vazava da
 tela, e o launcher não respeitou `x`/`size` do `win.open`).
+
+**Evolution decided on 2026-10-16**: the docked view becomes the default. Tools open as tabs shown
+over the main window's center panel, several tabs per tool, detachable without reload, with links
+from inside a tool opening as tabs next to it. What follows describes today's behavior, which stays
+as the **Windows** mode. Design and spikes: `docs/epics/E03-docked-tabs.md`.
 
 | Peça | O que é |
 | --- | --- |
@@ -374,7 +382,7 @@ máquina.
 | RNF-05 | Privacidade: nenhum dado sai da máquina sem ação explícita; eventos ficam locais até existir host. |
 | RNF-06 | Manutenção: TypeScript estrito; um fato em uma casa; nenhuma dependência que exija rede para compilar. |
 | RNF-07 | Teclado: toda ação alcançável por teclado, com a paleta como caminho principal; atalhos globais opcionais. |
-| RNF-08 | Idioma: o app é todo em inglês — interface, mensagens, identificadores, API, testes (decisão do dono, 2026-10-15); os documentos de projeto continuam em português do Brasil. |
+| RNF-08 | Language: the app is entirely in English — interface, messages, identifiers, API, tests (owner, 2026-10-15). From 2026-10-16, project documents are written in English too (owner: "é pra tudo ser em ingles a partir de agora"); existing pt-BR text stays until it is rewritten. |
 | RNF-09 | Trazer para a frente uma ferramenta já aberta é perceptível como instantâneo: menos de 150 ms entre o clique e a janela à frente; nunca recarrega a página. |
 | RNF-10 | Criptografia: o armazenamento padrão de segredo é o chaveiro do sistema. A senha local é hash PBKDF2-HMAC-SHA256 (salt de 16 bytes, parâmetros versionados); o único uso de AES-256-GCM é o export opcional, com nonce por gravação. Senha e chave derivada nunca tocam o disco nem entram em evento, log ou `store.json`. |
 | RNF-11 | (Retirado na v2 junto com o RF-22.) |
@@ -400,6 +408,10 @@ credencial. O `store.json` guarda só preferências e a lista de janelas abertas
 ## 18. Host fino (pesquisa futura)
 
 O dono quer, mais adiante, um servidor para todos se conectarem. O desenho proposto:
+
+Evolution proposed on 2026-10-16 — connected mode, host sign-in, personal tools and favorites,
+sync contract, Coolify deployment, stack options: `docs/epics/E01-connected-mode.md`. Rows marked
+`Decidido (2026-10-16)` in §22 already apply; the rest of this section waits for that epic's reading.
 
 - **Elixir/BEAM numa VPS com Coolify**, como a Carna já fez, consumido pelo **backend** do app (o
   runtime não tem servidor HTTP e a página não fala com a rede sem passar pelo backend —
@@ -444,6 +456,9 @@ momento, isso passa a ser validado online e a se atualizar sozinho.
   no cofre, cifrado pela senha local (§11).
 - **Env travada**: a release fixa `TINYJS_VERSION` e o `id` do app; não existe endpoint configurável
   em runtime que redirecione catálogo ou atualização. Isso é o que o dono chamou de "envs travadas".
+  **Superseded for the catalog on 2026-10-16** (owner: "env travada era algo como uma versão mais
+  simples inicial"): the host address is configurable at runtime and the host is the central core
+  (`docs/epics/E01-connected-mode.md` §2, §8). `TINYJS_VERSION` and the app `id` stay fixed per release.
 
 **Depois do seed, a página de build normal:**
 
@@ -500,7 +515,8 @@ Status: `Proposto` espera leitura do dono; `Aberto` espera pesquisa; só o dono 
 | --- | --- | --- | --- | --- |
 | Runtime | TypeScript sobre tinyjs (txiki.js + webview nativa) | Electron; Tauri | Pedido do dono; ~6 MB; multiplataforma; sem servidor HTTP | Proposto |
 | Janela única de gerenciar/usar | Uma janela principal com sidebar, Home, paleta e Settings; cada ferramenta em janela própria aberta a partir dela | rail ancorado + palcos encostados; janelas separadas para admin, paleta e carregando | Dono em 2026-10-15: "tudo em uma janela só para o lado de gerenciar/usar, aí abrimos as janelas a partir daí" | Decidido (2026-10-15) |
-| Idioma do app | Todo o app em inglês: interface, mensagens, identificadores, API, tipos, testes; docs de projeto em pt-BR | só a interface em inglês | Dono em 2026-10-15: "tudo deve estar em inglês" (escopo escolhido: o app inteiro) | Decidido (2026-10-15) |
+| Idioma do app | Todo o app em inglês: interface, mensagens, identificadores, API, tipos, testes; docs de projeto em pt-BR | só a interface em inglês | Dono em 2026-10-15: "tudo deve estar em inglês" (escopo escolhido: o app inteiro) | Decidido (2026-10-15); docs part superseded by "Project docs language" |
+| Project docs language | Everything written from 2026-10-16 on is in English, project documents included; existing pt-BR text is not translated in bulk | keep project docs in pt-BR | Owner on 2026-10-16: "é pra tudo ser em ingles a partir de agora" | Decidido (2026-10-16) |
 | Troca de sistema | Clicar ou `⌘N` traz a janela da ferramenta para a frente; abre se não estiver aberta | — | Pedido do dono (troca rápida), mantido na v2 sem palcos | Decidido (2026-10-15) |
 | Moldura integrada | Superada pela "Janela única de gerenciar/usar" (2026-10-15) | — | — | Superada |
 | Palco pré-aquecido | Superado pela janela única (RF-22 retirado) | — | — | Superada |
@@ -521,7 +537,26 @@ Status: `Proposto` espera leitura do dono; `Aberto` espera pesquisa; só o dono 
 | Identidade | Conta por casca hoje, conta por host depois; convite de uso único com hash e validade | login por ferramenta na mão | Herdado da Carna, que já provou o fluxo | Proposto |
 | Papéis | Papéis nomeados + concessão papel↔ferramenta; admin vê tudo | permissão pessoa a pessoa | Papel é o pedido do dono; concessão é a espinha, como a membership na Carna | Proposto |
 | Auditoria | Tabela local de eventos, exportável, sem valor secreto | telemetria remota | Privacidade e operação offline | Proposto |
-| Host | Elixir/BEAM em VPS com Coolify, consumido pelo backend do app | sidecar BEAM embutido; nada | O sidecar pesa dezenas de MB e quebra a premissa de tamanho | Aberto |
+| Host | Bun + **Elysia 2.0 beta** (exact beta pinned, bumped on purpose), one process, SQLite via `bun:sqlite`, in this repo under `host/` (`docs/epics/E01-connected-mode.md` §11) | Elysia 1.4 stable; Elixir/Phoenix; Bun sem framework; Go + PocketBase; two services (data + rules) | Owner on 2026-10-16: "vamos de bun com elysia mesmo"; "usar logo a v2 pra testar impactos e encontrar bugs. é um projeto pessoal" | Decidido (2026-10-16) |
+| Host tenancy | One host serves one guild; another guild is another container | several guilds per host | Owner on 2026-10-16: "cada container pode hospedar só uma guild, é isso mesmo" | Decidido (2026-10-16) |
+| Host deployment | One compose on the owner's Coolify: one service, SQLite on a volume (`docs/epics/E01-connected-mode.md` §10) | — | Owner on 2026-10-16: "quero hospedar um compose do servidor no meu coolify" | Decidido (2026-10-16) |
+| Host sign-in | The admin creates a person and gets a short access code; the person redeems it in the Bond and sets a password; sign-in is email + password. Email sending deferred (`docs/epics/E01-connected-mode.md` §7) | magic link by email | Owner on 2026-10-16: "passar um código curto que o sistema iria pedir e depois cadastrar sua senha"; "desconsiderar o sistema de email agora" | Decidido (2026-10-16) |
+| Password never reaches the host | The Bond derives `authKey` and `vaultKey` from the password; only `authKey` is sent; vault values encrypted with `vaultKey` before the keychain (`docs/epics/E01-connected-mode.md` §7) | send the password and hash it on the host | Owner on 2026-10-16: the password "abrir uma vault privada local que eu no servidor nao tenho acesso"; changes the plain-keychain detail of "Cofre" | Proposto |
+| Carna services | Deferred: future separate services beside the host, trusting its session | incorporate now | Owner on 2026-10-16: "deixar isso como algo futuro" | Decidido (2026-10-16) |
+| Biometric gate | Biometrics gate unlock and every reveal, copy, accept and send of a credential; password where biometrics don't exist (Linux); `vaultKey` kept in the keychain for biometric unlock (`docs/epics/E01-connected-mode.md` §7, `docs/epics/E02-credential-sharing.md` §5) | password only for the vault | Owner on 2026-10-16: "biometrics internas pra tudo, mesmo que isso inclua só desbloquear localmente as senhas guardadas" | Decidido (2026-10-16) |
+| Credential sharing | Send, assign (to a person or a role) and share tool credentials end to end: sealed to the receiver's X25519 key, signed with Ed25519, relayed by the host as ciphertext (`docs/epics/E02-credential-sharing.md`) | admin types it once; no sharing | Owner on 2026-10-16: "mandar senhas entre sí ou apontar senhas novas para membros… passando por biometria para conseguir sequer ver" | Proposto |
+| Guilds per install | One Bond is in one guild at a time; changing guild is removing the host and adding another (`docs/epics/E01-connected-mode.md` §4) | several guilds side by side | Owner on 2026-10-16: "no momento nao. se sair e voltar ele poderia entrar em outra" | Decidido (2026-10-16) |
+| Sharing scope and holders | Each credential has a scope — role (default), blocked, org — and shows who holds it (`docs/epics/E02-credential-sharing.md` §1) | anyone to anyone | Owner on 2026-10-16: "só entre pessoas da mesma role… ou bloqueado ou publica pra org"; "é bom ver que consegue ver aquele password" | Decidido (2026-10-16) |
+| Docked view and tabs | Docked mode **is the default**: tabs shown over the main window's center panel as frameless windows the Bond keeps on the slot, several tabs per tool, links clicked inside a tool adopted as tabs next to it; Windows mode stays as a setting (`docs/epics/E03-docked-tabs.md`) | iframes; tool windows only | Owner on 2026-10-16: center panel showing the open tab, detachable, several tabs per tool; "padrão é docked view". The docked mechanics remain a proposal until spikes S0–S4; iframes stay out (§7). Blocked by B05 | Decidido (2026-10-16): default and intent; mechanics Proposto |
+| Detach without reload | Detaching or docking a tab keeps the same window and page (frame toggled, no `parent`); never a reload (`docs/epics/E03-docked-tabs.md` §3) | reopen as a framed window (page reloads) | Owner on 2026-10-16: "quero que deatachar nao perca o progresso" | Decidido (2026-10-16) |
+| Quick links | Open any `http(s)` link in an ad-hoc tab (palette, `bond://open?url=`) and save any tab to the sidebar in one step, as a personal view or personal tool (`docs/epics/E03-docked-tabs.md` §5) | catalog-only navigation (§2) | Owner on 2026-10-16: "abrir link no bond e/ou salvar link novo na barra lateral mais rápido" | Decidido (2026-10-16) |
+| Web Bond | Optional browser version served by the host behind `WEB_UI=true`: same accounts, tools open in new browser tabs, no autofill or vault; clients as a kind of person (`docs/epics/E04-web-bond.md`) | app only; iframe tabs on the web (§23 q11) | Owner on 2026-10-16: "hospedar junto do stack, opcionalmente, uma versão não headless… para clientes acessarem material nosso"; later phase | Proposto |
+| Reveal countdown | A revealed credential stays visible a few seconds with a countdown indicator, then hides (`docs/epics/E02-credential-sharing.md` §5) | stay until closed; no grace | Owner on 2026-10-16: "visivel por alguns segundos com indicador de quanto tempo" | Decidido (2026-10-16) |
+| Personal tools and favorites | A person adds personal tools and favorites org tools; both follow the person through the host (`docs/epics/E01-connected-mode.md` §6) | org catalog only | Owner on 2026-10-16: "um usuário pode adicionar suas proprias ferramentas… favoritar ferramentas da org" | Decidido (2026-10-16) |
+| Connected mode | Optional host address per install; without it the Bond stays exactly as today (`docs/epics/E01-connected-mode.md`) | host mandatory; local only | Owner on 2026-10-16: offline "como eu quiser", or a server address to sync people and permissions; "sincronizar com uma central pra ser tipo um core mesmo" | Decidido (2026-10-16) |
+| Identity of the tools | SSO into the tools is a later milestone (M4); the first phases keep the login cascade (`docs/epics/E01-connected-mode.md` §13) | ready OIDC provider from day one; Boruta inside an Elixir host | The owner wants a simple self-contained host first; SSO needs an OIDC provider, the costliest piece | Proposto |
+| Host address at runtime | Configurable at runtime: the person types the host address or opens an invite link; the host is the central core that people, roles, grants and catalog sync from (`docs/epics/E01-connected-mode.md` §2, §8) | address pinned by the seed per release ("env travada") | Owner on 2026-10-16: env travada was a simpler first version; adding a tool (e.g. Jitsi) in the admin must make it appear for everyone | Decidido (2026-10-16) |
+| Host trust at enrollment | TLS + host key pinned at Add host; invite links carry the key fingerprint and must match; vault items bound to origin (`docs/epics/E01-connected-mode.md` §8) | no pinning | A typed address must not let a different server silently take over the catalog later | Proposto |
 | Distribuição macOS | Ad-hoc com liberação manual documentada; Developer ID só como melhoria | comprar o certificado antes de F4 | Dono em 2026-10-15: "somos devs, não tem problema repassar isso pros outros" | Decidido (2026-10-15) |
 | Extensões | Fora do v1: o Bond cadastra endereços, não hospeda código | registro/manifesto/actor como na Carna | Escopo: casca fina | Proposto |
 | Duas identidades na mesma ferramenta | Fora: um app tem um perfil de cookies | um app por identidade | Não há isolamento por janela (`docs/tinyjs.md` §10) | Proposto |
@@ -543,6 +578,7 @@ Questões:
    `saghul/txiki.js:src/js/polyfills/crypto/{kdf,ed,x25519,aes}.js`).
 7. Entregar as credenciais das ferramentas a uma pessoa **antes** de existir o host: usar o selo
    X25519 na chave pública da pessoa, digitação única pelo administrador, ou esperar o host?
+   Proposal on 2026-10-16: the X25519 seal, relayed by the host — `docs/epics/E02-credential-sharing.md`.
 8. Alguma ferramenta exige VPN ou allowlist de IP, o que muda a promessa de "abre e funciona"?
 9. Uma pessoa pode precisar de duas identidades na mesma ferramenta (por exemplo, conta pessoal e
    conta de trabalho no Discord)? Se sim, o desenho exige um segundo app com outro `id`.
@@ -550,6 +586,8 @@ Questões:
 11. Hospedar a casca em `bond.copland.studio` e usar abas por iframe: **adiado para a próxima
     sprint** (2026-10-15). O recorte a fazer lá é custo (deixa de funcionar offline) contra o ganho
     (abas de verdade, quando hospedar algo além das regras virar atrativo).
+    Revisited on 2026-10-16 with a different goal — a browser portal served by the host, for clients,
+    without iframe tabs: `docs/epics/E04-web-bond.md`.
 12. Quantas pessoas recebem a release, e o seed embutido pode ser lido por quem recebe? Hoje isso é
     aceito (é organização, não segredo), mas convém saber se cada release é por pessoa ou por grupo.
 
