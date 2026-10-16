@@ -22,9 +22,9 @@ import {
   type EntryInput,
   type HostPerson,
   type Repo,
-  type Role,
   type ToolInput,
 } from './repo';
+import type { Role } from '../shared/types';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const NOW = '2026-10-16T12:00:00.000Z';

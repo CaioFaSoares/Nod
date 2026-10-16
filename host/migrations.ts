@@ -150,7 +150,7 @@ export function applyMigrations(db: Database): number {
       .get(SCHEMA_VERSION_KEY);
     applied = versionRow ? Number(versionRow.value) : 0;
     if (!Number.isInteger(applied) || applied < 0) {
-      throw new Error(`invalid ${SCHEMA_VERSION_KEY} in meta: ${versionRow.value}`);
+      throw new Error(`invalid ${SCHEMA_VERSION_KEY} in meta: ${versionRow?.value}`);
     }
     if (applied > migrations.length) {
       throw new Error(

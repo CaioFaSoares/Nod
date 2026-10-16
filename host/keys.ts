@@ -37,7 +37,7 @@ export async function kidOf(publicKey: CryptoKey): Promise<string> {
   return Buffer.from(digest.subarray(0, 16)).toString('base64url');
 }
 
-function parseSigningKey(path: string, raw: string): SigningKey {
+function parseSigningKey(raw: string): SigningKey {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -45,13 +45,16 @@ function parseSigningKey(path: string, raw: string): SigningKey {
     throw new KeyFileError(`${SIGNING_KEY_FILE} is not JSON`);
   }
   const key = parsed as Partial<SigningKey>;
-  const ok =
-    typeof key.kid === 'string' &&
-    key.kid !== '' &&
-    typeof key.publicJwk?.x === 'string' &&
-    typeof key.privateJwk?.d === 'string';
-  if (!ok) throw new KeyFileError(`${SIGNING_KEY_FILE} is missing kid, publicJwk or privateJwk`);
-  return { kid: key.kid, publicJwk: key.publicJwk, privateJwk: key.privateJwk };
+  const { kid, publicJwk, privateJwk } = key;
+  if (
+    typeof kid !== 'string' ||
+    kid === '' ||
+    typeof publicJwk?.x !== 'string' ||
+    typeof privateJwk?.d !== 'string'
+  ) {
+    throw new KeyFileError(`${SIGNING_KEY_FILE} is missing kid, publicJwk or privateJwk`);
+  }
+  return { kid, publicJwk, privateJwk };
 }
 
 /** Writes a file only this user can read; mode 0600 survives any umask. */
@@ -63,7 +66,7 @@ function writePrivateFile(path: string, content: string | Uint8Array): void {
 export async function loadOrCreateSigningKey(dataDir: string): Promise<SigningKey> {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const path = signingKeyPath(dataDir);
-  if (existsSync(path)) return parseSigningKey(path, readFileSync(path, 'utf8'));
+  if (existsSync(path)) return parseSigningKey(readFileSync(path, 'utf8'));
 
   const pair = (await crypto.subtle.generateKey({ name: 'Ed25519' }, true, [
     'sign',

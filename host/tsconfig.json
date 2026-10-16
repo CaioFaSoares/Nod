@@ -1,14 +1,9 @@
 {
-  // The host sources are not part of the repo gate (`package.json` "typecheck" covers the root
-  // project and backend/), and Bun's own types (`Bun`, `bun:sqlite`, `process`) are not a
-  // dependency here: AGENTS.md allows only Elysia inside host/. Until that changes, this file
-  // serves the editor and any future `tsc -p host` gate, and those globals stay reported.
+  // Part of the repo gate (`bun run typecheck`). Bun's types come from the dev-only `@types/bun`,
+  // pinned to the Bun version of the Dockerfile and the release workflow.
   "extends": "../tsconfig.json",
   "compilerOptions": {
-    "target": "es2023",
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "types": []
+    "types": ["bun"]
   },
   "include": ["./**/*.ts"]
 }

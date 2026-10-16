@@ -54,6 +54,8 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
+        working-directory: host
       - run: bun run typecheck
       - run: bun test test/
 

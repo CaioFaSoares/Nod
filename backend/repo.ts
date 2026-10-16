@@ -29,6 +29,10 @@ import type {
 // A column a later build added to a table of this schema (SP05 §2) has to be written twice: here,
 // for a database that does not exist yet, and in `addColumns()`, for one that does — every `CREATE`
 // below is `IF NOT EXISTS` and would be skipped whole.
+//
+// The `host` and `host_outbox` tables of SP05 §2 are new: no earlier build wrote them, so the
+// `IF NOT EXISTS` here creates them on a fresh database and on an existing one alike. `host` has no
+// token column and never will (SP02 §5): the bearer lives in the system keychain.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS person (
   id TEXT PRIMARY KEY,
@@ -38,7 +42,9 @@ CREATE TABLE IF NOT EXISTS person (
   password_salt TEXT NOT NULL,
   password_iterations INTEGER NOT NULL,
   created_at TEXT NOT NULL,
-  revoked_at TEXT
+  revoked_at TEXT,
+  password_check TEXT,
+  password_algorithm TEXT NOT NULL DEFAULT 'PBKDF2-SHA256'
 );
 CREATE TABLE IF NOT EXISTS role (
   id TEXT PRIMARY KEY,
@@ -59,7 +65,9 @@ CREATE TABLE IF NOT EXISTS tool (
   sort_order INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1,
   auth_json TEXT,
-  probe_json TEXT
+  probe_json TEXT,
+  scope TEXT NOT NULL DEFAULT 'org',
+  owner_id TEXT
 );
 CREATE TABLE IF NOT EXISTS tool_view (
   tool_id TEXT NOT NULL REFERENCES tool (id) ON DELETE CASCADE,
@@ -102,11 +110,37 @@ CREATE TABLE IF NOT EXISTS event (
   type TEXT NOT NULL,
   url TEXT,
   result TEXT,
-  detail TEXT
+  detail TEXT,
+  client_id TEXT,
+  sent_at TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS host (
+  id            INTEGER PRIMARY KEY CHECK (id = 1),
+  address       TEXT NOT NULL,
+  guild         TEXT NOT NULL,
+  kid           TEXT NOT NULL,
+  public_key    TEXT NOT NULL,
+  person_id     TEXT NOT NULL,
+  salt          TEXT NOT NULL,
+  snapshot      TEXT,
+  version       TEXT,
+  issued_at     TEXT,
+  last_sync_at  TEXT,
+  last_error    TEXT,
+  added_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS host_outbox (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  method      TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  body        TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  last_error  TEXT
 );
 `;
 
@@ -115,8 +149,17 @@ CREATE TABLE IF NOT EXISTS meta (
  * nothing but the `CREATE … IF NOT EXISTS` above; a database without a version is either empty (a
  * fresh install), v2-shaped from a build older than the versioning, or one written by an older Bond
  * — and that last one is refused whole instead of half-migrated.
+ *
+ * `3` is SP05 §2's connected schema: the two `host` tables, the event's client id and sent time,
+ * the local password V2 columns and the tool's scope/owner. A `2` database gets them by presence
+ * (`addColumns`), with its people, tools and vault rows untouched; `0` covers everything written
+ * before the versioning, which is completed the same way. Only 0, 2 and the current version are
+ * known — anything else is a database from a build this one cannot reason about.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
+
+/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2, and current. */
+const KNOWN_VERSIONS: readonly number[] = [0, 2, SCHEMA_VERSION];
 
 /**
  * The database was created by an older Bond (v1, in Portuguese). `migrate` throws this and touches
@@ -197,6 +240,70 @@ interface EventRow {
   url: string | null;
   result: string | null;
   detail: string | null;
+}
+
+interface HostRow {
+  id: number;
+  address: string;
+  guild: string;
+  kid: string;
+  public_key: string;
+  person_id: Id;
+  salt: string;
+  snapshot: string | null;
+  version: string | null;
+  issued_at: string | null;
+  last_sync_at: string | null;
+  last_error: string | null;
+  added_at: string;
+}
+
+interface OutboxRowSql {
+  id: number;
+  method: string;
+  path: string;
+  body: string;
+  created_at: string;
+  attempts: number;
+  last_error: string | null;
+}
+
+/**
+ * The one `host` row of SP05 §2 as the rest of the backend reads it: the pinned host (address, key,
+ * person id, salt) and the cache of the last verified snapshot. No token field exists, on purpose
+ * (SP02 §5): the bearer is a keychain item, `bond.host.<kid>.<personId>`.
+ */
+export interface HostRecord {
+  address: string;
+  guild: string;
+  kid: string;
+  /** Pinned Ed25519 public key, base64url raw 32 bytes (SP05 §2). */
+  publicKey: string;
+  /** The host's person id: also the local person id of a connected account (SP05 §2). */
+  personId: Id;
+  /** The host salt, for offline unlock (SP02 §6). */
+  salt: string;
+  /** The last snapshot the Bond verified, verbatim, or `null` before the first sync. */
+  snapshot: string | null;
+  version: string | null;
+  issuedAt: string | null;
+  lastSyncAt: string | null;
+  lastError: string | null;
+  addedAt: string;
+}
+
+/** SP05 §2's `host_outbox.method`: the two writes the outbox replays (SP04 §4). */
+export type OutboxMethod = 'PUT' | 'DELETE';
+
+/** One pending write of SP04 §4, oldest first by `id`. */
+export interface OutboxEntry {
+  id: number;
+  method: OutboxMethod;
+  path: string;
+  body: string;
+  createdAt: string;
+  attempts: number;
+  lastError: string | null;
 }
 
 /** The only login results a `login` event may carry (`docs/arquitetura.md` §4). */
@@ -293,6 +400,51 @@ export interface Repo {
   // meta
   meta(key: string): string | null;
   setMeta(key: string, value: string): void;
+  // host (connected mode, SP05 §2)
+  /**
+   * The one `host` row, or `null` without a host. Everything the Bond sends to a host is built from
+   * this row (RF-30: no row, no client, no call).
+   */
+  hostRecord(): HostRecord | null;
+  /**
+   * Adds or replaces the row — `id = 1`, one guild at a time (SP05 §2). The pinned half is what the
+   * caller passes; `snapshot`, `version`, `issuedAt`, `lastSyncAt` and `lastError` start empty and
+   * are written by `saveHostSnapshot`/`saveHostError`. The token is never a parameter of anything
+   * here (SP02 §5).
+   */
+  saveHost(h: {
+    address: string;
+    guild: string;
+    kid: string;
+    publicKey: string;
+    personId: Id;
+    salt: string;
+    addedAt: string;
+  }): HostRecord;
+  /**
+   * Stores one verified snapshot verbatim (SP04 §2) — the body as received, its `version`, its
+   * `issuedAt` and when the sync succeeded. `syncedAt` also clears `last_error`: the last call
+   * decided.
+   */
+  saveHostSnapshot(s: { snapshot: string; version: string; issuedAt: string; syncedAt: string }): void;
+  /** The failure of the last sync, for Settings → Hosts (SP04 §3); `null` clears it. */
+  saveHostError(message: string | null): void;
+  /**
+   * Forgets the host: the row and the pending writes in one transaction. Without a host the outbox
+   * can never be replayed (nothing builds a client), so keeping it would only hide rows. What
+   * happens to the local personal tools is the caller's `keepPersonal` decision (SP05 §3), not this
+   * method's: they are `tool` rows, untouched here.
+   */
+  clearHost(): void;
+  // outbox
+  /** Appends one pending write (SP04 §4); the local cache already changed when this is called. */
+  enqueueOutbox(w: { method: OutboxMethod; path: string; body: string; createdAt: string }): OutboxEntry;
+  /** Every pending write, `id` order: the replay order of SP04 §4. */
+  listOutbox(): OutboxEntry[];
+  /** One more failed attempt and why it failed; `null` clears the message. Unknown id: no-op. */
+  markOutboxAttempt(id: number, error: string | null): void;
+  /** Drops one row: the write is done, or the host refused it for good (SP04 §4). Unknown id: no-op. */
+  deleteOutbox(id: number): void;
 }
 
 export function createRepo(db: SqlDb): Repo {
@@ -323,6 +475,11 @@ export function createRepo(db: SqlDb): Repo {
   function orFail<T>(value: T | null, message: string): T {
     if (value === null) throw new Error(message);
     return value;
+  }
+
+  /** How many rows the last statement wrote: `run()` returns nothing (not even the rowid). */
+  function rowsChanged(): number {
+    return singleRow<{ n: number }>('SELECT changes() AS n')?.n ?? 0;
   }
 
   /**
@@ -356,7 +513,18 @@ export function createRepo(db: SqlDb): Repo {
 
   /** The columns a later build added to a table of this schema (SP05 §2). */
   function addColumns(): void {
+    // B9: the origin a credential's fill is bound to (RF-38).
     addColumn('vault_item', 'origin', 'TEXT');
+    // B1: the local password V2 of SP02 §6. The old `password_hash`/`password_salt` stay: they are
+    // what a v2 database's accounts can still be unlocked with, once (SP02 §6's migration).
+    addColumn('person', 'password_check', 'TEXT');
+    addColumn('person', 'password_algorithm', "TEXT NOT NULL DEFAULT 'PBKDF2-SHA256'");
+    // B1: a personal tool is a `tool` row while the Bond is in local mode (SP05 §2).
+    addColumn('tool', 'scope', "TEXT NOT NULL DEFAULT 'org'");
+    addColumn('tool', 'owner_id', 'TEXT');
+    // B10: the stable client id of an event and when the host acked it (SP04 §5).
+    addColumn('event', 'client_id', 'TEXT');
+    addColumn('event', 'sent_at', 'TEXT');
   }
 
   /**
@@ -374,15 +542,18 @@ export function createRepo(db: SqlDb): Repo {
   }
 
   /**
-   * §4: `PRAGMA user_version` is the schema version. `2` is already this build's, so the DDL below
-   * only completes what is missing; no version at all is a database from before the versioning —
-   * empty (a fresh install), v2-shaped (an earlier v2 build: completed and stamped) or v1, which
-   * leaves as `LegacyDatabaseError` without a single write. The columns of SP05 §2 come after the
-   * DDL, by presence, and the origin of the items written before that column is filled in there.
+   * §4: `PRAGMA user_version` is the schema version. `3` is already this build's, so the DDL below
+   * only completes what is missing; `2` is a database of the previous block-1 build; no version at
+   * all is a database from before the versioning — empty (a fresh install), v2-shaped (an earlier
+   * v2 build: completed and stamped) or v1, which leaves as `LegacyDatabaseError` without a single
+   * write. The columns and tables of SP05 §2 come after the DDL, by presence, and the origin of the
+   * items written before that column is filled in there. Nothing here reads or rewrites the rows of
+   * a v2 database: local-mode data — people, tools, views, grants, vault items, events — is left
+   * exactly as it was, and only the missing columns are appended.
    */
   function migrate(): void {
     const version = singleRow<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
-    if (version !== 0 && version !== SCHEMA_VERSION) {
+    if (!KNOWN_VERSIONS.includes(version)) {
       throw new Error(`unsupported database version: ${version}`);
     }
     if (version === 0 && isLegacy()) {
@@ -391,7 +562,7 @@ export function createRepo(db: SqlDb): Repo {
     db.exec(SCHEMA);
     addColumns();
     backfillVaultOrigin();
-    if (version === 0) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    if (version !== SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
   // ---------------------------------------------------------------- people
@@ -483,7 +654,7 @@ export function createRepo(db: SqlDb): Repo {
         codeHash,
         at,
       ]);
-      if ((singleRow<{ n: number }>('SELECT changes() AS n')?.n ?? 0) === 0) {
+      if (rowsChanged() === 0) {
         // Unknown, already used or expired: roll back and leave the database as it was.
         db.exec('ROLLBACK');
         return null;
@@ -925,6 +1096,127 @@ export function createRepo(db: SqlDb): Repo {
     ]);
   }
 
+  // ---------------------------------------------------------------- host (connected mode)
+
+  function buildHost(l: HostRow): HostRecord {
+    return {
+      address: l.address,
+      guild: l.guild,
+      kid: l.kid,
+      publicKey: l.public_key,
+      personId: l.person_id,
+      salt: l.salt,
+      snapshot: l.snapshot,
+      version: l.version,
+      issuedAt: l.issued_at,
+      lastSyncAt: l.last_sync_at,
+      lastError: l.last_error,
+      addedAt: l.added_at,
+    };
+  }
+
+  function hostRecord(): HostRecord | null {
+    const row = singleRow<HostRow>('SELECT * FROM host WHERE id = 1');
+    return row === null ? null : buildHost(row);
+  }
+
+  function saveHost(h: {
+    address: string;
+    guild: string;
+    kid: string;
+    publicKey: string;
+    personId: Id;
+    salt: string;
+    addedAt: string;
+  }): HostRecord {
+    // One row, id 1 (SP05 §2): adding a host over an existing one replaces it whole — including the
+    // snapshot and the last error, which belong to the host that is going away. What is already
+    // there is not read first: the caller decided to replace it.
+    db.run(
+      `INSERT INTO host (id, address, guild, kid, public_key, person_id, salt, snapshot, version, issued_at,
+                         last_sync_at, last_error, added_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?)
+       ON CONFLICT (id) DO UPDATE SET
+         address = excluded.address,
+         guild = excluded.guild,
+         kid = excluded.kid,
+         public_key = excluded.public_key,
+         person_id = excluded.person_id,
+         salt = excluded.salt,
+         snapshot = NULL,
+         version = NULL,
+         issued_at = NULL,
+         last_sync_at = NULL,
+         last_error = NULL,
+         added_at = excluded.added_at`,
+      [h.address, h.guild, h.kid, h.publicKey, h.personId, h.salt, h.addedAt],
+    );
+    return orFail(hostRecord(), 'host not found');
+  }
+
+  function saveHostSnapshot(s: { snapshot: string; version: string; issuedAt: string; syncedAt: string }): void {
+    db.run(
+      `UPDATE host
+          SET snapshot = ?, version = ?, issued_at = ?, last_sync_at = ?, last_error = NULL
+        WHERE id = 1`,
+      [s.snapshot, s.version, s.issuedAt, s.syncedAt],
+    );
+    // A snapshot row with no host is a caller bug, not an empty cache: say so instead of dropping it
+    // (the verified body the caller just checked would be lost silently).
+    if (rowsChanged() === 0) throw new Error('host not found');
+  }
+
+  function saveHostError(message: string | null): void {
+    db.run('UPDATE host SET last_error = ? WHERE id = 1', [message]);
+    if (rowsChanged() === 0) throw new Error('host not found');
+  }
+
+  function clearHost(): void {
+    transaction(() => {
+      db.run('DELETE FROM host_outbox');
+      db.run('DELETE FROM host');
+    });
+  }
+
+  // ---------------------------------------------------------------- outbox
+
+  function buildOutbox(l: OutboxRowSql): OutboxEntry {
+    return {
+      id: l.id,
+      // The column carries what the caller wrote; the table's own contract is the two verbs
+      // (SP05 §2), and the caller is the only writer.
+      method: l.method as OutboxMethod,
+      path: l.path,
+      body: l.body,
+      createdAt: l.created_at,
+      attempts: l.attempts,
+      lastError: l.last_error,
+    };
+  }
+
+  function enqueueOutbox(w: { method: OutboxMethod; path: string; body: string; createdAt: string }): OutboxEntry {
+    // `RETURNING id`: the runtime's `run()` returns nothing (not even rowid), same as `addEvent`.
+    const inserted = singleRow<{ id: number }>(
+      `INSERT INTO host_outbox (method, path, body, created_at, attempts, last_error)
+       VALUES (?, ?, ?, ?, 0, NULL) RETURNING id`,
+      [w.method, w.path, w.body, w.createdAt],
+    );
+    const id = orFail(inserted, 'outbox write not recorded').id;
+    return buildOutbox(orFail(singleRow<OutboxRowSql>('SELECT * FROM host_outbox WHERE id = ?', [id]), 'outbox write not found'));
+  }
+
+  function listOutbox(): OutboxEntry[] {
+    return db.all<OutboxRowSql>('SELECT * FROM host_outbox ORDER BY id ASC').map(buildOutbox);
+  }
+
+  function markOutboxAttempt(id: number, error: string | null): void {
+    db.run('UPDATE host_outbox SET attempts = attempts + 1, last_error = ? WHERE id = ?', [error, id]);
+  }
+
+  function deleteOutbox(id: number): void {
+    db.run('DELETE FROM host_outbox WHERE id = ?', [id]);
+  }
+
   return {
     migrate,
     countPeople,
@@ -964,5 +1256,14 @@ export function createRepo(db: SqlDb): Repo {
     loginResults,
     meta,
     setMeta,
+    hostRecord,
+    saveHost,
+    saveHostSnapshot,
+    saveHostError,
+    clearHost,
+    enqueueOutbox,
+    listOutbox,
+    markOutboxAttempt,
+    deleteOutbox,
   };
 }

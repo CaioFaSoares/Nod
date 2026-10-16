@@ -27,6 +27,18 @@ function userVersion(db: SqlDb): number {
   return db.all<{ user_version: number }>('PRAGMA user_version')[0]?.user_version ?? -1;
 }
 
+/** Every table of the database, by name: what a migration created and what it left alone. */
+function tableNames(db: SqlDb): string[] {
+  return db
+    .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+    .map((row) => row.name);
+}
+
+/** The columns of a table as SQLite describes them: name, type, nullability, default and key. */
+function shapeOf(db: SqlDb, table: string): unknown[] {
+  return db.all(`PRAGMA table_info(${table})`);
+}
+
 function entry(id: string, fields: Partial<Entry> = {}): Entry {
   return {
     id,
@@ -161,10 +173,14 @@ describe('schema versioning', () => {
   });
 
   test('a version this build does not know is refused by name', () => {
-    const db = memorySqlite();
-    db.exec('PRAGMA user_version = 3');
-
-    expect(() => createRepo(db).migrate()).toThrow('unsupported database version: 3');
+    // The versioning started at 2, so `1` was never written by any build; `4` is a build from the
+    // future. Neither is completed — the database is refused whole.
+    for (const version of [1, 4]) {
+      const db = memorySqlite();
+      db.exec(`PRAGMA user_version = ${version}`);
+      expect(() => createRepo(db).migrate()).toThrow(`unsupported database version: ${version}`);
+      expect(userVersion(db)).toBe(version);
+    }
   });
 });
 
@@ -734,5 +750,239 @@ describe('meta', () => {
 
     repo.setMeta('seed_version', '4');
     expect(repo.meta('seed_version')).toBe('4');
+  });
+});
+
+/** The columns SP05 §2 adds to tables that already existed in v2 (and B9's `vault_item.origin`). */
+const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
+  ['vault_item', 'origin'],
+  ['person', 'password_check'],
+  ['person', 'password_algorithm'],
+  ['tool', 'scope'],
+  ['tool', 'owner_id'],
+  ['event', 'client_id'],
+  ['event', 'sent_at'],
+];
+
+describe('schema version 3 — connected mode (SP05 §2)', () => {
+  test('a fresh database is v3, with the two host tables and every column of SP05 §2', () => {
+    const db = memorySqlite();
+    createRepo(db).migrate();
+
+    expect(SCHEMA_VERSION).toBe(3);
+    expect(userVersion(db)).toBe(3);
+    expect(tableNames(db)).toEqual([
+      'event',
+      'host',
+      'host_outbox',
+      'invite',
+      'meta',
+      'person',
+      'person_role',
+      'role',
+      'tool',
+      'tool_grant',
+      'tool_view',
+      'vault_item',
+    ]);
+    for (const [table, column] of LATER_COLUMNS) {
+      const columns = db.all<{ name: string }>(`PRAGMA table_info(${table})`).map((row) => row.name);
+      expect(columns).toContain(column);
+    }
+  });
+
+  test('a v2 database keeps its people, tools and vault rows and gains the rest', () => {
+    // What a v2 build left behind: the schema it wrote, its rows, no host tables, `user_version = 2`.
+    const db = memorySqlite();
+    const v2 = createRepo(db);
+    v2.migrate();
+    v2.ensureAdminRole();
+    v2.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app' }));
+    const person = v2.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: ['admin'] });
+    v2.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Alpha',
+      username: 'ana',
+      keychainKey: `bond.cred.${person.id}.alpha`,
+      origin: 'https://alpha.example.test',
+    });
+    v2.addEvent({
+      personId: person.id,
+      toolId: 'alpha',
+      type: 'tool_opened',
+      url: 'https://alpha.example.test/app',
+      result: null,
+      detail: null,
+      at: '2026-10-15T10:00:00.000Z',
+    });
+    v2.setMeta('seed_version', '2');
+
+    // Back to the shape of that build: SP05 §2's columns gone, the host tables never created.
+    for (const [table, column] of LATER_COLUMNS) db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+    db.exec('DROP TABLE host');
+    db.exec('DROP TABLE host_outbox');
+    db.exec('PRAGMA user_version = 2');
+    expect(tableNames(db)).not.toContain('host');
+
+    const repo = createRepo(db);
+    repo.migrate();
+
+    // Stamped, completed, and every row of local mode still there, value for value.
+    expect(userVersion(db)).toBe(3);
+    expect(tableNames(db)).toContain('host');
+    expect(tableNames(db)).toContain('host_outbox');
+    expect(repo.listPeople().map((p) => p.email)).toEqual(['ana@example.test']);
+    expect(repo.listPeople()[0].roles).toEqual(['admin']);
+    expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
+    expect(repo.listEntries()[0].url).toBe('https://alpha.example.test/app');
+    expect(repo.listVault(person.id)).toHaveLength(1);
+    expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
+    expect(repo.listEvents({}).map((e) => e.type)).toEqual(['tool_opened']);
+    expect(repo.meta('seed_version')).toBe('2');
+    expect(repo.hostRecord()).toBeNull();
+
+    // The new defaults took on the rows that were already there, and nothing invented an owner.
+    expect(db.all('SELECT scope, owner_id FROM tool')).toEqual([{ scope: 'org', owner_id: null }]);
+    expect(db.all('SELECT password_algorithm, password_check FROM person')).toEqual([
+      { password_algorithm: 'PBKDF2-SHA256', password_check: null },
+    ]);
+
+    // A migrated database and a fresh one answer the same schema, table for table, column for column.
+    const fresh = memorySqlite();
+    createRepo(fresh).migrate();
+    expect(tableNames(db)).toEqual(tableNames(fresh));
+    for (const table of tableNames(db)) expect(shapeOf(db, table)).toEqual(shapeOf(fresh, table));
+
+    // And migrate stays idempotent on the migrated database.
+    repo.migrate();
+    expect(userVersion(db)).toBe(3);
+    expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
+  });
+
+  test('a v2 database with no version at all is completed and stamped the same way', () => {
+    const db = memorySqlite();
+    createRepo(db).migrate();
+    db.exec('PRAGMA user_version = 0');
+
+    createRepo(db).migrate();
+
+    expect(userVersion(db)).toBe(3);
+    expect(tableNames(db)).toContain('host_outbox');
+  });
+});
+
+describe('host and outbox (SP05 §2)', () => {
+  const PIN = {
+    address: 'https://bond.example.test',
+    guild: 'Example Guild',
+    kid: 'kid-a',
+    publicKey: 'cHVibGljLWtleQ',
+    personId: 'uuid-person-1',
+    salt: 'c2FsdA',
+    addedAt: '2026-10-16T10:00:00.000Z',
+  };
+
+  test('without a host there is no row and no pending write', () => {
+    const repo = newRepo();
+    expect(repo.hostRecord()).toBeNull();
+    expect(repo.listOutbox()).toEqual([]);
+  });
+
+  test('saveHost writes the single row of a guild and replaces it whole', () => {
+    const repo = newRepo();
+    expect(repo.saveHost(PIN)).toEqual({ ...PIN, snapshot: null, version: null, issuedAt: null, lastSyncAt: null, lastError: null });
+    expect(repo.hostRecord()).toEqual(repo.saveHost(PIN));
+
+    repo.saveHostSnapshot({ snapshot: '{"api":1}', version: 'v1', issuedAt: '2026-10-16T10:00:00.000Z', syncedAt: '2026-10-16T10:00:01.000Z' });
+    repo.saveHostError('could not reach the host');
+
+    const replaced = repo.saveHost({ ...PIN, guild: 'Another Guild', addedAt: '2026-10-16T12:00:00.000Z' });
+    expect(replaced.guild).toBe('Another Guild');
+    // What belonged to the host that is gone went with it: no snapshot, no error, one row.
+    expect(replaced.snapshot).toBeNull();
+    expect(replaced.lastError).toBeNull();
+    expect(replaced.lastSyncAt).toBeNull();
+  });
+
+  test('the verified snapshot, its version, the sync time and the last error', () => {
+    const repo = newRepo();
+    repo.saveHost(PIN);
+    repo.saveHostError('could not reach the host');
+    expect(repo.hostRecord()?.lastError).toBe('could not reach the host');
+
+    const body = '{"api":1,"version":"v1"}';
+    repo.saveHostSnapshot({ snapshot: body, version: 'v1', issuedAt: '2026-10-16T10:00:00.000Z', syncedAt: '2026-10-16T10:00:01.000Z' });
+
+    const record = repo.hostRecord();
+    expect(record?.snapshot).toBe(body); // verbatim, byte for byte (SP04 §2)
+    expect(record?.version).toBe('v1');
+    expect(record?.issuedAt).toBe('2026-10-16T10:00:00.000Z');
+    expect(record?.lastSyncAt).toBe('2026-10-16T10:00:01.000Z');
+    expect(record?.lastError).toBeNull(); // a good sync clears the failure before it
+
+    repo.saveHostError(null);
+    expect(repo.hostRecord()?.lastError).toBeNull();
+  });
+
+  test('a snapshot for a host that does not exist is a caller bug, not an empty cache', () => {
+    const repo = newRepo();
+    expect(() =>
+      repo.saveHostSnapshot({ snapshot: '{}', version: 'v1', issuedAt: '2026-10-16T10:00:00.000Z', syncedAt: '2026-10-16T10:00:01.000Z' }),
+    ).toThrow('host not found');
+    expect(() => repo.saveHostError('boom')).toThrow('host not found');
+  });
+
+  test('clearHost forgets the host and everything pending for it', () => {
+    const repo = newRepo();
+    repo.saveHost(PIN);
+    repo.enqueueOutbox({ method: 'PUT', path: '/v1/personal/tools/p-a', body: '{"title":"A"}', createdAt: '2026-10-16T10:00:00.000Z' });
+
+    repo.clearHost();
+
+    expect(repo.hostRecord()).toBeNull();
+    expect(repo.listOutbox()).toEqual([]);
+  });
+
+  test('the outbox keeps its writes in id order and its attempts per write', () => {
+    const repo = newRepo();
+    const first = repo.enqueueOutbox({
+      method: 'PUT',
+      path: '/v1/personal/tools/p-a',
+      body: '{"title":"A"}',
+      createdAt: '2026-10-16T10:00:00.000Z',
+    });
+    const second = repo.enqueueOutbox({
+      method: 'DELETE',
+      path: '/v1/personal/views/p-b',
+      body: '{"updatedAt":"2026-10-16T10:00:01.000Z"}',
+      createdAt: '2026-10-16T10:00:01.000Z',
+    });
+
+    expect(second.id).toBeGreaterThan(first.id);
+    expect(first).toEqual({
+      id: first.id,
+      method: 'PUT',
+      path: '/v1/personal/tools/p-a',
+      body: '{"title":"A"}',
+      createdAt: '2026-10-16T10:00:00.000Z',
+      attempts: 0,
+      lastError: null,
+    });
+    expect(repo.listOutbox().map((row) => row.id)).toEqual([first.id, second.id]);
+
+    repo.markOutboxAttempt(first.id, 'the host failed to answer');
+    expect(repo.listOutbox()[0].attempts).toBe(1);
+    expect(repo.listOutbox()[0].lastError).toBe('the host failed to answer');
+    repo.markOutboxAttempt(first.id, null);
+    expect(repo.listOutbox()[0]).toMatchObject({ attempts: 2, lastError: null });
+
+    // The replay of SP04 §4: a `2xx` (or a `409`, or another `4xx`) drops the row.
+    repo.deleteOutbox(first.id);
+    expect(repo.listOutbox().map((row) => row.id)).toEqual([second.id]);
+    // An id that is not there is a no-op: the loop may race with its own delete.
+    repo.markOutboxAttempt(first.id, 'gone');
+    repo.deleteOutbox(first.id);
+    expect(repo.listOutbox().map((row) => row.id)).toEqual([second.id]);
   });
 });

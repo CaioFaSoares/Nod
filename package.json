@@ -9,7 +9,7 @@
     "app:dev": "bun scripts/gen-config.ts dev && tinyjs dev",
     "app:build": "bun scripts/gen-config.ts build && tinyjs build",
     "test": "bun test test/",
-    "typecheck": "tsc -p tsconfig.json && tsc -p backend/tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json && tsc -p backend/tsconfig.json && tsc -p host/tsconfig.json"
   },
   "devDependencies": {
     "typescript": "~6.0.2",

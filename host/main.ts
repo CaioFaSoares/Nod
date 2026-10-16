@@ -1,13 +1,15 @@
 #!/usr/bin/env bun
-// Boot of the host process (SP07 §1–§2): environment → data dir → key files → database and
-// migrations → Elysia app. `bootHost` is the whole of it minus `listen`, so the tests run the same
-// boot on a temp data dir; only the last lines of this file touch the process.
+// Boot of the host process (SP07 §1–§2, §4): environment → data dir → key files → database and
+// migrations → Elysia app → backup timer. `bootHost` is the whole of it minus `listen` and the
+// timer, so the tests run the same boot on a temp data dir; only the last lines of this file touch
+// the process.
 
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Database } from 'bun:sqlite';
 
 import { createApp } from './app';
+import { loadBackupSettings, startBackupTimer, type BackupSettings } from './backup';
 import { ConfigError, loadConfig, type HostConfig } from './config';
 import { loadOrCreateHostSecret, loadOrCreateSigningKey, type SigningKey } from './keys';
 import { applyMigrations, migrations, openDatabase } from './migrations';
@@ -35,8 +37,10 @@ export async function bootHost(config: HostConfig): Promise<Host> {
 
 async function start(): Promise<void> {
   let config: HostConfig;
+  let backups: BackupSettings;
   try {
     config = loadConfig(process.env);
+    backups = loadBackupSettings(process.env);
   } catch (error) {
     // A bad environment is an operator mistake, not a crash: one line, no stack (repo style).
     if (!(error instanceof ConfigError)) throw error;
@@ -49,9 +53,16 @@ async function start(): Promise<void> {
   // No hostname hardcoded: inside the container the proxy reaches the process on every interface
   // (SP07 §2).
   app.listen({ port: config.port });
-  console.info(`bond host listening on :${config.port} (schema ${migrations.length})`);
+  // The scheduled pass of SP07 §4 lives with the serving process; `bun run backup-now` is the
+  // same pass on demand (§3).
+  const timer = startBackupTimer({ db: host.db, dataDir: config.dataDir }, backups);
+  console.info(
+    `bond host listening on :${config.port} (schema ${migrations.length}); ` +
+      `backups every ${backups.everyHours} h, keeping ${backups.keep}`,
+  );
 
   const shutdown = () => {
+    timer.stop();
     host.close();
     process.exit(0);
   };

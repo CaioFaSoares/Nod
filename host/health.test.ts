@@ -68,7 +68,7 @@ describe('boot', () => {
     expect(typeof key.privateJwk.d).toBe('string');
 
     const version = host.db
-      .query<{ value: string }, []>('SELECT value FROM meta WHERE key = ?')
+      .query<{ value: string }, [string]>('SELECT value FROM meta WHERE key = ?')
       .get(SCHEMA_VERSION_KEY);
     expect(version?.value).toBe('1');
 
