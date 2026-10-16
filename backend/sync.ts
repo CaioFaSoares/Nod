@@ -1,5 +1,5 @@
-// The sync loop of a connected Bond: the triggers, the outbox flush, the snapshot apply, the stale
-// state and the backoff (SP04 §3–§5, SP05 §1–§2; RF-37, RF-39).
+// The sync loop of a connected Bond: the triggers, the outbox flush, the event push, the snapshot
+// apply, the stale state and the backoff (SP04 §3–§5, SP05 §1–§2; RF-37, RF-39).
 //
 // The runtime arrives as parameters — the repository, the connection, the clock and the interval pair
 // (`docs/tinyjs.md` §3: the page is throttled when hidden, so the timer lives in the backend) — which
@@ -12,6 +12,8 @@
 // credential value into a row, a message, a log or a state (`AGENTS.md`).
 
 import { fromBase64url } from '../shared/encoding';
+import { HOST_ROUTES } from '../shared/host-api';
+import type { ClientEvent, EventsResponse } from '../shared/host-api';
 import { clearOrgData, outboxVerdict } from '../shared/host-merge';
 import type { HostState } from '../shared/types';
 import { fingerprintOf, HostError } from './host-client';
@@ -20,6 +22,13 @@ import type { HostRecord, Repo } from './repo';
 
 /** SP04 §3: while unlocked, one sync every five minutes. */
 export const SYNC_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * SP04 §5: how many events one `POST /v1/events` carries. The host refuses the 501st with a `400`
+ * that writes nothing (SP03 §2, `host/routes/events.ts`), so the Bond never assembles one: the
+ * number is the client's own choice inside the "up to 500" rule.
+ */
+export const EVENTS_PER_BATCH = 500;
 
 /**
  * SP04 §3: after a failure the next try comes 30 s, 1 min and 2 min later, and from then on the
@@ -161,7 +170,9 @@ export function createSync(deps: SyncDeps): Sync {
     await rememberFingerprint(record);
     const at = new Date(deps.now()).toISOString();
     try {
+      // SP04 §3's order: the outbox, then the events, then the state.
       await flushOutbox(connection);
+      await pushEvents(connection, at);
       await fetchSnapshot(connection, record, at);
       failures = 0;
       return publish();
@@ -239,11 +250,62 @@ export function createSync(deps: SyncDeps): Sync {
           repo.markOutboxAttempt(entry.id, error.message);
           return;
         }
-        // `drop` (a `409`: the host holds a newer version and the snapshot brings it) and `rejected`
-        // (a `4xx` the host refuses for good, which SP04 §4 pairs with a `sync.rejected` event — that
-        // kind is not in `EventType` yet; see `docs/handovers/b1.md`'s finding).
+        // `drop` is a `409`: the host holds a newer version and the snapshot brings it. `rejected` is
+        // a `4xx` the host refuses for good — SP04 §4 pairs it with a `sync.rejected` event, so the
+        // person sees which of their writes never landed. The status and the route are the whole
+        // event: neither the body nor the answer of the host goes anywhere near a row (canonico §13).
+        if (verdict === 'rejected') {
+          repo.addEvent({
+            personId: connection.host.personId,
+            toolId: null,
+            type: 'sync.rejected',
+            url: null,
+            result: String(error.status),
+            detail: `${entry.method} ${entry.path}`,
+          });
+        }
         repo.deleteOutbox(entry.id);
       }
+    }
+  }
+
+  // ---------------------------------------------------------------- event push (SP04 §5)
+
+  /**
+   * SP04 §5: every unsent event goes up, oldest first, in batches of at most `EVENTS_PER_BATCH`, until
+   * none is left pending. The body is `host/routes/events.ts`'s shape exactly — `shared/host-api.ts`'s
+   * `ClientEvent`, with `null` for the fields the event does not carry — and the client id is the
+   * local event's own, which is what makes a retry a no-op on the host (`ON CONFLICT(id) DO NOTHING`).
+   *
+   * Only the ids the host acked are marked, so a partial ack leaves the rest pending for the next
+   * round; a batch that acks nothing ends the push instead of asking for the same rows forever. A
+   * failure — the host did not answer, answered `5xx`, or refused the batch — raises out of here and
+   * the run reacts to it as a whole (SP04 §3): the events stay pending, with their client ids, and the
+   * next run sends exactly the same ones.
+   *
+   * `url` travels as the row holds it (`origin + pathname`, canonico §13) — the host strips it too —
+   * and nothing else of the event is added: the body has no field the route does not declare.
+   */
+  async function pushEvents(connection: HostConnection, at: string): Promise<void> {
+    for (;;) {
+      const pending = repo.unsentEvents(EVENTS_PER_BATCH);
+      if (pending.length === 0) return;
+      const events: ClientEvent[] = pending.map((e) => ({
+        id: e.clientId,
+        at: e.at,
+        kind: e.type,
+        toolId: e.toolId,
+        url: e.url,
+        result: e.result,
+        detail: e.detail,
+      }));
+      const answer = await connection.request<EventsResponse>('POST', HOST_ROUTES.events, { events });
+      // The host answers every id it now holds, in batch order; the set is what matters, so an id it
+      // already had from an earlier batch is acked just the same.
+      const acked = new Set(answer.acked);
+      const confirmed = pending.filter((e) => acked.has(e.clientId)).map((e) => e.clientId);
+      if (confirmed.length === 0) return;
+      repo.markEventsSent(confirmed, at);
     }
   }
 

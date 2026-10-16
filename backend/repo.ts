@@ -13,6 +13,7 @@ import type {
   AuthOverride,
   Entry,
   EventFilter,
+  EventSyncStatus,
   Id,
   Invite,
   LoginResult,
@@ -247,6 +248,8 @@ interface EventRow {
   url: string | null;
   result: string | null;
   detail: string | null;
+  client_id: Id | null;
+  sent_at: string | null;
 }
 
 interface HostRow {
@@ -315,6 +318,21 @@ export interface OutboxEntry {
 
 /** The only login results a `login` event may carry (`docs/arquitetura.md` §4). */
 const LOGIN_RESULTS: readonly LoginResult[] = ['session', 'filled', 'provider', 'manual', 'failed'];
+
+/**
+ * SP04 §5: an event on its way to the host. `clientId` is the one a pushed event cannot lack —
+ * `unsentEvents` fills a row that predates the column before it answers — while `AuditEvent` keeps it
+ * optional, because a read that does not go through the push (`listEvents`) may see such a row first.
+ */
+export interface PendingEvent extends AuditEvent {
+  clientId: string;
+}
+
+/**
+ * What `addEvent` takes: the event without the identity the repository owns — the numeric `id`, the
+ * instant (`at` is the caller's when it matters, now otherwise) and SP04 §5's `clientId`/`sentAt`.
+ */
+export type EventInput = Omit<AuditEvent, 'id' | 'at' | 'clientId' | 'sentAt'> & { at?: string };
 
 /**
  * Repository contract (§4 of `docs/arquitetura.md`). Whoever needs it imports the name `Repo` from
@@ -421,9 +439,22 @@ export interface Repo {
   /** Returns what it removed: the caller needs the keys to clean the keychain. */
   removeVaultOf(personId: Id): VaultItem[];
   // events
-  addEvent(e: Omit<AuditEvent, 'id' | 'at'> & { at?: string }): AuditEvent;
+  /**
+   * Appends one event. The repo owns the row's identity: the numeric `id`, the instant (`at`, the
+   * caller's or now) and SP04 §5's `clientId` (a fresh uuid) — the caller passes neither.
+   */
+  addEvent(e: EventInput): AuditEvent;
   /** Newest first; default limit 500. */
   listEvents(f: EventFilter): AuditEvent[];
+  /**
+   * SP04 §5: the events the host does not hold yet, oldest first, at most `limit` — the next batch of
+   * the push. A row recorded before the client id existed gets one here, so every answer carries it.
+   */
+  unsentEvents(limit: number): PendingEvent[];
+  /** SP04 §5: marks the ids the host acked with the receipt `at`; unknown ids and repeats are no-ops. */
+  markEventsSent(clientIds: readonly Id[], at: string): void;
+  /** How many events the host holds and how many are pending a push (SP04 §5, Settings → Activity). */
+  eventSyncCounts(): EventSyncStatus;
   /** One JSON per line, in chronological order. */
   eventsJsonl(): string;
   /** Newest first, from the `login` events of that tool, only valid `LoginResult` values. */
@@ -1139,18 +1170,79 @@ export function createRepo(db: SqlDb): Repo {
       url: l.url,
       result: l.result,
       detail: l.detail,
+      // SP04 §5: a row of a database written before the push existed has no client id yet; it stays
+      // `undefined` here and `unsentEvents` gives it one before the host ever sees it.
+      ...(l.client_id === null ? {} : { clientId: l.client_id }),
+      sentAt: l.sent_at,
     };
   }
 
-  function addEvent(e: Omit<AuditEvent, 'id' | 'at'> & { at?: string }): AuditEvent {
+  /**
+   * SP04 §5: every event carries a stable client id from the moment it is written — the host's
+   * idempotency key (`ON CONFLICT(id) DO NOTHING`). It is a uuid, not the local rowid: the host's
+   * `id` is the primary key of every person's events (`docs/handovers/h8.md`, finding 4), so two
+   * machines of the same person — each numbering its own rows from 1 — would collide and one
+   * machine's events would be dropped as duplicates.
+   *
+   * A row recorded before the column existed (local mode, or an older build) gets one the first time
+   * it is offered to the host: a Bond that never connects writes nothing extra. A row that is
+   * already `sent_at` cannot be one of these — the ack is matched by client id.
+   */
+  function backfillEventClientIds(): void {
+    for (const row of db.all<{ id: number }>('SELECT id FROM event WHERE sent_at IS NULL AND client_id IS NULL')) {
+      db.run('UPDATE event SET client_id = ? WHERE id = ?', [crypto.randomUUID(), row.id]);
+    }
+  }
+
+  function addEvent(e: EventInput): AuditEvent {
     const at = e.at ?? nowIso();
+    const clientId = crypto.randomUUID();
     // The id comes back from `RETURNING`: the runtime's `run()` returns nothing (not even rowid).
     const inserted = singleRow<{ id: number }>(
-      `INSERT INTO event (at, person_id, tool_id, type, url, result, detail)
-       VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-      [at, e.personId, e.toolId, e.type, e.url, e.result, e.detail],
+      `INSERT INTO event (at, person_id, tool_id, type, url, result, detail, client_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+      [at, e.personId, e.toolId, e.type, e.url, e.result, e.detail, clientId],
     );
-    return { ...e, at, id: orFail(inserted, 'event not recorded').id };
+    return { ...e, at, id: orFail(inserted, 'event not recorded').id, clientId, sentAt: null };
+  }
+
+  /**
+   * SP04 §5: the events the host does not hold yet, oldest first, at most `limit` of them — the next
+   * batch. `at` is the event's own instant and the order the host receives them in; `id` breaks a
+   * tie, so two batches can never skip or repeat a row.
+   */
+  function unsentEvents(limit: number): PendingEvent[] {
+    backfillEventClientIds();
+    // `client_id IS NOT NULL` is what the backfill above just ensured: every answer carries the id
+    // the host dedupes by (`PendingEvent`).
+    return db
+      .all<EventRow>(
+        'SELECT * FROM event WHERE sent_at IS NULL AND client_id IS NOT NULL ORDER BY at ASC, id ASC LIMIT ?',
+        [limit],
+      )
+      .map((row) => buildEvent(row) as PendingEvent);
+  }
+
+  /**
+   * SP04 §5: marks the ids the host acked, and only those. `at` is the receipt of this push; the
+   * `sent_at IS NULL` guard keeps the first one when the same ack arrives twice. Unknown ids are a
+   * no-op.
+   */
+  function markEventsSent(clientIds: readonly Id[], at: string): void {
+    if (clientIds.length === 0) return;
+    const placeholders = clientIds.map(() => '?').join(', ');
+    db.run(`UPDATE event SET sent_at = ? WHERE client_id IN (${placeholders}) AND sent_at IS NULL`, [
+      at,
+      ...clientIds,
+    ]);
+  }
+
+  /** SP04 §5: what Settings → Activity shows as sent vs pending. */
+  function eventSyncCounts(): EventSyncStatus {
+    return {
+      sent: singleRow<{ n: number }>('SELECT count(*) AS n FROM event WHERE sent_at IS NOT NULL')?.n ?? 0,
+      pending: singleRow<{ n: number }>('SELECT count(*) AS n FROM event WHERE sent_at IS NULL')?.n ?? 0,
+    };
   }
 
   function listEvents(f: EventFilter): AuditEvent[] {
@@ -1379,6 +1471,9 @@ export function createRepo(db: SqlDb): Repo {
     removeVaultOf,
     addEvent,
     listEvents,
+    unsentEvents,
+    markEventsSent,
+    eventSyncCounts,
     eventsJsonl,
     loginResults,
     meta,

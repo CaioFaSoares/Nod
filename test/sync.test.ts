@@ -1,7 +1,7 @@
 // `backend/sync.ts` driven end to end against a real in-memory repository, a scripted
 // `HostConnection` and an injected clock and interval pair: the four triggers of SP04 §3, the `304`,
-// the stale state with its backoff, the sign-out of RF-39, the key change of SP04 §1 and the outbox
-// flush of SP04 §4.
+// the stale state with its backoff, the sign-out of RF-39, the key change of SP04 §1, the outbox
+// flush of SP04 §4 and the event push of SP04 §5 (batches of ≤ 500, the ack, `sync.rejected`).
 import { describe, expect, test } from 'bun:test';
 import { HOST_KEY_CHANGED, HostError, hostTokenKey } from '../backend/host-client';
 import type { HostConnection, PinnedHost, SnapshotResult } from '../backend/host-client';
@@ -9,8 +9,9 @@ import { createRepo } from '../backend/repo';
 import type { OutboxMethod, Repo } from '../backend/repo';
 import { AFTER_WRITE_MS, BACKOFF_MS, createSync, SIGNED_OUT_ERROR, SYNC_INTERVAL_MS } from '../backend/sync';
 import type { Sync, SyncDeps } from '../backend/sync';
-import type { Snapshot } from '../shared/host-api';
-import type { Entry, HostState } from '../shared/types';
+import { HOST_ROUTES } from '../shared/host-api';
+import type { ClientEvent, EventsRequest, EventsResponse, Snapshot } from '../shared/host-api';
+import type { AuditEvent, Entry, HostState } from '../shared/types';
 import { memorySqlite } from './helpers/sqlite-bun';
 
 const START = Date.parse('2026-10-15T12:00:00.000Z');
@@ -73,6 +74,8 @@ interface Harness {
   connection: HostConnection;
   script: Script;
   calls: { snapshot: number; options: ({ version?: string | null; notOlderThan?: string | null } | undefined)[]; request: { method: string; path: string; body: unknown }[] };
+  /** One line per call the run made, in order: the outbox, the events, then the state (SP04 §3). */
+  order: string[];
   keychain: Map<string, string>;
   states: HostState[];
   signedOutCount: () => number;
@@ -99,6 +102,7 @@ function harness(script: Partial<Script> = {}): Harness {
 
   const keychain = new Map<string, string>([[TOKEN_KEY, 'a-token-value']]);
   const calls: Harness['calls'] = { snapshot: 0, options: [], request: [] };
+  const order: string[] = [];
   const live: Script = { snapshot: fullBody, ...script };
 
   const connection: HostConnection = {
@@ -112,11 +116,13 @@ function harness(script: Partial<Script> = {}): Harness {
     },
     request: async (method, path, body) => {
       calls.request.push({ method, path, body });
+      order.push(`${method} ${path}`);
       return live.request === undefined ? undefined : live.request(method, path, body);
     },
     snapshot: async (options) => {
       calls.snapshot += 1;
       calls.options.push(options);
+      order.push(`GET ${HOST_ROUTES.state}`);
       return live.snapshot();
     },
   };
@@ -155,6 +161,7 @@ function harness(script: Partial<Script> = {}): Harness {
     connection,
     script: live,
     calls,
+    order,
     keychain,
     states,
     signedOutCount: () => signedOuts,
@@ -182,6 +189,32 @@ function cachedSnapshot(h: Harness): string {
 
 function enqueue(h: Harness, method: OutboxMethod, path: string, body: unknown, at: string): void {
   h.repo.enqueueOutbox({ method, path, body: JSON.stringify(body), createdAt: at });
+}
+
+/** One local event as the app records it: the repo stamps the client id (SP04 §5). */
+function recordEvent(h: Harness, at: string): AuditEvent {
+  return h.repo.addEvent({
+    personId: HOST.personId,
+    toolId: 'alpha',
+    type: 'tool_opened',
+    url: 'https://alpha.example.test/app',
+    result: null,
+    detail: null,
+    at,
+  });
+}
+
+/** SP03 §2's host: the ids of the batch come back acked, in batch order. */
+function ackBatch(_method: string, path: string, body: unknown): unknown {
+  if (path !== HOST_ROUTES.events) return undefined;
+  return { acked: (body as EventsRequest).events.map((event) => event.id) } satisfies EventsResponse;
+}
+
+/** What one `POST /v1/events` carried: the batches of a run, in order. */
+function batchesOf(h: Harness): ClientEvent[][] {
+  return h.calls.request
+    .filter((call) => call.path === HOST_ROUTES.events)
+    .map((call) => (call.body as EventsRequest).events);
 }
 
 describe('triggers', () => {
@@ -436,7 +469,10 @@ describe('outbox', () => {
   test('a 409 and a 403 drop the write: neither can be replayed', async () => {
     for (const status of [409, 403]) {
       const h = harness({
-        request: () => {
+        // Only the write is refused: the host of SP03 §2 still takes the events and the state, and
+        // the 403 of SP04 §4 raises the `sync.rejected` event that the run then pushes.
+        request: (method, path, body) => {
+          if (path === HOST_ROUTES.events) return ackBatch(method, path, body);
           throw new HostError('refused', 'the host refused the request', status);
         },
       });
@@ -456,5 +492,158 @@ describe('outbox', () => {
     const state = await h.sync.syncNow();
     expect(state.pendingWrites).toBe(0);
     expect(h.calls.request.map((call) => call.path)).toEqual(['/v1/personal/tools/other']);
+  });
+});
+
+describe('event push', () => {
+  test('1200 unsent events go up in three batches of 500/500/200, oldest first, all marked sent', async () => {
+    const h = harness({ request: ackBatch });
+    const at = (index: number) => new Date(Date.parse('2026-10-15T10:00:00.000Z') + index * 1000).toISOString();
+    for (let index = 0; index < 1200; index += 1) recordEvent(h, at(index));
+    const pending = h.repo.unsentEvents(1200).map((event) => event.clientId);
+
+    const state = await h.sync.syncNow();
+
+    const batches = batchesOf(h);
+    expect(batches.map((batch) => batch.length)).toEqual([500, 500, 200]);
+    // Oldest first, and the three batches are consecutive: no row is skipped or repeated.
+    expect(batches.flat().map((event) => event.id)).toEqual(pending);
+    // The wire shape is SP04 §5's `ClientEvent` exactly — nothing more, nothing less.
+    expect(batches[0]?.[0]).toEqual({
+      id: pending[0],
+      at: at(0),
+      kind: 'tool_opened',
+      toolId: 'alpha',
+      url: 'https://alpha.example.test/app',
+      result: null,
+      detail: null,
+    });
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 1200, pending: 0 });
+    // SP04 §3's order, and no empty batch after the last one.
+    expect(h.order).toEqual([
+      `POST ${HOST_ROUTES.events}`,
+      `POST ${HOST_ROUTES.events}`,
+      `POST ${HOST_ROUTES.events}`,
+      `GET ${HOST_ROUTES.state}`,
+    ]);
+    expect(state.status).toBe('connected');
+    expect(state.lastError).toBeNull();
+  });
+
+  test('a partial ack marks only the acked ids; the rest stay pending and are re-sent', async () => {
+    let posts = 0;
+    const h = harness({
+      request: (method, path, body) => {
+        if (path !== HOST_ROUTES.events) return undefined;
+        posts += 1;
+        const events = (body as EventsRequest).events;
+        // The first batch confirms one row of three; the second confirms nothing.
+        return { acked: posts === 1 ? [events[0]!.id] : [] };
+      },
+    });
+    const events = [recordEvent(h, EARLIER), recordEvent(h, EARLIER), recordEvent(h, EARLIER)];
+
+    const state = await h.sync.syncNow();
+
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 1, pending: 2 });
+    const marked = h.repo.listEvents({});
+    expect(marked.filter((event) => event.sentAt !== null).map((event) => event.clientId)).toEqual([
+      events[0]?.clientId,
+    ]);
+    // The unacked pair went up again in the same run, then the push stopped instead of asking for
+    // the same rows forever.
+    expect(batchesOf(h).map((batch) => batch.map((event) => event.id))).toEqual([
+      events.map((event) => event.clientId),
+      [events[1]?.clientId, events[2]?.clientId],
+    ]);
+    expect(state.status).toBe('connected');
+  });
+
+  test('a failure keeps every event pending with its client id, and the next run sends the same ids', async () => {
+    const h = harness({ request: offline });
+    recordEvent(h, EARLIER);
+    recordEvent(h, EARLIER);
+
+    const failed = await h.sync.syncNow();
+    expect(failed.status).toBe('stale');
+    expect(failed.lastError).toBe('could not reach the host');
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 0, pending: 2 });
+    // The run stopped at the push: the state of SP04 §3 was not fetched.
+    expect(h.calls.snapshot).toBe(0);
+    const first = batchesOf(h);
+    expect(first).toHaveLength(1);
+
+    h.script.request = ackBatch;
+    const second = await h.sync.syncNow();
+    expect(second.status).toBe('connected');
+    expect(batchesOf(h)[1]?.map((event) => event.id)).toEqual(first[0]?.map((event) => event.id));
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 2, pending: 0 });
+  });
+
+  test('without a host row nothing is pushed and every event stays pending and private', async () => {
+    const h = harness();
+    recordEvent(h, EARLIER);
+    recordEvent(h, EARLIER);
+    h.repo.clearHost();
+
+    const state = await h.sync.syncNow();
+
+    expect(state.status).toBe('none');
+    expect(h.calls.request).toEqual([]);
+    expect(h.calls.snapshot).toBe(0);
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 0, pending: 2 });
+  });
+
+  test('the run goes outbox, events, state', async () => {
+    const h = harness({ request: (method, path, body) => (path === HOST_ROUTES.events ? ackBatch(method, path, body) : undefined) });
+    enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, EARLIER);
+    recordEvent(h, EARLIER);
+
+    await h.sync.syncNow();
+
+    expect(h.order).toEqual([
+      'PUT /v1/personal/tools/mine',
+      `POST ${HOST_ROUTES.events}`,
+      `GET ${HOST_ROUTES.state}`,
+    ]);
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 1, pending: 0 });
+  });
+
+  test('a write the host refuses for good raises one sync.rejected event, pushed by the same run', async () => {
+    const h = harness({
+      request: (method, path, body) => {
+        if (path === HOST_ROUTES.events) return ackBatch(method, path, body);
+        throw new HostError('refused', 'the host refused the request', 403);
+      },
+    });
+    enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, EARLIER);
+
+    await h.sync.syncNow();
+
+    // SP04 §4: the row is dropped and the person can see why; the body of the write is nowhere in
+    // the event (canonico §13).
+    const events = h.repo.listEvents({});
+    expect(events.map((event) => [event.type, event.result, event.detail, event.personId])).toEqual([
+      ['sync.rejected', '403', 'PUT /v1/personal/tools/mine', HOST.personId],
+    ]);
+    expect(batchesOf(h).map((batch) => batch.map((event) => event.kind))).toEqual([['sync.rejected']]);
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 1, pending: 0 });
+    expect(h.repo.listOutbox()).toEqual([]);
+  });
+
+  test('a 409 is not a refusal: the write is dropped and no event is raised', async () => {
+    const h = harness({
+      request: (method, path, body) => {
+        if (path === HOST_ROUTES.events) return ackBatch(method, path, body);
+        throw new HostError('refused', 'the host refused the request', 409);
+      },
+    });
+    enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, EARLIER);
+
+    const state = await h.sync.syncNow();
+
+    expect(h.repo.listOutbox()).toEqual([]);
+    expect(h.repo.listEvents({})).toEqual([]);
+    expect(state.status).toBe('connected');
   });
 });

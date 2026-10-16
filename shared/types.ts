@@ -156,7 +156,13 @@ export type EventType =
   | 'roles_changed'
   | 'invite_issued'
   | 'access_revoked'
-  | 'update';
+  | 'update'
+  /**
+   * SP04 §4: the Sync loop's own event — the host refused an outbox write for good (`4xx`, `409`
+   * excepted). Not one of canonico §13's kinds: it exists only in connected mode. `docs/handovers/c1.md`
+   * (decision 5) left the member for this slice.
+   */
+  | 'sync.rejected';
 
 /** Result of the login cascade (canonico §8, §11). */
 export type LoginResult = 'session' | 'filled' | 'provider' | 'manual' | 'failed';
@@ -171,6 +177,15 @@ export interface AuditEvent {
   url: string | null;
   result: string | null;
   detail: string | null;
+  /**
+   * SP04 §5: the stable client id the host dedupes by — a `crypto.randomUUID()` written with the
+   * row. Optional because a row recorded before the push existed carries none until it is first
+   * offered to the host; `backend/repo.ts` fills it then, so an event handed to the wire always has
+   * one.
+   */
+  clientId?: string;
+  /** SP04 §5: when the host acked the event; `null` while it is still waiting for a push. */
+  sentAt?: string | null;
 }
 
 export interface EventFilter {
@@ -178,6 +193,15 @@ export interface EventFilter {
   toolId?: Id;
   result?: string;
   limit?: number;
+}
+
+/**
+ * SP04 §5's "what was sent" counters, for Settings → Activity: how many of the local events the
+ * host holds (`sent`) and how many are still pending a push (`pending`).
+ */
+export interface EventSyncStatus {
+  sent: number;
+  pending: number;
 }
 
 // ---------------------------------------------------------------- probe
@@ -365,6 +389,8 @@ export interface ApiContract {
   'tools.reload': [{ id: Id }, ToolsState];
 
   'events.list': [EventFilter, AuditEvent[]];
+  /** SP04 §5: the sent/pending counters of Settings → Activity (`{ sent: 0, pending: 0 }` with no host). */
+  'events.syncStatus': [void, EventSyncStatus];
   'events.exportToFile': [{ path: string }, true];
 
   /** `bond.*`, not `app.*`: the runtime has builtins under `app.` that would win (bridge.js:3156). */

@@ -54,6 +54,7 @@ const KIND_SET: Readonly<Record<EventType, true>> = {
   invite_issued: true,
   access_revoked: true,
   update: true,
+  'sync.rejected': true,
 };
 
 /** The same list as values, in the order above. `Object.keys` is the only way back from a type. */

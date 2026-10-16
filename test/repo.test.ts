@@ -1,9 +1,11 @@
 // Repository against in-memory SQLite (bun:sqlite): proves the visible behaviour of every method of
 // the contract (`backend/repo.ts`) and its boundaries — schema versioning, revocation, rewrite of
 // views/grants, used and expired invites, atomic invite consumption, vault upsert and the origin a
-// credential is bound to, event filters and JSONL, login results, meta.
+// credential is bound to, event filters and JSONL, the event push of SP04 §5 (client ids, the unsent
+// batch, the ack and the counters), login results, meta.
 import { describe, expect, test } from 'bun:test';
 import { createRepo, LegacyDatabaseError, SCHEMA_VERSION } from '../backend/repo';
+import type { Repo } from '../backend/repo';
 import { memorySqlite } from './helpers/sqlite-bun';
 import type { PasswordHashV2 } from '../shared/auth';
 import type { Entry, PasswordHash, Probe, SqlDb } from '../shared/types';
@@ -738,6 +740,114 @@ describe('events', () => {
     expect(repo.loginResults('alpha', 0)).toEqual([]);
     expect(repo.loginResults('beta', 10)).toEqual(['provider']);
     expect(repo.loginResults('gamma', 10)).toEqual([]);
+  });
+});
+
+describe('event push (SP04 §5)', () => {
+  /** The events as inserted, with the instant the batch order is read from. */
+  function seed(repo: Repo, count: number): void {
+    for (let index = 0; index < count; index += 1) {
+      repo.addEvent({
+        personId: null,
+        toolId: 'alpha',
+        type: 'tool_opened',
+        url: 'https://alpha.example.test/app',
+        result: null,
+        detail: null,
+        at: new Date(Date.parse('2026-10-15T10:00:00.000Z') + index * 1000).toISOString(),
+      });
+    }
+  }
+
+  test('addEvent stamps a fresh client id and leaves the event unsent', () => {
+    const repo = newRepo();
+    const first = repo.addEvent({
+      personId: null,
+      toolId: null,
+      type: 'unlocked',
+      url: null,
+      result: null,
+      detail: null,
+      at: '2026-10-15T10:00:00.000Z',
+    });
+    const second = repo.addEvent({
+      personId: null,
+      toolId: null,
+      type: 'locked',
+      url: null,
+      result: null,
+      detail: null,
+      at: '2026-10-15T10:01:00.000Z',
+    });
+
+    expect(first.clientId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(second.clientId).not.toBe(first.clientId);
+    expect(first.sentAt).toBeNull();
+    // The id is the row's, not the answer's: a read returns the same one.
+    expect(repo.listEvents({}).map((e) => e.clientId)).toEqual([second.clientId, first.clientId]);
+    expect(repo.eventSyncCounts()).toEqual({ sent: 0, pending: 2 });
+  });
+
+  test('unsentEvents answers oldest first, at most the limit, and never a sent one', () => {
+    const repo = newRepo();
+    seed(repo, 5);
+    const all = repo.unsentEvents(10);
+    expect(all.map((e) => e.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(repo.unsentEvents(2).map((e) => e.id)).toEqual([1, 2]);
+
+    repo.markEventsSent([all[1]!.clientId, all[3]!.clientId], '2026-10-15T12:00:00.000Z');
+    expect(repo.unsentEvents(10).map((e) => e.id)).toEqual([1, 3, 5]);
+    expect(repo.eventSyncCounts()).toEqual({ sent: 2, pending: 3 });
+  });
+
+  test('a row recorded before the push existed gets a client id when it is first offered', () => {
+    const db = memorySqlite();
+    const repo = createRepo(db);
+    repo.migrate();
+    // What a database of the previous block holds: an event with no client id and no sent time.
+    db.run(
+      `INSERT INTO event (at, person_id, tool_id, type, url, result, detail) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ['2026-10-15T10:00:00.000Z', 'p1', 'alpha', 'unlocked', null, null, null],
+    );
+    expect(repo.listEvents({})[0]?.clientId).toBeUndefined();
+
+    const first = repo.unsentEvents(10);
+    expect(first).toHaveLength(1);
+    expect(first[0]?.clientId).toMatch(/^[0-9a-f]{8}-/);
+    // The backfill is stable: the same row answers the same id, so a retry cannot duplicate it.
+    expect(repo.unsentEvents(10)[0]?.clientId).toBe(first[0]?.clientId);
+    expect(repo.listEvents({})[0]?.clientId).toBe(first[0]?.clientId);
+    expect(repo.eventSyncCounts()).toEqual({ sent: 0, pending: 1 });
+  });
+
+  test('markEventsSent marks the given ids only, keeps the first receipt and ignores the rest', () => {
+    const repo = newRepo();
+    seed(repo, 3);
+    const pending = repo.unsentEvents(10);
+    const ids = pending.map((e) => e.clientId);
+
+    repo.markEventsSent([ids[0]!, 'not-an-id'], '2026-10-15T12:00:00.000Z');
+    expect(repo.eventSyncCounts()).toEqual({ sent: 1, pending: 2 });
+    // A second ack of the same id — the host answers every id it holds — keeps the first time.
+    repo.markEventsSent(ids, '2026-10-15T13:00:00.000Z');
+    const marked = repo.listEvents({}).filter((e) => e.sentAt !== null);
+    expect(marked).toHaveLength(3);
+    expect(marked.map((e) => e.sentAt)).toEqual([
+      '2026-10-15T13:00:00.000Z',
+      '2026-10-15T13:00:00.000Z',
+      '2026-10-15T12:00:00.000Z',
+    ]);
+    expect(repo.eventSyncCounts()).toEqual({ sent: 3, pending: 0 });
+    expect(repo.unsentEvents(10)).toEqual([]);
+    // Nothing to mark is not a query.
+    repo.markEventsSent([], '2026-10-15T14:00:00.000Z');
+    expect(repo.eventSyncCounts()).toEqual({ sent: 3, pending: 0 });
+  });
+
+  test('with no events the counters are zero and nothing is unsent', () => {
+    const repo = newRepo();
+    expect(repo.eventSyncCounts()).toEqual({ sent: 0, pending: 0 });
+    expect(repo.unsentEvents(500)).toEqual([]);
   });
 });
 

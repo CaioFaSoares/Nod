@@ -13,6 +13,7 @@ import type {
   Entry,
   EntryDetails,
   EventFilter,
+  EventSyncStatus,
   HostState,
   Id,
   JoinInvite,
@@ -488,6 +489,8 @@ export function mountSettings(
     vaultLabel: '',
     /** SP05 §3: the one host, as `host.state` or the push `host` last answered. */
     host: ctx.host ?? null,
+    /** SP04 §5: sent vs pending of the Activity tab, read while a host is known; null without one. */
+    eventSync: null as EventSyncStatus | null,
     /** SP04 §1.3: the invite a `bond://join` link carried, spent by the join flow on mount. */
     join: ctx.join ?? null,
   };
@@ -704,6 +707,8 @@ export function mountSettings(
         case 'activity':
           state.entries = await call('catalog.list');
           state.people = await call('people.list');
+          // SP04 §5's sent/pending only means anything with a host: without one every event is local.
+          state.eventSync = hasHost() ? await call('events.syncStatus') : null;
           await loadEvents();
           break;
         case 'catalog':
@@ -2006,6 +2011,15 @@ export function mountSettings(
 
   // ---------------------------------------------------------------- tab: activity
 
+  /**
+   * Whether the Bond knows a host at all. `host.state` answers `none` rather than `null` for a Bond
+   * that was never connected — and `host.remove` leaves the same shape — so the absence of a host is
+   * this status, not a missing object (SP05 §3).
+   */
+  function hasHost(): boolean {
+    return state.host !== null && state.host.status !== 'none';
+  }
+
   function viewActivity(): HTMLElement {
     const box = el('section', { class: 'stack' });
     box.append(
@@ -2040,6 +2054,13 @@ export function mountSettings(
       ),
     );
 
+    // SP04 §5's "what was sent": the counters and, per event, the ack time. Without a host every
+    // event is local and private (canonico §13), so there is nothing to show per row.
+    const eventSync = hasHost() ? state.eventSync : null;
+    if (eventSync !== null) {
+      box.append(el('p', { class: 'muted' }, `Sent ${eventSync.sent} · pending ${eventSync.pending}`));
+    }
+
     if (state.events.length === 0) {
       box.append(el('p', { class: 'empty' }, 'No events.'));
       return box;
@@ -2057,6 +2078,7 @@ export function mountSettings(
           el('td', {}, event.type),
           el('td', {}, event.result ?? '—'),
           el('td', { class: 'muted' }, event.url ?? '—'),
+          eventSync === null ? null : el('td', { class: 'muted' }, event.sentAt ?? 'pending'),
         ),
       );
     }
@@ -2076,6 +2098,7 @@ export function mountSettings(
             el('th', {}, 'Type'),
             el('th', {}, 'Result'),
             el('th', {}, 'URL'),
+            eventSync === null ? null : el('th', {}, 'Sent'),
           ),
         ),
         body,
@@ -2225,6 +2248,9 @@ export function mountSettings(
     }
     state.host = next;
     if (state.tab === 'hosts') render();
+    // SP04 §5: a run that pushed events moved rows from pending to sent, so an open Activity tab
+    // reads the list and the counters again — the same thing a catalog change makes it do.
+    else if (state.tab === 'activity') void load();
   });
 
   state.tab = ctx.tab !== undefined && canShow(ctx.tab) ? ctx.tab : defaultTab();

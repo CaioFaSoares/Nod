@@ -39,6 +39,7 @@ import type {
   SaltResponse,
   TokenResponse,
 } from '../shared/host-api';
+import { createConnectedCatalog } from './connected-catalog';
 import { createHostClient } from './host-client';
 import { createIcons } from './icons';
 import { probe } from './probe-net';
@@ -49,6 +50,7 @@ import { openSqlite } from './sqlite';
 import { createSync } from './sync';
 import { createToolWindows } from './tool-windows';
 import { createVault } from './vault';
+import type { ConnectedCatalog } from './connected-catalog';
 import type { HostClient, HostConnection, HostDiscovery } from './host-client';
 import type { Icons } from './icons';
 import type { Repo } from './repo';
@@ -69,6 +71,15 @@ let runtime: TinyApp | null = null;
 let client: HostClient | null = null;
 /** The sync timer and its state (B4). Built with the database, started and stopped by the session. */
 let sync: Sync | null = null;
+/**
+ * The effective catalog (B5): the snapshot's entries and roles while a `host` row exists, the local
+ * tables otherwise (SP05 §2). Re-derived wherever the row can have moved.
+ */
+let connected: ConnectedCatalog | null = null;
+/** Whether the last derivation found a `host` row: the catalog layer's local/connected switch. */
+let connectedMode = false;
+/** The entries the effective catalog holds while connected — empty until the first snapshot reads. */
+let connectedEntries: Entry[] = [];
 /**
  * SP04 §1.3's `bond://join` link, kept until the join flow picks it up (`host.discover`) or a host
  * is added. Not a secret — the address, the fingerprint and the code the person was given — and it
@@ -133,6 +144,11 @@ export async function init(app: TinyApp): Promise<void> {
       detail: reason(error),
     });
   }
+  // SP05 §2: the effective catalog — the snapshot's org half while a `host` row exists, the local
+  // tables otherwise. Derived here, before anything reads an entry, and again wherever the row can
+  // have moved (an unlock, a join, a removal, every state a sync publishes).
+  connected = createConnectedCatalog({ now: () => Date.now() });
+  refreshConnectedCatalog();
   await refreshIcons();
 
   session = createSession({
@@ -142,7 +158,9 @@ export async function init(app: TinyApp): Promise<void> {
     authenticate: (request: string) => app.authenticate(request),
     biometricAvailable: system !== 'linux' && supported(capabilities, 'authenticate'),
   });
-  vault = createVault({ repo: database, keychain: app.secrets });
+  // SP02 §8/RF-38: the vault reads the entry of a credential through the effective catalog, so the
+  // origin it records is the entry's own url at save time — the host entry's, while connected.
+  vault = createVault({ repo: { ...database, entry: (id) => catalogEntryOf(id) }, keychain: app.secrets });
   // Connected mode (SP05 §1): the host client holds no state and makes no call of its own, and the
   // sync loop only ever asks it for a connection built from the `host` row (RF-30).
   client = createHostClient({ fetch, keychain: app.secrets });
@@ -150,7 +168,12 @@ export async function init(app: TinyApp): Promise<void> {
     repo: database,
     connection: () => connectionOf(),
     now: () => Date.now(),
-    onState: (state) => push('host', state),
+    onState: (state) => {
+      push('host', state);
+      // SP05 §2: a run that moved the snapshot moves the catalog with it, and the page hears it once
+      // — a `304` advances `last_sync_at` alone, and the catalog it would push is the same one.
+      if (refreshConnectedCatalog()) afterCatalogChange();
+    },
     onSignedOut: () => {
       // SP04 §3/RF-39: the session is gone — the bearer is dropped and the page asks to sign in.
       // `host.last_error` already carries `SIGNED_OUT_ERROR`, which is what the state reports.
@@ -253,7 +276,45 @@ function currentPerson(): Person | null {
 function visibleEntriesOf(): Entry[] {
   const r = repo;
   const person = currentPerson();
-  return r === null || person === null ? [] : visibleEntries(r.listEntries(), person);
+  if (r === null || person === null) return [];
+  // SP05 §2: while a `host` row exists the entries are the snapshot's, in SP05 §4's order; without
+  // one they are the local catalog's, untouched.
+  if (connectedMode) return connectedEntries;
+  return visibleEntries(r.listEntries(), person);
+}
+
+/**
+ * SP05 §2: the effective catalog of the `host` row the caller just read — the snapshot while one
+ * exists, the local tables otherwise. It is derived wherever the row can have moved (the boot, an
+ * unlock, a join, a removal and every state the sync publishes) and answers whether the entries,
+ * the roles and the person the host knows changed since the last derivation.
+ */
+function refreshConnectedCatalog(): boolean {
+  const r = repo;
+  const catalog = connected;
+  if (r === null || catalog === null) return false;
+  const record = r.hostRecord();
+  const changed = catalog.refresh(record);
+  connectedMode = record !== null;
+  connectedEntries = catalog.entries();
+  return changed;
+}
+
+/** What a changed effective catalog moves: the sidebar's icons, the open tool windows, the page. */
+function afterCatalogChange(): void {
+  cacheConnectedIcons();
+  const open = windows;
+  if (open !== null) open.reconcile();
+  push('catalog', null);
+  push('tools', toolsState());
+}
+
+/** The effective entry of this id: the connected catalog's while one is in force, the local's else. */
+function catalogEntryOf(id: Id): Entry | null {
+  const r = repo;
+  if (r === null) return null;
+  if (connectedMode) return connectedEntries.find((entry) => entry.id === id) ?? null;
+  return r.entry(id);
 }
 
 function toolsState(): ToolsState {
@@ -273,6 +334,38 @@ function vaultOriginOf(toolId: Id): string | null {
   return r === null || person === null ? null : r.vaultOrigin(person.id, toolId);
 }
 
+/**
+ * The entries the page lists (SP05 §3 `catalog.list`), in `visibleEntriesOf`'s order. A connected
+ * entry carries the host's icon inside the snapshot; a local one keeps it in the store, addressed by
+ * the hash of the row (`canonico §8`; `Entry.icon` at runtime is a data URI or null).
+ */
+async function listedEntries(): Promise<Entry[]> {
+  const entries = visibleEntriesOf();
+  if (connectedMode) {
+    return entries.map((entry) => ({
+      ...entry,
+      icon: typeof entry.icon === 'string' ? entry.icon : null,
+    }));
+  }
+  const r = repo;
+  const store = icons;
+  if (r === null || store === null) return entries;
+  return Promise.all(
+    entries.map(async (entry) => {
+      const hash = r.iconHash(entry.id);
+      return { ...entry, icon: hash === null ? null : await store.dataUri(hash) };
+    }),
+  );
+}
+
+/** SP05 §2: the guild's roles while connected, the local `role` table (untouched) otherwise. */
+function rolesOf(): Role[] {
+  const r = required(repo, 'roles.list');
+  const catalog = connected;
+  if (connectedMode && catalog !== null) return catalog.roles();
+  return r.listRoles();
+}
+
 /** The page and the tool windows read an entry's icon as a data URI (canonico §8). */
 async function refreshIcons(): Promise<void> {
   const r = repo;
@@ -284,6 +377,16 @@ async function refreshIcons(): Promise<void> {
     if (hash === null) continue;
     const uri = await store.dataUri(hash);
     if (uri !== null) iconCache.set(entry.id, uri);
+  }
+  // Last, so that a connected entry answers with its own icon when it shares an id with a local one.
+  cacheConnectedIcons();
+}
+
+/** The connected entries carry their icon in the snapshot itself: a data URI, or nothing to show. */
+function cacheConnectedIcons(): void {
+  if (!connectedMode) return;
+  for (const entry of connectedEntries) {
+    if (typeof entry.icon === 'string' && entry.icon.startsWith('data:')) iconCache.set(entry.id, entry.icon);
   }
 }
 
@@ -355,6 +458,7 @@ const ADMIN_ONLY: Partial<Record<Method, true>> = {
   'people.revoke': true,
   'invites.issue': true,
   'events.list': true,
+  'events.syncStatus': true,
   'events.exportToFile': true,
   'bond.installUpdate': true,
 };
@@ -562,6 +666,9 @@ function startUpdateWatch(): void {
 /** §4: unlocking or creating an account pushes session and tools, then restores the open tools. */
 async function afterUnlock(state: SessionState): Promise<SessionState> {
   const open = required(windows, 'session');
+  // SP05 §2: before anything reads an entry — a join has just added the `host` row, and the tools
+  // this function pushes next come from the effective catalog.
+  refreshConnectedCatalog();
   push('session', state);
   push('tools', open.state());
   await open.restore();
@@ -977,6 +1084,10 @@ const methods: { [M in Method]: Handler<M> } = {
     // SP02 §5: the bearer goes with the host; without a row nothing would ever read it again.
     if (connection !== null) await connection.forgetToken();
     r.clearHost();
+    // SP05 §2: without a `host` row the local tables are the catalog again — "removing the host
+    // returns to them" — so the effective catalog and the page's list are re-derived here.
+    refreshConnectedCatalog();
+    afterCatalogChange();
     const state = hostState();
     push('host', state);
     return state;
@@ -984,16 +1095,9 @@ const methods: { [M in Method]: Handler<M> } = {
 
   // -------------------------------------------------------------- catalog
   'catalog.list': async () => {
-    const r = required(repo, 'catalog.list');
-    const store = required(icons, 'catalog.list');
-    const person = unlockedPerson('catalog.list');
-    return Promise.all(
-      visibleEntries(r.listEntries(), person).map(async (entry) => {
-        const hash = r.iconHash(entry.id);
-        // `Entry.icon` at runtime is a data URI or null (shared/types): the page shows the image.
-        return { ...entry, icon: hash === null ? null : await store.dataUri(hash) };
-      }),
-    );
+    unlockedPerson('catalog.list');
+    // SP05 §2: the effective catalog — the snapshot's entries while a `host` row exists.
+    return listedEntries();
   },
 
   'catalog.get': async (params): Promise<EntryDetails> => {
@@ -1111,7 +1215,7 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   // -------------------------------------------------------------- roles
-  'roles.list': () => required(repo, 'roles.list').listRoles(),
+  'roles.list': () => rolesOf(),
 
   'roles.save': async (params) => {
     const r = required(repo, 'roles.save');
@@ -1375,6 +1479,9 @@ const methods: { [M in Method]: Handler<M> } = {
     const path = text(parameters(params, 'invalid file').path, 'invalid path');
     return writeTextFile(path, r.eventsJsonl());
   },
+
+  /** SP04 §5: the sent/pending counters of Settings → Activity. Counters only — no event travels. */
+  'events.syncStatus': () => required(repo, 'events.syncStatus').eventSyncCounts(),
 
   // -------------------------------------------------------------- bond
   'bond.info': async (): Promise<AppInfo> => {
