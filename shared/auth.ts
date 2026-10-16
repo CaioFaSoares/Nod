@@ -2,9 +2,13 @@
 // Pure logic: only WebCrypto, TextEncoder, btoa/atob. No tjs, tiny or DOM.
 // Signatures: docs/arquitetura.md §3.
 
+import { fromBase64url, toBase64url } from './encoding';
 import type { PasswordHash } from './types';
 
 export const PBKDF2_ITERATIONS = 600_000;
+
+/** SP02 §6: the algorithm of the new local verifier, `PasswordHashV2`; `PasswordHash` stays v1. */
+export const PASSWORD_V2_ALGORITHM = 'BOND-KDF-V1' as const;
 
 const ALGORITHM = 'PBKDF2-SHA256' as const;
 const SALT_LENGTH = 16;
@@ -153,6 +157,89 @@ export async function verifyPassword(password: string, h: PasswordHash): Promise
 export function validateNewPassword(password: string): string | null {
   if (password.length < 8) return 'password must be at least 8 characters';
   return null;
+}
+
+// ------------------------------------------------------------- local verifier v2 (SP02 §6)
+
+/**
+ * SP02 §6: the local verifier of a connected account. It holds no password hash — only a check over
+ * one of the three derived keys, so offline unlock derives the same keys the host's salt gives and
+ * the `vaultKey` is available with no network at all.
+ */
+export interface PasswordHashV2 {
+  algorithm: typeof PASSWORD_V2_ALGORITHM;
+  /** base64url of the 16 salt bytes: the host salt when connected, a fresh one in local mode. */
+  salt: string;
+  iterations: number;
+  /** base64url of `SHA-256(localKey)`. */
+  check: string;
+}
+
+/** The verifier a storage row carries (SP02 §6): the v1 PBKDF2 hash or the V2 record. */
+export type StoredPassword = PasswordHash | PasswordHashV2;
+
+/** SP02 §6: a fresh 16-byte salt, base64url — the form the host and `PasswordHashV2` carry. */
+export function randomSalt(): string {
+  return toBase64url(crypto.getRandomValues(new Uint8Array(SALT_LENGTH)));
+}
+
+/**
+ * `base64url(SHA-256(localKey))`, the `check` of SP02 §6. It is what a stored account compares
+ * against, so a caller that already derived the keys does not pay a second PBKDF2 to write the row.
+ */
+export async function passwordCheck(localKey: Uint8Array<ArrayBuffer>): Promise<string> {
+  return toBase64url(new Uint8Array(await crypto.subtle.digest('SHA-256', localKey)));
+}
+
+/**
+ * Whether `check` is the `base64url(SHA-256(localKey))` of that key, compared in constant time. A
+ * `check` that is not base64url, or of another size, answers `false` — a row that cannot be read is
+ * a row that does not open.
+ */
+export async function passwordCheckMatches(
+  localKey: Uint8Array<ArrayBuffer>,
+  check: string,
+): Promise<boolean> {
+  let expected: Uint8Array;
+  try {
+    expected = fromBase64url(check);
+  } catch {
+    return false;
+  }
+  const obtained = new Uint8Array(await crypto.subtle.digest('SHA-256', localKey));
+  return equalInConstantTime(expected, obtained);
+}
+
+/** SP02 §6: derives the keys of `password` over `salt` (base64url) and returns the V2 record. */
+export async function createPasswordHashV2(
+  password: string,
+  salt: string,
+  iterations: number = PBKDF2_ITERATIONS,
+): Promise<PasswordHashV2> {
+  const keys = await deriveKeys(password, fromBase64url(salt), iterations);
+  return {
+    algorithm: PASSWORD_V2_ALGORITHM,
+    salt,
+    iterations,
+    check: await passwordCheck(keys.localKey),
+  };
+}
+
+/** SP02 §6: offline unlock — derive with the stored salt and compare the check in constant time. */
+export async function verifyPasswordV2(password: string, h: PasswordHashV2): Promise<boolean> {
+  if (h.algorithm !== PASSWORD_V2_ALGORITHM) return false;
+  const keys = await deriveKeys(password, fromBase64url(h.salt), h.iterations);
+  return passwordCheckMatches(keys.localKey, h.check);
+}
+
+/** Verifies whichever verifier the row carries: the v1 hash or the V2 check (SP02 §6). */
+export async function verifyStoredPassword(
+  password: string,
+  stored: StoredPassword,
+): Promise<boolean> {
+  return stored.algorithm === PASSWORD_V2_ALGORITHM
+    ? verifyPasswordV2(password, stored)
+    : verifyPassword(password, stored);
 }
 
 // ------------------------------------------------------------- invites

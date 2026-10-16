@@ -26,6 +26,7 @@ interface SettingsTabItem {
 
 const SETTINGS_TABS: SettingsTabItem[] = [
   { id: 'account', label: 'Account', admin: false },
+  { id: 'hosts', label: 'Hosts', admin: false },
   { id: 'vault', label: 'Vault', admin: false },
   { id: 'tools', label: 'Tools', admin: true },
   { id: 'roles', label: 'Roles', admin: true },

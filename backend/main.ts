@@ -3,16 +3,20 @@
 // with the §2 window guard) and the runtime hooks.
 // No secret crosses this frontier: only `vault.reveal` returns a credential, and no secret ever
 // enters an event, `store` or a log.
-import { generateInviteCode, hashInviteCode, inviteIsValid, verifyPassword } from '../shared/auth';
+import { generateInviteCode, hashInviteCode, inviteIsValid, randomSalt, verifyStoredPassword } from '../shared/auth';
 import { auditUrl, exportSeed, originOf, validateEntry, validateSeed, visibleEntries } from '../shared/catalog';
+import { toBase64url } from '../shared/encoding';
+import { HOST_ROUTES } from '../shared/host-api';
 import { MAIN_WINDOW, toolOfWindow } from '../shared/types';
 import type {
   AppInfo,
   Entry,
   EntryDetails,
   EventFilter,
+  HostState,
   Id,
   InviteSeed,
+  JoinInvite,
   LoginResult,
   Method,
   Person,
@@ -27,17 +31,29 @@ import type {
   ToolsState,
   UpdateInfo,
 } from '../shared/types';
+import type {
+  ActivateRequest,
+  Device,
+  LoginRequest,
+  PasswordChangeRequest,
+  SaltResponse,
+  TokenResponse,
+} from '../shared/host-api';
+import { createHostClient } from './host-client';
 import { createIcons } from './icons';
 import { probe } from './probe-net';
 import { createRepo, LegacyDatabaseError } from './repo';
 import { applyBundledSeed, gateOrigins, importSeedFile, storedSeedVersion } from './seed';
 import { createSession } from './session';
 import { openSqlite } from './sqlite';
+import { createSync } from './sync';
 import { createToolWindows } from './tool-windows';
 import { createVault } from './vault';
+import type { HostClient, HostConnection, HostDiscovery } from './host-client';
 import type { Icons } from './icons';
 import type { Repo } from './repo';
 import type { Session } from './session';
+import type { Sync } from './sync';
 import type { ToolWindows } from './tool-windows';
 import type { Vault } from './vault';
 
@@ -49,6 +65,16 @@ let vault: Vault | null = null;
 let windows: ToolWindows | null = null;
 let icons: Icons | null = null;
 let runtime: TinyApp | null = null;
+/** The host client (B1): no I/O of its own, and the only path to a host (RF-30). */
+let client: HostClient | null = null;
+/** The sync timer and its state (B4). Built with the database, started and stopped by the session. */
+let sync: Sync | null = null;
+/**
+ * SP04 §1.3's `bond://join` link, kept until the join flow picks it up (`host.discover`) or a host
+ * is added. Not a secret — the address, the fingerprint and the code the person was given — and it
+ * never goes to a file, an event or `store`.
+ */
+let pendingJoin: JoinInvite | null = null;
 let system: System = 'linux';
 let tray = false;
 let bundledSeed: Seed | null = null;
@@ -117,6 +143,25 @@ export async function init(app: TinyApp): Promise<void> {
     biometricAvailable: system !== 'linux' && supported(capabilities, 'authenticate'),
   });
   vault = createVault({ repo: database, keychain: app.secrets });
+  // Connected mode (SP05 §1): the host client holds no state and makes no call of its own, and the
+  // sync loop only ever asks it for a connection built from the `host` row (RF-30).
+  client = createHostClient({ fetch, keychain: app.secrets });
+  sync = createSync({
+    repo: database,
+    connection: () => connectionOf(),
+    now: () => Date.now(),
+    onState: (state) => push('host', state),
+    onSignedOut: () => {
+      // SP04 §3/RF-39: the session is gone — the bearer is dropped and the page asks to sign in.
+      // `host.last_error` already carries `SIGNED_OUT_ERROR`, which is what the state reports.
+      const connection = connectionOf();
+      if (connection !== null) void connection.forgetToken();
+    },
+    setInterval: (run, ms) => setInterval(run, ms),
+    // `Sync` keeps its handle opaque (`unknown`); the runtime's `clearInterval` takes back the id
+    // its own `setInterval` answered.
+    clearInterval: (handle) => clearInterval(handle as number),
+  });
   windows = createToolWindows(app, {
     entries: () => visibleEntriesOf(),
     icon: (id) => iconCache.get(id) ?? null,
@@ -320,6 +365,10 @@ const WITHOUT_SESSION: Partial<Record<Method, true>> = {
   'session.createAccount': true,
   'session.unlock': true,
   'session.unlockBiometric': true,
+  // SP05 §3: the first run has no account at all, and a join is what creates the connected one.
+  'host.discover': true,
+  'host.activate': true,
+  'host.signIn': true,
   'bond.info': true,
   'bond.quit': true,
 };
@@ -519,11 +568,19 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
   push('tools', open.state());
   // RF-55: the notice the launch check already found, for the window that had not subscribed yet.
   push('update', updateNotice);
+  // SP05 §3: the host state goes with the session, so the sidebar knows before any sync ran.
+  push('host', hostState());
+  // SP04 §3: the unlock is the first trigger of a sync. RF-30: without a `host` row there is no
+  // client and no call, so `start()` is only armed when there is something to sync with.
+  const running = sync;
+  if (running !== null && required(repo, 'host').hostRecord() !== null) running.start();
   return state;
 }
 
 /** §4: locking closes every tool window and the popups they opened. */
 function lockSession(): SessionState {
+  // SP04 §3: nothing is synced while locked — the state a locked Bond shows is the cache.
+  sync?.stop();
   const state = required(session, 'session.lock').lock();
   required(windows, 'session.lock').closeAll();
   push('session', state);
@@ -544,6 +601,86 @@ async function afterChange(): Promise<void> {
   push('catalog', null);
   push('tools', toolsState());
   push('session', await s.state());
+  // SP04 §3: an admin write is one of the triggers of a sync. The write itself still goes to the
+  // local catalog; routing it to the host is B6. `afterWrite` is a no-op while stopped.
+  if (sync !== null) sync.afterWrite();
+}
+
+// ---------------------------------------------------------------- connected mode (SP05, SP04)
+
+/**
+ * SP04 §1.3: `bond://join?host=<address>&fp=<fingerprint>[&code=<code>]`. Every other link — another
+ * scheme, another host, a missing `host` or `fp` — answers null and the app ignores it.
+ */
+function parseJoinLink(url: string): JoinInvite | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'bond:') return null;
+  // `bond://join` puts the action in the authority; a link typed as `bond:join` has it in the path.
+  const action = parsed.host !== '' ? parsed.host : parsed.pathname.replaceAll('/', '');
+  if (action.toLowerCase() !== 'join') return null;
+  const address = parsed.searchParams.get('host');
+  const fingerprint = parsed.searchParams.get('fp');
+  if (address === null || address.trim() === '') return null;
+  if (fingerprint === null || fingerprint.trim() === '') return null;
+  return { address, fingerprint, code: parsed.searchParams.get('code') };
+}
+
+/**
+ * RF-30: a connection exists only while a `host` row exists. Every host call the backend makes past
+ * the two auth calls of a join goes through this one builder, and the client holds the bearer in
+ * the keychain (SP02 §5) — never in a parameter, a row or an event.
+ */
+function connectionOf(): HostConnection | null {
+  const r = repo;
+  const c = client;
+  if (r === null || c === null) return null;
+  const row = r.hostRecord();
+  if (row === null) return null;
+  return c.connect({
+    address: row.address,
+    kid: row.kid,
+    publicKey: row.publicKey,
+    personId: row.personId,
+  });
+}
+
+/**
+ * The public auth routes of SP02 §4 (`salt`, `activate`, `setup`, `login`) carry no bearer, and the
+ * person is known only once they answer: a connection built before that names no `personId`, so the
+ * keychain has no item under its key and the request goes out without an `Authorization` header
+ * (`backend/host-client.ts`). It is never used for a call that needs a session.
+ */
+function preAuthConnection(found: HostDiscovery): HostConnection {
+  return required(client, 'host').connect({
+    address: found.address,
+    kid: found.pin.kid,
+    publicKey: found.pin.ed25519Public,
+    personId: '',
+  });
+}
+
+/** SP03 §2's `device`: the host shows it in the session list (O1). None of it is a secret. */
+async function deviceOf(): Promise<Device> {
+  const app = required(runtime, 'host');
+  const info = await app.info();
+  let arch: string | null = null;
+  try {
+    arch = (await app.system.info()).arch;
+  } catch {
+    // A runtime that does not answer `system.info` still has an OS: the name is coarser, not wrong.
+    arch = null;
+  }
+  return { name: arch === null ? system : `${system} ${arch}`, os: system, appVersion: info.version };
+}
+
+/** SP05 §3 `host.state`: the one guild, or the `none` of a Bond that was never connected. */
+function hostState(): HostState {
+  return required(sync, 'host.state').state();
 }
 
 /** The invites that still travel in an export: unused and unexpired (canonico §9). */
@@ -560,9 +697,11 @@ function activeInvites(r: Repo, now: Date): InviteSeed[] {
 
 /** §4: the vault export checks the local password first (the session is already unlocked). */
 async function confirmLocalPassword(r: Repo, person: Person, password: string): Promise<void> {
-  const record = r.personByEmail(person.email);
+  // The row carries a v1 PBKDF2 hash or B3's V2 check (SP02 §6): `personAuthByEmail` is the read
+  // that returns either, and `verifyStoredPassword` dispatches on it.
+  const record = r.personAuthByEmail(person.email);
   if (record === null) throw new Error('invalid credentials');
-  if (!(await verifyPassword(password, record.password))) throw new Error('incorrect password');
+  if (!(await verifyStoredPassword(password, record.password))) throw new Error('incorrect password');
 }
 
 async function writeTextFile(path: string, content: string): Promise<true> {
@@ -605,7 +744,12 @@ function usualLogin(results: LoginResult[]): LoginResult | null {
 
 const methods: { [M in Method]: Handler<M> } = {
   // -------------------------------------------------------------- session
-  'session.state': () => required(session, 'session.state').state(),
+  'session.state': () => {
+    // SP04 §1.3: the page subscribes before it calls this at boot, so a `bond://join` link that
+    // arrived while it was loading is handed over here.
+    if (pendingJoin !== null) push('join', pendingJoin);
+    return required(session, 'session.state').state();
+  },
 
   'session.createAccount': async (params) => {
     const p = parameters(params, 'invalid account');
@@ -641,14 +785,202 @@ const methods: { [M in Method]: Handler<M> } = {
 
   'session.changePassword': async (params): Promise<true> => {
     const p = parameters(params, 'invalid passwords');
+    const connection = connectionOf();
+    // SP02 §7: when a host is connected, the host rewrites its salt and hash **first**; only then
+    // does the local verifier follow. The request carries the two `authKey`s, never a password.
     await required(session, 'session.changePassword').changePassword(
       text(p.current, 'invalid current password'),
       text(p.next, 'invalid new password'),
+      connection === null
+        ? undefined
+        : async (request: PasswordChangeRequest): Promise<void> => {
+            await connection.request('POST', HOST_ROUTES.authPassword, request);
+          },
     );
     return true;
   },
 
   'session.lock': () => lockSession(),
+
+  // -------------------------------------------------------------- host (connected mode)
+  'host.state': () => hostState(),
+
+  'host.discover': async (params) => {
+    // SP04 §1 steps 1–4: nothing is written — the page shows the guild and the fingerprint.
+    const found = await required(client, 'host.discover').discover(
+      text(parameters(params, 'invalid address').address, 'invalid address'),
+    );
+    // SP04 §1.3: the flow picked the invite up, so it is not offered again on the next call.
+    pendingJoin = null;
+    return { guild: found.document.guild, fingerprint: found.fingerprint };
+  },
+
+  'host.activate': async (params) => {
+    const c = required(client, 'host.activate');
+    const r = required(repo, 'host.activate');
+    const s = required(session, 'host.activate');
+    const p = parameters(params, 'invalid join');
+    const address = text(p.address, 'invalid address');
+    const fingerprint = text(p.fingerprint, 'invalid fingerprint');
+    const email = text(p.email, 'invalid email').trim();
+    const code = text(p.code, 'invalid code');
+    const password = text(p.password, 'invalid password');
+    const name = optional(p.name, (value) => text(value, 'invalid name'));
+
+    // SP05 §2 keeps one guild at a time. Replacing the row here would drop the current host's
+    // bearer and snapshot without a word, so the person removes the host first.
+    if (r.hostRecord() !== null) {
+      throw new Error('Bond is already connected to a host — remove it first');
+    }
+
+    // SP04 §1.3: the invite's `fp` must be the key the host answers. A mismatch throws here, before
+    // any request past the discovery, and stores nothing.
+    const found = await c.discover(address, { fingerprint });
+    const pre = preAuthConnection(found);
+    // SP02 §4: the host's iteration count for this derivation (it answers for any email).
+    const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
+    // SP02 §1: at activation the Bond chooses the person's salt. SP02 §7's reset is a new salt, so
+    // the one the host answers is only read, never stored — another machine's cached salt is what
+    // notices a reset, and it must never match by accident.
+    const salt = randomSalt();
+    const keys = await s.deriveFor(password, salt, published.iterations);
+
+    const body: ActivateRequest = {
+      email,
+      code,
+      salt,
+      // SP02 §1–§2: only this one derived key travels; the password stays on this machine.
+      authKey: toBase64url(keys.authKey),
+      device: await deviceOf(),
+    };
+    const setup = name !== undefined;
+    // SP02 §3: the setup code creates the first admin; an access code redeems one person's row.
+    const opened = await pre.request<TokenResponse>(
+      'POST',
+      setup ? HOST_ROUTES.authSetup : HOST_ROUTES.authActivate,
+      setup ? { ...body, name } : body,
+    );
+
+    const connection = c.connect({
+      address: found.address,
+      kid: found.pin.kid,
+      publicKey: found.pin.ed25519Public,
+      personId: opened.personId,
+    });
+    const state = await s.adoptConnectedAccount({
+      personId: opened.personId,
+      email,
+      // The host knows the person's name; an access-code activation learns it from the first
+      // snapshot, and the local row carries the email until then.
+      name: name ?? email,
+      password,
+      salt,
+      iterations: published.iterations,
+      // An access-code activation says nothing about the roles: the snapshot fills them (B4/B5).
+      admin: setup,
+    });
+    await connection.saveToken(opened.token);
+    r.saveHost({
+      address: found.address,
+      guild: found.document.guild,
+      kid: found.pin.kid,
+      publicKey: found.pin.ed25519Public,
+      personId: opened.personId,
+      salt,
+      addedAt: new Date().toISOString(),
+    });
+    pendingJoin = null;
+    return afterUnlock(state);
+  },
+
+  'host.signIn': async (params) => {
+    const c = required(client, 'host.signIn');
+    const r = required(repo, 'host.signIn');
+    const s = required(session, 'host.signIn');
+    const p = parameters(params, 'invalid sign-in');
+    const address = text(p.address, 'invalid address');
+    const fingerprint = text(p.fingerprint, 'invalid fingerprint');
+    const email = text(p.email, 'invalid email').trim();
+    const password = text(p.password, 'invalid password');
+
+    const row = r.hostRecord();
+    // SP04 §1: a host that is already added is pinned, so a second key is never accepted silently;
+    // a host that is not has only the fingerprint the person confirmed (or the invite carried).
+    const found = await c.discover(
+      address,
+      row === null
+        ? { fingerprint }
+        : { pinned: { kid: row.kid, ed25519Public: row.publicKey } },
+    );
+    const pre = preAuthConnection(found);
+    // SP02 §4: the person's own salt for an activated account (a fake one would sign nobody in).
+    const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
+    const keys = await s.deriveFor(password, published.salt, published.iterations);
+    const opened = await pre.request<TokenResponse>('POST', HOST_ROUTES.authLogin, {
+      email,
+      authKey: toBase64url(keys.authKey),
+      device: await deviceOf(),
+    } satisfies LoginRequest);
+
+    // SP02 §7: the host answered a salt other than the one this machine cached, so the account was
+    // reset somewhere else. The saved logins of this machine go before the new keys are adopted
+    // (RF-43) — and only for the person the host just signed in.
+    const same = row !== null && row.personId === opened.personId;
+    if (same && row.salt !== published.salt) await s.wipeVault(row.personId);
+
+    const local = r.personById(opened.personId);
+    const connection = c.connect({
+      address: found.address,
+      kid: found.pin.kid,
+      publicKey: found.pin.ed25519Public,
+      personId: opened.personId,
+    });
+    const state = await s.adoptConnectedAccount({
+      personId: opened.personId,
+      email,
+      name: local === null ? email : local.name,
+      password,
+      salt: published.salt,
+      iterations: published.iterations,
+      // The snapshot is what says who is an admin (B4/B5); the local row is the last word until then.
+      admin: local !== null && local.admin,
+    });
+    await connection.saveToken(opened.token);
+    r.saveHost({
+      address: found.address,
+      guild: found.document.guild,
+      kid: found.pin.kid,
+      publicKey: found.pin.ed25519Public,
+      personId: opened.personId,
+      salt: published.salt,
+      addedAt: same && row !== null ? row.addedAt : new Date().toISOString(),
+    });
+    pendingJoin = null;
+    return afterUnlock(state);
+  },
+
+  'host.syncNow': async () => {
+    if (required(repo, 'host.syncNow').hostRecord() === null) {
+      throw new Error('Bond is not connected to a host');
+    }
+    return await required(sync, 'host.syncNow').syncNow();
+  },
+
+  'host.remove': async (params) => {
+    const r = required(repo, 'host.remove');
+    // SP05 §3 requires the flag; what it decides — the local personal tools — is block 2 (SP05 §2
+    // keeps them in `tool` rows either way, and `clearHost` never touches them).
+    booleanValue(parameters(params, 'invalid removal').keepPersonal, 'invalid removal');
+
+    sync?.stop();
+    const connection = connectionOf();
+    // SP02 §5: the bearer goes with the host; without a row nothing would ever read it again.
+    if (connection !== null) await connection.forgetToken();
+    r.clearHost();
+    const state = hostState();
+    push('host', state);
+    return state;
+  },
 
   // -------------------------------------------------------------- catalog
   'catalog.list': async () => {
@@ -1112,6 +1444,20 @@ export const api: Record<string, TinyApiHandler> = Object.fromEntries(
 );
 
 // ---------------------------------------------------------------- runtime hooks
+
+/**
+ * SP04 §1.3: a `bond://join?host=…&fp=…[&code=…]` link (tinyjs' `"urlScheme"`, the second launch
+ * forwarding to the running copy). The window comes forward and the page opens the join screen with
+ * the invite prefilled; anything else the launcher forwards is ignored. The code is the person's own
+ * — it is never logged, written to a file or put in an event.
+ */
+export function onOpenUrl(url: string, app: TinyApp): void {
+  const join = parseJoinLink(url);
+  if (join === null) return;
+  pendingJoin = join;
+  app.window(MAIN_WINDOW).show();
+  push('join', join);
+}
 
 export function onNavigate(info: TinyNavEvent): 'deny' | 'external' | undefined {
   const open = windows;

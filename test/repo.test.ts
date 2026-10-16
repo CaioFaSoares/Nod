@@ -5,6 +5,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createRepo, LegacyDatabaseError, SCHEMA_VERSION } from '../backend/repo';
 import { memorySqlite } from './helpers/sqlite-bun';
+import type { PasswordHashV2 } from '../shared/auth';
 import type { Entry, PasswordHash, Probe, SqlDb } from '../shared/types';
 
 // A fake hash: the repository stores and returns the `PasswordHash`; it never computes PBKDF2.
@@ -944,6 +945,29 @@ describe('host and outbox (SP05 §2)', () => {
     expect(repo.listOutbox()).toEqual([]);
   });
 
+  test('saveHostSalt moves the cached salt and nothing else (SP02 §6–§7)', () => {
+    const repo = newRepo();
+    repo.saveHost(PIN);
+    repo.saveHostSnapshot({
+      snapshot: '{"api":1}',
+      version: 'v1',
+      issuedAt: '2026-10-16T10:00:00.000Z',
+      syncedAt: '2026-10-16T10:00:01.000Z',
+    });
+
+    repo.saveHostSalt('AAECAwQFBgcICQoLDA0ODw');
+
+    const record = repo.hostRecord();
+    expect(record?.salt).toBe('AAECAwQFBgcICQoLDA0ODw');
+    // The cached catalog and the rest of the pin are what they were: a change of password is not a
+    // reason to lose the org tools (SP04 §3).
+    expect(record).toEqual({ ...PIN, salt: 'AAECAwQFBgcICQoLDA0ODw', snapshot: '{"api":1}', version: 'v1', issuedAt: '2026-10-16T10:00:00.000Z', lastSyncAt: '2026-10-16T10:00:01.000Z', lastError: null });
+
+    // Without a host there is no cache to keep, and no error either.
+    repo.clearHost();
+    expect(() => repo.saveHostSalt('AAECAwQFBgcICQoLDA0ODw')).not.toThrow();
+  });
+
   test('the outbox keeps its writes in id order and its attempts per write', () => {
     const repo = newRepo();
     const first = repo.enqueueOutbox({
@@ -984,5 +1008,124 @@ describe('host and outbox (SP05 §2)', () => {
     repo.markOutboxAttempt(first.id, 'gone');
     repo.deleteOutbox(first.id);
     expect(repo.listOutbox().map((row) => row.id)).toEqual([second.id]);
+  });
+});
+
+describe('local verifier: v1 and V2 (SP02 §6)', () => {
+  /** 16 bytes of base64url: the form the host salt and a V2 salt have (SP02 §4). */
+  const HOST_SALT = 'AAECAwQFBgcICQoLDA0ODw';
+  /** A real V2 record — the check is `base64url(SHA-256(localKey))` of 32 zero bytes. */
+  const V2: PasswordHashV2 = {
+    algorithm: 'BOND-KDF-V1',
+    salt: HOST_SALT,
+    iterations: 600_000,
+    check: 'Zmh6rfhivXdsj8GLjp-OIAiXFIVu4jOzkCpZHQ1fKSU',
+  };
+  /** Another check, of no particular password: 32 zero bytes encoded. */
+  const OTHER_CHECK = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
+  test('personAuthByEmail answers the v1 verifier of a local account', () => {
+    const repo = newRepo();
+    const person = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: [] });
+
+    expect(repo.personAuthByEmail(' ANA@Example.Test ')?.person.id).toBe(person.id);
+    expect(repo.personAuthByEmail('ana@example.test')?.password).toEqual(PASSWORD);
+    expect(repo.personAuthByEmail('nobody@example.test')).toBeNull();
+    // Revoked people are invisible to both reads.
+    repo.revokePerson(person.id);
+    expect(repo.personAuthByEmail('ana@example.test')).toBeNull();
+  });
+
+  test('saveConnectedPerson creates the row with the host id, the host salt and no v1 hash', () => {
+    const db = memorySqlite();
+    const repo = createRepo(db);
+    repo.migrate();
+
+    const person = repo.saveConnectedPerson({
+      id: 'host-person-1',
+      email: ' Ana@Guild.Test ',
+      name: 'Ana',
+      password: V2,
+      roles: [],
+    });
+
+    expect(person.id).toBe('host-person-1'); // the host person id, stable across machines (SP05 §2)
+    expect(person.email).toBe('ana@guild.test');
+    expect(person.admin).toBe(false);
+    expect(db.all('SELECT password_hash, password_salt, password_iterations, password_check, password_algorithm FROM person')).toEqual([
+      {
+        password_hash: '',
+        password_salt: HOST_SALT,
+        password_iterations: 600_000,
+        password_check: V2.check,
+        password_algorithm: 'BOND-KDF-V1',
+      },
+    ]);
+    expect(repo.personAuthByEmail('ana@guild.test')?.password).toEqual(V2);
+    // The v1 read of a V2 row says there is no PBKDF2 verifier: an empty hash.
+    expect(repo.personByEmail('ana@guild.test')?.password).toEqual({
+      algorithm: 'PBKDF2-SHA256',
+      hash: '',
+      salt: HOST_SALT,
+      iterations: 600_000,
+    });
+  });
+
+  test('saveConnectedPerson updates in place, replaces the roles and brings a revoked row back', () => {
+    const repo = newRepo();
+    repo.saveRole({ id: 'operator', name: 'Operator', admin: false });
+    const first = repo.saveConnectedPerson({
+      id: 'host-person-1',
+      email: 'ana@guild.test',
+      name: 'Ana',
+      password: V2,
+      roles: ['operator'],
+    });
+    repo.revokePerson(first.id);
+    expect(repo.personById(first.id)).toBeNull();
+
+    const next = repo.saveConnectedPerson({
+      id: 'host-person-1',
+      email: 'ana.renamed@guild.test',
+      name: 'Ana Renamed',
+      password: { ...V2, check: OTHER_CHECK },
+      roles: ['admin'],
+    });
+
+    expect(repo.countPeople()).toBe(1); // one person, not two: the host id is the row
+    expect(next.createdAt).toBe(first.createdAt);
+    expect(next.name).toBe('Ana Renamed');
+    expect(next.email).toBe('ana.renamed@guild.test');
+    expect(next.roles).toEqual(['admin']);
+    expect(next.admin).toBe(true);
+    expect(repo.personAuthByEmail('ana.renamed@guild.test')?.password.check).toBe(OTHER_CHECK);
+    expect(repo.personAuthByEmail('ana.guild.test')).toBeNull(); // the old email is gone
+  });
+
+  test('savePasswordCheck rewrites the row as V2 and empties the v1 hash', () => {
+    const db = memorySqlite();
+    const repo = createRepo(db);
+    repo.migrate();
+    const person = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: [] });
+
+    repo.savePasswordCheck(person.id, V2);
+
+    expect(repo.personAuthByEmail('ana@example.test')?.password).toEqual(V2);
+    expect(db.all('SELECT password_hash, password_check, password_algorithm FROM person')).toEqual([
+      { password_hash: '', password_check: V2.check, password_algorithm: 'BOND-KDF-V1' },
+    ]);
+  });
+
+  test('savePasswordCheck writes nothing for an unknown or a revoked person', () => {
+    const repo = newRepo();
+    const person = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: [] });
+    repo.revokePerson(person.id);
+
+    repo.savePasswordCheck(person.id, V2);
+    repo.savePasswordCheck('nobody-at-all', V2);
+
+    // The revoked row kept its v1 verifier and no other row was invented.
+    expect(repo.personAuthByEmail('ana@example.test')).toBeNull();
+    expect(repo.countPeople()).toBe(1);
   });
 });

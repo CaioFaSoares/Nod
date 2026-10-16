@@ -750,6 +750,54 @@ button {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* ----------------------------------------------------------------- connected mode */
+
+/* SP05 §4: the offline badge of the sidebar, while the last sync failed. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.badge-offline {
+  color: var(--info);
+  border-color: var(--info);
+}
+
+/* SP04 §3: the signed-out notice, next to the update one. */
+.notice-warn {
+  border-left-color: var(--info);
+}
+
+/* SP05 §4: one labelled line of the host card. */
+.host-line {
+  align-items: baseline;
+}
+
+.host-label {
+  min-width: 110px;
+}
+
+/* SP04 §1.1's fingerprint is read out loud: keep it selectable and evenly spaced. */
+.fingerprint {
+  letter-spacing: 0.08em;
+}
+
+/* The join flow draws its own sections; inside the auth card they are sections, not cards. */
+.auth-card .card {
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
 /* ------------------------------------------------------------ small window */
 
 @media (max-width: 900px) {

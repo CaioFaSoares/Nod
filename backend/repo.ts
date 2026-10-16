@@ -3,8 +3,11 @@
 // All of the app's SQL lives here: no other slice writes SQL. The schema is the one from §16 of
 // `docs/canonico.md` with the additions of the architecture contract (see `SCHEMA` below).
 // Nothing here holds a secret: the vault keeps only the pointer (`keychain_key`) to the system
-// keychain.
+// keychain, and the local password is a verifier — the v1 PBKDF2 `PasswordHash` or the V2 `check`
+// of SP02 §6 — never the password or a derived key.
+import { PASSWORD_V2_ALGORITHM } from '../shared/auth';
 import { originOf } from '../shared/catalog';
+import type { PasswordHashV2, StoredPassword } from '../shared/auth';
 import type {
   AuditEvent,
   AuthOverride,
@@ -182,6 +185,10 @@ interface PersonRow {
   password_iterations: number;
   created_at: string;
   revoked_at: string | null;
+  /** `PasswordHashV2.check` (SP02 §6); `NULL` on a v1 row. */
+  password_check: string | null;
+  /** `'PBKDF2-SHA256'` (v1) or `'BOND-KDF-V1'` (V2). */
+  password_algorithm: string;
 }
 
 interface RoleRow {
@@ -338,6 +345,30 @@ export interface Repo {
   ): Person | null;
   /** Case-insensitive; ignores revoked people. */
   personByEmail(email: string): { person: Person; password: PasswordHash } | null;
+  /**
+   * The person plus the verifier their row carries (SP02 §6): the V2 record when
+   * `password_algorithm` is `'BOND-KDF-V1'`, the v1 PBKDF2 hash otherwise — the read every local
+   * unlock and password gate goes through. Case-insensitive; ignores revoked people.
+   */
+  personAuthByEmail(email: string): { person: Person; password: StoredPassword } | null;
+  /**
+   * Creates — or updates in place — the local person of a connected account (SP05 §2): the host
+   * person id is the local id, the row carries the V2 verifier over the host salt and no v1 hash,
+   * and a revoked row comes back. Roles are replaced wholesale, like `setRoles`.
+   */
+  saveConnectedPerson(p: {
+    id: Id;
+    email: string;
+    name: string;
+    password: PasswordHashV2;
+    roles: Id[];
+  }): Person;
+  /**
+   * Rewrites the local verifier as V2 (SP02 §6): the salt, the iterations and the check move to the
+   * row, the algorithm is stamped and the v1 hash is emptied. A revoked or unknown person is a
+   * no-op.
+   */
+  savePasswordCheck(personId: Id, password: PasswordHashV2): void;
   /** Ignores revoked people. */
   personById(id: Id): Person | null;
   /** Ignores revoked people. */
@@ -427,6 +458,13 @@ export interface Repo {
    * decided.
    */
   saveHostSnapshot(s: { snapshot: string; version: string; issuedAt: string; syncedAt: string }): void;
+  /**
+   * Rewrites the salt the `host` row caches for offline unlock (SP02 §6) — and nothing else. SP02
+   * §7's password change moves that salt, and the cached one has to move with it: the sign-in of
+   * §7 calls a salt other than the cached one a reset, and a reset wipes the vault (RF-43). No-op
+   * without a host row.
+   */
+  saveHostSalt(salt: string): void;
   /** The failure of the last sync, for Settings → Hosts (SP04 §3); `null` clears it. */
   saveHostError(message: string | null): void;
   /**
@@ -670,11 +708,45 @@ export function createRepo(db: SqlDb): Repo {
     return orFail(personById(id), 'person not found');
   }
 
+  /**
+   * The v1 projection of the row: the PBKDF2 verifier of a local account. A V2 row (a connected
+   * account, SP02 §6) has no v1 hash and answers with the empty one — `personAuthByEmail` is the
+   * read that decides by algorithm.
+   */
   function personByEmail(email: string): { person: Person; password: PasswordHash } | null {
+    const found = personAuthByEmail(email);
+    if (found === null) return null;
+    const password = found.password;
+    return {
+      person: found.person,
+      password:
+        password.algorithm === PASSWORD_V2_ALGORITHM
+          ? { algorithm: 'PBKDF2-SHA256', hash: '', salt: password.salt, iterations: password.iterations }
+          : password,
+    };
+  }
+
+  /**
+   * SP02 §6: the row's verifier. A `password_algorithm` of `BOND-KDF-V1` makes the row V2 — it has
+   * no v1 hash and its `check` decides; anything else is the v1 PBKDF2 hash. A V2 row with no
+   * `check` reads as an empty one, which matches no password.
+   */
+  function personAuthByEmail(email: string): { person: Person; password: StoredPassword } | null {
     const row = singleRow<PersonRow>('SELECT * FROM person WHERE email = ? AND revoked_at IS NULL', [
       email.trim().toLowerCase(),
     ]);
     if (row === null) return null;
+    if (row.password_algorithm === PASSWORD_V2_ALGORITHM) {
+      return {
+        person: buildPerson(row),
+        password: {
+          algorithm: PASSWORD_V2_ALGORITHM,
+          salt: row.password_salt,
+          iterations: row.password_iterations,
+          check: row.password_check ?? '',
+        },
+      };
+    }
     return {
       person: buildPerson(row),
       password: {
@@ -684,6 +756,52 @@ export function createRepo(db: SqlDb): Repo {
         iterations: row.password_iterations,
       },
     };
+  }
+
+  function saveConnectedPerson(p: {
+    id: Id;
+    email: string;
+    name: string;
+    password: PasswordHashV2;
+    roles: Id[];
+  }): Person {
+    // `password_hash` is emptied on purpose: a connected account never had a v1 verifier (SP02 §6
+    // creates it with V2), and the empty value is what says so — `verifyPassword` cannot match it.
+    const email = p.email.trim().toLowerCase();
+    const verifier = [p.password.salt, p.password.iterations, p.password.check, PASSWORD_V2_ALGORITHM];
+    transaction(() => {
+      const exists = singleRow<{ id: Id }>('SELECT id FROM person WHERE id = ?', [p.id]) !== null;
+      if (exists) {
+        // A revoked row comes back: the host is the one that decides who is active (SP05 §2), and an
+        // activation that just succeeded is that decision. `created_at` stays: the row is not new.
+        db.run(
+          `UPDATE person
+              SET email = ?, name = ?, password_hash = '', password_salt = ?, password_iterations = ?,
+                  password_check = ?, password_algorithm = ?, revoked_at = NULL
+            WHERE id = ?`,
+          [email, p.name, ...verifier, p.id],
+        );
+      } else {
+        db.run(
+          `INSERT INTO person (id, email, name, password_hash, password_salt, password_iterations,
+                               created_at, revoked_at, password_check, password_algorithm)
+           VALUES (?, ?, ?, '', ?, ?, ?, NULL, ?, ?)`,
+          [p.id, email, p.name, p.password.salt, p.password.iterations, nowIso(), p.password.check, PASSWORD_V2_ALGORITHM],
+        );
+      }
+      replaceRoles(p.id, p.roles);
+    });
+    return orFail(personById(p.id), 'person not found');
+  }
+
+  function savePasswordCheck(personId: Id, password: PasswordHashV2): void {
+    db.run(
+      `UPDATE person
+          SET password_hash = '', password_salt = ?, password_iterations = ?, password_check = ?,
+              password_algorithm = ?
+        WHERE id = ? AND revoked_at IS NULL`,
+      [password.salt, password.iterations, password.check, PASSWORD_V2_ALGORITHM, personId],
+    );
   }
 
   function personById(id: Id): Person | null {
@@ -1171,6 +1289,12 @@ export function createRepo(db: SqlDb): Repo {
     if (rowsChanged() === 0) throw new Error('host not found');
   }
 
+  function saveHostSalt(salt: string): void {
+    // No `host not found` here, unlike the snapshot and the error: losing the host in the middle of
+    // a password change must not fail the change, and without a row there is no cache to keep.
+    db.run('UPDATE host SET salt = ? WHERE id = 1', [salt]);
+  }
+
   function clearHost(): void {
     transaction(() => {
       db.run('DELETE FROM host_outbox');
@@ -1224,6 +1348,9 @@ export function createRepo(db: SqlDb): Repo {
     createPerson,
     createPersonWithInvite,
     personByEmail,
+    personAuthByEmail,
+    saveConnectedPerson,
+    savePasswordCheck,
     personById,
     listPeople,
     setRoles,
@@ -1259,6 +1386,7 @@ export function createRepo(db: SqlDb): Repo {
     hostRecord,
     saveHost,
     saveHostSnapshot,
+    saveHostSalt,
     saveHostError,
     clearHost,
     enqueueOutbox,

@@ -1,0 +1,460 @@
+// `backend/sync.ts` driven end to end against a real in-memory repository, a scripted
+// `HostConnection` and an injected clock and interval pair: the four triggers of SP04 §3, the `304`,
+// the stale state with its backoff, the sign-out of RF-39, the key change of SP04 §1 and the outbox
+// flush of SP04 §4.
+import { describe, expect, test } from 'bun:test';
+import { HOST_KEY_CHANGED, HostError, hostTokenKey } from '../backend/host-client';
+import type { HostConnection, PinnedHost, SnapshotResult } from '../backend/host-client';
+import { createRepo } from '../backend/repo';
+import type { OutboxMethod, Repo } from '../backend/repo';
+import { AFTER_WRITE_MS, BACKOFF_MS, createSync, SIGNED_OUT_ERROR, SYNC_INTERVAL_MS } from '../backend/sync';
+import type { Sync, SyncDeps } from '../backend/sync';
+import type { Snapshot } from '../shared/host-api';
+import type { Entry, HostState } from '../shared/types';
+import { memorySqlite } from './helpers/sqlite-bun';
+
+const START = Date.parse('2026-10-15T12:00:00.000Z');
+const EARLIER = new Date(START - 60_000).toISOString();
+const PUBLIC_KEY = 'A'.repeat(43);
+const HOST: PinnedHost = {
+  address: 'https://guild.example.test',
+  kid: 'kid-1',
+  publicKey: PUBLIC_KEY,
+  personId: 'p1',
+};
+const TOKEN_KEY = hostTokenKey(HOST.kid, HOST.personId);
+
+function entry(id: string, fields: Partial<Entry> = {}): Entry {
+  return {
+    id,
+    title: `Tool ${id}`,
+    url: `https://${id}.example.test/app`,
+    icon: null,
+    order: 1,
+    roles: [],
+    views: [],
+    auth: null,
+    active: true,
+    ...fields,
+  };
+}
+
+const BODY: Snapshot = {
+  api: 1,
+  version: 'v1',
+  issuedAt: '2026-10-15T10:00:00.000Z',
+  me: { id: 'p1', email: 'p@example.test', name: 'P', roles: ['team'], admin: false, kind: 'member' },
+  roles: [{ id: 'team', name: 'Team', admin: false }],
+  orgTools: [entry('jitsi', { roles: ['team'], scope: 'org', ownerId: null })],
+  personalTools: [entry('mine', { scope: 'personal', ownerId: 'p1' })],
+  personalViews: [],
+  favorites: ['jitsi'],
+};
+const BODY_RAW = JSON.stringify(BODY);
+
+const offline = (): never => {
+  throw new HostError('offline', 'could not reach the host');
+};
+const signedOut = (): never => {
+  throw new HostError('signed-out', 'signed out', 401);
+};
+const fullBody = (): SnapshotResult => ({ notModified: false, snapshot: BODY, raw: BODY_RAW });
+
+interface Script {
+  /** What `GET /v1/state` does; a body when the host has one, a raise when it does not. */
+  snapshot: () => SnapshotResult;
+  /** What one replayed write does; `undefined` is the host taking it. */
+  request?: (method: string, path: string, body: unknown) => unknown;
+}
+
+interface Harness {
+  repo: Repo;
+  sync: Sync;
+  connection: HostConnection;
+  script: Script;
+  calls: { snapshot: number; options: ({ version?: string | null; notOlderThan?: string | null } | undefined)[]; request: { method: string; path: string; body: unknown }[] };
+  keychain: Map<string, string>;
+  states: HostState[];
+  signedOutCount: () => number;
+  advance: (ms: number) => void;
+  /** The delay of the one armed timer, or null when nothing is armed. */
+  delay: () => number | null;
+  armed: () => number;
+  /** Fires the armed timer the way the runtime would, and waits for the run it started. */
+  fire: () => Promise<void>;
+}
+
+function harness(script: Partial<Script> = {}): Harness {
+  const repo = createRepo(memorySqlite());
+  repo.migrate();
+  repo.saveHost({
+    address: HOST.address,
+    guild: 'Guild',
+    kid: HOST.kid,
+    publicKey: HOST.publicKey,
+    personId: HOST.personId,
+    salt: 'c2FsdA',
+    addedAt: '2026-10-01T00:00:00.000Z',
+  });
+
+  const keychain = new Map<string, string>([[TOKEN_KEY, 'a-token-value']]);
+  const calls: Harness['calls'] = { snapshot: 0, options: [], request: [] };
+  const live: Script = { snapshot: fullBody, ...script };
+
+  const connection: HostConnection = {
+    host: HOST,
+    tokenKey: () => TOKEN_KEY,
+    saveToken: async (token) => {
+      keychain.set(TOKEN_KEY, token);
+    },
+    forgetToken: async () => {
+      keychain.delete(TOKEN_KEY);
+    },
+    request: async (method, path, body) => {
+      calls.request.push({ method, path, body });
+      return live.request === undefined ? undefined : live.request(method, path, body);
+    },
+    snapshot: async (options) => {
+      calls.snapshot += 1;
+      calls.options.push(options);
+      return live.snapshot();
+    },
+  };
+
+  let clock = START;
+  const timers = new Map<number, { run: () => void; ms: number }>();
+  let nextTimer = 1;
+  const states: HostState[] = [];
+  let signedOuts = 0;
+
+  const deps: SyncDeps = {
+    repo,
+    connection: () => connection,
+    now: () => clock,
+    onState: (state) => {
+      states.push(state);
+    },
+    onSignedOut: () => {
+      signedOuts += 1;
+    },
+    setInterval: (run, ms) => {
+      const id = nextTimer;
+      nextTimer += 1;
+      timers.set(id, { run, ms });
+      return id;
+    },
+    clearInterval: (handle) => {
+      timers.delete(handle as number);
+    },
+  };
+
+  const sync = createSync(deps);
+  return {
+    repo,
+    sync,
+    connection,
+    script: live,
+    calls,
+    keychain,
+    states,
+    signedOutCount: () => signedOuts,
+    advance: (ms) => {
+      clock += ms;
+    },
+    delay: () => [...timers.values()][0]?.ms ?? null,
+    armed: () => timers.size,
+    fire: async () => {
+      const [id, timer] = [...timers.entries()][0] ?? [];
+      if (id === undefined || timer === undefined) throw new Error('no timer armed');
+      timers.delete(id);
+      timer.run();
+      await sync.syncNow();
+    },
+  };
+}
+
+/** The row as a run of the default script leaves it: one verified body and a success time. */
+function cachedSnapshot(h: Harness): string {
+  const raw = h.calls.snapshot === 0 ? BODY_RAW : (h.repo.hostRecord()?.snapshot ?? '');
+  h.repo.saveHostSnapshot({ snapshot: raw, version: 'v1', issuedAt: BODY.issuedAt, syncedAt: EARLIER });
+  return raw;
+}
+
+function enqueue(h: Harness, method: OutboxMethod, path: string, body: unknown, at: string): void {
+  h.repo.enqueueOutbox({ method, path, body: JSON.stringify(body), createdAt: at });
+}
+
+describe('triggers', () => {
+  test('start() syncs once and arms the five-minute timer', async () => {
+    const h = harness();
+    h.sync.start();
+    const state = await h.sync.syncNow();
+    expect(h.calls.snapshot).toBe(1);
+    expect(h.delay()).toBe(SYNC_INTERVAL_MS);
+    expect(state.status).toBe('connected');
+    expect(state.guild).toBe('Guild');
+    expect(state.address).toBe(HOST.address);
+    expect(state.lastSyncAt).toBe(new Date(START).toISOString());
+    expect(state.lastError).toBeNull();
+    expect(state.pendingWrites).toBe(0);
+    // SP04 §1.1's fingerprint, computed from the pinned key.
+    expect(state.fingerprint).toMatch(/^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
+    // The body lands verbatim, with its own version and issuedAt.
+    expect(h.repo.hostRecord()?.snapshot).toBe(BODY_RAW);
+    expect(h.repo.hostRecord()?.version).toBe('v1');
+    expect(h.repo.hostRecord()?.issuedAt).toBe(BODY.issuedAt);
+    expect(h.states.at(-1)).toEqual(state);
+  });
+
+  test('the five-minute timer runs the next sync', async () => {
+    const h = harness();
+    h.sync.start();
+    await h.sync.syncNow();
+    h.advance(SYNC_INTERVAL_MS);
+    await h.fire();
+    expect(h.calls.snapshot).toBe(2);
+    expect(h.repo.hostRecord()?.lastSyncAt).toBe(new Date(START + SYNC_INTERVAL_MS).toISOString());
+  });
+
+  test('syncNow() with no loop running syncs once and arms nothing', async () => {
+    const h = harness();
+    const state = await h.sync.syncNow();
+    expect(h.calls.snapshot).toBe(1);
+    expect(h.armed()).toBe(0);
+    expect(state.status).toBe('connected');
+  });
+
+  test('stop() clears the timer and a manual sync afterwards arms nothing', async () => {
+    const h = harness();
+    h.sync.start();
+    await h.sync.syncNow();
+    expect(h.armed()).toBe(1);
+    h.sync.stop();
+    h.sync.stop();
+    expect(h.armed()).toBe(0);
+    await h.sync.syncNow();
+    expect(h.armed()).toBe(0);
+    expect(h.calls.snapshot).toBe(2);
+  });
+
+  test('a write asks for a near-immediate sync, and a burst becomes one', async () => {
+    const h = harness();
+    h.sync.start();
+    await h.sync.syncNow();
+    h.sync.afterWrite();
+    h.sync.afterWrite();
+    expect(h.armed()).toBe(1);
+    expect(h.delay()).toBe(AFTER_WRITE_MS);
+    await h.fire();
+    expect(h.calls.snapshot).toBe(2);
+    expect(h.delay()).toBe(SYNC_INTERVAL_MS);
+  });
+
+  test('afterWrite() without a running loop arms nothing', () => {
+    const h = harness();
+    h.sync.afterWrite();
+    expect(h.armed()).toBe(0);
+  });
+
+  test('without a host row no sync reaches anywhere', async () => {
+    const h = harness();
+    h.repo.clearHost();
+    const state = await h.sync.syncNow();
+    expect(h.calls.snapshot).toBe(0);
+    expect(h.calls.request).toEqual([]);
+    expect(state).toEqual({
+      status: 'none',
+      guild: null,
+      address: null,
+      fingerprint: null,
+      lastSyncAt: null,
+      lastError: null,
+      pendingWrites: 0,
+    });
+  });
+});
+
+describe('snapshot', () => {
+  test('the last version is offered, and a 304 keeps the cached body', async () => {
+    const h = harness({ snapshot: () => ({ notModified: true }) });
+    const raw = cachedSnapshot(h);
+    const state = await h.sync.syncNow();
+    expect(h.calls.options).toEqual([{ version: 'v1', notOlderThan: BODY.issuedAt }]);
+    expect(state.status).toBe('connected');
+    expect(state.lastSyncAt).toBe(new Date(START).toISOString());
+    expect(state.lastError).toBeNull();
+    expect(h.repo.hostRecord()?.snapshot).toBe(raw);
+    expect(h.repo.hostRecord()?.version).toBe('v1');
+  });
+
+  test('a network failure is stale, keeps the cache and backs off to five minutes', async () => {
+    const h = harness({ snapshot: offline });
+    const raw = cachedSnapshot(h);
+    h.sync.start();
+    const first = await h.sync.syncNow();
+    expect(first.status).toBe('stale');
+    expect(first.lastError).toBe('could not reach the host');
+    expect(first.lastSyncAt).toBe(EARLIER);
+    expect(h.repo.hostRecord()?.snapshot).toBe(raw);
+    expect(h.delay()).toBe(BACKOFF_MS[0]);
+
+    const delays: number[] = [];
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await h.fire();
+      delays.push(h.delay() ?? 0);
+    }
+    // 1 min, 2 min, then the normal five minutes, and it stays there.
+    expect(delays).toEqual([BACKOFF_MS[1], BACKOFF_MS[2], BACKOFF_MS[3], SYNC_INTERVAL_MS]);
+    expect(h.states.at(-1)?.status).toBe('stale');
+  });
+
+  test('a changed host key writes the client message and stops the loop', async () => {
+    const h = harness({
+      snapshot: () => {
+        throw new HostError('key-changed', HOST_KEY_CHANGED);
+      },
+    });
+    h.sync.start();
+    const state = await h.sync.syncNow();
+    expect(state.status).toBe('stale');
+    expect(state.lastError).toBe(HOST_KEY_CHANGED);
+    expect(state.guild).toBe('Guild');
+    expect(h.armed()).toBe(0);
+    expect(h.repo.hostRecord()?.snapshot).toBeNull();
+  });
+});
+
+describe('401', () => {
+  test('forgets the token, drops the org half, keeps the personal half and asks for sign-in once', async () => {
+    const h = harness({ snapshot: signedOut, request: signedOut });
+    cachedSnapshot(h);
+    enqueue(h, 'PUT', '/v1/favorites', { entries: ['jitsi'], updatedAt: EARLIER }, EARLIER);
+    h.sync.start();
+
+    const state = await h.sync.syncNow();
+    expect(h.keychain.has(TOKEN_KEY)).toBe(false);
+    expect(state.status).toBe('signed-out');
+    expect(state.lastError).toBe(SIGNED_OUT_ERROR);
+    expect(state.guild).toBe('Guild');
+    expect(state.lastSyncAt).toBe(EARLIER);
+    expect(h.signedOutCount()).toBe(1);
+    // The write stays: a 401 judged the session, not the person's write (SP04 §4).
+    expect(h.calls.request.length).toBe(1);
+    expect(state.pendingWrites).toBe(1);
+
+    const cached = h.repo.hostRecord()?.snapshot ?? '';
+    const rows = JSON.parse(cached) as Snapshot;
+    expect(rows.orgTools).toEqual([]);
+    expect(rows.roles).toEqual([]);
+    expect(rows.me.id).toBe('p1');
+    expect(rows.personalTools.map((tool) => tool.id)).toEqual(['mine']);
+    expect(rows.favorites).toEqual(['jitsi']);
+    expect(h.repo.hostRecord()?.version).toBe('v1');
+    expect(h.repo.hostRecord()?.issuedAt).toBe(BODY.issuedAt);
+
+    // A second retry neither asks for sign-in again nor loses the pending write; it never reached
+    // the snapshot, because the flush stopped at the same 401.
+    await h.sync.syncNow();
+    expect(h.signedOutCount()).toBe(1);
+    expect(h.calls.snapshot).toBe(0);
+    expect(h.repo.listOutbox()).toHaveLength(1);
+  });
+
+  test('a network failure after a sign-out leaves the state signed out', async () => {
+    const h = harness({ snapshot: signedOut });
+    cachedSnapshot(h);
+    await h.sync.syncNow();
+    h.script.snapshot = offline;
+    const state = await h.sync.syncNow();
+    expect(state.status).toBe('signed-out');
+    expect(state.lastError).toBe(SIGNED_OUT_ERROR);
+    expect(h.calls.options.at(-1)?.version).toBeNull();
+  });
+
+  test('a successful sync after the sign-in clears the state and brings the org half back', async () => {
+    const h = harness({ snapshot: signedOut });
+    cachedSnapshot(h);
+    await h.sync.syncNow();
+    expect(h.repo.hostRecord()?.snapshot).not.toBe(BODY_RAW);
+
+    h.keychain.set(TOKEN_KEY, 'a-new-token');
+    h.script.snapshot = fullBody;
+    const state = await h.sync.syncNow();
+    expect(state.status).toBe('connected');
+    expect(state.lastError).toBeNull();
+    expect(h.repo.hostRecord()?.snapshot).toBe(BODY_RAW);
+    // The sign-out had emptied the cache, so that run went out unconditionally; the next one is
+    // conditional again, because the row holds the host's own bytes.
+    expect(h.calls.options.at(-1)?.version).toBeNull();
+    await h.sync.syncNow();
+    expect(h.calls.options.at(-1)?.version).toBe('v1');
+  });
+});
+
+describe('outbox', () => {
+  test('pending writes are replayed in id order and dropped when the host takes them', async () => {
+    const h = harness();
+    const write = { id: 'mine', scope: 'personal', ownerId: 'p1' };
+    enqueue(h, 'PUT', '/v1/personal/tools/mine', write, '2026-10-15T11:00:00.000Z');
+    enqueue(h, 'DELETE', '/v1/personal/views/v-1', { updatedAt: '2026-10-15T11:01:00.000Z' }, '2026-10-15T11:01:00.000Z');
+
+    const state = await h.sync.syncNow();
+    expect(h.calls.request.map((call) => [call.method, call.path])).toEqual([
+      ['PUT', '/v1/personal/tools/mine'],
+      ['DELETE', '/v1/personal/views/v-1'],
+    ]);
+    expect(h.calls.request[0]?.body).toEqual(write);
+    expect(h.repo.listOutbox()).toEqual([]);
+    expect(state.pendingWrites).toBe(0);
+  });
+
+  test('a write the host never received is marked and kept, and the next sync sends it', async () => {
+    const h = harness({ snapshot: offline, request: offline });
+    enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, '2026-10-15T11:00:00.000Z');
+    enqueue(h, 'PUT', '/v1/personal/tools/other', { id: 'other' }, '2026-10-15T11:02:00.000Z');
+
+    let state = await h.sync.syncNow();
+    expect(state.status).toBe('stale');
+    expect(state.pendingWrites).toBe(2);
+    // One request at a time: the flush stops at the first write it could not place.
+    expect(h.calls.request.length).toBe(1);
+    const kept = h.repo.listOutbox();
+    expect(kept.map((row) => row.id)).toEqual([1, 2]);
+    expect(kept[0]?.attempts).toBe(1);
+    expect(kept[0]?.lastError).toBe('could not reach the host');
+    expect(kept[1]?.attempts).toBe(0);
+
+    h.script.snapshot = fullBody;
+    delete h.script.request;
+    state = await h.sync.syncNow();
+    expect(state.status).toBe('connected');
+    expect(state.pendingWrites).toBe(0);
+    expect(h.calls.request.length).toBe(3);
+    expect(h.repo.listOutbox()).toEqual([]);
+  });
+
+  test('a 409 and a 403 drop the write: neither can be replayed', async () => {
+    for (const status of [409, 403]) {
+      const h = harness({
+        request: () => {
+          throw new HostError('refused', 'the host refused the request', status);
+        },
+      });
+      enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, '2026-10-15T11:00:00.000Z');
+      const state = await h.sync.syncNow();
+      expect(h.repo.listOutbox()).toEqual([]);
+      expect(state.pendingWrites).toBe(0);
+      // The rest of the run still happened: the snapshot was asked for.
+      expect(h.calls.snapshot).toBe(1);
+    }
+  });
+
+  test('a row whose body is not JSON is dropped rather than blocking the queue', async () => {
+    const h = harness();
+    h.repo.enqueueOutbox({ method: 'PUT', path: '/v1/personal/tools/mine', body: 'not json', createdAt: EARLIER });
+    enqueue(h, 'PUT', '/v1/personal/tools/other', { id: 'other' }, EARLIER);
+    const state = await h.sync.syncNow();
+    expect(state.pendingWrites).toBe(0);
+    expect(h.calls.request.map((call) => call.path)).toEqual(['/v1/personal/tools/other']);
+  });
+});

@@ -5,13 +5,15 @@
 // nothing is written to storage, the console, the page title or an error message.
 import { call, errorMessage, on } from './api';
 import { openPalette } from './palette';
-import { mountSettings } from './settings';
+import { mountJoinFlow, mountSettings } from './settings';
 import { button, clear, el, field, input, message } from './ui';
 import type { SettingsTab } from './settings';
 import type {
   AppInfo,
   Entry,
+  HostState,
   Id,
+  JoinInvite,
   LoginResult,
   SessionState,
   ToolStatus,
@@ -66,6 +68,14 @@ let tools: ToolStatus[] = [];
 let catalog: Entry[] = [];
 /** Push `update` (RF-55): the newer release to announce, or `null` when there is none. */
 let update: UpdateInfo | null = null;
+/** SP05 §3: the one host, from `host.state` or the push `host`. */
+let host: HostState | null = null;
+/** SP05 §4: the first-run screen is on "Join a guild" instead of create/invite. */
+let joiningGuild = false;
+/** SP04 §1.3: the invite a `bond://join` link carried, until the join flow spends it. */
+let joinInvite: JoinInvite | null = null;
+/** Handle of the join flow on the locked screen, so a second link re-aims it. */
+let lockedJoin: { setPrefill(invite: JoinInvite | null): void } | null = null;
 let view: View = 'home';
 /** The person chose to create an account with an invite code instead of signing in. */
 let creatingAccount = false;
@@ -112,9 +122,40 @@ function renderLocked(): void {
   if (session === null) return;
   const state = session;
   const card = el('div', { class: 'card auth-card' });
-  if (!state.hasAccount || creatingAccount) renderCreateAccount(card, state);
+  if (joiningGuild) renderJoin(card);
+  else if (!state.hasAccount || creatingAccount) renderCreateAccount(card, state);
   else renderUnlock(card, state);
   root.replaceChildren(el('div', { class: 'auth' }, card));
+}
+
+/**
+ * SP05 §4's third path of the first-run screen: "Join a guild". The host flow of `host.activate`
+ * and `host.signIn` needs no local session, so this screen replaces the create/invite pair before
+ * a person exists; a deep link (`bond://join`) lands here with the invite already filled in.
+ */
+function renderJoin(card: HTMLElement): void {
+  authHeader(card, 'Join a guild', 'The address and the fingerprint your admin gave you.');
+  const form = el('div');
+  card.append(form);
+  lockedJoin = mountJoinFlow(form, {
+    prefill: joinInvite,
+    email: null,
+    onJoined: () => {
+      // The backend pushed the session already; the `session` handler builds the shell. This only
+      // closes the screen.
+      joiningGuild = false;
+      joinInvite = null;
+      lockedJoin = null;
+    },
+  });
+  card.append(
+    button('Back', () => {
+      joiningGuild = false;
+      joinInvite = null;
+      lockedJoin = null;
+      render();
+    }, { kind: 'ghost' }),
+  );
 }
 
 function authHeader(card: HTMLElement, title: string, subtitle: string | null): void {
@@ -160,6 +201,12 @@ function renderUnlock(card: HTMLElement, state: SessionState): void {
       }, { kind: 'ghost', title: 'Create an account with an invite code' }),
     );
   }
+  card.append(
+    button('Join a guild', () => {
+      joiningGuild = true;
+      render();
+    }, { kind: 'ghost', title: 'Connect this Bond to a guild host' }),
+  );
 
   if (state.waitMs > 0) armWait(state.waitMs, submit, wait);
 }
@@ -219,6 +266,12 @@ function renderCreateAccount(card: HTMLElement, state: SessionState): void {
       }, { kind: 'ghost' }),
     );
   }
+  card.append(
+    button('Join a guild', () => {
+      joiningGuild = true;
+      render();
+    }, { kind: 'ghost', title: 'Connect this Bond to a guild host' }),
+  );
 }
 
 function stopWait(): void {
@@ -349,6 +402,18 @@ function renderSidebar(): void {
   const footer = el(
     'div',
     { class: 'sidebar-footer' },
+    // SP05 §4: `stale` is the last sync having failed — the cached guild still shows, and the
+    // sidebar says so instead of pretending everything is current.
+    host !== null && host.status === 'stale'
+      ? el(
+          'span',
+          {
+            class: 'badge badge-offline',
+            title: `Offline — Bond is showing the cached guild${host.lastError === null ? '' : ` (${host.lastError})`}`,
+          },
+          'offline',
+        )
+      : null,
     sidebarAction('⚙', 'Settings', () => {
       go('account');
     }),
@@ -428,7 +493,7 @@ function renderContent(): void {
   const container = el('div', { class: 'settings-view' });
   shell.content.replaceChildren(container);
   settingsTab = view;
-  settings = mountSettings(container, { session, info, tab: view });
+  settings = mountSettings(container, { session, info, tab: view, host, join: joinInvite });
 }
 
 function renderHome(content: HTMLElement): void {
@@ -536,17 +601,41 @@ function clearBanner(): void {
   if (shell !== null) clear(shell.banner);
 }
 
-// ------------------------------------------------------------ update notice (RF-55)
+// ------------------------------------------------------------ notices (host, RF-55)
+
+/**
+ * SP04 §3/RF-39: the host ended this session. Nothing syncs until the person signs in again, so the
+ * notice sits on top of the window and takes them to Settings → Hosts.
+ */
+function renderHostNotice(slot: HTMLElement): void {
+  const state = host;
+  if (state === null || state.status !== 'signed-out') return;
+  slot.append(
+    el(
+      'div',
+      { class: 'notice notice-warn', role: 'status' },
+      el('p', { class: 'notice-text' }, `${state.guild ?? 'The guild'} signed this Bond out`),
+      el(
+        'div',
+        { class: 'notice-actions' },
+        button(
+          'Sign in',
+          () => {
+            go('hosts');
+          },
+          { kind: 'primary' },
+        ),
+      ),
+    ),
+  );
+}
 
 /**
  * RF-55: the newer release the backend found on its own, on top of the main window — the person
  * does not open Settings to learn about it. Installing stays a decision (A13): the button exists
  * only for an admin, who is the one `bond.installUpdate` accepts.
  */
-function renderNotice(): void {
-  const target = shell;
-  if (target === null) return;
-  clear(target.notice);
+function renderUpdateNotice(slot: HTMLElement): void {
   const notice = update;
   const person = session === null || !session.unlocked ? null : session.person;
   if (notice === null || notice.latest === null) return;
@@ -564,7 +653,7 @@ function renderNotice(): void {
   );
   dismiss.addEventListener('click', () => void dismissNotice(version));
 
-  target.notice.append(
+  slot.append(
     el(
       'div',
       { class: 'notice', role: 'status' },
@@ -583,6 +672,14 @@ function renderNotice(): void {
       ),
     ),
   );
+}
+
+function renderNotices(): void {
+  const target = shell;
+  if (target === null) return;
+  clear(target.notice);
+  renderHostNotice(target.notice);
+  renderUpdateNotice(target.notice);
 }
 
 /** The install of Settings, reused here: the backend records the event, swaps and restarts. */
@@ -608,7 +705,7 @@ async function dismissNotice(version: string): Promise<void> {
     return;
   }
   update = null;
-  renderNotice();
+  renderNotices();
 }
 
 async function runTools(action: () => Promise<ToolsState>): Promise<void> {
@@ -641,15 +738,24 @@ async function lockSession(): Promise<void> {
   teardownShell();
   tools = [];
   catalog = [];
+  // Locked windows cannot read `host.state` (SP05 §3): the badge waits for the next unlock.
+  host = null;
+  joinInvite = null;
   view = 'home';
   render();
 }
 
 async function loadUnlocked(): Promise<void> {
   try {
-    const [state, entries] = await Promise.all([call('tools.state'), call('catalog.list')]);
+    const [state, entries, hostState] = await Promise.all([
+      call('tools.state'),
+      call('catalog.list'),
+      // SP05 §3: locked windows cannot read it, and the sidebar needs it right after the unlock.
+      call('host.state'),
+    ]);
     tools = state.tools;
     catalog = entries;
+    host = hostState;
   } catch (e) {
     showBanner(e);
     return;
@@ -702,7 +808,7 @@ function render(): void {
   if (shell === null) buildShell();
   renderSidebar();
   renderContent();
-  renderNotice();
+  renderNotices();
 }
 
 async function boot(): Promise<void> {
@@ -725,17 +831,30 @@ async function boot(): Promise<void> {
 }
 
 on('session', (next) => {
+  const wasUnlocked = session !== null && session.unlocked;
   session = next;
   if (!next.unlocked) {
     teardownShell();
     tools = [];
     catalog = [];
+    host = null;
+    joinInvite = null;
+    joiningGuild = false;
+    lockedJoin = null;
     view = 'home';
     creatingAccount = false;
     render();
     return;
   }
   creatingAccount = false;
+  // A join always unlocks: the invite is spent, whether it came from a link or from typing.
+  joinInvite = null;
+  // A join (`host.activate` / `host.signIn`) unlocks the session from the page's own call: the
+  // shell was never built, so it is built here with the tools and the catalog of the new person.
+  if (!wasUnlocked) {
+    void startUnlocked();
+    return;
+  }
   render();
 });
 
@@ -754,7 +873,34 @@ on('palette', () => {
 
 on('update', (next) => {
   update = next;
-  renderNotice();
+  renderNotices();
+});
+
+on('host', (next) => {
+  host = next;
+  // The sidebar badge and the signed-out notice both read it; the Hosts tab reads the push itself.
+  if (shell !== null) {
+    renderSidebar();
+    renderNotices();
+  }
+});
+
+/**
+ * SP04 §1.3: a `bond://join` link. Unlocked, it opens Settings → Hosts with the invite prefilled;
+ * locked, it opens the join screen — a Bond with no account at all is the usual case.
+ */
+on('join', (invite) => {
+  if (invite === null) return;
+  joinInvite = invite;
+  if (session !== null && session.unlocked) {
+    // The Hosts tab takes the invite through `mountSettings`, so it is mounted anew with it.
+    destroySettings();
+    go('hosts');
+    return;
+  }
+  joiningGuild = true;
+  if (lockedJoin !== null) lockedJoin.setPrefill(invite);
+  else render();
 });
 
 async function loadCatalog(): Promise<void> {

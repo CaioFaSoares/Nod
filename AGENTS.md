@@ -47,8 +47,9 @@ sistema. É um downscale da Carna, não uma continuação dela.
 - Pôr segredo, token ou senha em arquivo, em log, em evento ou em `store.json`.
 - Rodar `tinyjs dev` com `TINYJS_DEBUG=1` usando credenciais reais: o trace do runtime imprime o
   EVAL do adaptador de login (usuário e senha) e cada chamada de API até 160 caracteres — senha local
-  em `session.unlock`/`createAccount`/`changePassword`, segredo em `vault.save`/`vault.reveal`,
-  código em `invites.issue`. O runtime só esconde `secrets.*` e `clip.*`.
+  em `session.unlock`/`createAccount`/`changePassword`, senha e código em
+  `host.activate`/`host.signIn`, segredo em `vault.save`/`vault.reveal`, código em `invites.issue`.
+  O runtime só esconde `secrets.*` e `clip.*`.
 - Abrir ferramenta de terceiro em iframe dentro da casca, ou conceder `api` com `"all"` ou
   wildcard de subdomínio.
 - Inventar endereço, produto ou capacidade das ferramentas internas que o dono não confirmou.

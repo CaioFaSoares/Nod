@@ -2,15 +2,24 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   PBKDF2_ITERATIONS,
+  PASSWORD_V2_ALGORITHM,
+  createPasswordHashV2,
   deriveKeys,
   generateInviteCode,
   hashInviteCode,
   hashPassword,
   inviteIsValid,
+  passwordCheck,
+  passwordCheckMatches,
+  randomSalt,
   unlockWait,
   validateNewPassword,
   verifyPassword,
+  verifyPasswordV2,
+  verifyStoredPassword,
 } from '../shared/auth';
+import { fromBase64url, toBase64url } from '../shared/encoding';
+import type { PasswordHashV2 } from '../shared/auth';
 import type { PasswordHash } from '../shared/types';
 
 // PBKDF2 with 600,000 iterations costs hundreds of ms per derivation; the tests use few iterations
@@ -279,5 +288,100 @@ describe('unlockWait', () => {
   test('the wait is capped at fifteen minutes', () => {
     expect(unlockWait(40)).toBe(900_000);
     expect(unlockWait(41)).toBe(900_000);
+  });
+});
+
+// SP02 §6: the local verifier of a connected account. Its `check` is `base64url(SHA-256(localKey))`
+// over the pinned localKey of SP02 §1, so a change in the derivation or in the check fails here.
+describe('PasswordHashV2 (SP02 §6)', () => {
+  test('createPasswordHashV2 keeps the salt and the iterations and writes a 32-byte check', async () => {
+    const salt = randomSalt();
+    const h = await createPasswordHashV2('guild-password', salt, TEST_ITERATIONS);
+
+    expect(PASSWORD_V2_ALGORITHM).toBe('BOND-KDF-V1');
+    expect(h).toMatchObject({ algorithm: 'BOND-KDF-V1', salt, iterations: TEST_ITERATIONS });
+    expect(fromBase64url(h.salt).length).toBe(16);
+    expect(h.check).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(fromBase64url(h.check).length).toBe(32);
+  });
+
+  test('the check of a pinned SP02 §1 vector is base64url(SHA-256(localKey))', async () => {
+    const [vector] = KDF_VECTORS;
+    const salt = toBase64url(bytesOf(vector.saltHex));
+    const h = await createPasswordHashV2(vector.password, salt, vector.iterations);
+
+    // Computed outside this repository (shasum and python3 hashlib over the pinned localKey bytes).
+    expect(h.check).toBe('toURM34wdy8zrJ8B-TxvHBgJQTDfLX2eaTN9dm4EB2Q');
+
+    const keys = await deriveKeys(vector.password, bytesOf(vector.saltHex), vector.iterations);
+    expect(await passwordCheck(keys.localKey)).toBe(h.check);
+  });
+
+  test('passwordCheck is base64url(SHA-256(bytes)) of the bytes it is given', async () => {
+    // 32 zero bytes, computed outside this repository the same way as the vector above.
+    expect(await passwordCheck(new Uint8Array(32))).toBe('Zmh6rfhivXdsj8GLjp-OIAiXFIVu4jOzkCpZHQ1fKSU');
+  });
+
+  test('the right password passes and a wrong one, another salt or other iterations do not', async () => {
+    const salt = randomSalt();
+    const h = await createPasswordHashV2('guild-password', salt, TEST_ITERATIONS);
+
+    expect(await verifyPasswordV2('guild-password', h)).toBe(true);
+    expect(await verifyPasswordV2('guild-passwor', h)).toBe(false);
+    expect(await verifyPasswordV2('', h)).toBe(false);
+    expect(await verifyPasswordV2('guild-password', { ...h, iterations: TEST_ITERATIONS + 1 })).toBe(false);
+    expect(await verifyPasswordV2('guild-password', { ...h, salt: randomSalt() })).toBe(false);
+    expect(await verifyPasswordV2('guild-password', { ...h, check: await passwordCheck(new Uint8Array(32)) })).toBe(
+      false,
+    );
+    // The same password under a different salt is a different verifier (SP02 §1).
+    const otherSalt = await createPasswordHashV2('guild-password', randomSalt(), TEST_ITERATIONS);
+    expect(otherSalt.check).not.toBe(h.check);
+  });
+
+  test('an algorithm other than the expected one rejects without deriving', async () => {
+    const h = await createPasswordHashV2('guild-password', randomSalt(), TEST_ITERATIONS);
+    const changed = { ...h, algorithm: 'PBKDF2-SHA256' } as unknown as PasswordHashV2;
+
+    expect(await verifyPasswordV2('guild-password', changed)).toBe(false);
+  });
+
+  test('passwordCheckMatches compares constant-time and fails closed', async () => {
+    const keys = await deriveKeys('guild-password', bytesOf(KDF_VECTORS[0].saltHex), TEST_ITERATIONS);
+    const check = await passwordCheck(keys.localKey);
+
+    expect(await passwordCheckMatches(keys.localKey, check)).toBe(true);
+    expect(await passwordCheckMatches(keys.vaultKey, check)).toBe(false);
+    // A check that is not base64url, is empty or has another size can never match: no throw, `false`.
+    expect(await passwordCheckMatches(keys.localKey, 'not base64url!')).toBe(false);
+    expect(await passwordCheckMatches(keys.localKey, '')).toBe(false);
+    expect(await passwordCheckMatches(keys.localKey, check.slice(0, 42))).toBe(false);
+  });
+
+  test('randomSalt is 16 bytes of base64url and never repeats', () => {
+    const salt = randomSalt();
+
+    expect(salt).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    expect(fromBase64url(salt).length).toBe(16);
+    expect(randomSalt()).not.toBe(salt);
+  });
+
+  test('verifyStoredPassword verifies the v1 hash or the V2 record, by algorithm', async () => {
+    const v1 = await hashPassword('guild-password', TEST_ITERATIONS);
+    const v2 = await createPasswordHashV2('guild-password', randomSalt(), TEST_ITERATIONS);
+
+    expect(await verifyStoredPassword('guild-password', v1)).toBe(true);
+    expect(await verifyStoredPassword('other-password', v1)).toBe(false);
+    expect(await verifyStoredPassword('guild-password', v2)).toBe(true);
+    expect(await verifyStoredPassword('other-password', v2)).toBe(false);
+    // A V2 row with no check (a row that cannot be read) opens for nobody.
+    expect(await verifyStoredPassword('guild-password', { ...v2, check: '' })).toBe(false);
+  });
+
+  test('a v1 hash and a V2 record are told apart by the algorithm field', async () => {
+    const v1: PasswordHash = await hashPassword('guild-password', TEST_ITERATIONS);
+
+    expect(v1.algorithm).toBe('PBKDF2-SHA256');
+    expect(v1.algorithm).not.toBe(PASSWORD_V2_ALGORITHM);
   });
 });

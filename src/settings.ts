@@ -6,13 +6,16 @@
 import { call, errorMessage, on } from './api';
 import { button, clear, el, field, input, message } from './ui';
 import { originOf, slug } from '../shared/catalog';
+import { CODE_LENGTH, normalizeCode } from '../shared/host-api';
 import type {
   AppInfo,
   AuditEvent,
   Entry,
   EntryDetails,
   EventFilter,
+  HostState,
   Id,
+  JoinInvite,
   LoginResult,
   Person,
   Probe,
@@ -24,11 +27,20 @@ import type {
   VaultItem,
 } from '../shared/types';
 
-export type SettingsTab = 'account' | 'vault' | 'tools' | 'roles' | 'people' | 'activity' | 'catalog';
+export type SettingsTab =
+  | 'account'
+  | 'hosts'
+  | 'vault'
+  | 'tools'
+  | 'roles'
+  | 'people'
+  | 'activity'
+  | 'catalog';
 
 /** Tabs in the order of the screen; `admin` marks the ones only an admin person sees (§2). */
 const TABS: ReadonlyArray<{ id: SettingsTab; label: string; admin: boolean }> = [
   { id: 'account', label: 'Account', admin: false },
+  { id: 'hosts', label: 'Hosts', admin: false },
   { id: 'vault', label: 'Vault', admin: false },
   { id: 'tools', label: 'Tools', admin: true },
   { id: 'roles', label: 'Roles', admin: true },
@@ -91,9 +103,330 @@ function toggleIn(list: Id[], id: Id, include: boolean): void {
   else if (!include && index >= 0) list.splice(index, 1);
 }
 
+/** A checkbox whose change handler takes the new state. */
+function checkbox(
+  name: string,
+  checked: boolean,
+  onChange: (checked: boolean) => void,
+  aria?: string,
+): HTMLInputElement {
+  const node = el('input', {
+    attrs: { type: 'checkbox', name },
+    aria: aria !== undefined ? { label: aria } : {},
+    on: { change: (event: Event) => onChange((event.target as HTMLInputElement).checked) },
+  });
+  node.checked = checked;
+  return node;
+}
+
+function checkboxField(label: string, control: HTMLInputElement): HTMLLabelElement {
+  return el('label', { class: 'row' }, control, el('span', {}, label));
+}
+
+// ---------------------------------------------------------------- join a guild (SP05 §4)
+
+/** What the join form holds between renders. The password is cleared on every submit. */
+interface JoinDraft {
+  address: string;
+  /** the fingerprint an invite (or an added host) fixed, or null when the person typed the address */
+  expected: string | null;
+  guild: string;
+  fingerprint: string;
+  email: string;
+  code: string;
+  name: string;
+  password: string;
+  confirm: string;
+  /** the account is already activated: sign in with the password instead of redeeming a code */
+  usePassword: boolean;
+  /** the address was found and the account fields are on screen */
+  discovered: boolean;
+}
+
+/** Case, spaces and grouping are presentation (SP04 §1.1): one key typed two ways is one string. */
+function sameFingerprint(left: string, right: string): boolean {
+  const plain = (value: string): string => value.toUpperCase().replaceAll('-', '').replaceAll(' ', '');
+  return plain(left) === plain(right);
+}
+
+/** SP02 §3: a setup code is 16 Crockford characters, an access code 8 — the length says which. */
+function isSetupCode(code: string): boolean {
+  const normalized = normalizeCode(code);
+  return normalized !== null && normalized.length === CODE_LENGTH.setup;
+}
+
+/** What the join screen starts with, per SP05 §4. */
+export interface JoinFlowOptions {
+  /** a prefilled address and fingerprint: a `bond://join` invite, or what an added host knows */
+  prefill?: JoinInvite | null;
+  /** the prefill is the host this machine already pinned, so another key is SP04 §1.4's refusal */
+  pinned?: boolean;
+  /** an account exists on this machine: the email starts filled, in the password mode */
+  email?: string | null;
+  /** the join went through: the backend has already pushed the new session */
+  onJoined: () => void;
+}
+
+/**
+ * SP05 §4's join flow, shared by the first-run screen ("Join a guild") and Settings → Hosts:
+ * address → discovery (guild and fingerprint) → email + access code (or password) → set password.
+ * `host.discover`, `host.activate` and `host.signIn` take no session, so this works while locked.
+ *
+ * The fingerprint is on screen before anything is typed, and the same one travels with the call:
+ * the backend compares it against the key the host answers (SP04 §1.3–§1.4). The password never
+ * leaves this module except as the parameter of that one call (RF-42).
+ */
+export function mountJoinFlow(
+  root: HTMLElement,
+  ctx: JoinFlowOptions,
+): { setPrefill(invite: JoinInvite | null): void } {
+  const refusal =
+    ctx.pinned === true
+      ? 'host key changed — remove and add the host again'
+      : 'host key does not match the invite';
+  const draft: JoinDraft = {
+    address: ctx.prefill?.address ?? '',
+    expected: ctx.prefill?.fingerprint ?? null,
+    guild: '',
+    fingerprint: '',
+    email: ctx.email ?? '',
+    code: ctx.prefill?.code ?? '',
+    name: '',
+    password: '',
+    confirm: '',
+    usePassword: ctx.pinned === true || (ctx.email ?? '') !== '',
+    discovered: false,
+  };
+  let status: { kind: 'info' | 'ok' | 'error'; text: string } | null = null;
+
+  function render(): void {
+    clear(root);
+    const box = el('section', { class: 'stack' });
+    box.append(addressCard());
+    if (draft.discovered) box.append(accountCard());
+    if (status !== null) {
+      const line = el('div');
+      message(line, status.kind, status.text);
+      box.append(line);
+    }
+    root.append(box);
+  }
+
+  function addressCard(): HTMLElement {
+    const address = input('address', { value: draft.address, placeholder: 'bond.example.com' });
+    address.addEventListener('input', () => {
+      draft.address = address.value;
+    });
+    const card = el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'Guild host'),
+      el('p', { class: 'muted' }, 'The address of the host, and the fingerprint your admin gave you.'),
+      el(
+        'div',
+        { class: 'row' },
+        field('Address', address),
+        button(
+          draft.discovered ? 'Find again' : 'Find guild',
+          () => void findGuild(address.value),
+          { kind: 'primary' },
+        ),
+      ),
+    );
+    if (draft.discovered) {
+      card.append(
+        el(
+          'div',
+          { class: 'row' },
+          el('span', { class: 'chip' }, draft.guild),
+          el('span', { class: 'mono fingerprint' }, draft.fingerprint),
+        ),
+        el('p', { class: 'muted' }, 'Check this fingerprint with your admin before you continue.'),
+      );
+    }
+    return card;
+  }
+
+  function accountCard(): HTMLElement {
+    const email = input('email', { type: 'email', autocomplete: 'username', value: draft.email });
+    email.addEventListener('input', () => {
+      draft.email = email.value;
+    });
+    const password = input('password', {
+      type: 'password',
+      autocomplete: draft.usePassword ? 'current-password' : 'new-password',
+    });
+    password.addEventListener('input', () => {
+      draft.password = password.value;
+    });
+    const modes = el(
+      'div',
+      { class: 'row' },
+      button('Access code', () => setMode(false), { kind: draft.usePassword ? 'ghost' : 'primary' }),
+      button('Password', () => setMode(true), { kind: draft.usePassword ? 'primary' : 'ghost' }),
+    );
+
+    const card = el('section', { class: 'card stack' }, el('h2', {}, 'Your account'), modes);
+    if (draft.usePassword) {
+      card.append(
+        el('div', { class: 'row' }, field('Email', email), field('Password', password)),
+        el('p', { class: 'muted' }, 'The password you already set for this guild.'),
+        el('div', { class: 'row' }, button('Sign in', () => void submit(), { kind: 'primary' })),
+      );
+      return card;
+    }
+
+    const code = input('code', { value: draft.code, placeholder: 'XXXX-XXXX' });
+    const nameControl = input('name', { value: draft.name, autocomplete: 'name' });
+    nameControl.addEventListener('input', () => {
+      draft.name = nameControl.value;
+    });
+    // SP02 §3: only the 16-character setup code creates a person, and it needs a name for them.
+    const nameField = field('Name', nameControl, 'The setup code creates the guild, so it needs your name.');
+    nameField.hidden = !isSetupCode(draft.code);
+    code.addEventListener('input', () => {
+      draft.code = code.value;
+      nameField.hidden = !isSetupCode(code.value);
+    });
+    const confirm = input('confirm', { type: 'password', autocomplete: 'new-password' });
+    confirm.addEventListener('input', () => {
+      draft.confirm = confirm.value;
+    });
+    card.append(
+      el('div', { class: 'row' }, field('Email', email), field('Access code', code)),
+      nameField,
+      el('div', { class: 'row' }, field('Password', password), field('Confirm password', confirm)),
+      el(
+        'p',
+        { class: 'muted' },
+        'Bond derives the keys on this machine; the password itself never reaches the host.',
+      ),
+      el('div', { class: 'row' }, button('Join the guild', () => void submit(), { kind: 'primary' })),
+    );
+    return card;
+  }
+
+  function setMode(usePassword: boolean): void {
+    draft.usePassword = usePassword;
+    // The fields are rebuilt by the render below and a password is never written back into the
+    // DOM: leaving the draft behind would submit a password the person can no longer see.
+    draft.password = '';
+    draft.confirm = '';
+    status = null;
+    render();
+  }
+
+  async function findGuild(raw: string): Promise<void> {
+    const address = raw.trim();
+    status = null;
+    if (address === '') {
+      status = { kind: 'error', text: 'enter the address of the host' };
+      render();
+      return;
+    }
+    try {
+      const found = await call('host.discover', { address });
+      draft.address = address;
+      draft.guild = found.guild;
+      draft.fingerprint = found.fingerprint;
+      // SP04 §1.3: the fingerprint the invite fixed is compared here, before a password is typed.
+      // The backend compares it again — over the same discovery — when the join goes out.
+      draft.discovered = draft.expected === null || sameFingerprint(draft.expected, found.fingerprint);
+      if (!draft.discovered) {
+        draft.guild = '';
+        draft.fingerprint = '';
+        status = { kind: 'error', text: refusal };
+      }
+    } catch (e) {
+      draft.discovered = false;
+      draft.guild = '';
+      draft.fingerprint = '';
+      status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  async function submit(): Promise<void> {
+    status = null;
+    const email = draft.email.trim();
+    if (email === '') {
+      status = { kind: 'error', text: 'enter your email' };
+      render();
+      return;
+    }
+    if (draft.password === '') {
+      status = { kind: 'error', text: 'enter your password' };
+      render();
+      return;
+    }
+    if (!draft.usePassword && draft.password !== draft.confirm) {
+      status = { kind: 'error', text: 'the two passwords are not the same' };
+      render();
+      return;
+    }
+    const setup = !draft.usePassword && isSetupCode(draft.code);
+    if (setup && draft.name.trim() === '') {
+      status = { kind: 'error', text: 'the setup code needs your name' };
+      render();
+      return;
+    }
+    // The fingerprint the host answered is what the backend re-checks; the invite's own one wins
+    // when there was an invite (it is the same string, or the flow already refused above).
+    const fingerprint = draft.expected ?? draft.fingerprint;
+    const password = draft.password;
+    try {
+      if (draft.usePassword) {
+        await call('host.signIn', { address: draft.address, fingerprint, email, password });
+      } else {
+        await call('host.activate', {
+          address: draft.address,
+          fingerprint,
+          email,
+          code: draft.code,
+          password,
+          ...(setup ? { name: draft.name.trim() } : {}),
+        });
+      }
+    } catch (e) {
+      // A failed join keeps neither the password nor a half-written host.
+      draft.password = '';
+      draft.confirm = '';
+      status = { kind: 'error', text: errorMessage(e) };
+      render();
+      return;
+    }
+    draft.password = '';
+    draft.confirm = '';
+    ctx.onJoined();
+  }
+
+  render();
+  if (ctx.prefill !== null && ctx.prefill !== undefined) void findGuild(ctx.prefill.address);
+
+  return {
+    setPrefill(invite: JoinInvite | null): void {
+      if (invite === null) return;
+      draft.address = invite.address;
+      draft.expected = invite.fingerprint;
+      draft.code = invite.code ?? '';
+      status = null;
+      render();
+      void findGuild(invite.address);
+    },
+  };
+}
+
 export function mountSettings(
   root: HTMLElement,
-  ctx: { session: SessionState; info: AppInfo; tab?: SettingsTab },
+  ctx: {
+    session: SessionState;
+    info: AppInfo;
+    tab?: SettingsTab;
+    /** SP05 §3: the last host state the page knows, before this tab reads one of its own */
+    host?: HostState | null;
+    /** SP04 §1.3: the invite a `bond://join` link carried, for the Hosts tab to prefill */
+    join?: JoinInvite | null;
+  },
 ): {
   setTab(tab: SettingsTab): void;
   update(session: SessionState): void;
@@ -153,10 +486,20 @@ export function mountSettings(
     vaultTool: '',
     vaultUsername: '',
     vaultLabel: '',
+    /** SP05 §3: the one host, as `host.state` or the push `host` last answered. */
+    host: ctx.host ?? null,
+    /** SP04 §1.3: the invite a `bond://join` link carried, spent by the join flow on mount. */
+    join: ctx.join ?? null,
   };
 
   let alive = true;
   let revealTimer: number | null = null;
+  /**
+   * The join flow owns its DOM and its half-typed form, so the Hosts tab re-attaches this element
+   * instead of building a new one on every render.
+   */
+  let joinBox: HTMLElement | null = null;
+  let joinMode: 'join' | 'signin' | null = null;
 
   // ---------------------------------------------------------------- gate of session and tabs
 
@@ -218,25 +561,6 @@ export function mountSettings(
     );
     node.value = value;
     return node;
-  }
-
-  function checkbox(
-    name: string,
-    checked: boolean,
-    onChange: (checked: boolean) => void,
-    aria?: string,
-  ): HTMLInputElement {
-    const node = el('input', {
-      attrs: { type: 'checkbox', name },
-      aria: aria !== undefined ? { label: aria } : {},
-      on: { change: (event: Event) => onChange((event.target as HTMLInputElement).checked) },
-    });
-    node.checked = checked;
-    return node;
-  }
-
-  function checkboxField(label: string, control: HTMLInputElement): HTMLLabelElement {
-    return el('label', { class: 'row' }, control, el('span', {}, label));
   }
 
   function radio(
@@ -316,6 +640,8 @@ export function mountSettings(
     switch (state.tab) {
       case 'account':
         return viewAccount(owner);
+      case 'hosts':
+        return viewHosts();
       case 'vault':
         return viewVault();
       case 'tools':
@@ -354,6 +680,10 @@ export function mountSettings(
       switch (state.tab) {
         case 'account':
           state.roles = await call('roles.list');
+          break;
+        case 'hosts':
+          // SP05 §3: the tab reads the state itself instead of waiting for a push.
+          state.host = await call('host.state');
           break;
         case 'vault':
           state.vault = await call('vault.list');
@@ -398,6 +728,155 @@ export function mountSettings(
       }
       state.results.sort();
     }
+  }
+
+  // ---------------------------------------------------------------- tab: hosts (SP05 §4)
+
+  /** One labelled line of the host card. */
+  function hostLine(label: string, value: string): HTMLElement {
+    return el(
+      'div',
+      { class: 'row host-line' },
+      el('span', { class: 'muted host-label' }, label),
+      el('span', { class: 'mono' }, value),
+    );
+  }
+
+  /**
+   * SP05 §4's "with a host" half: guild, address, fingerprint, last sync, pending writes, "Sync
+   * now", "Remove host".
+   */
+  function hostCard(host: HostState): HTMLElement {
+    const card = el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, host.guild ?? 'Guild'),
+      hostLine('Address', host.address ?? '—'),
+      hostLine('Fingerprint', host.fingerprint ?? '—'),
+      hostLine('Last sync', host.lastSyncAt ?? 'never'),
+      hostLine('Pending writes', String(host.pendingWrites)),
+    );
+    if (host.status === 'signed-out') {
+      card.append(
+        el('p', { class: 'message message-info' }, 'Signed out — sign in again to keep syncing this guild.'),
+      );
+    } else if (host.status === 'stale') {
+      card.append(
+        el(
+          'p',
+          { class: 'message message-info' },
+          `Offline — Bond is showing the cached guild${host.lastError === null ? '' : ` (${host.lastError})`}.`,
+        ),
+      );
+    } else if (host.lastError !== null) {
+      card.append(el('p', { class: 'message message-error' }, host.lastError));
+    }
+    card.append(
+      el('div', { class: 'row' }, button('Sync now', () => void syncNow(), { kind: 'primary' })),
+    );
+    return card;
+  }
+
+  function removeCard(host: HostState): HTMLElement {
+    let keepPersonal = true;
+    const keep = checkbox('keepPersonal', true, (on) => {
+      keepPersonal = on;
+    });
+    return el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'Remove host'),
+      el(
+        'p',
+        { class: 'muted' },
+        `Bond goes back to its local catalog and stops showing anything from ${host.guild ?? 'the guild'}.`,
+      ),
+      checkboxField('Keep my personal tools', keep),
+      el(
+        'p',
+        { class: 'field-hint' },
+        'Default. Nothing in the keychain or in the local catalog is deleted either way.',
+      ),
+      el(
+        'div',
+        { class: 'row' },
+        button('Remove host', () => void removeHost(keepPersonal), { kind: 'danger' }),
+      ),
+    );
+  }
+
+  /**
+   * The join flow, mounted once per mode: it holds a half-typed form (and the password field with
+   * it), so a re-render of the tab re-attaches it instead of building a new one.
+   */
+  function joinSection(mode: 'join' | 'signin'): HTMLElement {
+    if (joinBox === null || joinMode !== mode) {
+      const owner = person();
+      const host = state.host;
+      const box = el('div');
+      mountJoinFlow(box, {
+        // A pinned host is what the sign-in mode has: its address and key are already on record.
+        prefill:
+          mode === 'signin' && host !== null
+            ? { address: host.address ?? '', fingerprint: host.fingerprint ?? '', code: null }
+            : state.join,
+        pinned: mode === 'signin',
+        email: mode === 'signin' ? (owner === null ? null : owner.email) : null,
+        onJoined: () => {
+          state.status = { kind: 'ok', text: 'Connected' };
+        },
+      });
+      joinBox = box;
+      joinMode = mode;
+    }
+    return joinBox;
+  }
+
+  function viewHosts(): HTMLElement {
+    const box = el('section', { class: 'stack' });
+    const host = state.host;
+    if (host === null) {
+      box.append(el('p', { class: 'muted' }, 'Reading the host…'));
+      return box;
+    }
+    if (host.status === 'none') {
+      box.append(
+        el(
+          'p',
+          { class: 'muted' },
+          'This Bond is not connected to a guild. Join one with the address and the fingerprint your admin gave you.',
+        ),
+        joinSection('join'),
+      );
+      return box;
+    }
+    box.append(hostCard(host));
+    // SP04 §3: signed out asks for a sign-in; on the same screen, the host can also be removed.
+    if (host.status === 'signed-out') box.append(joinSection('signin'));
+    box.append(removeCard(host));
+    return box;
+  }
+
+  async function syncNow(): Promise<void> {
+    state.status = null;
+    try {
+      state.host = await call('host.syncNow');
+      state.status = { kind: 'ok', text: 'Synced' };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  async function removeHost(keepPersonal: boolean): Promise<void> {
+    state.status = null;
+    try {
+      state.host = await call('host.remove', { keepPersonal });
+      state.status = { kind: 'ok', text: 'Host removed' };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
   }
 
   // ---------------------------------------------------------------- tab: account
@@ -1734,6 +2213,20 @@ export function mountSettings(
     void load();
   });
 
+  // SP05 §3: the sync pushed a new host state — the tab shows it without a refresh of its own.
+  let knownStatus: HostState['status'] | null = state.host === null ? null : state.host.status;
+  const offHost = on('host', (next) => {
+    // A host that just arrived, left or was signed out makes a half-typed join form stale: it is
+    // rebuilt from the new state on the next render.
+    if (next.status !== knownStatus) {
+      joinBox = null;
+      joinMode = null;
+      knownStatus = next.status;
+    }
+    state.host = next;
+    if (state.tab === 'hosts') render();
+  });
+
   state.tab = ctx.tab !== undefined && canShow(ctx.tab) ? ctx.tab : defaultTab();
   render();
   void load();
@@ -1748,8 +2241,12 @@ export function mountSettings(
     destroy(): void {
       alive = false;
       offCatalog();
+      offHost();
       hideRevealed();
       clear(root);
+      // The join flow is a child of this tree: it is rebuilt from `ctx` on the next mount.
+      joinBox = null;
+      joinMode = null;
     },
   };
 }

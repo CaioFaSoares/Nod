@@ -16,7 +16,10 @@ import { createAuthService, type AuthService } from './auth';
 import type { HostConfig } from './config';
 import { loadOrCreateHostSecret } from './keys';
 import { RepoError, createRepo, type Repo } from './repo';
+import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
+import { eventRoutes } from './routes/events';
+import { stateRoutes } from './routes/state';
 
 export type AppDeps = {
   /** Host configuration resolved at boot (SP07 §1–§2). */
@@ -93,6 +96,11 @@ export function createApp(deps: AppDeps) {
 
     .get(HOST_ROUTES.health, () => 'ok')
 
-    // SP03 §2. The group files of H5 (admin), H6 (state) and H8 (events) each add one line here.
-    .use(authRoutes);
+    // SP03 §2: the four route groups in one line each, in this order — auth (H4), admin (H5), state
+    // (H6), events (H8). Each carries its own guards, so a group mounted later keeps its own access
+    // rules and the levels of the groups above stay inside them (H4's regression test).
+    .use(authRoutes)
+    .use(adminRoutes)
+    .use(stateRoutes)
+    .use(eventRoutes);
 }

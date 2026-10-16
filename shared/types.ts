@@ -243,6 +243,26 @@ export interface SessionState {
   waitMs: number;
 }
 
+/**
+ * Connected mode (SP05 §3): the one host a Bond knows, as Settings → Hosts shows it. `none` without
+ * a `host` row; `connected` after the last sync succeeded; `stale` when it failed (SP04 §3) — the
+ * cache stays in use and the sidebar says `offline`; `signed-out` after a `401`, which asks the
+ * person to sign in again (RF-39). `fingerprint` is SP04 §1.1's string of the pinned key.
+ */
+export interface HostState {
+  status: 'none' | 'connected' | 'stale' | 'signed-out';
+  /** `meta.guild_name` of the host (SP04 §1); null without a host. */
+  guild: string | null;
+  address: string | null;
+  fingerprint: string | null;
+  /** ISO 8601 UTC of the last snapshot the Bond verified; null before the first one. */
+  lastSyncAt: string | null;
+  /** Why the last sync failed, as Settings → Hosts shows it; null after one that worked. */
+  lastError: string | null;
+  /** Writes waiting in the outbox (SP04 §4). */
+  pendingWrites: number;
+}
+
 export interface AppInfo {
   version: string;
   seedVersion: number | null;
@@ -287,6 +307,28 @@ export interface ApiContract {
   'session.enableBiometric': [{ password: string }, SessionState];
   'session.changePassword': [{ current: string; next: string }, true];
   'session.lock': [void, SessionState];
+
+  // connected mode (SP05 §3). `discover`, `activate` and `signIn` work with no session at all:
+  // the first run has no account yet, and the password only ever travels page → backend.
+  'host.state': [void, HostState];
+  'host.discover': [{ address: string }, { guild: string; fingerprint: string }];
+  'host.activate': [
+    {
+      address: string;
+      /** the invite's `fp` (SP04 §1.3), or the fingerprint the person confirmed on screen */
+      fingerprint: string;
+      email: string;
+      code: string;
+      password: string;
+      /** only for a setup code: it creates the first admin of an empty host (SP02 §3) */
+      name?: string;
+    },
+    SessionState,
+  ];
+  'host.signIn': [{ address: string; fingerprint: string; email: string; password: string }, SessionState];
+  'host.syncNow': [void, HostState];
+  /** `keepPersonal` is SP05 §3's choice about the local personal tools (block 2). */
+  'host.remove': [{ keepPersonal: boolean }, HostState];
 
   'catalog.list': [void, Entry[]];
   'catalog.get': [{ id: Id }, EntryDetails];
@@ -344,11 +386,29 @@ export type Result<M extends Method> = ApiContract[M][1];
 /** What the login adapter script reports back (canonico §11). */
 export type ReportState = 'no-form' | 'form' | 'filled' | 'error';
 
+/** What a `bond://join` link carries (SP04 §1.3): no secret — an address, a fingerprint, a code. */
+export interface JoinInvite {
+  address: string;
+  fingerprint: string;
+  code: string | null;
+}
+
 /** Events the backend pushes to the main window (app.push). */
 export interface PushEvents {
   session: SessionState;
   tools: ToolsState;
   catalog: null;
+  /**
+   * Connected mode: `host.state` changed or was pushed by the sync (B4). The sidebar's `offline`
+   * badge and Settings → Hosts both read it.
+   */
+  host: HostState;
+  /**
+   * A `bond://join?host=…&fp=…[&code=…]` link arrived (SP04 §1.3): the join screen opens with the
+   * invite's host, fingerprint and code prefilled. Delivered again on the next `session.state`
+   * until the join flow picks it up with `host.discover`.
+   */
+  join: JoinInvite | null;
   /** a global shortcut asked the main window to open the command palette */
   palette: null;
   /**
