@@ -149,7 +149,8 @@ caminho real é `template/types/tiny.d.ts`.
   EC; `src/webcrypto.c` é o encaminhamento nativo e `src/js/polyfills/crypto/subtle.js` expõe o
   `subtle`. Ou seja: derivar chave de senha e assinar um documento não exigem dependência externa.
   O comportamento exato (parâmetros aceitos, custo) ainda não foi medido por execução — exceto
-  PBKDF2 e HMAC-SHA256, medidos em 2026-10-16 no parágrafo abaixo.
+  PBKDF2 e HMAC-SHA256 (H3) e X25519, Ed25519, AES-GCM e HKDF (S0): medidos por execução em
+  2026-10-16, nos dois parágrafos abaixo.
 
 **Observed by execution (2026-10-16): PBKDF2 and HMAC-SHA256 in the Bond runtime** (story H3,
 `docs/specs/SP02-auth-and-keys.md` §1). Method: `~/.tinyjs/bin/tjs run` on a bundle of the real
@@ -170,9 +171,36 @@ of `test/auth.test.ts`.
   produce the same bytes as Bun for each length; repeated derivations of the same triple are stable.
   `String.prototype.normalize('NFC')` exists in the runtime: the non-ASCII vector typed with
   combining marks derives the same 32-byte keys as its NFC form, and as Bun.
-- **Still unmeasured by execution:** AES-GCM, Ed25519 and X25519 (the sources above say they exist;
-  their measurements belong to story S0, `docs/epics/E02-credential-sharing.md`). This paragraph is
-  the PBKDF2 half of `docs/canonico.md` §23 q6.
+- **Beyond PBKDF2.** The other SP06 §1 primitives — X25519, Ed25519, AES-256-GCM and HKDF — are the
+  paragraph below; with the two above they answer the three items of `docs/canonico.md` §23 q6
+  (PBKDF2 cost, AES-GCM cost, `subtle` behaviour for X25519).
+
+**Observed by execution (2026-10-16): X25519, Ed25519, AES-256-GCM and the SP06 §3 seal in the Bond
+runtime** (story S0, `docs/specs/SP06-credential-sharing.md` §1, §3). Method: the same as H3's
+paragraph above — `~/.tinyjs/bin/tjs run` on a bundle of the real `shared/seal.ts` built by
+`Bun.build` (`target: 'browser'`), the txiki.js binary the tinyjs launcher uses for the app backend;
+per operation, 5 rounds of 200 calls after one warm-up call, `Date.now()` around each batch and the
+per-call figure taken as batch ÷ 200. Both runtimes produce the pinned `sealed` strings of
+`test/seal.test.ts` byte for byte, and `test/smoke/run.ts` re-runs those same vectors under this
+runtime as `seal vectors: ok …` (SP06 §6, S0).
+
+- **Cost per operation**, Bond runtime → Bun, median of the 5 rounds: `seal` (fresh ephemeral X25519
+  pair, ECDH, HKDF-SHA256 over HMAC, AES-256-GCM, Ed25519 over the body) **1.51 ms → 0.10 ms**;
+  `open` (signature verify, ECDH, HKDF, AES-GCM decrypt) **1.21 ms → 0.09 ms**; `sign` (Ed25519 over
+  40 bytes) **0.86 ms → 0.02 ms**; `verify` **0.85 ms → 0.03 ms**. A share to 20 people therefore
+  costs the sender ~30 ms of sealing and one open costs the receiver ~1.2 ms — both far below the
+  biometric gate they sit behind (E02 §5). `subtle` is 12–15× slower than Bun on `seal` and `open`
+  and ~30–40× slower on `sign` and `verify` here, in the same order H3 found for PBKDF2.
+- **HKDF is native after all.** `crypto.subtle.deriveBits` with `{ name: 'HKDF', hash: 'SHA-256' }`
+  resolves in both runtimes and costs ~0.01 ms per call (64-byte salt, 19-byte info, 256 bits).
+  SP06 §1 still writes RFC 5869 over HMAC inside `shared/seal.ts`: that is portability, not
+  necessity, and that choice costs no extra round trip beyond the `seal`/`open` figures above.
+- **Accepted parameters.** `generateKey`/`exportKey`/`importKey` for `X25519` and `Ed25519` resolve
+  in both runtimes and export the same shapes: 32-byte raw public key, 48-byte PKCS#8 private key
+  (RFC 8410), 64-byte Ed25519 signature from `subtle.sign`. `deriveBits` with
+  `{ name: 'X25519', public }` and 256 bits gives the same 32-byte shared secret on both sides.
+  AES-256-GCM accepts a 12-byte nonce plus `additionalData` and authenticates both. `btoa`/`atob`
+  exist and carry the base64url form (`-`/`_`, no padding) that `docs/specs/README.md` requires.
 
 ## 6. Permissões e capacidades
 

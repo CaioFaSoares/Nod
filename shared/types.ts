@@ -9,10 +9,19 @@ export type Id = string;
 // ---------------------------------------------------------------- catalog
 
 export interface View {
+  /**
+   * uuid the host stores for the view (SP04 §2); absent in local mode, where a view is addressed by
+   * its index inside the entry (`toolWindowId`).
+   */
+  id?: Id;
   label: string;
   url: string;
   /** 'window' opens its own tool window; 'navigate' navigates the tool's main window */
   mode: 'window' | 'navigate';
+  /** 'org' for a view of the catalog; 'personal' for a view its owner hangs under an entry (SP04 §2) */
+  scope?: 'org' | 'personal';
+  /** owner of a personal view; `null` for an org view (SP04 §2) */
+  ownerId?: Id | null;
 }
 
 /** Optional override of the login cascade (canonico §8). Absent = default cascade. */
@@ -24,6 +33,13 @@ export interface AuthOverride {
 export interface Entry {
   /** slug: ^[a-z0-9][a-z0-9-]{0,39}$ */
   id: Id;
+  /**
+   * 'org' for a catalog entry, 'personal' for one person's own tool (SP04 §2). Local mode fills
+   * 'org', so a local catalog entry carries it too; absent only in data written before the field.
+   */
+  scope?: 'org' | 'personal';
+  /** owner of a personal entry; `null` for an org entry (SP04 §2) */
+  ownerId?: Id | null;
   title: string;
   /** https URL (http only on loopback); no user:password@ */
   url: string;

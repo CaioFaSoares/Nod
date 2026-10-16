@@ -72,6 +72,13 @@ Imports sem extensão. Arquivos removidos na v2 (cada fatia apaga os seus): `adm
 ### `shared/auth.ts`
 ```ts
 export const PBKDF2_ITERATIONS = 600_000;
+export interface DerivedKeys { authKey: Uint8Array; vaultKey: Uint8Array; localKey: Uint8Array }
+export function deriveKeys(password: string, salt: Uint8Array, iterations: number): Promise<DerivedKeys>;
+                                                    // SP02 §1: PBKDF2-HMAC-SHA256(NFC password, salt, iterations) → master, then one
+                                                    // HMAC-SHA256 per label (bond/auth/v1, bond/vault/v1, bond/local/v1). Raw 32 bytes
+                                                    // on purpose: the caller encodes — base64url(authKey) on the wire, SHA-256(localKey)
+                                                    // in PasswordHashV2.check. Only crypto.subtle; vectors in test/auth.test.ts,
+                                                    // derived again in txiki.js by the smoke (H3)
 export function hashPassword(password: string, iterations?: number): Promise<PasswordHash>;
 export function verifyPassword(password: string, h: PasswordHash): Promise<boolean>; // constant-time
 export function validateNewPassword(password: string): string | null;              // 'password must be at least 8 characters'
@@ -79,6 +86,77 @@ export function generateInviteCode(): string;                                   
 export function hashInviteCode(code: string): Promise<string>;                      // sha256, lowercase hex
 export function inviteIsValid(i: { expiresAt: string; usedAt: string | null }, now: Date): boolean;
 export function unlockWait(failures: number): number;                               // 0 up to 4; then 1000·2^(n−5), cap 15 min
+```
+
+### `shared/encoding.ts` — bytes on the wire (`docs/specs/README.md`)
+```ts
+export function toBase64url(bytes: Uint8Array): string;                             // no padding, canonical
+export function fromBase64url(text: string): Uint8Array;                            // throws 'invalid base64url' on a char outside
+                                                    // the alphabet, padding, length % 4 === 1 or trailing bits that are not zero.
+                                                    // Decoding is hand-written: atob and txiki.js disagree on non-canonical input
+export function toHex(bytes: Uint8Array): string;                                   // lowercase, two digits per byte
+export function fromHex(text: string): Uint8Array;                                  // throws 'invalid hex' on an odd length or a bad char
+export async function sha256Hex(data: Uint8Array | string): Promise<string>;        // crypto.subtle, lowercase hex; the one hash of
+                                                    // the code hashes, token hashes, the snapshot version and the host `kid` (H4, H6)
+```
+
+### `shared/host-api.ts` — the host API contract (`docs/specs/SP03-host-api.md` §2, §4)
+Every block 1 route body and response, shared by the host and the Bond, plus `Discovery` and the
+signed `Snapshot` of SP04 §1–§2 and the event batch of §5. Block 2 (SP03 §3, the optional block 2
+members of `Snapshot`) is out until its story lands. The host's SQL rows (`host/repo.ts`) carry these
+field names on purpose, so a snapshot can hand a row over without a rename.
+```ts
+export const HOST_ROUTES = { health, discovery, authSalt, authActivate, authSetup, authLogin,
+  authLogout, authPassword, state, sessions, session, personalTool, personalView, favorites, events,
+  adminPeople, adminPerson, adminPersonCode, adminPersonSessions, adminSession, adminRole,
+  adminGrants, adminTool, adminToolPromote, adminBootstrap, adminEvents };          // paths of SP03 §2; ':id' is the
+                                                    // segment the caller fills. Block 2 paths are not here
+export interface ErrorResponse { error: string }                                    // the only field of a failure (SP03 §1)
+// auth: SaltRequest/SaltResponse, ActivateRequest, SetupRequest (+ name), LoginRequest, TokenResponse,
+// PasswordChangeRequest; Device, DeviceSession, DeviceOs
+// people: AdminPerson, PersonCreateRequest/Response, PersonUpdateRequest, CodeResponse, PersonKind
+// admin: RoleRequest, GrantRequest, OrgTool (= Entry + views), PromoteRequest,
+//        BootstrapRequest, BootstrapResponse
+// person: PersonalTool (Entry + updatedAt), PersonalView (View + id/entryId/updatedAt), DeleteRequest,
+//        FavoritesRequest
+// events: ClientEvent, EventsRequest, EventsResponse, HostEvent, AdminEventsQuery
+// discovery and snapshot: Discovery, SignInMethod, Snapshot, SnapshotEnvelope, SnapshotSignature,
+//        SNAPSHOT_ETAG_HEADER ('ETag'), SNAPSHOT_SIGNATURE_HEADER ('Bond-Signature')
+export type CodeKind = 'access' | 'setup';                                          // 'access' is purpose 'activate' of SP01 §2
+export const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';                    // Crockford base32 (SP02 §3)
+export const CODE_BYTES: Readonly<Record<CodeKind, number>>;                        // 5 and 10 bytes → 8 and 16 chars
+export const CODE_LENGTH: Readonly<Record<CodeKind, number>>;
+export function generateCode(kind: CodeKind): string;                               // crypto.getRandomValues → 'XXXX-XXXX' (SP02 §3)
+export function formatCode(code: string): string;                                   // groups a normalized code in fours
+export function normalizeCode(code: string): string | null;                         // uppercase, no spaces or hyphens,
+                                                    // O→0, I→1, L→1; null on any other character (SP02 §3)
+export function validateCode(code: string, kind: CodeKind): boolean;                // normalizeCode + that kind's length
+export function normalizeEmail(email: string): string;                              // trim + lowercase, the form SP01 §2
+                                                    // stores and every lookup matches
+```
+
+### `shared/seal.ts` — credential sharing (`docs/specs/SP06-credential-sharing.md` §1–§3)
+```ts
+export const SEAL_VERSION = 1;                                                      // first byte of the body and payload `v`
+export const SEAL_PUBLIC_LENGTH = 32; export const SEAL_NONCE_LENGTH = 12;
+export const SEAL_SIGNATURE_LENGTH = 64;
+export type SealScope = 'role' | 'org'; export type SealKind = 'send' | 'assign' | 'update';
+export interface SealPayload { v; credentialId; toolId; toolOrigin; label; username; secret; scope; from; to; kind; issuedAt }
+export interface SealKeyPair { publicKey: Uint8Array; privateKey: Uint8Array }      // raw 32-byte public, PKCS#8 private (SP06 §2)
+export interface SealOptions { ephemeral?: SealKeyPair; nonce?: Uint8Array }        // vectors only: pins seal byte for byte
+export interface OpenOptions { recipientPrivateKey: Uint8Array; recipientPublicKey: Uint8Array;
+  senderPublicKey: Uint8Array; credentialId: string; to: string }                  // the sender's key is the pinned one
+export function generateX25519KeyPair(): Promise<SealKeyPair>;
+export function generateEd25519KeyPair(): Promise<SealKeyPair>;
+export function importX25519PublicKey(raw: Uint8Array): Promise<CryptoKey>;         // and the other three import* of SP06 §2–§3
+export function sign(message: Uint8Array, privateKey: Uint8Array): Promise<Uint8Array>;
+export function verify(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): Promise<boolean>;
+export async function seal(payload: SealPayload, recipientPublicKey: Uint8Array, senderPrivateKey: Uint8Array,
+  options?: SealOptions): Promise<string>;                                          // base64url(0x01 || eph.public || nonce ||
+                                                    // ct || sig); HKDF-SHA256 hand-rolled over HMAC as SP06 §1 asks (S0)
+export async function open(sealed: string, options: OpenOptions): Promise<SealPayload | null>;   // null on every refusal: bad
+                                                    // base64url, bad body, bad signature, wrong key, wrong AAD. Only X25519,
+                                                    // Ed25519, AES-256-GCM and HMAC-SHA256 from crypto.subtle (S0)
 ```
 
 ### `shared/catalog.ts`
@@ -170,11 +248,12 @@ Schema (inglês): `person(id, email UNIQUE NOCASE, name, password_hash, password
 password_iterations, created_at, revoked_at)`, `role(id, name, admin)`, `person_role`, `tool(id, title,
 url, origin, icon_hash, sort_order, active, auth_json, probe_json)`, `tool_view(tool_id, idx, label,
 url, mode)`, `tool_grant(role_id, tool_id)`, `vault_item(id, person_id, tool_id, label, username,
-keychain_key, created_at, updated_at, UNIQUE(person_id, tool_id))`, `invite(id, code_hash UNIQUE,
+keychain_key, created_at, updated_at, origin, UNIQUE(person_id, tool_id))`, `invite(id, code_hash UNIQUE,
 roles_json, expires_at, used_at, created_by)`, `event(id AUTOINCREMENT, at, person_id, tool_id, type,
 url, result, detail)`, `meta(key, value)`. `migrate()` idempotente.
 ```ts
-migrate(): void
+migrate(): void                               // idempotent; also adds SP05 §2's columns by presence —
+                                              // `vault_item.origin` (B9), backfilled from `tool.origin`
 // people
 countPeople(): number                         // INCLUDING revoked (first-account rule, P6)
 countAdmins(): number                         // active people with an admin role
@@ -208,7 +287,9 @@ listInvites(): Invite[]
 listVault(personId): VaultItem[]
 vaultItem(personId, toolId): VaultItem | null
 vaultItemsByTool(toolId): VaultItem[]         // all people (to clean the keychain when a tool is removed)
-saveVaultItem(i: { personId; toolId; label; username; keychainKey }): VaultItem
+vaultOrigin(personId, toolId): string | null  // the origin the credential was saved for; null without an
+                                              // item, or with one that has none on record (B9, RF-38)
+saveVaultItem(i: { personId; toolId; label; username; keychainKey; origin }): VaultItem
 removeVaultItem(personId, toolId): void
 removeVaultOf(personId): VaultItem[]
 // events
@@ -244,7 +325,8 @@ Biometria: `enableBiometric` grava `bond.bio.<person>` no chaveiro e `last_perso
 key(personId, toolId): string                 // 'bond.cred.<person>.<tool>'
 list(personId); save(personId, p: { toolId; username; secret; label? }): Promise<VaultItem>
   // tool must exist ('unknown tool'); keychain first, index only if the keychain accepted
-  // ('the system keychain refused the credential')
+  // ('the system keychain refused the credential'); records `originOf(entry.url)` with the item, the
+  // origin the fill is bound to (B9, RF-38)
 read(personId, toolId): Promise<{ username; secret } | null>
 remove(personId, toolId); removeAllOf(personId); removeAllForTool(toolId)   // keychain + index (A6)
 export(personId, password): Promise<string>; import(personId, blob, password): Promise<number>
@@ -256,7 +338,8 @@ export function createToolWindows(app: TinyApp, deps: {
   entries(): Entry[];                         // visible to the current person (empty when locked)
   icon(id: Id): string | null;
   credential(toolId: Id): Promise<{ username: string; secret: string } | null>;
-  hasCredential(toolId: Id): boolean;      // synchronous, from the vault index (the cascade needs it before injecting)
+  vaultOrigin(toolId: Id): string | null;  // the origin the credential was saved for (B9, RF-38);
+                                           // synchronous, the cascade needs the answer before injecting
   record(e: Omit<AuditEvent, 'id' | 'at'>): void;
   store: { get(k: string): Promise<unknown>; set(k: string, v: unknown): Promise<boolean> };
   os: 'macos' | 'windows' | 'linux';
@@ -278,6 +361,12 @@ onWindowClosed(id: string): void
 onFocus(windowId: string, focused: boolean): void
 onHotkey(id: string): void                    // 'digit-1'..'digit-9' → open; 'palette' → show main + push 'palette'
 ```
+- Fill gate (B9, RF-38): the cascade context reads
+  `hasCredential = vaultOrigin(toolId) !== null && vaultOrigin(toolId) === window.origin`, where
+  `window.origin` is the canonical origin of the entry address the window opened at. A tool whose
+  address moved — a local edit or a host snapshot rewriting the entry — reads as one with no
+  credential: `fill: false`, no attempt counted, no keychain read. The credential belongs to the
+  origin, not to the page: another path on the same origin still fills.
 - Abrir: `app.win.open(toolWindowId(id), { page: url, title, size: 'WxH', x, y })` e logo depois
   `setPosition`/`setSize` no handle (o launcher não respeitou `x`/`size` do `win.open` — observado por
   execução na v1). Geometria padrão: 1280×800 limitada a 90% da área útil da tela da janela `main`,
