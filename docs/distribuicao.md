@@ -114,8 +114,9 @@ dados falsos.
    | Linux arm64 | `ubuntu-24.04-arm` | `bond-<v>-linux-arm64.tar.gz` |
    | Windows | `windows-2025` | `bond-<v>-win.zip` |
 
-3. **Release**: merges the per-OS `manifest.json` files into one, then creates release `v<version>`
-   with every archive and the merged manifest, marked as latest.
+3. **Release**: merges the per-OS `manifest.json` files into one, then creates release
+   `release-<version>` — the `prepare` job prints the tag, the prefix included (`docs/canonico.md`
+   §19) — with every archive and the merged manifest, marked as latest.
 
 **One-time setup:**
 
@@ -128,22 +129,24 @@ dados falsos.
 
   GitHub caps a secret at 48 KB. If the icons don't fit, put them in the seed as data URIs.
 - Auto-update from GitHub Releases: the seed's `update.url` must be
-  `https://github.com/<release repo>/releases/latest/download/manifest.json`. `tinyjs publish`
+  `https://github.com/CaioFaSoares/Bond/releases/latest/download/manifest.json`. `tinyjs publish`
   derives every download URL from that address, and the release job warns when they don't point at
-  the release repository.
+  the release repository. With the channel set, an installed Bond that finds a newer release shows
+  the notice by itself (RF-55, `docs/canonico.md` §14): no step in the app and no release by hand.
 
 **Caveats:**
 
 - **Version bump.** Pushing again with the same `version` replaces the release's files. Installed
   apps only update when `version` in `tinyjs.base.json` goes up.
-- **Private repository: no auto-update.** This repository is private, so its release files need
-  authentication to download, and installed apps can't fetch them. The release still serves for
-  sending by hand (§3). For auto-update, set the variable `BOND_RELEASE_REPO` to another repository
-  and the secret `BOND_RELEASE_TOKEN` to a token with `contents: write` on it.
-- **Public release repository: the seed becomes public.** Every archive carries the seed (§1):
-  addresses, roles, grants and invite hashes. `docs/canonico.md` §19 accepts that people who
-  receive the release can read the seed, not the whole internet. Prefer a host the owner controls
-  for the manifest and archives before making releases public.
+- **Public repository: auto-update works.** The repository is public, so release files download
+  without authentication and an installed Bond fetches its manifest and its archives straight from
+  GitHub Releases. The release repository is this one — `RELEASE_REPO` already defaults to
+  `github.repository`. `BOND_RELEASE_REPO` plus a `BOND_RELEASE_TOKEN` with `contents: write` are
+  only for putting the release in *another* repository, which then has to be public too.
+- **Public repository: the seed becomes public.** Every archive carries the seed (§1): addresses,
+  roles, grants and invite hashes. With a public repository anyone who downloads a release reads
+  them, not just the people who received it. `docs/canonico.md` §19 accepts that; what keeps it
+  acceptable is RF-27 — the seed carries organization, never a password, a credential or a token.
 - **Unsigned.** macOS builds are signed ad hoc, so the release step in §3 still applies. Windows
   builds are unsigned (§4).
 - **macOS runner cost.** On a private repository, macOS runner minutes cost more than Linux ones

@@ -1,7 +1,7 @@
 // Vault (`backend/vault.ts`) against in-memory SQLite and an in-memory keychain: proves this
 // slice's acceptance criteria — index without a secret, value only in the keychain, a tool that
-// does not exist, the keychain refusing, removal (one item, one person, one tool) and the encrypted
-// export/import round trip.
+// does not exist, the keychain refusing, the origin the credential is bound to (RF-38), removal
+// (one item, one person, one tool) and the encrypted export/import round trip.
 import { describe, expect, test } from 'bun:test';
 
 import { createRepo } from '../backend/repo';
@@ -251,6 +251,51 @@ describe('key and index', () => {
   });
 });
 
+describe('origin', () => {
+  test('save records the entry origin; a moved tool does not move the saved credential', async () => {
+    const s = scene();
+
+    const item = await s.vault.save(s.ana.id, {
+      toolId: 'kanban',
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+
+    // The entry's canonical origin, as the tool window compares its own address against (RF-38).
+    expect(s.repo.vaultOrigin(s.ana.id, 'kanban')).toBe('https://kanban.example.test');
+    expect(s.items.get(item.keychainKey)).toBe(
+      JSON.stringify({ username: 'ana', secret: KANBAN_SECRET }),
+    );
+
+    // The tool address moves — a local edit or a host snapshot rewriting the entry. The credential
+    // the person saved stays bound to the origin it was saved for.
+    s.repo.saveEntry({ ...tool('kanban'), url: 'https://moved.example.test/app' });
+    expect(s.repo.vaultOrigin(s.ana.id, 'kanban')).toBe('https://kanban.example.test');
+    // The value in the keychain is untouched by that: the item did not move either.
+    expect(await s.vault.read(s.ana.id, 'kanban')).toEqual({
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+
+    // Saved again on the new address, the item follows the entry.
+    await s.vault.save(s.ana.id, { toolId: 'kanban', username: 'ana', secret: 'second' });
+    expect(s.repo.vaultOrigin(s.ana.id, 'kanban')).toBe('https://moved.example.test');
+  });
+
+  test('a refused keychain writes no origin and a person without an item has none', async () => {
+    const s = scene();
+
+    expect(s.repo.vaultOrigin(s.ana.id, 'kanban')).toBeNull();
+
+    s.refuse();
+    await expect(
+      s.vault.save(s.ana.id, { toolId: 'kanban', username: 'ana', secret: KANBAN_SECRET }),
+    ).rejects.toThrow('the system keychain refused the credential');
+    expect(s.repo.vaultOrigin(s.ana.id, 'kanban')).toBeNull();
+    expect(s.vault.list(s.ana.id)).toEqual([]);
+  });
+});
+
 describe('remove', () => {
   test('remove deletes the keychain key and the index row', async () => {
     const s = scene();
@@ -335,6 +380,7 @@ describe('export and import', () => {
       label: 'orphan',
       username: 'ana',
       keychainKey: `bond.cred.${s.ana.id}.orphan`,
+      origin: 'https://orphan.example.test',
     });
 
     const blob = await s.vault.export(s.ana.id, 'export-password');

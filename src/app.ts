@@ -16,6 +16,7 @@ import type {
   SessionState,
   ToolStatus,
   ToolsState,
+  UpdateInfo,
 } from '../shared/types';
 
 /** What the right side shows: Home or one Settings tab. */
@@ -32,6 +33,8 @@ const LOGIN_TEXT: Record<LoginResult, string> = {
 
 interface Shell {
   sidebar: HTMLElement;
+  /** RF-55: the slot of the update notice, above the banner. */
+  notice: HTMLElement;
   banner: HTMLElement;
   content: HTMLElement;
 }
@@ -61,6 +64,8 @@ let info: AppInfo | null = null;
 let tools: ToolStatus[] = [];
 /** Answer of `catalog.list` or a refresh triggered by the push `catalog`. */
 let catalog: Entry[] = [];
+/** Push `update` (RF-55): the newer release to announce, or `null` when there is none. */
+let update: UpdateInfo | null = null;
 let view: View = 'home';
 /** The person chose to create an account with an invite code instead of signing in. */
 let creatingAccount = false;
@@ -322,10 +327,13 @@ async function waitFromState(): Promise<number> {
 
 function buildShell(): void {
   const sidebar = el('aside', { class: 'sidebar', aria: { label: 'Bond' } });
+  const notice = el('div', { class: 'notice-slot' });
   const banner = el('div', { class: 'banner' });
   const content = el('div', { class: 'content' });
-  shell = { sidebar, banner, content };
-  root.replaceChildren(el('div', { class: 'shell' }, sidebar, el('div', { class: 'main' }, banner, content)));
+  shell = { sidebar, notice, banner, content };
+  root.replaceChildren(
+    el('div', { class: 'shell' }, sidebar, el('div', { class: 'main' }, notice, banner, content)),
+  );
 }
 
 function teardownShell(): void {
@@ -528,6 +536,81 @@ function clearBanner(): void {
   if (shell !== null) clear(shell.banner);
 }
 
+// ------------------------------------------------------------ update notice (RF-55)
+
+/**
+ * RF-55: the newer release the backend found on its own, on top of the main window — the person
+ * does not open Settings to learn about it. Installing stays a decision (A13): the button exists
+ * only for an admin, who is the one `bond.installUpdate` accepts.
+ */
+function renderNotice(): void {
+  const target = shell;
+  if (target === null) return;
+  clear(target.notice);
+  const notice = update;
+  const person = session === null || !session.unlocked ? null : session.person;
+  if (notice === null || notice.latest === null) return;
+  const version = notice.latest;
+
+  const dismiss = el(
+    'button',
+    {
+      class: 'notice-dismiss',
+      title: 'Dismiss until a newer version appears',
+      aria: { label: `Dismiss the notice of version ${version}` },
+      attrs: { type: 'button' },
+    },
+    '×',
+  );
+  dismiss.addEventListener('click', () => void dismissNotice(version));
+
+  target.notice.append(
+    el(
+      'div',
+      { class: 'notice', role: 'status' },
+      el('p', { class: 'notice-text' }, `Version ${version} available`),
+      el(
+        'div',
+        { class: 'notice-actions' },
+        // Installing is an admin method (§2): a person without it never sees the button.
+        person !== null && person.admin
+          ? button('Install', () => installUpdateNow(), { kind: 'primary' })
+          : null,
+        button('Details', () => {
+          go('account');
+        }, { kind: 'ghost' }),
+        dismiss,
+      ),
+    ),
+  );
+}
+
+/** The install of Settings, reused here: the backend records the event, swaps and restarts. */
+async function installUpdateNow(): Promise<void> {
+  const target = shell;
+  if (target === null) return;
+  message(target.banner, 'info', 'Installing the update…');
+  try {
+    await call('bond.installUpdate');
+  } catch (e) {
+    showBanner(e);
+    return;
+  }
+  message(target.banner, 'ok', 'Update installed');
+}
+
+/** RF-55: the dismissal is per version, and the backend keeps it in the machine's preferences. */
+async function dismissNotice(version: string): Promise<void> {
+  try {
+    await call('bond.dismissUpdate', { version });
+  } catch (e) {
+    showBanner(e);
+    return;
+  }
+  update = null;
+  renderNotice();
+}
+
 async function runTools(action: () => Promise<ToolsState>): Promise<void> {
   clearBanner();
   let state: ToolsState;
@@ -619,6 +702,7 @@ function render(): void {
   if (shell === null) buildShell();
   renderSidebar();
   renderContent();
+  renderNotice();
 }
 
 async function boot(): Promise<void> {
@@ -666,6 +750,11 @@ on('catalog', () => {
 
 on('palette', () => {
   openPaletteNow();
+});
+
+on('update', (next) => {
+  update = next;
+  renderNotice();
 });
 
 async function loadCatalog(): Promise<void> {

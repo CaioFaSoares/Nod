@@ -14,7 +14,10 @@ const BASE: Record<string, unknown> = {
   id: 'studio.copland.bond',
   version: '0.1.0',
   frontend: { dist: 'dist', devUrl: 'http://127.0.0.1:5173' },
+  permissions: { camera: 'why camera', microphone: 'why microphone' },
 };
+
+const TOOL = ['login.report', 'media.camera', 'media.microphone'];
 
 async function exampleSeed(): Promise<Seed> {
   const url = new URL('../resources/seed.example.json', import.meta.url);
@@ -69,8 +72,8 @@ describe('generateConfig', () => {
     const o = origins(config);
 
     expect(o['file://*']).toBe('all');
-    expect(o['https://kanban.example.com']).toEqual(['login.report']);
-    expect(o['https://docs.example.com']).toEqual(['login.report']);
+    expect(o['https://kanban.example.com']).toEqual(TOOL);
+    expect(o['https://docs.example.com']).toEqual(TOOL);
     expect(Object.keys(o).sort()).toEqual([
       'file://*',
       'https://docs.example.com',
@@ -110,6 +113,25 @@ describe('generateConfig', () => {
     );
   });
 
+  test('build without camera and microphone usage strings fails (macOS kills the app)', async () => {
+    const s = await exampleSeed();
+    const { permissions: _, ...bare } = BASE;
+    expect(() => generateConfig(bare, s, 'build')).toThrow('permissions');
+    expect(() => generateConfig({ ...BASE, permissions: { camera: 'x' } }, s, 'build')).toThrow(
+      'permissions',
+    );
+    expect(() => generateConfig({ ...BASE, permissions: { camera: ' ', microphone: 'x' } }, s, 'build')).toThrow(
+      'permissions',
+    );
+    expect(generateConfig(BASE, s, 'build').permissions).toEqual(BASE.permissions);
+  });
+
+  test('the real tinyjs.base.json builds with camera and microphone usage strings', async () => {
+    const base = JSON.parse(await Bun.file(new URL('../tinyjs.base.json', import.meta.url)).text());
+    const config = generateConfig(base, await exampleSeed(), 'build');
+    expect(config.permissions).toEqual({ camera: expect.any(String), microphone: expect.any(String) });
+  });
+
   test('dev without a seed releases only the app pages', () => {
     const config = generateConfig(BASE, null, 'dev');
 
@@ -121,7 +143,7 @@ describe('generateConfig', () => {
     const o = origins(generateConfig(BASE, await exampleSeed(), 'dev'));
 
     expect(o['http://127.0.0.1:5173']).toBe('all');
-    expect(o['https://kanban.example.com']).toEqual(['login.report']);
+    expect(o['https://kanban.example.com']).toEqual(TOOL);
   });
 
   test('dev on another port moves the page gate and the dev url together', () => {
@@ -144,7 +166,7 @@ describe('generateConfig', () => {
       'build',
     );
 
-    expect(origins(config)['https://x.example.com']).toEqual(['login.report']);
+    expect(origins(config)['https://x.example.com']).toEqual(TOOL);
     expect(Object.keys(origins(config)).sort()).toEqual(['file://*', 'https://x.example.com']);
   });
 

@@ -15,5 +15,9 @@
   "urlScheme": "bond",
   "popups": "window",
   "downloads": "auto",
-  "contextMenu": true
+  "contextMenu": true,
+  "permissions": {
+    "camera": "Tools you open in Bond, like video calls, can use the camera.",
+    "microphone": "Tools you open in Bond, like video calls, can use the microphone."
+  }
 }

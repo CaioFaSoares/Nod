@@ -313,6 +313,8 @@ export interface ApiContract {
   'bond.info': [void, AppInfo];
   'bond.checkUpdate': [void, UpdateInfo];
   'bond.installUpdate': [void, boolean];
+  /** RF-55: hides the notice of one version on this machine; only the version string is stored. */
+  'bond.dismissUpdate': [{ version: string }, true];
   'bond.quit': [void, true];
 
   /** The only call accepted from tool windows (the tool's origin). */
@@ -333,6 +335,13 @@ export interface PushEvents {
   catalog: null;
   /** a global shortcut asked the main window to open the command palette */
   palette: null;
+  /**
+   * RF-55: the automatic check of the release channel (backend/main.ts). The notice to show, or
+   * `null` when there is nothing to announce — no channel, no newer release, or that version was
+   * dismissed on this machine. A dismissed version never comes back through here; Settings' manual
+   * check (`bond.checkUpdate`) answers with it regardless.
+   */
+  update: UpdateInfo | null;
 }
 
 /** The single management window (canonico §7). */

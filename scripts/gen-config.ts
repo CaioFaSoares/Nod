@@ -20,6 +20,22 @@ const DEFAULT_DEV_PORT = 5173;
 const FILE_ORIGIN = 'file://*';
 const MISSING_SEED_MESSAGE =
   'private seed missing: resources/seed.json (see resources/seed.example.json)';
+const MISSING_PERMISSIONS_MESSAGE =
+  'tinyjs.base.json must declare "permissions": { "camera": "...", "microphone": "..." }';
+
+/** What an org tool's origin may call: report the login result, use camera and microphone. */
+const TOOL_METHODS = ['login.report', 'media.camera', 'media.microphone'] as const;
+
+/** The base config carries a non-empty usage string for both camera and microphone. */
+function hasMediaPermissions(base: Record<string, unknown>): boolean {
+  const p = base.permissions;
+  if (p === null || typeof p !== 'object') return false;
+  const text = (key: string): boolean => {
+    const v: unknown = (p as Record<string, unknown>)[key];
+    return typeof v === 'string' && v.trim() !== '';
+  };
+  return text('camera') && text('microphone');
+}
 
 /** Files the release always ships from `resources/`, before the relative entry icons. */
 const BUNDLED = ['seed.json', 'tray.png'];
@@ -79,6 +95,9 @@ export function generateConfig(
   devPort: number = DEFAULT_DEV_PORT,
 ): Record<string, unknown> {
   if (mode === 'build' && seed === null) throw new Error(MISSING_SEED_MESSAGE);
+  // macOS kills a packaged app whose page captures camera or microphone without the usage strings
+  // (tinyjs docs, "Mic + camera"); a call tool would crash the release, so the build refuses it.
+  if (mode === 'build' && !hasMediaPermissions(base)) throw new Error(MISSING_PERMISSIONS_MESSAGE);
 
   const tools = seed === null ? [] : toolOrigins(seed);
   for (const origin of tools) {
@@ -89,9 +108,10 @@ export function generateConfig(
 
   const origins: Record<string, 'all' | string[]> = { [FILE_ORIGIN]: 'all' };
   if (mode === 'dev') origins[`http://127.0.0.1:${devPort}`] = 'all';
-  // Tool origins come last: none of them can inherit `"all"`, and none of them needs more than
-  // reporting the login result.
-  for (const origin of tools) origins[origin] = ['login.report'];
+  // Tool origins come last and never inherit `"all"`. Org tools (the release seed) report the login
+  // result and get camera and microphone without the per-site prompt; any other origin keeps the
+  // engine's own prompt, which is the warning for links from outside the org.
+  for (const origin of tools) origins[origin] = [...TOOL_METHODS];
 
   const config: Record<string, unknown> = { ...base };
   config.api = { origins };

@@ -15,14 +15,26 @@
 // `.build/`: `tinyjs dev` takes that directory as cwd and recreates it on start, wiping whatever is
 // inside.
 //
+// Besides the page-driven steps, the harness derives the SP02 §1 key vectors under the tinyjs runtime
+// binary (`bin/tjs`, the txiki.js process the app's backend runs on) and compares them with the
+// pinned hex (`KDF_VECTORS`): same bytes in Bun and in the Bond runtime, or the smoke fails.
+//
 // The run holds its own dev port (`BOND_DEV_PORT`, `SMOKE_DEV_PORT` below) for `gen-config` and for
 // the `tinyjs dev` child, so the smoke never takes the port a developer's `bun run app:dev` is
 // already using; the last regeneration drops the variable and leaves the default 5173 config.
 import type { ChildProcess } from 'node:child_process';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, platform } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import type { Tools } from './tools';
 import { startTools } from './tools';
 
@@ -40,6 +52,10 @@ const SEED = join(ROOT, 'resources', 'seed.json');
 const SEED_BACKUP = join(GENERATED_DIR, 'seed.json.bak');
 const TINYJS_JSON = join(ROOT, 'tinyjs.json');
 const EXPORT_PATH = join(GENERATED_DIR, 'events.jsonl');
+
+/** The key-vector driver and its bundle, both generated (test/smoke/.gerado/ is gitignored). */
+const KDF_DRIVER = join(GENERATED_DIR, 'kdf-driver.ts');
+const KDF_OUTDIR = join(GENERATED_DIR, 'kdf');
 
 /** Marker of the `smoke.html` template, replaced by the JSON of the origins. */
 const MARKER = '__CONFIG__';
@@ -243,6 +259,189 @@ function checkExport(): { ok: boolean; detail: string } {
   return { ok: true, detail: `${lines.length} event(s), no secret` };
 }
 
+// ------------------------------------------------------------- SP02 §1 in the Bond runtime
+
+/**
+ * The three SP02 §1 vectors: the same triples and the same pinned hex as `test/auth.test.ts`.
+ *
+ * Kept in both files because a `bun:test` module cannot be imported outside the test runner
+ * (`describe` throws there), and this check has to compare the Bond runtime against the pinned bytes
+ * instead of against Bun. Change one copy and the other fails — `bun test test/auth.test.ts` here and
+ * the smoke below.
+ */
+const KDF_VECTORS = [
+  {
+    password: 'correct horse battery staple',
+    saltHex: '000102030405060708090a0b0c0d0e0f',
+    iterations: 1000,
+    authKey: '8f5d9631b2425febae77676239724baadfc150a78186996166bba91ea20a33a4',
+    vaultKey: '3e1717afd122bc46c5ef27e03b4ac87180f174aec27dfc6d87fcfc7fb8a271e6',
+    localKey: '254aec6c6d53cd77a078fac64513d3ff5969ba41b50638724ed279a27aa2bfc9',
+  },
+  {
+    // 'café-Ünicode-pässwörd' typed with combining marks (NFD); the pinned hex is the NFC one.
+    password: 'cafe\u0301-U\u0308nicode-pa\u0308sswo\u0308rd',
+    saltHex: 'ffeeddccbbaa99887766554433221100',
+    iterations: 1000,
+    authKey: 'e94fe009e769ebc5ae5e2f5e0518c42ac3cb077f99bffb22938642e20355de04',
+    vaultKey: 'c54112e99b6b8f73e272ba3021aba0a7430067d9324e6a5e3ebf2e6fd3074934',
+    localKey: '0be6e4c41ba9235af51ff4afa2273d404cf89c8bf13e46a1dcd3602b6924a356',
+  },
+  {
+    password: 'bond-h3-third-vector',
+    saltHex: '00112233445566778899aabbccddeeff',
+    iterations: 600_000,
+    authKey: 'c755c494f743b2df0c76cca56b08d44e1e26bfaa5ccf5be8aa1a3ddf15eef43d',
+    vaultKey: 'a740caf4e1c9be6a719165afe7263b9edc8c2d63995b8241f09839c8b7a2462a',
+    localKey: '5a91a24b2e32e0c48324b973b7a0cdba980397437a01b09ee1526c2990a43ef4',
+  },
+];
+
+/** JSON shape the generated driver prints on its last line. */
+interface DerivedVectors {
+  ms: number;
+  derived: Record<string, string>[];
+}
+
+/**
+ * The Bond runtime: `<tinyjs home>/bin/tjs`, the txiki.js binary the tinyjs launcher execs
+ * (`~/.tinyjs/tinyjs` is `exec "$DIR/bin/tjs" run "$DIR/cli.js"`). `TINYJS_HOME` and the launcher on
+ * PATH come first, so no install path is hardcoded.
+ */
+function runtimeBinary(): string | null {
+  const name = platform() === 'win32' ? 'tjs.exe' : 'tjs';
+  const launcher = Bun.which('tinyjs');
+  const candidates = [
+    ...(process.env.TINYJS_HOME ? [join(process.env.TINYJS_HOME, 'bin', name)] : []),
+    ...(launcher === null ? [] : [join(dirname(realpathSync(launcher)), 'bin', name)]),
+    join(homedir(), '.tinyjs', 'bin', name),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+}
+
+/**
+ * Source of the generated driver: it imports the real `shared/auth.ts` (bundled by the runner) and
+ * derives the three triples, printing one JSON line. An async IIFE with no top-level await, so the
+ * bundle needs no module system in the runtime.
+ */
+function kdfDriver(): string {
+  const triples = KDF_VECTORS.map(({ password, saltHex, iterations }) => ({
+    password,
+    saltHex,
+    iterations,
+  }));
+  return `// GENERATED by test/smoke/run.ts — the SP02 §1 triples, derived here by the Bond runtime.
+import { deriveKeys } from '${relative(GENERATED_DIR, join(ROOT, 'shared', 'auth'))}';
+
+const TRIPLES = ${JSON.stringify(triples, null, 2)};
+
+function bytesOf(hex) {
+  return new Uint8Array((hex.match(/../g) || []).map((pair) => parseInt(pair, 16)));
+}
+
+function hexOf(bytes) {
+  let hex = '';
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0');
+  return hex;
+}
+
+(async function () {
+  const started = Date.now();
+  const derived = [];
+  for (const triple of TRIPLES) {
+    const keys = await deriveKeys(triple.password, bytesOf(triple.saltHex), triple.iterations);
+    derived.push({
+      authKey: hexOf(keys.authKey),
+      vaultKey: hexOf(keys.vaultKey),
+      localKey: hexOf(keys.localKey),
+    });
+  }
+  console.log(JSON.stringify({ ms: Date.now() - started, derived: derived }));
+})();
+`;
+}
+
+/**
+ * The same three vectors derived by the Bond runtime instead of Bun: a bundle of the real
+ * `shared/auth.ts` runs under the txiki.js binary the app's backend runs on, and the result is
+ * compared with the pinned hex. PBKDF2, HMAC-SHA256 and the NFC step must agree in both runtimes, or
+ * H3 fails (`shared/context.md`: a vector that differs between runtimes blocks the story).
+ */
+async function checkKdfVectors(): Promise<{ ok: boolean; detail: string }> {
+  const binary = runtimeBinary();
+  if (binary === null) {
+    return {
+      ok: false,
+      detail: 'the tinyjs runtime binary was not found (TINYJS_HOME, tinyjs on PATH or ~/.tinyjs/bin/tjs)',
+    };
+  }
+
+  mkdirSync(KDF_OUTDIR, { recursive: true });
+  writeFileSync(KDF_DRIVER, kdfDriver());
+  const built = await Bun.build({
+    entrypoints: [KDF_DRIVER],
+    target: 'browser',
+    format: 'iife',
+    outdir: KDF_OUTDIR,
+  }).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+  if (built instanceof Error) return { ok: false, detail: `bundling the vectors failed: ${built.message}` };
+  if (!built.success || built.outputs.length === 0) {
+    return {
+      ok: false,
+      detail: `bundling the vectors failed: ${built.logs.map((log) => log.message).join('; ')}`,
+    };
+  }
+
+  const run = Bun.spawnSync([binary, 'run', built.outputs[0].path], {
+    cwd: ROOT,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const stdout = run.stdout?.toString() ?? '';
+  const stderr = run.stderr?.toString() ?? '';
+  if (run.exitCode !== 0) {
+    return {
+      ok: false,
+      detail: `the Bond runtime exited ${run.exitCode}: ${(stderr || stdout).trim().slice(-400)}`,
+    };
+  }
+
+  let output: DerivedVectors;
+  try {
+    output = JSON.parse(
+      stdout
+        .trim()
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .pop() ?? '',
+    );
+  } catch {
+    return {
+      ok: false,
+      detail: `the Bond runtime printed no JSON: ${(stdout || stderr).trim().slice(-400)}`,
+    };
+  }
+  if (output.derived?.length !== KDF_VECTORS.length) {
+    return {
+      ok: false,
+      detail: `the Bond runtime derived ${output.derived?.length ?? 0} of ${KDF_VECTORS.length} vectors`,
+    };
+  }
+
+  for (let index = 0; index < KDF_VECTORS.length; index++) {
+    for (const name of ['authKey', 'vaultKey', 'localKey'] as const) {
+      const obtained = output.derived[index][name];
+      if (obtained !== KDF_VECTORS[index][name]) {
+        return {
+          ok: false,
+          detail: `vector ${index + 1} ${name}: the Bond runtime gave ${obtained}, expected ${KDF_VECTORS[index][name]}`,
+        };
+      }
+    }
+  }
+  return { ok: true, detail: `${KDF_VECTORS.length} vectors matched in ${output.ms} ms (${binary})` };
+}
+
 async function main(): Promise<number> {
   if (existsSync(SEED) && !process.argv.includes('--force')) {
     console.error("refused: resources/seed.json exists (it is the owner's private seed).");
@@ -352,6 +551,9 @@ async function main(): Promise<number> {
     const exportCheck = checkExport();
     console.log(`export: ${exportCheck.ok ? 'ok' : 'FAILED'} ${exportCheck.detail}`);
 
+    const kdfCheck = await checkKdfVectors();
+    console.log(`kdf vectors: ${kdfCheck.ok ? 'ok' : 'FAILED'} ${kdfCheck.detail}`);
+
     if (!result.ok) {
       console.error(`smoke without result: ${result.error}`);
       if (result.steps.length > 0) console.error(`(partial above: ${result.steps.length} step(s) recorded)`);
@@ -368,6 +570,10 @@ async function main(): Promise<number> {
     }
     if (!exportCheck.ok) {
       console.error(`export check failed: ${exportCheck.detail}`);
+      return 1;
+    }
+    if (!kdfCheck.ok) {
+      console.error(`kdf vectors check failed: ${kdfCheck.detail}`);
       return 1;
     }
     console.log(`smoke ok: ${result.steps.length} steps`);

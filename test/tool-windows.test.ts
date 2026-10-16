@@ -3,12 +3,19 @@
 // with `closeAll`/`restore` (RF-06), `reconcile` and the global shortcuts (canonico §7, §10, §13).
 //
 // The fake records every call the module makes to the runtime. Time is under `vi`'s control, so
-// the 4 s re-check is advanced, never waited for.
+// the 4 s re-check is advanced, never waited for. The fill gate (RF-38) runs against the real
+// `backend/repo.ts` and `backend/vault.ts`: there the entry address and the saved origin come from
+// SQLite, so the cascade reads what the person actually saved the credential for.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
+import { createRepo } from '../backend/repo';
 import { createToolWindows } from '../backend/tool-windows';
+import { createVault } from '../backend/vault';
+import { memorySqlite } from './helpers/sqlite-bun';
+import type { Repo } from '../backend/repo';
 import type { ToolWindows, ToolWindowsDeps } from '../backend/tool-windows';
-import type { Entry, Id, ToolStatus } from '../shared/types';
+import type { Vault } from '../backend/vault';
+import type { Entry, Id, PasswordHash, Person, SecretStore, ToolStatus } from '../shared/types';
 
 const ENTRY_URL = 'https://kanban.example/app';
 const ENTRY_AUDIT = 'https://kanban.example/app';
@@ -97,9 +104,9 @@ interface FakeState {
   screens: FakeScreen[];
   main: Rect | null;
   credential: { username: string; secret: string } | null;
-  /** The vault index: it decides the fill, and it is independent of `credential` (the keychain) —
-   *  the desync case is a real one. */
-  hasCredential: boolean;
+  /** The vault index: the origin the credential was saved for. It decides the fill, and it is
+   *  independent of `credential` (the keychain) — the desync case is a real one. */
+  vaultOrigin: string | null;
   failEval: boolean;
   /** true makes `win.open` throw, the way the launcher does when it refuses a window */
   failOpen: boolean;
@@ -140,7 +147,7 @@ function fakeEnvironment(): FakeEnvironment {
     screens: [BIG_SCREEN],
     main: { x: 100, y: 80, width: 900, height: 600 },
     credential: { username: 'ana', secret: 's3cret' },
-    hasCredential: true,
+    vaultOrigin: 'https://kanban.example',
     failEval: false,
     failOpen: false,
   };
@@ -214,7 +221,7 @@ function fakeEnvironment(): FakeEnvironment {
       calls.credential += 1;
       return state.credential;
     },
-    hasCredential: () => state.hasCredential,
+    vaultOrigin: () => state.vaultOrigin,
     record: (event) => {
       records.push({
         toolId: event.toolId,
@@ -260,6 +267,72 @@ function handle(env: FakeEnvironment, id: string): FakeHandle {
   const found = env.handles.get(id);
   if (found === undefined) throw new Error(`no fake handle for ${id}`);
   return found;
+}
+
+// ---------------------------------------------------------------- real catalog and vault
+
+// The fill gate is the one place in this module that reads the catalog and the vault, so those
+// tests put the real `backend/repo.ts` and `backend/vault.ts` behind the dependencies (RF-38):
+// the entry address and the origin the credential was saved for come from SQLite, never from the
+// fake state. Only the runtime stays fake — the adapter script is recorded, never executed.
+
+function memoryKeychain(): SecretStore {
+  const items = new Map<string, string>();
+  return {
+    async get(key) {
+      return items.get(key) ?? null;
+    },
+    async set(key, value) {
+      items.set(key, value);
+      return true;
+    },
+    async delete(key) {
+      return items.delete(key);
+    },
+  };
+}
+
+const VAULT_PASSWORD: PasswordHash = {
+  algorithm: 'PBKDF2-SHA256',
+  hash: 'aGFzaC1ub3QtdXNlZA==',
+  salt: 'c2FsdC1ub3QtdXNlZA==',
+  iterations: 1000,
+};
+
+interface Catalog {
+  repo: Repo;
+  vault: Vault;
+  person: Person;
+}
+
+/** A real repository holding `entry`, with a real vault and one person. */
+function catalog(entry: Entry): Catalog {
+  const repo = createRepo(memorySqlite());
+  repo.migrate();
+  // The entry's grants are foreign keys into `role`: the roles it names have to exist.
+  for (const roleId of entry.roles) repo.saveRole({ id: roleId, name: roleId, admin: false });
+  repo.saveEntry(entry);
+  const vault = createVault({ repo, keychain: memoryKeychain() });
+  const person = repo.createPerson({
+    email: 'ana@example.test',
+    name: 'Ana',
+    password: VAULT_PASSWORD,
+    roles: [],
+  });
+  return { repo, vault, person };
+}
+
+/** The fake runtime with that real catalog behind the window dependencies. */
+function makeCatalogToolWindows(env: FakeEnvironment, catalog: Catalog): ToolWindows {
+  return makeToolWindows(env, {
+    ...env.deps,
+    entries: () => catalog.repo.listEntries().filter((entry) => entry.active),
+    credential: async (toolId) => {
+      env.calls.credential += 1;
+      return catalog.vault.read(catalog.person.id, toolId);
+    },
+    vaultOrigin: (toolId) => catalog.repo.vaultOrigin(catalog.person.id, toolId),
+  });
 }
 
 function tool(toolWindows: ToolWindows, id: Id): ToolStatus {
@@ -725,7 +798,7 @@ describe('tool windows — login cascade', () => {
 
   test('a tool with no credential in the vault index ends in session, never in filled', async () => {
     const env = fakeEnvironment();
-    env.state.hasCredential = false;
+    env.state.vaultOrigin = null;
     const toolWindows = makeToolWindows(env);
     await toolWindows.open('kanban');
     toolWindows.onNavigate(nav({ kind: 'finish', url: FINISH_URL }));
@@ -743,7 +816,7 @@ describe('tool windows — login cascade', () => {
 
   test('an index that has the item and a keychain that lost it gives the attempt back', async () => {
     const env = fakeEnvironment();
-    env.state.credential = null; // `hasCredential` stays true: the index has the item
+    env.state.credential = null; // `vaultOrigin` still matches: the index has the item
     const toolWindows = makeToolWindows(env);
     await toolWindows.open('kanban');
     toolWindows.onNavigate(nav({ kind: 'finish', url: ENTRY_URL }));
@@ -763,6 +836,91 @@ describe('tool windows — login cascade', () => {
     expect(env.records.filter((event) => event.type === 'login')).toEqual([
       { toolId: 'kanban', type: 'login', url: ENTRY_AUDIT, result: 'session', detail: null },
     ]);
+  });
+
+  test('a credential saved for the entry origin is filled into the form (RF-38)', async () => {
+    const env = fakeEnvironment();
+    const c = catalog(KANBAN);
+    await c.vault.save(c.person.id, { toolId: 'kanban', username: 'ana', secret: 's3cret' });
+    const toolWindows = makeCatalogToolWindows(env, c);
+
+    await toolWindows.open('kanban');
+    toolWindows.onNavigate(nav({ kind: 'finish', url: FINISH_URL }));
+    await settle();
+
+    expect(c.repo.vaultOrigin(c.person.id, 'kanban')).toBe('https://kanban.example');
+    expect(env.calls.credential).toBe(1);
+    expect(handle(env, 'tool_kanban').evals).toHaveLength(1);
+    expect(handle(env, 'tool_kanban').evals[0]).toContain('"fill":true');
+    expect(handle(env, 'tool_kanban').evals[0]).toContain('"username":"ana"');
+    expect(handle(env, 'tool_kanban').evals[0]).toContain('"secret":"s3cret"');
+  });
+
+  test('a local edit that moves the tool to another origin stops the fill (RF-38)', async () => {
+    const env = fakeEnvironment();
+    const c = catalog(KANBAN);
+    await c.vault.save(c.person.id, { toolId: 'kanban', username: 'ana', secret: 's3cret' });
+    // Settings: the person edits the address of the tool it saved a credential for.
+    c.repo.saveEntry({ ...KANBAN, url: 'https://moved.example/app' });
+    const toolWindows = makeCatalogToolWindows(env, c);
+
+    await toolWindows.open('kanban');
+    expect(env.opened[0]?.options.page).toBe('https://moved.example/app');
+    toolWindows.onNavigate(nav({ kind: 'finish', url: 'https://moved.example/app' }));
+    await settle();
+
+    // The keychain is never read: the origin the credential was saved for is another one.
+    expect(env.calls.credential).toBe(0);
+    expect(handle(env, 'tool_kanban').evals).toHaveLength(1);
+    expect(handle(env, 'tool_kanban').evals[0]).toContain('"fill":false');
+    expect(handle(env, 'tool_kanban').evals[0]).not.toContain('s3cret');
+    toolWindows.onReport('tool_kanban', 'form', 'https://moved.example');
+    await settle();
+    // Acts as a tool with no credential: the cascade ends in manual, never in filled/failed.
+    expect(tool(toolWindows, 'kanban').login).toBe('manual');
+  });
+
+  test('a host sync that rewrites the entry with another address stops the fill (RF-38)', async () => {
+    const env = fakeEnvironment();
+    const c = catalog(KANBAN);
+    await c.vault.save(c.person.id, { toolId: 'kanban', username: 'ana', secret: 's3cret' });
+    // A snapshot apply writes the entry whole, so the swapped address arrives through `saveEntry`.
+    c.repo.saveEntry({
+      ...KANBAN,
+      url: 'https://swapped.example/app',
+      views: [{ label: 'Sprint', url: 'https://swapped.example/boards/42', mode: 'window' }],
+    });
+    const toolWindows = makeCatalogToolWindows(env, c);
+
+    await toolWindows.open('kanban');
+    toolWindows.onNavigate(nav({ kind: 'finish', url: 'https://swapped.example/app' }));
+    await settle();
+
+    expect(env.calls.credential).toBe(0);
+    expect(handle(env, 'tool_kanban').evals).toHaveLength(1);
+    expect(handle(env, 'tool_kanban').evals[0]).toContain('"fill":false');
+    expect(handle(env, 'tool_kanban').evals[0]).not.toContain('s3cret');
+    toolWindows.onReport('tool_kanban', 'form', 'https://swapped.example');
+    await settle();
+    expect(tool(toolWindows, 'kanban').login).toBe('manual');
+  });
+
+  test('an address change inside the saved origin still fills (RF-38)', async () => {
+    const env = fakeEnvironment();
+    const c = catalog(KANBAN);
+    await c.vault.save(c.person.id, { toolId: 'kanban', username: 'ana', secret: 's3cret' });
+    // Another path on the same origin: the credential belongs to the origin, not to the page.
+    c.repo.saveEntry({ ...KANBAN, url: 'https://kanban.example/renewed' });
+    const toolWindows = makeCatalogToolWindows(env, c);
+
+    await toolWindows.open('kanban');
+    toolWindows.onNavigate(nav({ kind: 'finish', url: 'https://kanban.example/renewed' }));
+    await settle();
+
+    expect(env.calls.credential).toBe(1);
+    expect(handle(env, 'tool_kanban').evals).toHaveLength(1);
+    expect(handle(env, 'tool_kanban').evals[0]).toContain('"origin":"https://kanban.example"');
+    expect(handle(env, 'tool_kanban').evals[0]).toContain('"fill":true');
   });
 
   test('the tool override noFill keeps the credential out of the page', async () => {

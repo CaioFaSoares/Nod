@@ -1,4 +1,4 @@
-// Local password, invites and unlock backoff (canonico §9, §11).
+// Local password, invite codes, key derivation and unlock backoff (canonico §9, §11; SP02).
 // Pure logic: only WebCrypto, TextEncoder, btoa/atob. No tjs, tiny or DOM.
 // Signatures: docs/arquitetura.md §3.
 
@@ -66,6 +66,64 @@ function equalInConstantTime(a: Uint8Array, b: Uint8Array): boolean {
   let difference = 0;
   for (let i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
   return difference === 0;
+}
+
+// ------------------------------------------------------------- keys (SP02 §1)
+
+/**
+ * The three 32-byte keys SP02 §1 derives from one password. Raw bytes on purpose: each side encodes
+ * what its own wire or storage needs (`base64url(authKey)` in the host calls, `SHA-256(localKey)` in
+ * the local unlock check) and the derivation stays one definition.
+ */
+export interface DerivedKeys {
+  /** Sent to the host on activation and sign-in; there it becomes `argon2id(authKey)` (SP02 §2). */
+  authKey: Uint8Array<ArrayBuffer>;
+  /** Never leaves the machine: it encrypts each vault value before the keychain (SP02 §8). */
+  vaultKey: Uint8Array<ArrayBuffer>;
+  /** Offline unlock check: `base64url(SHA-256(localKey))` is the `check` of `PasswordHashV2` (SP02 §6). */
+  localKey: Uint8Array<ArrayBuffer>;
+}
+
+/** SP02 §1: one HMAC-SHA256 label per key. Changing a label changes every key derived from it. */
+const KEY_LABELS = {
+  authKey: 'bond/auth/v1',
+  vaultKey: 'bond/vault/v1',
+  localKey: 'bond/local/v1',
+} as const;
+
+/** HMAC-SHA256(key, UTF-8 data) → 32 bytes. */
+async function hmac(key: Uint8Array<ArrayBuffer>, data: string): Promise<Uint8Array<ArrayBuffer>> {
+  const imported = await crypto.subtle.importKey(
+    'raw',
+    key,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', imported, new TextEncoder().encode(data));
+  return new Uint8Array(signature);
+}
+
+/**
+ * `deriveKeys(password, salt, iterations) → { authKey, vaultKey, localKey }` (SP02 §1).
+ *
+ * One PBKDF2 per unlock or sign-in, then three cheap HMACs over `master`. The password is Unicode
+ * NFC before it becomes UTF-8 bytes, so an NFD input derives the same keys as its NFC form. Only
+ * `crypto.subtle`, so the bytes are the same in the host (Bun) and in the Bond backend (txiki.js):
+ * the pinned vectors of `test/auth.test.ts` are derived again in the Bond runtime by the smoke
+ * (`test/smoke/run.ts`).
+ */
+export async function deriveKeys(
+  password: string,
+  salt: Uint8Array<ArrayBuffer>,
+  iterations: number,
+): Promise<DerivedKeys> {
+  const master = await derive(password.normalize('NFC'), salt, iterations);
+  return {
+    authKey: await hmac(master, KEY_LABELS.authKey),
+    vaultKey: await hmac(master, KEY_LABELS.vaultKey),
+    localKey: await hmac(master, KEY_LABELS.localKey),
+  };
 }
 
 // ------------------------------------------------------------- passwords

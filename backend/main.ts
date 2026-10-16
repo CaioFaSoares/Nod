@@ -25,6 +25,7 @@ import type {
   Seed,
   SessionState,
   ToolsState,
+  UpdateInfo,
 } from '../shared/types';
 import { createIcons } from './icons';
 import { probe } from './probe-net';
@@ -53,6 +54,15 @@ let tray = false;
 let bundledSeed: Seed | null = null;
 /** Why the database could not be opened, when it could not: every handler answers with it (§4). */
 let bootFailure: string | null = null;
+/** RF-55: the notice the main window shows, `null` while there is nothing to announce. */
+let updateNotice: UpdateInfo | null = null;
+
+/** How often the background check of the update channel runs (RF-55). */
+const UPDATE_CHECK_MS = 24 * 60 * 60 * 1000;
+/** The window needs a moment before it can take a push, so the first check waits for it (RF-55). */
+const UPDATE_FIRST_CHECK_MS = 5_000;
+/** `store` key of the version whose notice was dismissed: one version string, never a secret. */
+const DISMISSED_UPDATE_KEY = 'dismissed_update';
 
 /** Data URI of each entry's icon: the tool-window API asks for an icon synchronously. */
 const iconCache = new Map<Id, string>();
@@ -111,7 +121,7 @@ export async function init(app: TinyApp): Promise<void> {
     entries: () => visibleEntriesOf(),
     icon: (id) => iconCache.get(id) ?? null,
     credential: (toolId) => credentialOf(toolId),
-    hasCredential: (toolId) => hasCredentialOf(toolId),
+    vaultOrigin: (toolId) => vaultOriginOf(toolId),
     record: (event) => {
       // The tool windows do not know the session: this side fills the person in (canonico §13).
       const person = currentPerson();
@@ -130,6 +140,9 @@ export async function init(app: TinyApp): Promise<void> {
   // With a tray, closing the main window hides it and the tool windows keep running (RF-15); with
   // no tray the main window's own close quits the app.
   if (tray) app.win.setHideOnClose(true);
+
+  // RF-55: armed last, so the check never sits on the boot path; without a channel it is a no-op.
+  startUpdateWatch();
 }
 
 // ---------------------------------------------------------------- database boot
@@ -208,15 +221,11 @@ function credentialOf(toolId: Id): Promise<{ username: string; secret: string } 
   return store === null || person === null ? Promise.resolve(null) : store.read(person.id, toolId);
 }
 
-/**
- * §4: whether the vault index holds a credential for the tool. Synchronous, and only the index —
- * the cascade counts the fill attempt by it (`hasCredential` in `ToolWindowsDeps`), so a tool
- * without a credential ends its cascade in `session` instead of `filled`.
- */
-function hasCredentialOf(toolId: Id): boolean {
+/** The origin the person's credential for this tool was saved for; null without an item (RF-38). */
+function vaultOriginOf(toolId: Id): string | null {
   const r = repo;
   const person = currentPerson();
-  return r !== null && person !== null && r.vaultItem(person.id, toolId) !== null;
+  return r === null || person === null ? null : r.vaultOrigin(person.id, toolId);
 }
 
 /** The page and the tool windows read an entry's icon as a data URI (canonico §8). */
@@ -447,6 +456,60 @@ function push<K extends keyof PushEvents>(event: K, data: PushEvents[K]): void {
   if (runtime !== null) runtime.push(event, data);
 }
 
+/**
+ * Version whose notice was dismissed on this machine, from `store`. Only the version string is
+ * kept there (RF-55): no address, no token, nothing that belongs in the keychain.
+ */
+async function dismissedUpdate(): Promise<string | null> {
+  const app = runtime;
+  if (app === null) return null;
+  try {
+    const raw = await app.store.get(DISMISSED_UPDATE_KEY);
+    return typeof raw === 'string' && raw !== '' ? raw : null;
+  } catch {
+    // An unreadable preference is not a reason to stop checking.
+    return null;
+  }
+}
+
+/**
+ * RF-55: checks the release channel and pushes the notice. Nothing here blocks the boot — `init`
+ * only arms the timer — and nothing here installs: installing is the person's call (A13,
+ * `bond.installUpdate`). A failure turns into one audit event with the reason and nothing else.
+ */
+async function refreshUpdateNotice(): Promise<void> {
+  const app = runtime;
+  const r = repo;
+  if (app === null || r === null || bundledSeed === null || bundledSeed.update === null) return;
+  let info: UpdateInfo;
+  try {
+    info = await app.update.check();
+  } catch (error) {
+    // Offline is normal; the event is the whole trace of it.
+    r.addEvent({
+      personId: null,
+      toolId: null,
+      type: 'update',
+      url: null,
+      result: 'failed',
+      detail: reason(error),
+    });
+    return;
+  }
+  const latest = info.latest;
+  updateNotice =
+    info.available && latest !== null && latest !== (await dismissedUpdate()) ? info : null;
+  push('update', updateNotice);
+}
+
+/** RF-55: one check shortly after the launch, then one every 24 hours. Without a channel the seed
+ * names, none of this runs — no address in the code, no call out of a Bond that has no channel. */
+function startUpdateWatch(): void {
+  if (bundledSeed === null || bundledSeed.update === null) return;
+  setTimeout(() => void refreshUpdateNotice(), UPDATE_FIRST_CHECK_MS);
+  setInterval(() => void refreshUpdateNotice(), UPDATE_CHECK_MS);
+}
+
 /** §4: unlocking or creating an account pushes session and tools, then restores the open tools. */
 async function afterUnlock(state: SessionState): Promise<SessionState> {
   const open = required(windows, 'session');
@@ -454,6 +517,8 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
   push('tools', open.state());
   await open.restore();
   push('tools', open.state());
+  // RF-55: the notice the launch check already found, for the window that had not subscribed yet.
+  push('update', updateNotice);
   return state;
 }
 
@@ -1007,6 +1072,22 @@ const methods: { [M in Method]: Handler<M> } = {
       detail: null,
     });
     return required(runtime, 'bond.installUpdate').update.install();
+  },
+
+  /** RF-55: hides the notice of one version on this machine; `store` keeps the version string. */
+  'bond.dismissUpdate': async (params): Promise<true> => {
+    const app = required(runtime, 'bond.dismissUpdate');
+    const version = text(parameters(params, 'invalid dismissal').version, 'invalid version');
+    // `store.set` answers false when it could not write: better to say so than to hide a notice
+    // that comes back on the next launch.
+    if (!(await app.store.set(DISMISSED_UPDATE_KEY, version))) {
+      throw new Error('Bond could not save the dismissal');
+    }
+    if (updateNotice !== null && updateNotice.latest === version) {
+      updateNotice = null;
+      push('update', null);
+    }
+    return true;
   },
 
   'bond.quit': () => {

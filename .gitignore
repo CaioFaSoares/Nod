@@ -28,6 +28,12 @@ resources/seed.json
 tinyjs.json
 .build
 
+# host: dados locais, segredos e backups (SP01 §1, SP07 §2/§4)
+.env
+host/.env
+host/data/
+backups/
+
 # smoke: página gerada (fora de .build, que o tinyjs dev recria)
 test/smoke/.gerado/
 

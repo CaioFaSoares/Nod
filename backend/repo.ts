@@ -25,6 +25,10 @@ import type {
 // `event` has no foreign key on purpose: the audit (§13) survives the removal of the tool or of
 // the person. A revoked person is invisible to every read of `person`; only `countPeople` still
 // sees it (the first-account rule asks whether the database ever held an account).
+//
+// A column a later build added to a table of this schema (SP05 §2) has to be written twice: here,
+// for a database that does not exist yet, and in `addColumns()`, for one that does — every `CREATE`
+// below is `IF NOT EXISTS` and would be skipped whole.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS person (
   id TEXT PRIMARY KEY,
@@ -79,6 +83,7 @@ CREATE TABLE IF NOT EXISTS vault_item (
   keychain_key TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  origin TEXT,
   UNIQUE (person_id, tool_id)
 );
 CREATE TABLE IF NOT EXISTS invite (
@@ -171,6 +176,7 @@ interface VaultRow {
   keychain_key: string;
   created_at: string;
   updated_at: string;
+  origin: string | null;
 }
 
 interface InviteRow {
@@ -256,9 +262,23 @@ export interface Repo {
   // vault index
   listVault(personId: Id): VaultItem[];
   vaultItem(personId: Id, toolId: Id): VaultItem | null;
+  /**
+   * The origin that person's credential for that tool was saved for (SP02 §8, RF-38): the origin a
+   * tool window must be on for the fill to run. `null` when the index holds no item — or an item
+   * with no origin, which no fill may use either.
+   */
+  vaultOrigin(personId: Id, toolId: Id): string | null;
   /** Every person's item of that tool (to clean the keychain when a tool is removed). */
   vaultItemsByTool(toolId: Id): VaultItem[];
-  saveVaultItem(i: { personId: Id; toolId: Id; label: string; username: string; keychainKey: string }): VaultItem;
+  saveVaultItem(i: {
+    personId: Id;
+    toolId: Id;
+    label: string;
+    username: string;
+    keychainKey: string;
+    /** Canonical origin of the tool entry at save time; the fill is bound to it (B9, RF-38). */
+    origin: string;
+  }): VaultItem;
   removeVaultItem(personId: Id, toolId: Id): void;
   /** Returns what it removed: the caller needs the keys to clean the keychain. */
   removeVaultOf(personId: Id): VaultItem[];
@@ -321,10 +341,44 @@ export function createRepo(db: SqlDb): Repo {
   }
 
   /**
+   * Adds a column to a table that already exists. Every `CREATE TABLE` here is `IF NOT EXISTS`, so
+   * a column added to `SCHEMA` never reaches a database whose table is already there: SQLite keeps
+   * the old shape and the whole `CREATE` is skipped (the `meta (chave, valor)` surprise of
+   * `docs/handovers/v2-repo.md`). A column of SP05 §2 therefore lives in both places — in the DDL
+   * above, written with the shape the `ALTER` leaves behind (nullable, appended at the end), and
+   * here, by presence. A migrated database and a fresh one end up the same.
+   */
+  function addColumn(table: string, column: string, definition: string): void {
+    const columns = db.all<{ name: string }>(`PRAGMA table_info(${table})`).map((row) => row.name);
+    if (columns.includes(column)) return;
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  /** The columns a later build added to a table of this schema (SP05 §2). */
+  function addColumns(): void {
+    addColumn('vault_item', 'origin', 'TEXT');
+  }
+
+  /**
+   * B9/RF-38: an item saved before the column existed takes the origin of its tool. That is the
+   * address the entry had when the credential was saved — the same value `saveVaultItem` writes
+   * today — and the only origin the item can be attributed to. An item that already carries one
+   * keeps it: a moved tool must not move the credential with it.
+   */
+  function backfillVaultOrigin(): void {
+    db.run(
+      `UPDATE vault_item
+          SET origin = (SELECT t.origin FROM tool t WHERE t.id = vault_item.tool_id)
+        WHERE origin IS NULL`,
+    );
+  }
+
+  /**
    * §4: `PRAGMA user_version` is the schema version. `2` is already this build's, so the DDL below
    * only completes what is missing; no version at all is a database from before the versioning —
    * empty (a fresh install), v2-shaped (an earlier v2 build: completed and stamped) or v1, which
-   * leaves as `LegacyDatabaseError` without a single write.
+   * leaves as `LegacyDatabaseError` without a single write. The columns of SP05 §2 come after the
+   * DDL, by presence, and the origin of the items written before that column is filled in there.
    */
   function migrate(): void {
     const version = singleRow<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
@@ -335,6 +389,8 @@ export function createRepo(db: SqlDb): Repo {
       throw new LegacyDatabaseError('this database was created by an older Bond');
     }
     db.exec(SCHEMA);
+    addColumns();
+    backfillVaultOrigin();
     if (version === 0) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
@@ -717,6 +773,16 @@ export function createRepo(db: SqlDb): Repo {
     return row === null ? null : buildVaultItem(row);
   }
 
+  function vaultOrigin(personId: Id, toolId: Id): string | null {
+    // An item with no origin (`NULL`) answers `null` on purpose: an origin nobody recorded is not
+    // an origin the fill may run in (RF-38 fails closed).
+    const row = singleRow<{ origin: string | null }>(
+      'SELECT origin FROM vault_item WHERE person_id = ? AND tool_id = ?',
+      [personId, toolId],
+    );
+    return row?.origin ?? null;
+  }
+
   function vaultItemsByTool(toolId: Id): VaultItem[] {
     return db
       .all<VaultRow>('SELECT * FROM vault_item WHERE tool_id = ? ORDER BY person_id, label COLLATE NOCASE', [toolId])
@@ -729,18 +795,32 @@ export function createRepo(db: SqlDb): Repo {
     label: string;
     username: string;
     keychainKey: string;
+    origin: string;
   }): VaultItem {
     const at = nowIso();
-    // One item per (person, tool) pair: saving again updates in place and keeps the same id.
+    // One item per (person, tool) pair: saving again updates in place and keeps the same id. The
+    // origin is rewritten with the rest: it belongs to the credential as it is now, and it is what
+    // the fill compares the window's entry origin against (B9, RF-38).
     db.run(
-      `INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (person_id, tool_id) DO UPDATE SET
          label = excluded.label,
          username = excluded.username,
          keychain_key = excluded.keychain_key,
-         updated_at = excluded.updated_at`,
-      [crypto.randomUUID(), i.personId, i.toolId, i.label, i.username, i.keychainKey, at, at],
+         updated_at = excluded.updated_at,
+         origin = excluded.origin`,
+      [
+        crypto.randomUUID(),
+        i.personId,
+        i.toolId,
+        i.label,
+        i.username,
+        i.keychainKey,
+        at,
+        at,
+        i.origin,
+      ],
     );
     return orFail(vaultItem(i.personId, i.toolId), 'vault item not found');
   }
@@ -873,6 +953,7 @@ export function createRepo(db: SqlDb): Repo {
     listInvites,
     listVault,
     vaultItem,
+    vaultOrigin,
     vaultItemsByTool,
     saveVaultItem,
     removeVaultItem,

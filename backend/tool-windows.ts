@@ -48,11 +48,13 @@ export interface ToolWindowsDeps {
   icon(id: Id): string | null;
   credential(toolId: Id): Promise<{ username: string; secret: string } | null>;
   /**
-   * Whether the vault index holds a credential for this tool. Synchronous on purpose: the cascade
-   * needs the answer before it decides to inject (`shared/login-cascade.ts` rule 4), and the attempt
-   * it counts decides whether a `no-form` report reads `filled` or `session` (rule 5).
+   * The origin the person's credential for this tool was saved for (SP02 §8, RF-38); `null` when
+   * the vault index holds no item — or one with no origin on record, which no fill may use either.
+   * Synchronous on purpose: the cascade needs the answer before it decides to inject
+   * (`shared/login-cascade.ts` rule 4), and the attempt it counts decides whether a `no-form` report
+   * reads `filled` or `session` (rule 5).
    */
-  hasCredential(toolId: Id): boolean;
+  vaultOrigin(toolId: Id): string | null;
   /** audit (canonico §13); the person goes in here, not in the window */
   record(e: Omit<AuditEvent, 'id' | 'at'>): void;
   store: { get(k: string): Promise<unknown>; set(k: string, v: unknown): Promise<boolean> };
@@ -486,19 +488,27 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   // ------------------------------------------------------------ login cascade
 
   /**
-   * The context of one cascade step: whether the person has a credential for the tool (the vault
-   * index — `hasCredential`) and whether the entry refuses the fill. A tool with no credential never
-   * has an attempt counted, so its `no-form` report reads `session`, never `filled`.
+   * The context of one cascade step: whether the person holds a credential this window may use, and
+   * whether the entry refuses the fill. A credential counts only for the origin it was saved for
+   * (SP02 §8, RF-38): a tool whose address moved — a local edit or a host snapshot rewriting the
+   * entry — has another entry origin, and the cascade reads it as a tool with no credential. It
+   * then never counts an attempt and ends in `manual` (`shared/login-cascade.ts` rules 4, 5, 7),
+   * and the keychain is never read: nothing secret is loaded for an origin the person did not save
+   * it for.
    */
-  function cascadeContext(toolId: Id): { hasCredential: boolean; noFill: boolean } {
-    const entry = entryOf(toolId);
-    return { hasCredential: deps.hasCredential(toolId), noFill: entry?.auth?.noFill === true };
+  function cascadeContext(window: ToolWindow): { hasCredential: boolean; noFill: boolean } {
+    const entry = entryOf(window.toolId);
+    const savedOrigin = deps.vaultOrigin(window.toolId);
+    return {
+      hasCredential: savedOrigin !== null && savedOrigin === window.origin,
+      noFill: entry?.auth?.noFill === true,
+    };
   }
 
   /** Feeds the cascade, synchronously, and fires the action it asks for. */
   function signal(window: ToolWindow, input: CascadeSignal): void {
     try {
-      const step = stepCascade(window.cascade, input, cascadeContext(window.toolId));
+      const step = stepCascade(window.cascade, input, cascadeContext(window));
       window.cascade = step.state;
       void apply(window, step.action, step.state);
     } catch {

@@ -1,7 +1,7 @@
 // Repository against in-memory SQLite (bun:sqlite): proves the visible behaviour of every method of
 // the contract (`backend/repo.ts`) and its boundaries — schema versioning, revocation, rewrite of
-// views/grants, used and expired invites, atomic invite consumption, vault upsert, event filters
-// and JSONL, login results, meta.
+// views/grants, used and expired invites, atomic invite consumption, vault upsert and the origin a
+// credential is bound to, event filters and JSONL, login results, meta.
 import { describe, expect, test } from 'bun:test';
 import { createRepo, LegacyDatabaseError, SCHEMA_VERSION } from '../backend/repo';
 import { memorySqlite } from './helpers/sqlite-bun';
@@ -85,6 +85,56 @@ describe('schema versioning', () => {
     expect(() => repo.migrate()).not.toThrow();
     expect(userVersion(db)).toBe(SCHEMA_VERSION);
     expect(repo.listRoles().map((r) => r.id)).toEqual(['admin']);
+  });
+
+  test('a v2 database from before the vault origin column is completed and its items are backfilled', () => {
+    const db = memorySqlite();
+    const before = createRepo(db);
+    before.migrate();
+    before.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app' }));
+    const person = before.createPerson({
+      email: 'ana@example.test',
+      name: 'Ana',
+      password: PASSWORD,
+      roles: [],
+    });
+    // What that build left behind: `user_version = 2` and a `vault_item` with no `origin` column,
+    // so the `CREATE TABLE IF NOT EXISTS` of this build is skipped and the ALTER has to add it.
+    db.exec('ALTER TABLE vault_item DROP COLUMN origin');
+    db.run(
+      `INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        crypto.randomUUID(),
+        person.id,
+        'alpha',
+        'Alpha',
+        'ana',
+        `bond.cred.${person.id}.alpha`,
+        '2026-10-15T10:00:00.000Z',
+        '2026-10-15T10:00:00.000Z',
+      ],
+    );
+    expect(() => db.all('SELECT origin FROM vault_item')).toThrow();
+
+    const repo = createRepo(db);
+    repo.migrate();
+
+    // The item written before the column existed takes the origin of its tool.
+    expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
+    expect(repo.listVault(person.id)).toHaveLength(1);
+    expect(userVersion(db)).toBe(SCHEMA_VERSION);
+
+    // The migrated table and a fresh one are the same, column for column.
+    const fresh = memorySqlite();
+    createRepo(fresh).migrate();
+    const migrated = db.all<{ name: string }>('PRAGMA table_info(vault_item)').map((row) => row.name);
+    const created = fresh.all<{ name: string }>('PRAGMA table_info(vault_item)').map((row) => row.name);
+    expect(migrated).toEqual(created);
+
+    // A second migrate neither throws nor loses what the backfill wrote.
+    repo.migrate();
+    expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
   });
 
   test('a v1 database (meta with chave/valor) is refused as legacy, with nothing written', () => {
@@ -304,6 +354,7 @@ describe('catalog', () => {
       label: 'Zebra',
       username: 'ana',
       keychainKey: `bond.cred.${person.id}.zebra`,
+      origin: 'https://zebra.example.test',
     });
 
     repo.removeEntry('zebra');
@@ -441,6 +492,7 @@ describe('vault', () => {
       label: 'Alpha',
       username: 'ana',
       keychainKey: `bond.cred.${person.id}.alpha`,
+      origin: 'https://alpha.example.test',
     });
     const second = repo.saveVaultItem({
       personId: person.id,
@@ -448,6 +500,7 @@ describe('vault', () => {
       label: 'Alpha (new)',
       username: 'bia',
       keychainKey: `bond.cred.${person.id}.alpha`,
+      origin: 'https://alpha.example.test',
     });
 
     expect(second.id).toBe(first.id);
@@ -455,6 +508,7 @@ describe('vault', () => {
     expect(second.label).toBe('Alpha (new)');
     expect(second.createdAt).toBe(first.createdAt);
     expect(repo.listVault(person.id)).toHaveLength(1);
+    expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
 
     repo.saveVaultItem({
       personId: other.id,
@@ -462,6 +516,7 @@ describe('vault', () => {
       label: 'Alpha',
       username: 'ana',
       keychainKey: `bond.cred.${other.id}.alpha`,
+      origin: 'https://alpha.example.test',
     });
     repo.saveVaultItem({
       personId: person.id,
@@ -469,15 +524,51 @@ describe('vault', () => {
       label: 'Beta',
       username: 'ana',
       keychainKey: `bond.cred.${person.id}.beta`,
+      origin: 'https://beta.example.test',
     });
 
     expect(repo.vaultItemsByTool('alpha').map((i) => i.personId).sort()).toEqual([person.id, other.id].sort());
     expect(repo.vaultItemsByTool('beta').map((i) => i.toolId)).toEqual(['beta']);
     expect(repo.vaultItem(person.id, 'beta')?.username).toBe('ana');
+    expect(repo.vaultOrigin(person.id, 'beta')).toBe('https://beta.example.test');
 
     repo.removeVaultItem(person.id, 'beta');
     expect(repo.vaultItem(person.id, 'beta')).toBeNull();
+    expect(repo.vaultOrigin(person.id, 'beta')).toBeNull();
     expect(repo.listVault(person.id)).toHaveLength(1);
+  });
+
+  test('the origin belongs to the credential: saving again rewrites it, a moved tool does not', () => {
+    const repo = newRepo();
+    const person = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: [] });
+    repo.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app' }));
+
+    expect(repo.vaultOrigin(person.id, 'alpha')).toBeNull();
+
+    repo.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Alpha',
+      username: 'ana',
+      keychainKey: `bond.cred.${person.id}.alpha`,
+      origin: 'https://alpha.example.test',
+    });
+    expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
+
+    // The tool moved: the credential the person saved stays bound to the origin it was saved for.
+    repo.saveEntry(entry('alpha', { url: 'https://moved.example.test/app' }));
+    expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
+
+    // Saved again on the new address, it follows the entry.
+    repo.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Alpha',
+      username: 'ana',
+      keychainKey: `bond.cred.${person.id}.alpha`,
+      origin: 'https://moved.example.test',
+    });
+    expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://moved.example.test');
   });
 
   test('removeVaultOf returns what it removed and cleans the index', () => {
@@ -493,6 +584,7 @@ describe('vault', () => {
         label: toolId,
         username: 'ana',
         keychainKey: `bond.cred.${person.id}.${toolId}`,
+        origin: `https://${toolId}.example.test`,
       });
     }
 

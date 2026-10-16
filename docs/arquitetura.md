@@ -50,7 +50,9 @@ Imports sem extensão. Arquivos removidos na v2 (cada fatia apaga os seus): `adm
   `roles.save|remove|grant`, `people.*`, `invites.issue`, `events.*`, `bond.installUpdate`. O resto
   exige sessão desbloqueada. Erro = `throw new Error('<English message>')`.
 - **Gate de origin do runtime** (`scripts/gen-config.ts`): `file://*` e (só em dev)
-  `http://127.0.0.1:<BOND_DEV_PORT ou 5173>` ganham `"all"`; cada origin exata de entrada do seed ganha `["login.report"]`.
+  `http://127.0.0.1:<BOND_DEV_PORT ou 5173>` ganham `"all"`; cada origin exata de entrada do seed ganha
+  `["login.report", "media.camera", "media.microphone"]` (canonico §8). The build fails when
+  `tinyjs.base.json` lacks `permissions.camera`/`permissions.microphone`.
   Nunca `*` em chave de ferramenta (o gerador lança se aparecer), nunca `"all"` para ferramenta.
 - **Eval só na origin da entrada e só no frame de cima**, conferido duas vezes: no backend antes de
   chamar `eval` (depois de qualquer `await`) e dentro do próprio script (`location.origin` igual à

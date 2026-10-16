@@ -148,7 +148,31 @@ caminho real é `template/types/tiny.d.ts`.
   `nativeEd25519GenerateKey/Sign/Verify`), ao lado de AES (`…/aes.js`), digest, HMAC, X25519, RSA e
   EC; `src/webcrypto.c` é o encaminhamento nativo e `src/js/polyfills/crypto/subtle.js` expõe o
   `subtle`. Ou seja: derivar chave de senha e assinar um documento não exigem dependência externa.
-  O comportamento exato (parâmetros aceitos, custo) ainda não foi medido por execução.
+  O comportamento exato (parâmetros aceitos, custo) ainda não foi medido por execução — exceto
+  PBKDF2 e HMAC-SHA256, medidos em 2026-10-16 no parágrafo abaixo.
+
+**Observed by execution (2026-10-16): PBKDF2 and HMAC-SHA256 in the Bond runtime** (story H3,
+`docs/specs/SP02-auth-and-keys.md` §1). Method: `~/.tinyjs/bin/tjs run` on a bundle of the real
+`shared/auth.ts` built by `Bun.build` (`target: 'browser'`) — the same txiki.js binary the tinyjs
+launcher uses for the app backend — 5 rounds after one warm-up derivation, `Date.now()` around each
+call; macOS 27.0.0 arm64 (Apple M4), tinyjs v0.57.2 (txiki.js 26.6.0), Bun 1.4.3 for comparison. The
+byte-identity half is reproduced by `test/smoke/run.ts` (`kdf vectors: ok …`) against the pinned hex
+of `test/auth.test.ts`.
+
+- **Cost.** One `deriveKeys` at 600 000 iterations (PBKDF2-HMAC-SHA256, 16-byte salt, 32-byte output,
+  plus the three HMAC-SHA256 label keys) takes **383–427 ms, median 390 ms**. PBKDF2 alone
+  (`hashPassword` at the same count): 370–416 ms, median 381 ms — the three HMACs stay under ~10 ms,
+  inside the noise. Bun 1.4.3 on the same machine and the same code: 39–50 ms, median 43 ms (about
+  nine times faster; both are native implementations, the gap is txiki.js's). One unlock or sign-in
+  pays this once (SP02 §1, §6), which keeps the figure acceptable on this machine.
+- **Accepted parameters.** `crypto.subtle.deriveBits` with `{ name: 'PBKDF2', hash: 'SHA-256' }` and
+  `crypto.subtle.sign('HMAC', …)` both resolve; salts of 1, 8, 16 and 32 bytes are accepted and
+  produce the same bytes as Bun for each length; repeated derivations of the same triple are stable.
+  `String.prototype.normalize('NFC')` exists in the runtime: the non-ASCII vector typed with
+  combining marks derives the same 32-byte keys as its NFC form, and as Bun.
+- **Still unmeasured by execution:** AES-GCM, Ed25519 and X25519 (the sources above say they exist;
+  their measurements belong to story S0, `docs/epics/E02-credential-sharing.md`). This paragraph is
+  the PBKDF2 half of `docs/canonico.md` §23 q6.
 
 ## 6. Permissões e capacidades
 
@@ -160,11 +184,15 @@ caminho real é `template/types/tiny.d.ts`.
   (`docs.html`).
 - Mic/câmera só são concedidos sem prompt às páginas do próprio app; uma origin externa precisa de
   uma chave em `api.origins` que permita `media.*` (`docs.html`).
-- **Observed by execution (owner, 2026-10-16):** Jitsi opened in a Bond tool window and the camera
-  worked "sem problemas". OS and exact config not recorded; the generated `tinyjs.json` in the repo
-  at that time had no tool origin in `api.origins` and no `"permissions"` block (`leitura`). Reading:
-  the `media.*` key above gates the `tiny` media API, not WebRTC `getUserMedia` in the page —
-  `[INFERENCE]`, to confirm on Windows and Linux and in a built release.
+- **Observed by execution (owner, 2026-10-16):** Jitsi's camera worked under `tinyjs dev` with no
+  tool origin in `api.origins` and no `"permissions"` block, but the **built release crashed** on
+  WebRTC. Reading of `docs.html` ("Mic + camera"): `getUserMedia` from another origin gets the
+  engine's prompt on macOS/Windows and a denial on Linux unless its key allows `media.camera` /
+  `media.microphone`, and macOS kills a bundle that captures without the usage strings; in dev the
+  grants and the `Info.plist` belong to the shared launcher. Fix: `"permissions"` in
+  `tinyjs.base.json` (→ `NSCameraUsageDescription`/`NSMicrophoneUsageDescription`) and the media
+  keys on seed origins (→ `TinyjsMediaOrigins`), both confirmed with `plutil` on `dist/Bond.app`
+  (`execucao`, 2026-10-16). Camera use from the built app not yet re-run.
 - `tiny.fetch` roda **no backend**: sem CORS, sem CSP, sem limite de mixed content, com
   `{ stream: true }`; certos casos caem no `curl` do sistema (`docs.html`).
 - `tiny.system.capabilities()` lista **apenas as exceções** — testar `caps.x !== false`, nunca

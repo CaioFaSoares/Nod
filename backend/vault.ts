@@ -5,6 +5,10 @@
 // the repository and the keychain come in through `deps`, which keeps the slice testable with
 // `bun test`. The `credential_saved`/`credential_removed`/`vault_exported`/`vault_imported` events
 // belong to `backend/main.ts`: the vault records no event at all.
+//
+// The index row also carries the origin of the entry at save time (SP02 §8, RF-38): it is what
+// `backend/tool-windows.ts` compares a window's entry origin against before it fills a form.
+import { originOf } from '../shared/catalog';
 import { exportVault, importVault } from '../shared/vault-export';
 import type { Id, SecretStore, VaultExportItem, VaultItem } from '../shared/types';
 import type { Repo } from './repo';
@@ -60,7 +64,12 @@ export function createVault(deps: VaultDeps): Vault {
     if (p.secret.length === 0) throw new Error(SECRET_REQUIRED);
     // The row has a foreign key to `tool`: an entry that does not exist is refused before anything
     // is written to the keychain (the index would be impossible to keep).
-    if (deps.repo.entry(p.toolId) === null) throw new Error(UNKNOWN_TOOL);
+    const entry = deps.repo.entry(p.toolId);
+    if (entry === null) throw new Error(UNKNOWN_TOOL);
+    // RF-38: the origin is taken before the keychain write, so a refused write leaves no trace of
+    // it either. It is the entry's own canonical origin — the same value the tool window compares
+    // its address against.
+    const origin = originOf(entry.url);
 
     const label = p.label === undefined || p.label.trim().length === 0 ? p.toolId : p.label;
     const keychainKey = key(personId, p.toolId);
@@ -76,6 +85,7 @@ export function createVault(deps: VaultDeps): Vault {
       label,
       username,
       keychainKey,
+      origin,
     });
   }
 

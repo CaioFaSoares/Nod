@@ -171,7 +171,9 @@ Stories, points and effort blocks: `docs/epics/blocks.md`.
 | **M2 — assign** | Admin assigns to a person or a role; missing-copy list; rotation pending | New member of "team" gets the Jitsi login after the admin's next sync |
 | **M3 — share with updates** | Recipients remembered; rotation re-seals | Owner changes the password; recipients get it at the next sync |
 
-## 8. Requirements (proposal)
+## 8. Requirements
+
+These requirements entered `docs/canonico.md` §14 on 2026-10-16 (RF-44 to RF-48, RF-53, RF-54). The table stays here for reference.
 
 | ID | Requirement | Acceptance |
 | --- | --- | --- |

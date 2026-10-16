@@ -321,8 +321,16 @@ A tool added on the host appears for everyone with no release. Two things still 
 - **`login.report`**: only origins in the release's gate can report the login result
   (`docs/canonico.md` §8). A host-added tool opens and the cascade still fills the form; it just
   doesn't report back until a release lists it.
-- **Camera / mic**: the owner opened Jitsi with the camera working on 2026-10-16 (execution, owner)
-  with no tool origin in the gate. Details and what remains to confirm: `docs/tinyjs.md` §6.
+- **Camera / mic**: only origins in the release's gate skip the system prompt (`docs/canonico.md`
+  §8). A host-added org tool still gets camera and mic, but behind the system prompt (macOS,
+  Windows) and denied on Linux until a release lists it; the Bond must not label it as "outside
+  the org". Details: `docs/tinyjs.md` §6.
+
+Both gaps are a delay, not a permanent limit (owner, 2026-10-16): once the host and the `release-*`
+pipeline with auto-update (RF-55, `docs/distribuicao.md` §8) work, the next release closes them.
+Proposed: the release build takes the gate origins from the host's org tools — the signed
+snapshot, verified against the pinned key — besides the seed, so a tool added on the host reaches
+every Bond's gate at the next `release-*` without editing the seed by hand.
 
 ## 10. Deployment on Coolify
 
@@ -451,7 +459,7 @@ Stories, points and effort blocks: `docs/epics/blocks.md`.
 
 ## 14. Proposed requirements
 
-To enter `docs/canonico.md` §14 after reading; they replace RF-17 and RF-18.
+These requirements entered `docs/canonico.md` §14 on 2026-10-16 (RF-30 to RF-43); they replace RF-17 and RF-18. The table stays here for reference.
 
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
@@ -478,9 +486,9 @@ To enter `docs/canonico.md` §14 after reading; they replace RF-17 and RF-18.
 4. Removing a host: keep personal tools and favorites as local tools (proposal), or wipe.
 5. Personal tools readable by whoever operates the host DB: acceptable?
 6. ~~Several guilds~~ — decided 2026-10-16: one guild at a time per install.
-7. Backup target off the VPS.
-8. Offline: how long a stale cache keeps showing org tools.
-9. Host address: named by the owner (`AGENTS.md`).
+7. ~~Backup target off the VPS~~ — decided 2026-10-16: a local volume only for now; the off-VPS copy is deferred.
+8. ~~Offline: how long a stale cache keeps showing org tools~~ — decided 2026-10-16: 14 days after the last successful sync, then the org tools hide until a sync succeeds.
+9. ~~Host address: named by the owner (`AGENTS.md`)~~ — decided 2026-10-16: configurable at deploy through an env var; no address in the code.
 
 ## 16. Vocabulary to propose
 
