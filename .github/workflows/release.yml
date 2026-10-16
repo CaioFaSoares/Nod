@@ -118,32 +118,32 @@ jobs:
       - name: generate tinyjs.json
         run: bun scripts/gen-config.ts build
 
+      # Outside .build: `tinyjs build` (inside `publish`) wipes .build before packing.
       - name: release notes
         env:
           MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          mkdir -p .build
-          printf '%s\n' "${MESSAGE:-Bond ${{ needs.prepare.outputs.version }}}" > .build/release-notes.md
+          printf '%s\n' "${MESSAGE:-Bond ${{ needs.prepare.outputs.version }}}" > "${{ runner.temp }}/release-notes.md"
 
       - name: publish (macOS arm64 + x86_64)
         if: runner.os == 'macOS'
         run: |
           tinyjs version
-          tinyjs publish --arch arm64 --notes-file .build/release-notes.md
-          tinyjs publish --arch x86_64 --notes-file .build/release-notes.md
+          tinyjs publish --arch arm64 --notes-file "${{ runner.temp }}/release-notes.md"
+          tinyjs publish --arch x86_64 --notes-file "${{ runner.temp }}/release-notes.md"
 
       - name: publish (Linux)
         if: runner.os == 'Linux'
         run: |
           tinyjs version
-          tinyjs publish --notes-file .build/release-notes.md
+          tinyjs publish --notes-file "${{ runner.temp }}/release-notes.md"
 
       - name: publish (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           tinyjs version
-          tinyjs publish --notes-file .build/release-notes.md
+          tinyjs publish --notes-file "${{ runner.temp }}/release-notes.md"
 
       - name: check manifest version
         env:
