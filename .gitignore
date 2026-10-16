@@ -30,3 +30,6 @@ tinyjs.json
 
 # smoke: página gerada (fora de .build, que o tinyjs dev recria)
 test/smoke/.gerado/
+
+# omp: roster do _Aleph, symlink local (ln -s <_Aleph>/.aleph/agents .omp/agents)
+.omp/agents
