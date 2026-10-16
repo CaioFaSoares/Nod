@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Bond — connected smoke (two instances)</title>
+  </head>
+  <body>
+    <pre id="log">Bond connected smoke: waiting for the runtime…</pre>
+    <script>
+      // Test page for the two-instance smoke (SP05 §5). Plain JavaScript, no bundler.
+      // This file is a TEMPLATE: test/smoke/connected.ts replaces its one config marker with the
+      // JSON of the launch { phase, nonce, address, guild, desk, originA, adminEmail,
+      // personEmail, methods } and writes the result to the app store (tiny.store.set), which the
+      // runner reads at <app data>/store.json.
+      //
+      // The page drives the API through the real path (tiny.api.call), phase by phase:
+      //
+      //   admin-publish      SP05 §5.2  setup code, publish the local tools, create P with role
+      //                                 `team`, grant Tool A to `team`, sync; hand P's code over
+      //   person-join        SP05 §5.3  P activates, the granted tool appears, the vault fills on
+      //                     SP05 §5.5  its origin; host stopped: lock/unlock, tools from the cache,
+      //                                 `stale`; host restarted: the events go up
+      //   admin-revoke       SP05 §5.4  the admin revokes P
+      //   person-signed-out  SP05 §5.4  P's next sync: `signed-out`, the org tools gone
+      //
+      // No code, token or password is ever printed: the access code arrives over the runner's desk
+      // (loopback) and the password is this page's own constant, never echoed.
+      (async function () {
+        'use strict';
+
+        const CONFIG = __CONFIG__;
+
+        /** The password this smoke sets for both accounts. Not a secret: it guards two throwaway
+         *  app data dirs under the smoke's own ids, and it never leaves this page. */
+        const ACCOUNT_PASSWORD = 'smoke-connected-1';
+
+        const TINY_WAIT_MS = 30000;
+        const STATE_TIMEOUT_MS = 20000;
+        const POLL_INTERVAL_MS = 200;
+
+        const log = document.getElementById('log');
+        const steps = [];
+
+        /** What one phase carries from its own steps to the next one (never a code or a secret). */
+        const shared = {
+          fingerprint: null,
+          /** The setup code of the admin phase and the access code of the person phase: held in
+           *  memory only, cleared as soon as the call that spends it returns. */
+          setupCode: null,
+          personCode: null,
+          toolId: null,
+          personId: null,
+        };
+
+        function sleep(ms) {
+          return new Promise((resolve) => setTimeout(resolve, ms));
+        }
+
+        function message(error) {
+          if (error instanceof Error) return error.message;
+          if (typeof error === 'string') return error;
+          return 'unknown error';
+        }
+
+        function expect(condition, text) {
+          if (!condition) throw new Error(text);
+        }
+
+        function call(method, params) {
+          return window.tiny.api.call(method, params || {});
+        }
+
+        function summarize(value) {
+          try {
+            return JSON.stringify(value).slice(0, 400);
+          } catch (error) {
+            return String(value);
+          }
+        }
+
+        function record(step, ok, detail, ms) {
+          steps.push({
+            step: step,
+            ok: !!ok,
+            detail: String(detail === null || detail === undefined ? '' : detail),
+            ms: Math.max(0, Math.round(ms || 0)),
+          });
+          log.textContent = steps
+            .map((s) => (s.ok ? 'ok ' : 'FAILED ') + s.step + ' (' + s.ms + ' ms) ' + s.detail)
+            .join('\n');
+        }
+
+        // The result also carries the phase and the nonce of this launch: the runner launches the
+        // same app id more than once, and the nonce is what tells a fresh result from the previous
+        // one still sitting in store.json.
+        async function writeResult(done, error) {
+          try {
+            await window.tiny.store.set('smoke_result', {
+              done: !!done,
+              phase: CONFIG.phase,
+              nonce: CONFIG.nonce,
+              steps: steps,
+              error: error || null,
+            });
+          } catch (e) {
+            /* without the store there is no result; the runner falls back to the timeout */
+          }
+        }
+
+        async function waitUntil(read, accept, timeoutMs, summary) {
+          const start = Date.now();
+          let last = null;
+          for (;;) {
+            last = await read();
+            if (accept(last)) return last;
+            if (Date.now() - start > timeoutMs) {
+              throw new Error(
+                'timeout (' + timeoutMs + ' ms); last state: ' + (summary ? summary(last) : summarize(last)),
+              );
+            }
+            await sleep(POLL_INTERVAL_MS);
+          }
+        }
+
+        async function waitForTiny() {
+          const start = Date.now();
+          while (!window.tiny) {
+            if (Date.now() - start > TINY_WAIT_MS) {
+              throw new Error('the tiny global did not show up in ' + TINY_WAIT_MS + ' ms');
+            }
+            await sleep(100);
+          }
+        }
+
+        /**
+         * The desk: the runner's loopback endpoint. It holds the host's setup code (the terminal
+         * that started the host), receives P's access code from this page (the admin's chat) and
+         * switches the host process off and on (SP05 §5.5). Nothing here goes through a file.
+         */
+        async function desk(path, body) {
+          const init =
+            body === undefined
+              ? undefined
+              : {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify(body),
+                };
+          const response = await window.tiny.fetch(CONFIG.desk + path, init);
+          let payload = null;
+          try {
+            payload = await response.json();
+          } catch (error) {
+            payload = null;
+          }
+          if (!response.ok || payload === null || payload.ok !== true) {
+            const why = payload && payload.error ? String(payload.error) : 'status ' + response.status;
+            throw new Error('desk ' + path + ' refused: ' + why);
+          }
+          return payload;
+        }
+
+        /** The origin of an entry's url — the same normalization the vault applies (RF-38). */
+        function originOf(url) {
+          try {
+            return new URL(url).origin;
+          } catch (error) {
+            return null;
+          }
+        }
+
+        /** The catalog entry of one fake tool, whatever id the seed and the host gave it. */
+        function entryOfOrigin(list, origin) {
+          return (list || []).find((entry) => originOf(entry.url) === origin) || null;
+        }
+
+        function toolLabel(entry) {
+          return entry === null
+            ? 'absent'
+            : entry.id +
+                ' (roles ' +
+                summarize(entry.roles) +
+                ', ' +
+                (entry.views || []).length +
+                ' view(s))';
+        }
+
+        // ------------------------------------------------------------------ SP05 §5.2 — the admin
+
+        async function stepStateFresh() {
+          const state = await call('session.state');
+          expect(state.hasAccount === false, 'hasAccount = ' + JSON.stringify(state.hasAccount));
+          expect(state.unlocked === false, 'unlocked = ' + JSON.stringify(state.unlocked));
+          return 'no account and locked';
+        }
+
+        async function stepSetupCode() {
+          const from = await desk('/desk/admin');
+          expect(from.guild === CONFIG.guild, 'the desk guild = ' + JSON.stringify(from.guild));
+          expect(typeof from.code === 'string' && from.code.length > 0, 'the desk carries no setup code');
+          expect(from.address === CONFIG.address, 'the desk address is not this host');
+          shared.setupCode = from.code;
+          return 'setup code in memory (not printed)';
+        }
+
+        async function stepDiscover() {
+          const found = await call('host.discover', { address: CONFIG.address });
+          expect(found.guild === CONFIG.guild, 'guild = ' + JSON.stringify(found.guild));
+          expect(
+            typeof found.fingerprint === 'string' && found.fingerprint.length > 0,
+            'fingerprint = ' + JSON.stringify(found.fingerprint),
+          );
+          shared.fingerprint = found.fingerprint;
+          return 'guild ' + found.guild + ', fingerprint ' + found.fingerprint.length + ' chars';
+        }
+
+        async function stepActivateAdmin() {
+          const state = await call('host.activate', {
+            address: CONFIG.address,
+            fingerprint: shared.fingerprint,
+            email: CONFIG.adminEmail,
+            code: shared.setupCode,
+            password: ACCOUNT_PASSWORD,
+            name: 'Smoke Admin',
+          });
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          expect(
+            !!state.person && state.person.admin === true,
+            'person.admin = ' + JSON.stringify(state.person && state.person.admin),
+          );
+          return 'activated with the setup code; the session is unlocked and the person is admin';
+        }
+
+        async function stepSyncConnected() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          expect(state.guild === CONFIG.guild, 'guild = ' + JSON.stringify(state.guild));
+          return (
+            'status connected, guild ' + state.guild + ', pending writes ' + JSON.stringify(state.pendingWrites)
+          );
+        }
+
+        async function stepPublish() {
+          const method = CONFIG.methods.publish;
+          if (method === null) {
+            throw new Error(
+              'ApiContract declares no bootstrap/publish method yet (B6 #18 / B8a #19 are not in this tree)',
+            );
+          }
+          let result;
+          let how = 'no arguments';
+          if (CONFIG.methods.publishBody) {
+            // A body-taking variant mirrors SP03 §2's BootstrapRequest; the page can only offer the
+            // catalog it can read, which while connected is the snapshot's own (empty before this
+            // write). The observation below says what came back either way.
+            const entries = await call('catalog.list');
+            const roles = await call('roles.list');
+            result = await call(method, { tools: entries, roles: roles });
+            how = 'BootstrapRequest body (' + entries.length + ' tool(s), ' + roles.length + ' role(s))';
+          } else {
+            result = await call(method, {});
+          }
+          const created = result && typeof result.created === 'number' ? result.created : null;
+          expect(
+            !(result && result.refused === true),
+            method + ' refused the publish (the host already has org tools)',
+          );
+          expect(
+            created === null || created > 0,
+            method + ' created ' + JSON.stringify(created) + ' org tool(s)',
+          );
+          return method + ' with ' + how + '; answer ' + summarize(result);
+        }
+
+        async function stepCatalogPublished() {
+          await call('host.syncNow');
+          const list = await call('catalog.list');
+          const entry = entryOfOrigin(list, CONFIG.originA);
+          expect(entry !== null, 'Tool A is not in the catalog after publishing (' + list.length + ' entries)');
+          shared.toolId = entry.id;
+          return 'Tool A published as org tool ' + toolLabel(entry);
+        }
+
+        async function stepSaveTeam() {
+          const role = await call('roles.save', { role: { id: 'team', name: 'Team', admin: false } });
+          expect(role.id === 'team', 'role id = ' + JSON.stringify(role.id));
+          return 'role team saved (admin ' + JSON.stringify(role.admin) + ')';
+        }
+
+        async function stepCreatePerson() {
+          const method = CONFIG.methods.personCreate;
+          if (method === null) throw new Error('ApiContract declares no person-create method');
+          const params = CONFIG.methods.personCreateEmail
+            ? { email: CONFIG.personEmail, name: 'Smoke Person', roles: ['team'], days: 1 }
+            : { roles: ['team'], days: 1 };
+          const answer = await call(method, params);
+          expect(
+            !!answer && typeof answer.code === 'string' && answer.code.length > 0,
+            method + ' answered ' + summarize(answer),
+          );
+          shared.personCode = answer.code;
+          return (
+            method +
+            ' issued P\'s access code (' +
+            (CONFIG.methods.personCreateEmail ? 'email + name + roles' : 'roles only — the pre-B6 shape') +
+            ', code not printed)'
+          );
+        }
+
+        // The code is handed over here, right after it exists: the person phases then fail for
+        // their own reasons instead of for a missing hand-over.
+        async function stepHandOver() {
+          expect(typeof shared.personCode === 'string', 'no access code was issued');
+          await desk('/desk/handover', { code: shared.personCode });
+          shared.personCode = null;
+          return 'handed over through the desk (not printed)';
+        }
+
+        async function stepPersonListed() {
+          const people = await call('people.list');
+          expect(Array.isArray(people), 'people.list returned ' + typeof people);
+          const person = people.find((item) => item.email === CONFIG.personEmail) || null;
+          expect(
+            person !== null,
+            'P is not a person of the guild (' +
+              people.length +
+              ' listed: ' +
+              summarize(people.map((item) => item.email)) +
+              ')',
+          );
+          expect(
+            (person.roles || []).indexOf('team') !== -1,
+            'P.roles = ' + summarize(person.roles),
+          );
+          shared.personId = person.id;
+          return 'P is a person of the guild with role team (' + (person.roles || []).length + ' role(s))';
+        }
+
+        async function stepGrant() {
+          expect(shared.toolId !== null, 'the tool was never published');
+          const ok = await call('roles.grant', { roleId: 'team', toolId: shared.toolId, granted: true });
+          expect(ok === true, 'roles.grant answered ' + summarize(ok));
+          return 'Tool A granted to team';
+        }
+
+        async function stepGrantVisible() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          const list = await call('catalog.list');
+          const entry = entryOfOrigin(list, CONFIG.originA);
+          expect(entry !== null, 'Tool A left the catalog after the grant');
+          expect(
+            (entry.roles || []).indexOf('team') !== -1,
+            'the snapshot does not carry the grant: roles = ' + summarize(entry.roles),
+          );
+          return 'the snapshot carries the grant to team (' + toolLabel(entry) + ')';
+        }
+
+        // ----------------------------------------------------------------- SP05 §5.3 and §5.5 — P
+
+        async function stepPersonStateFresh() {
+          const state = await call('session.state');
+          expect(state.hasAccount === false, 'hasAccount = ' + JSON.stringify(state.hasAccount));
+          return 'no account and locked';
+        }
+
+        async function stepPersonCode() {
+          const from = await desk('/desk/person');
+          expect(from.guild === CONFIG.guild, 'the desk guild = ' + JSON.stringify(from.guild));
+          expect(typeof from.code === 'string' && from.code.length > 0, 'the desk carries no access code');
+          shared.personCode = from.code;
+          return "P's access code in memory (not printed)";
+        }
+
+        async function stepPersonDiscover() {
+          const found = await call('host.discover', { address: CONFIG.address });
+          expect(found.guild === CONFIG.guild, 'guild = ' + JSON.stringify(found.guild));
+          shared.fingerprint = found.fingerprint;
+          return 'guild ' + found.guild + ', fingerprint ' + found.fingerprint.length + ' chars';
+        }
+
+        async function stepActivatePerson() {
+          const state = await call('host.activate', {
+            address: CONFIG.address,
+            fingerprint: shared.fingerprint,
+            email: CONFIG.personEmail,
+            code: shared.personCode,
+            password: ACCOUNT_PASSWORD,
+          });
+          shared.personCode = null;
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          expect(state.person !== null, 'person = ' + summarize(state.person));
+          expect(state.person.admin !== true, 'P came out as an admin');
+          return 'activated with the access code; the session is unlocked and P is not an admin';
+        }
+
+        async function stepPersonSync() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          return 'status connected, guild ' + state.guild;
+        }
+
+        async function stepGrantedToolAppears() {
+          const list = await call('catalog.list');
+          const entry = entryOfOrigin(list, CONFIG.originA);
+          expect(entry !== null, 'the granted tool is not in P\'s catalog (' + list.length + ' entries)');
+          expect(
+            (entry.roles || []).indexOf('team') !== -1,
+            'the entry does not carry the grant: roles = ' + summarize(entry.roles),
+          );
+          shared.toolId = entry.id;
+          return 'Jitsi\'s stand-in appeared for team: ' + toolLabel(entry);
+        }
+
+        async function stepVaultSave() {
+          await call('vault.save', { toolId: shared.toolId, username: 'person@test', secret: 'secret-a' });
+          const items = await call('vault.list');
+          expect(
+            items.some((item) => item.toolId === shared.toolId),
+            'the credential is not in the vault index',
+          );
+          expect(JSON.stringify(items).indexOf('secret-a') === -1, 'the secret showed up in vault.list');
+          return 'credential saved for ' + shared.toolId + ' (value only in the keychain)';
+        }
+
+        async function stepFill() {
+          await call('tools.open', { id: shared.toolId });
+          await tiny.win.show();
+          const state = await waitUntil(
+            () => call('tools.state'),
+            (s) => {
+              const tool = (s.tools || []).find((item) => item.id === shared.toolId);
+              return !!tool && tool.login === 'filled';
+            },
+            STATE_TIMEOUT_MS,
+            (s) => {
+              const tool = (s.tools || []).find((item) => item.id === shared.toolId);
+              return 'login=' + JSON.stringify(tool && tool.login);
+            },
+          );
+          const tool = (state.tools || []).find((item) => item.id === shared.toolId);
+          expect(!!tool && tool.openWindows >= 1, 'the tool window is not open');
+          return 'the form was filled on the credential\'s own origin (login ' + tool.login + ')';
+        }
+
+        async function stepHostDown() {
+          const answer = await desk('/desk/host', { action: 'stop' });
+          return String(answer.detail);
+        }
+
+        async function stepOfflineSync() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'stale', 'host.state.status = ' + JSON.stringify(state.status));
+          expect(state.lastError !== null, 'lastError = ' + JSON.stringify(state.lastError));
+          return 'status stale with the cache kept (lastError set, lastSyncAt ' + JSON.stringify(state.lastSyncAt) + ')';
+        }
+
+        async function stepOfflineCatalog() {
+          const list = await call('catalog.list');
+          const entry = entryOfOrigin(list, CONFIG.originA);
+          expect(entry !== null, 'the org tool left the catalog while offline (' + list.length + ' entries)');
+          return 'Tool A still listed from the cache: ' + toolLabel(entry);
+        }
+
+        async function stepLock() {
+          const state = await call('session.lock');
+          expect(state.unlocked === false, 'unlocked = ' + JSON.stringify(state.unlocked));
+          return 'locked with the host down';
+        }
+
+        async function stepOfflineUnlock() {
+          const state = await call('session.unlock', {
+            email: CONFIG.personEmail,
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          return 'unlocked offline';
+        }
+
+        async function stepCatalogAfterUnlock() {
+          const list = await call('catalog.list');
+          const entry = entryOfOrigin(list, CONFIG.originA);
+          expect(entry !== null, 'the org tool is gone after the offline unlock');
+          return 'Tool A still listed after the offline unlock';
+        }
+
+        async function stepHostUp() {
+          const answer = await desk('/desk/host', { action: 'start' });
+          return String(answer.detail);
+        }
+
+        async function stepOnlineSync() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          expect(state.pendingWrites === 0, 'pendingWrites = ' + JSON.stringify(state.pendingWrites));
+          return 'status connected again; nothing is pending';
+        }
+
+        /**
+         * B10's "what was sent" (SP04 §5) on the real surface. It is an admin method (`ADMIN_ONLY`,
+         * `backend/main.ts`), and the rows it counts are this machine's own: what it proves here is
+         * that a connected admin's local events reached the host and none is left pending. P's own
+         * rows — some of them recorded while the host was down — are the runner's check, read from
+         * the host's SQLite after the run.
+         */
+        async function stepEventsSent() {
+          const counts = await call('events.syncStatus');
+          expect(!!counts && counts.sent > 0, 'events.syncStatus = ' + summarize(counts));
+          expect(counts.pending === 0, 'pending = ' + JSON.stringify(counts.pending));
+          return 'the admin\'s machine sent ' + counts.sent + ' event(s); pending ' + counts.pending;
+        }
+
+        // ------------------------------------------------------------------ SP05 §5.4 — revoke
+
+        async function stepAdminState() {
+          const state = await call('session.state');
+          expect(state.hasAccount === true, 'hasAccount = ' + JSON.stringify(state.hasAccount));
+          expect(state.unlocked === false, 'unlocked = ' + JSON.stringify(state.unlocked));
+          return 'the admin account is here and the session starts locked';
+        }
+
+        async function stepAdminUnlock() {
+          const state = await call('session.unlock', {
+            email: CONFIG.adminEmail,
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          return 'admin unlocked';
+        }
+
+        async function stepAdminSync() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          return 'status connected, guild ' + state.guild;
+        }
+
+        async function stepFindPerson() {
+          const people = await call('people.list');
+          const person = people.find((item) => item.email === CONFIG.personEmail) || null;
+          expect(person !== null, 'P is not in the guild list (' + people.length + ' people)');
+          shared.personId = person.id;
+          return 'P found among ' + people.length + ' person(s)';
+        }
+
+        async function stepRevoke() {
+          expect(shared.personId !== null, 'P was never found');
+          const ok = await call('people.revoke', { personId: shared.personId, deleteCredentials: false });
+          expect(ok === true, 'people.revoke answered ' + summarize(ok));
+          return "P revoked (P's own keychain is left alone)";
+        }
+
+        async function stepRevokedListed() {
+          const people = await call('people.list');
+          const person = people.find((item) => item.email === CONFIG.personEmail) || null;
+          if (person === null) return 'P left the guild list';
+          return 'P is still listed, disabledAt = ' + JSON.stringify(person.disabledAt);
+        }
+
+        // ------------------------------------------------------- SP05 §5.4 — the doomed sync
+
+        async function stepPersonStateAgain() {
+          const state = await call('session.state');
+          expect(state.hasAccount === true, 'hasAccount = ' + JSON.stringify(state.hasAccount));
+          return 'P\'s account is here and the session starts locked';
+        }
+
+        async function stepPersonUnlockAgain() {
+          const state = await call('session.unlock', {
+            email: CONFIG.personEmail,
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          return 'P unlocked from the cache';
+        }
+
+        async function stepSignedOut() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'signed-out', 'host.state.status = ' + JSON.stringify(state.status));
+          expect(state.lastError !== null, 'lastError = ' + JSON.stringify(state.lastError));
+          return 'status signed-out (lastError set)';
+        }
+
+        async function stepOrgToolsGone() {
+          const list = await call('catalog.list');
+          const entry = entryOfOrigin(list, CONFIG.originA);
+          expect(entry === null, 'the org tool is still there: ' + toolLabel(entry));
+          return 'the org tools are gone from the cache (' + list.length + ' entries left)';
+        }
+
+        // The order inside each phase is the order of the spec's steps; the phases themselves run in
+        // the order the runner launches them.
+        const PHASES = {
+          'admin-publish': [
+            ['2.1 session.state (no account yet)', stepStateFresh],
+            ['2.2 desk: setup code', stepSetupCode],
+            ['2.3 host.discover', stepDiscover],
+            ['2.4 host.activate (setup code)', stepActivateAdmin],
+            ['2.5 host.syncNow', stepSyncConnected],
+            ['2.6 publish the local tools', stepPublish],
+            ['2.7 catalog.list (published)', stepCatalogPublished],
+            ['2.8 roles.save (team)', stepSaveTeam],
+            ['2.9 invites.issue (P, role team)', stepCreatePerson],
+            ['2.10 hand P\'s code over', stepHandOver],
+            ['2.11 people.list (P of the guild)', stepPersonListed],
+            ['2.12 roles.grant (Tool A to team)', stepGrant],
+            ['2.13 host.syncNow (the grant travels)', stepGrantVisible],
+          ],
+          'person-join': [
+            ['3.1 session.state (no account yet)', stepPersonStateFresh],
+            ['3.2 desk: access code', stepPersonCode],
+            ['3.3 host.discover', stepPersonDiscover],
+            ['3.4 host.activate (access code)', stepActivatePerson],
+            ['3.5 host.syncNow', stepPersonSync],
+            ['3.6 catalog.list (the granted tool)', stepGrantedToolAppears],
+            ['3.7 vault.save (Tool A)', stepVaultSave],
+            ['3.8 tools.open (fill on the origin)', stepFill],
+            ['5.1 desk: stop the host', stepHostDown],
+            ['5.2 host.syncNow (offline)', stepOfflineSync],
+            ['5.3 catalog.list (from the cache)', stepOfflineCatalog],
+            ['5.4 session.lock', stepLock],
+            ['5.5 session.unlock (offline)', stepOfflineUnlock],
+            ['5.6 catalog.list (after the unlock)', stepCatalogAfterUnlock],
+            ['5.7 desk: start the host', stepHostUp],
+            ['5.8 host.syncNow (back online)', stepOnlineSync],
+          ],
+          'admin-revoke': [
+            ['4.1 session.state', stepAdminState],
+            ['4.2 session.unlock (admin)', stepAdminUnlock],
+            ['4.3 host.syncNow', stepAdminSync],
+            ['4.3b events.syncStatus (what was sent)', stepEventsSent],
+            ['4.4 people.list (find P)', stepFindPerson],
+            ['4.5 people.revoke (P)', stepRevoke],
+            ['4.6 people.list (after the revocation)', stepRevokedListed],
+          ],
+          'person-signed-out': [
+            ['4.7 session.state', stepPersonStateAgain],
+            ['4.8 session.unlock (P)', stepPersonUnlockAgain],
+            ['4.9 host.syncNow (revoked)', stepSignedOut],
+            ['4.10 catalog.list (org tools gone)', stepOrgToolsGone],
+          ],
+        };
+
+        async function run() {
+          const sequence = PHASES[CONFIG.phase];
+          if (!sequence) throw new Error('unknown phase ' + JSON.stringify(CONFIG.phase));
+          let stopped = false;
+          for (const [name, fn] of sequence) {
+            if (stopped) {
+              record(name, false, 'did not run', 0);
+              continue;
+            }
+            const start = Date.now();
+            let ok = false;
+            let detail = '';
+            try {
+              detail = await fn();
+              ok = true;
+            } catch (error) {
+              ok = false;
+              detail = 'error: ' + message(error);
+            }
+            record(name, ok, detail, Date.now() - start);
+            stopped = !ok;
+            await writeResult(false, null);
+          }
+          await writeResult(true, null);
+        }
+
+        try {
+          await waitForTiny();
+          await run();
+        } catch (error) {
+          record('0 setup', false, 'error: ' + message(error), 0);
+          await writeResult(true, message(error));
+        }
+      })();
+    </script>
+  </body>
+</html>

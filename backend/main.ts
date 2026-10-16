@@ -40,6 +40,7 @@ import type {
   TokenResponse,
 } from '../shared/host-api';
 import { createConnectedCatalog } from './connected-catalog';
+import { hostAdminFor, orgViewsOf } from './host-admin';
 import { createHostClient } from './host-client';
 import { createIcons } from './icons';
 import { probe } from './probe-net';
@@ -347,9 +348,17 @@ async function listedEntries(): Promise<Entry[]> {
       icon: typeof entry.icon === 'string' ? entry.icon : null,
     }));
   }
-  const r = repo;
   const store = icons;
-  if (r === null || store === null) return entries;
+  return store === null ? entries : await localEntriesWithIcons(entries, store);
+}
+
+/**
+ * The local rows as the page and B8a read them: each icon leaves the store as a data URI (`canonico
+ * §8`). A connected entry never comes through here — its icon travels inside the snapshot.
+ */
+async function localEntriesWithIcons(entries: Entry[], store: Icons): Promise<Entry[]> {
+  const r = repo;
+  if (r === null) return entries;
   return Promise.all(
     entries.map(async (entry) => {
       const hash = r.iconHash(entry.id);
@@ -457,6 +466,7 @@ const ADMIN_ONLY: Partial<Record<Method, true>> = {
   'people.setRoles': true,
   'people.revoke': true,
   'invites.issue': true,
+  'host.bootstrap': true,
   'events.list': true,
   'events.syncStatus': true,
   'events.exportToFile': true,
@@ -572,6 +582,22 @@ function rawIcon(value: unknown): RawIcon {
     throw new Error('unsupported icon type');
   }
   return { type, base64: text(raw.base64, 'invalid icon') };
+}
+
+/** `RawIcon` media types (`backend/icons.ts`'s `MIME`, which also leaves as a data URI). */
+const ICON_MIME: Record<RawIcon['type'], string> = {
+  png: 'image/png',
+  svg: 'image/svg+xml',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+};
+
+/**
+ * `RawIcon` → the data URI an entry's icon is at runtime (`canonico §8`), which is what the host
+ * stores too (SP04 §2): a connected write sends the picked bytes as the URI of their media type.
+ */
+function iconDataUri(icon: RawIcon): string {
+  return `data:${ICON_MIME[icon.type]};base64,${icon.base64}`;
 }
 
 function role(value: unknown): Role {
@@ -711,6 +737,21 @@ async function afterChange(): Promise<void> {
   // SP04 §3: an admin write is one of the triggers of a sync. The write itself still goes to the
   // local catalog; routing it to the host is B6. `afterWrite` is a no-op while stopped.
   if (sync !== null) sync.afterWrite();
+}
+
+/**
+ * SP05 §3–§4: an admin write that went to the host instead of the local tables. The change is on the
+ * host the moment the route answers, so what is left is to make it visible: `afterChange()` reloads
+ * this side and asks for a sync of its own, and the run is awaited so the `catalog.list` the Tools
+ * tab reads right after the call already carries the new row. A host that cannot be reached leaves
+ * the write where it landed and `host.state` says why — never a failed admin method.
+ */
+async function afterHostWrite(): Promise<void> {
+  await afterChange();
+  const running = sync;
+  const r = repo;
+  if (running === null || r === null || r.hostRecord() === null) return;
+  await running.syncNow();
 }
 
 // ---------------------------------------------------------------- connected mode (SP05, SP04)
@@ -1093,6 +1134,41 @@ const methods: { [M in Method]: Handler<M> } = {
     return state;
   },
 
+  /**
+   * B8a (SP05 §4, RF-40): the first admin of a host that has no org tool publishes this Bond's local
+   * catalog — the `org` rows of the local `tool` table with their views and their icons, and the
+   * local roles — through `POST /v1/admin/bootstrap`. The host writes it all in one go and refuses a
+   * second time (SP03 §2); the refusal comes back as `refused` so the offer can end without the page
+   * having to read a status.
+   */
+  'host.bootstrap': async () => {
+    const r = required(repo, 'host.bootstrap');
+    const actor = unlockedPerson('host.bootstrap');
+    const store = required(icons, 'host.bootstrap');
+    const admin = hostAdminFor(connectionOf());
+    if (admin === null) throw new Error('Bond is not connected to a host');
+
+    // The local catalog, not the effective one: publishing the snapshot's own tools back to the host
+    // would be a no-op at best. A local personal tool is not part of the guild's catalog (RF-40).
+    const local = r.listEntries().filter((entry) => (entry.scope ?? 'org') === 'org');
+    const tools = await localEntriesWithIcons(local, store);
+    if (tools.length === 0) throw new Error('this Bond has no local tools to publish');
+    const roles = r.listRoles();
+
+    const answer = await admin.bootstrap(tools, roles);
+    if (answer.refused) return answer;
+    r.addEvent({
+      personId: actor.id,
+      toolId: null,
+      type: 'catalog_changed',
+      url: null,
+      result: 'published',
+      detail: `tools: ${answer.created}, roles: ${roles.length}`,
+    });
+    await afterHostWrite();
+    return answer;
+  },
+
   // -------------------------------------------------------------- catalog
   'catalog.list': async () => {
     unlockedPerson('catalog.list');
@@ -1104,8 +1180,20 @@ const methods: { [M in Method]: Handler<M> } = {
     const r = required(repo, 'catalog.get');
     const store = required(icons, 'catalog.get');
     const id = text(parameters(params, 'invalid tool').id, 'invalid id');
-    const entry = r.entry(id);
+    const entry = catalogEntryOf(id);
     if (entry === null) throw new Error('tool not found');
+
+    // SP05 §4: the Tools tab edits the entries the page lists, and while connected those are the
+    // snapshot's (B5 left this read for B6). The probe and the login history are this machine's own
+    // records of the local catalog, and the host holds neither; the person's personal views hang
+    // under the entry for the screens that open them (B5) and are not the org tool's own.
+    if (connectedMode) {
+      return {
+        entry: { ...entry, icon: entry.icon ?? null, views: orgViewsOf(entry.views) },
+        probe: null,
+        usualLogin: null,
+      };
+    }
 
     const hash = r.iconHash(id);
     return {
@@ -1126,6 +1214,30 @@ const methods: { [M in Method]: Handler<M> } = {
     const person = unlockedPerson('catalog.save');
     const p = parameters(params, 'invalid entry');
     const entry = validateEntry(p.entry);
+    const admin = hostAdminFor(connectionOf());
+
+    // SP05 §3: while a host is connected the catalog is the host's, so this write goes to
+    // `PUT /v1/admin/tools/:id` and the local `tool` rows stay untouched (SP05 §2).
+    if (admin !== null) {
+      // The admin tool routes write the guild's org tools; a personal tool of this person is not
+      // one of them (SP04 §2, and the grants of SP01 §2 are org-only).
+      if (catalogEntryOf(entry.id)?.scope === 'personal') {
+        throw new Error('a personal tool is not part of the guild catalog');
+      }
+      const icon =
+        p.icon === undefined ? entry.icon : p.icon === null ? null : iconDataUri(rawIcon(p.icon));
+      const saved = await admin.saveTool({ ...entry, icon });
+      r.addEvent({
+        personId: person.id,
+        toolId: saved.id,
+        type: 'catalog_changed',
+        url: auditUrl(saved.url),
+        result: 'saved',
+        detail: saved.title,
+      });
+      await afterHostWrite();
+      return saved;
+    }
 
     // An absent `icon` keeps the stored one, `null` removes it and a `RawIcon` writes a new one; the
     // key only enters `extras` when the parameter arrived — that is how the repo decides.
@@ -1156,8 +1268,28 @@ const methods: { [M in Method]: Handler<M> } = {
     const r = required(repo, 'catalog.remove');
     const person = unlockedPerson('catalog.remove');
     const id = text(parameters(params, 'invalid tool').id, 'invalid id');
-    const previous = r.entry(id);
+    // The entry the page sees: the snapshot's while connected, the local row otherwise.
+    const previous = catalogEntryOf(id);
     if (previous === null) throw new Error('tool not found');
+    const admin = hostAdminFor(connectionOf());
+
+    // SP05 §3: removing a connected entry removes the host's row. The local row, its icon and the
+    // credentials saved for it are this machine's own and stay (the local catalog is not the catalog
+    // while connected, SP05 §2) — deleting them would take the admin's logins with the guild's tool.
+    if (admin !== null) {
+      if (previous.scope === 'personal') throw new Error('a personal tool is not part of the guild catalog');
+      await admin.removeTool(id);
+      r.addEvent({
+        personId: person.id,
+        toolId: id,
+        type: 'catalog_changed',
+        url: auditUrl(previous.url),
+        result: 'removed',
+        detail: previous.title,
+      });
+      await afterHostWrite();
+      return true;
+    }
 
     // A6: the credentials of a removed tool leave the keychain and the vault index first.
     await required(vault, 'catalog.remove').removeAllForTool(id);
@@ -1220,7 +1352,26 @@ const methods: { [M in Method]: Handler<M> } = {
   'roles.save': async (params) => {
     const r = required(repo, 'roles.save');
     const person = unlockedPerson('roles.save');
-    const saved = r.saveRole(role(parameters(params, 'invalid role').role));
+    const wanted = role(parameters(params, 'invalid role').role);
+    const admin = hostAdminFor(connectionOf());
+
+    // SP05 §3: the guild's roles live on the host while connected (B5 reads them from the snapshot;
+    // this is the write side).
+    if (admin !== null) {
+      const saved = await admin.saveRole(wanted);
+      r.addEvent({
+        personId: person.id,
+        toolId: null,
+        type: 'roles_changed',
+        url: null,
+        result: 'saved',
+        detail: saved.id,
+      });
+      await afterHostWrite();
+      return saved;
+    }
+
+    const saved = r.saveRole(wanted);
     r.addEvent({
       personId: person.id,
       toolId: null,
@@ -1237,6 +1388,24 @@ const methods: { [M in Method]: Handler<M> } = {
     const r = required(repo, 'roles.remove');
     const person = unlockedPerson('roles.remove');
     const id = text(parameters(params, 'invalid role').id, 'invalid id');
+    const admin = hostAdminFor(connectionOf());
+
+    if (admin !== null) {
+      // The host refuses the role that would leave the guild without an admin (`409`); the failure
+      // reaches the page as it is, and nothing local changes.
+      await admin.removeRole(id);
+      r.addEvent({
+        personId: person.id,
+        toolId: null,
+        type: 'roles_changed',
+        url: null,
+        result: 'removed',
+        detail: id,
+      });
+      await afterHostWrite();
+      return true;
+    }
+
     r.removeRole(id);
     r.addEvent({
       personId: person.id,
@@ -1257,6 +1426,23 @@ const methods: { [M in Method]: Handler<M> } = {
     const granted = booleanValue(p.granted, 'invalid grant');
     const roleId = text(p.roleId, 'invalid role');
     const toolId = text(p.toolId, 'invalid tool');
+    const admin = hostAdminFor(connectionOf());
+
+    // SP05 §3/SP03 §2: a grant is the host's row on an org entry; the host is the one that decides
+    // whether the entry is an org one at all.
+    if (admin !== null) {
+      await admin.grant(roleId, toolId, granted);
+      r.addEvent({
+        personId: person.id,
+        toolId,
+        type: 'grant_changed',
+        url: null,
+        result: granted ? 'granted' : 'revoked',
+        detail: roleId,
+      });
+      await afterHostWrite();
+      return true;
+    }
 
     r.grant(roleId, toolId, granted);
     r.addEvent({
@@ -1272,13 +1458,36 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   // -------------------------------------------------------------- people and invites
-  'people.list': () => required(repo, 'people.list').listPeople(),
+  'people.list': async () => {
+    const admin = hostAdminFor(connectionOf());
+    // SP05 §4: the People tab lists the guild's people while connected, from `GET
+    // /v1/admin/people` (never a salt or a hash, SP03 §2). The local `person` table holds this
+    // machine's accounts, which is a different question in connected mode.
+    if (admin !== null) return await admin.listPeople();
+    return required(repo, 'people.list').listPeople();
+  },
 
   'people.setRoles': async (params) => {
     const r = required(repo, 'people.setRoles');
     const p = parameters(params, 'invalid person');
     const personId = text(p.personId, 'invalid person');
     const roles = textList(p.roles, 'invalid roles');
+    const admin = hostAdminFor(connectionOf());
+
+    if (admin !== null) {
+      const updated = await admin.setRoles(personId, roles);
+      r.addEvent({
+        personId: updated.id,
+        toolId: null,
+        type: 'roles_changed',
+        url: null,
+        result: 'assigned',
+        detail: roles.length === 0 ? 'none' : roles.join(', '),
+      });
+      await afterHostWrite();
+      return updated;
+    }
+
     const updated = r.setRoles(personId, roles);
     r.addEvent({
       personId: updated.id,
@@ -1299,6 +1508,26 @@ const methods: { [M in Method]: Handler<M> } = {
     const p = parameters(params, 'invalid person');
     const personId = text(p.personId, 'invalid person');
     const deleteCredentials = booleanValue(p.deleteCredentials, 'invalid revocation');
+    const admin = hostAdminFor(connectionOf());
+
+    // SP05 §3–§4: revoking a guild member is disabling them on the host (`PATCH
+    // /v1/admin/people/:id { disabled: true }`), which ends every session of theirs (SP03 §2, RF-39).
+    // Their saved credentials live on their own machine, so `deleteCredentials` — this machine's
+    // vault (RF-16) — has nothing to delete here; the flag is read all the same, as SP05 §3 asks.
+    if (admin !== null) {
+      if (personId === actor.id) throw new Error("you can't revoke yourself");
+      await admin.disable(personId);
+      r.addEvent({
+        personId,
+        toolId: null,
+        type: 'access_revoked',
+        url: null,
+        result: 'disabled on the host',
+        detail: null,
+      });
+      await afterHostWrite();
+      return true;
+    }
 
     const target = r.personById(personId);
     if (target === null) throw new Error('person not found');
@@ -1329,6 +1558,42 @@ const methods: { [M in Method]: Handler<M> } = {
     const actor = unlockedPerson('invites.issue');
     const p = parameters(params, 'invalid invite');
     const roles = textList(p.roles, 'invalid roles');
+    const admin = hostAdminFor(connectionOf());
+
+    // SP05 §3: while connected the same question — "a code to hand over" — is the host's
+    // `POST /v1/admin/people` (create the person and their access code) or, for somebody who is
+    // already in the guild, `POST /v1/admin/people/:id/code` (reissue, revoking the previous one).
+    // `days` stays local: SP02 §3 fixes 72 h on the host's side.
+    if (admin !== null) {
+      const personId = optional(p.personId, (value) => text(value, 'invalid person'));
+      if (personId !== undefined) {
+        const issued = await admin.issueCode(personId);
+        r.addEvent({
+          personId: actor.id,
+          toolId: null,
+          type: 'invite_issued',
+          url: null,
+          result: null,
+          detail: `reissued for ${personId} — expires at ${issued.expiresAt}`,
+        });
+        // The list the People tab reloads is the host's; no sync is needed for a code.
+        return { code: issued.code, expiresAt: issued.expiresAt };
+      }
+
+      const email = text(p.email, 'invalid email');
+      const name = text(p.name, 'invalid name');
+      const created = await admin.createPerson({ email, name, roles });
+      r.addEvent({
+        personId: actor.id,
+        toolId: null,
+        type: 'invite_issued',
+        url: null,
+        result: null,
+        detail: `roles: ${roles.length === 0 ? 'none' : roles.join(', ')} — expires at ${created.expiresAt}`,
+      });
+      return { code: created.code, expiresAt: created.expiresAt };
+    }
+
     const known = new Set(r.listRoles().map((item) => item.id));
     for (const id of roles) {
       if (!known.has(id)) throw new Error(`unknown role: ${id}`);
@@ -1461,7 +1726,7 @@ const methods: { [M in Method]: Handler<M> } = {
     required(windows, 'tools.reload').reload(text(parameters(params, 'invalid tool').id, 'invalid id')),
 
   // -------------------------------------------------------------- audit
-  'events.list': (params) => {
+  'events.list': async (params) => {
     const r = required(repo, 'events.list');
     const p = parameters(params, 'invalid filter');
     const filter: EventFilter = {};
@@ -1471,6 +1736,10 @@ const methods: { [M in Method]: Handler<M> } = {
     }
     const limit = optional(p.limit, (input) => integer(input, 'invalid filter'));
     if (limit !== undefined) filter.limit = limit;
+    // SP05 §4: Settings → Activity shows the guild's own log while connected (`GET
+    // /v1/admin/events`, SP03 §2) — the local event table is this machine's queue for the host.
+    const admin = hostAdminFor(connectionOf());
+    if (admin !== null) return await admin.listEvents(filter);
     return r.listEvents(filter);
   },
 

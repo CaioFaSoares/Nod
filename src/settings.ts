@@ -477,8 +477,15 @@ export function mountSettings(
     results: [] as string[],
     editor: null as ToolEditor | null,
     invite: null as { code: string; expiresAt: string } | null,
+    /** which card the code block belongs to: the new-person card ('new') or one person's id */
+    inviteFor: null as 'new' | Id | null,
     inviteRoles: [] as Id[],
     inviteDays: '7',
+    /** connected People tab: the half-typed new person, cleared once the host created them */
+    personEmail: '',
+    personName: '',
+    /** B8a: set once the publish offer was answered — it is offered at most one time */
+    publishClosed: false,
     revealed: null as { toolId: Id; username: string; secret: string } | null,
     filterTool: '',
     filterResult: '',
@@ -667,6 +674,7 @@ export function mountSettings(
     state.status = null;
     // The invite code lives only while the People tab is on screen (canonico §9).
     state.invite = null;
+    state.inviteFor = null;
     state.editor = null;
     hideRevealed();
     render();
@@ -687,6 +695,9 @@ export function mountSettings(
         case 'hosts':
           // SP05 §3: the tab reads the state itself instead of waiting for a push.
           state.host = await call('host.state');
+          // B8a: whether the publish offer still applies is a question about the entries the
+          // snapshot carries (RF-40), so the tab reads the same list the sidebar shows.
+          state.entries = await call('catalog.list');
           break;
         case 'vault':
           state.vault = await call('vault.list');
@@ -829,12 +840,41 @@ export function mountSettings(
         email: mode === 'signin' ? (owner === null ? null : owner.email) : null,
         onJoined: () => {
           state.status = { kind: 'ok', text: 'Connected' };
+          // B8a: a host just joined — the offer belongs to its own snapshot, not to the last one.
+          state.publishClosed = false;
         },
       });
       joinBox = box;
       joinMode = mode;
     }
     return joinBox;
+  }
+
+  /**
+   * B8a (RF-40, SP05 §4): the offer belongs to the first admin of a host that has no org tool yet —
+   * the snapshot's org half is what says so. It is offered once: a successful publish fills the
+   * guild, and the host's own `409` (the window closed between this screen and the call) ends it too.
+   */
+  function publishOffer(): HTMLElement | null {
+    const host = state.host;
+    if (host === null || !isAdmin() || state.publishClosed) return null;
+    if (host.status === 'none' || host.status === 'signed-out') return null;
+    if (state.entries.some((entry) => (entry.scope ?? 'org') === 'org')) return null;
+    return el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'Publish local tools to the guild'),
+      el(
+        'p',
+        { class: 'muted' },
+        `This guild has no org tool yet. Bond can publish the tools and roles of this machine to ${host.guild ?? 'it'} — once; from then on the guild catalog belongs to the host.`,
+      ),
+      el(
+        'div',
+        { class: 'row' },
+        button('Publish local tools', () => void publishLocalTools(), { kind: 'primary' }),
+      ),
+    );
   }
 
   function viewHosts(): HTMLElement {
@@ -856,10 +896,33 @@ export function mountSettings(
       return box;
     }
     box.append(hostCard(host));
+    const offer = publishOffer();
+    if (offer !== null) box.append(offer);
     // SP04 §3: signed out asks for a sign-in; on the same screen, the host can also be removed.
     if (host.status === 'signed-out') box.append(joinSection('signin'));
     box.append(removeCard(host));
     return box;
+  }
+
+  async function publishLocalTools(): Promise<void> {
+    state.status = null;
+    try {
+      const answer = await call('host.bootstrap');
+      // The offer is spent either way: the window is closed once org tools exist.
+      state.publishClosed = true;
+      state.status = answer.refused
+        ? { kind: 'info', text: 'The guild already has org tools — publishing is closed.' }
+        : {
+            kind: 'ok',
+            text: `Published ${plural(answer.created, 'tool', 'tools')} to ${state.host?.guild ?? 'the guild'}`,
+          };
+      state.entries = await call('catalog.list');
+      state.host = await call('host.state');
+    } catch (e) {
+      // A host that could not be reached keeps the offer: nothing was published.
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
   }
 
   async function syncNow(): Promise<void> {
@@ -877,6 +940,8 @@ export function mountSettings(
     state.status = null;
     try {
       state.host = await call('host.remove', { keepPersonal });
+      // A host that left takes the offer's history with it: another host starts from its own state.
+      state.publishClosed = false;
       state.status = { kind: 'ok', text: 'Host removed' };
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
@@ -1589,12 +1654,13 @@ export function mountSettings(
       ),
     );
     if (state.editor !== null) box.append(toolEditorCard(state.editor));
-    if (state.entries.length === 0) {
+    const entries = guildEntries();
+    if (entries.length === 0) {
       box.append(el('p', { class: 'empty' }, 'No tools in the catalog.'));
       return box;
     }
     const list = el('div', { class: 'stack' });
-    for (const entry of state.entries) list.append(toolItem(entry));
+    for (const entry of entries) list.append(toolItem(entry));
     box.append(list);
     return box;
   }
@@ -1737,7 +1803,7 @@ export function mountSettings(
     const head = el('tr', {}, el('th', {}, 'Tool'));
     for (const role of state.roles) head.append(el('th', {}, role.name));
     const body = el('tbody');
-    for (const entry of state.entries) {
+    for (const entry of guildEntries()) {
       const row = el('tr', {}, el('td', {}, entry.title));
       for (const role of state.roles) {
         row.append(
@@ -1785,7 +1851,7 @@ export function mountSettings(
       for (const role of state.roles) list.append(roleItem(role));
       box.append(list);
     }
-    if (state.roles.length > 0 && state.entries.length > 0) {
+    if (state.roles.length > 0 && guildEntries().length > 0) {
       box.append(
         el(
           'section',
@@ -1908,6 +1974,49 @@ export function mountSettings(
     return card;
   }
 
+  /**
+   * SP05 §4, connected: the guild's people are the host's, so "a code to hand over" is the host
+   * asking for a person (`invites.issue` → `POST /v1/admin/people`). The email and the name are what
+   * creates them; the roles are the ones they start with.
+   */
+  function newPersonCard(): HTMLElement {
+    const email = input('person-email', {
+      type: 'email',
+      value: state.personEmail,
+      placeholder: 'person@example.com',
+    });
+    email.addEventListener('input', (event) => {
+      state.personEmail = (event.target as HTMLInputElement).value;
+    });
+    const name = input('person-name', { value: state.personName, placeholder: 'Name' });
+    name.addEventListener('input', (event) => {
+      state.personName = (event.target as HTMLInputElement).value;
+    });
+    const card = el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'New person'),
+      el(
+        'p',
+        { class: 'muted' },
+        'Bond creates the person on the host and answers one access code. Hand it over now: the host will not show it again.',
+      ),
+      el('div', { class: 'row' }, field('Email', email), field('Name', name)),
+      roleCheckboxes(
+        (role) => `invite-role-${role.id}`,
+        (role) => state.inviteRoles.includes(role.id),
+        (role, on) => toggleIn(state.inviteRoles, role.id, on),
+      ),
+      el(
+        'div',
+        { class: 'row' },
+        button('New access code', () => void createPerson(), { kind: 'primary' }),
+      ),
+    );
+    if (state.invite !== null && state.inviteFor === 'new') card.append(inviteCodeBlock(state.invite));
+    return card;
+  }
+
   function personItem(target: Person, owner: Person): HTMLElement {
     const card = el(
       'div',
@@ -1918,6 +2027,9 @@ export function mountSettings(
         el('strong', {}, target.name),
         el('span', { class: 'muted' }, target.email),
         target.admin ? el('span', { class: 'chip' }, 'admin') : null,
+        // The two columns only the host keeps (SP03 §2): undefined in local mode.
+        target.disabledAt != null ? el('span', { class: 'chip' }, 'revoked') : null,
+        target.activatedAt === null ? el('span', { class: 'chip' }, 'not activated') : null,
       ),
       roleCheckboxes(
         (role) => `person-${target.id}-role-${role.id}`,
@@ -1925,8 +2037,22 @@ export function mountSettings(
         (role, on) => void togglePersonRole(target, role.id, on),
       ),
     );
+    // SP05 §4: "New access code" while connected — the host reissues the code, revoking the previous
+    // one (SP02 §3). A person the host disabled is offered no code: it would not sign them in.
+    if (hasHost() && target.disabledAt == null) {
+      card.append(
+        el(
+          'div',
+          { class: 'row' },
+          button('New access code', () => void issuePersonCode(target)),
+          target.activatedAt !== null && target.activatedAt !== undefined
+            ? null
+            : el('span', { class: 'muted' }, 'Has not set a password yet'),
+        ),
+      );
+    }
     // Revoking yourself is refused by the backend; the button is not even offered.
-    if (target.id !== owner.id) {
+    if (target.disabledAt == null && target.id !== owner.id) {
       const deleteCredentials = checkbox(`person-${target.id}-delete`, false, () => {});
       card.append(
         el(
@@ -1937,12 +2063,15 @@ export function mountSettings(
         ),
       );
     }
+    if (state.invite !== null && state.inviteFor === target.id) card.append(inviteCodeBlock(state.invite));
     return card;
   }
 
   function viewPeople(owner: Person): HTMLElement {
     const box = el('section', { class: 'stack' });
-    box.append(inviteCard());
+    // SP05 §4: connected, the People tab belongs to the host — a person and their code come from
+    // `POST /v1/admin/people`, not from a local invite.
+    box.append(hasHost() ? newPersonCard() : inviteCard());
     if (state.people.length === 0) {
       box.append(el('p', { class: 'empty' }, 'No people.'));
       return box;
@@ -1951,6 +2080,40 @@ export function mountSettings(
     for (const item of state.people) list.append(personItem(item, owner));
     box.append(list);
     return box;
+  }
+
+  /** Connected only: the host answers a fresh code for a person who already exists (SP02 §3). */
+  async function issuePersonCode(target: Person): Promise<void> {
+    state.status = null;
+    try {
+      state.invite = await call('invites.issue', { personId: target.id, roles: [...target.roles] });
+      state.inviteFor = target.id;
+      state.status = { kind: 'ok', text: `New code for ${target.name}` };
+      state.people = await call('people.list');
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** Connected only: the person and their one code, in a single call to the host (RF-33). */
+  async function createPerson(): Promise<void> {
+    state.status = null;
+    try {
+      state.invite = await call('invites.issue', {
+        email: state.personEmail.trim(),
+        name: state.personName.trim(),
+        roles: [...state.inviteRoles],
+      });
+      state.inviteFor = 'new';
+      state.personEmail = '';
+      state.personName = '';
+      state.status = { kind: 'ok', text: 'Person created — hand over the code' };
+      state.people = await call('people.list');
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
   }
 
   async function togglePersonRole(target: Person, roleId: Id, include: boolean): Promise<void> {
@@ -2018,6 +2181,17 @@ export function mountSettings(
    */
   function hasHost(): boolean {
     return state.host !== null && state.host.status !== 'none';
+  }
+
+  /**
+   * SP05 §4: the Tools and Roles tabs edit the guild's catalog — the effective list without the
+   * person's own tools, which the host keeps apart (SP04 §2's `personalTools`) and whose own screens
+   * are block 2's. In local mode the list is already the catalog.
+   */
+  function guildEntries(): Entry[] {
+    return hasHost()
+      ? state.entries.filter((entry) => (entry.scope ?? 'org') !== 'personal')
+      : state.entries;
   }
 
   function viewActivity(): HTMLElement {

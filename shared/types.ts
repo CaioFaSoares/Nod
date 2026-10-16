@@ -88,6 +88,13 @@ export interface Person {
   /** derived: some role has admin = true */
   admin: boolean;
   createdAt: string;
+  /**
+   * Connected mode (SP03 §2 `AdminPerson`, SP05 §4): the two columns the host keeps and Settings →
+   * People shows — when the person redeemed their code, and when the host disabled them. Absent in
+   * local mode, which has neither.
+   */
+  activatedAt?: string | null;
+  disabledAt?: string | null;
 }
 
 export interface PasswordHash {
@@ -168,7 +175,11 @@ export type EventType =
 export type LoginResult = 'session' | 'filled' | 'provider' | 'manual' | 'failed';
 
 export interface AuditEvent {
-  id: number;
+  /**
+   * Local row id. While connected, Settings → Activity reads the host's own log, whose ids are
+   * uuids (SP03 §2 `HostEvent`), so the field is a number only in local mode.
+   */
+  id: number | string;
   at: string;
   personId: Id | null;
   toolId: Id | null;
@@ -353,6 +364,14 @@ export interface ApiContract {
   'host.syncNow': [void, HostState];
   /** `keepPersonal` is SP05 §3's choice about the local personal tools (block 2). */
   'host.remove': [{ keepPersonal: boolean }, HostState];
+  /**
+   * B8a: publishes this Bond's local catalog — the `org` rows of the local `tool` table, with their
+   * views and their icons, and the local roles — to a host that has no org tool yet (SP03 §2
+   * `/v1/admin/bootstrap`). `refused` is the host's `409`: the window is closed because the guild
+   * already holds org tools (H5 decision 12), which is an answer and not a failure of the call.
+   * Admin only, like every write of the host's catalog.
+   */
+  'host.bootstrap': [void, { created: number; refused: boolean }];
 
   'catalog.list': [void, Entry[]];
   'catalog.get': [{ id: Id }, EntryDetails];
@@ -372,8 +391,23 @@ export interface ApiContract {
 
   'people.list': [void, Person[]];
   'people.setRoles': [{ personId: Id; roles: Id[] }, Person];
+  /**
+   * Local mode: revokes the person and, with `deleteCredentials`, their local credentials (RF-16).
+   * Connected (SP05 §3): disables the person on the host (`disabledAt`), which revokes every session
+   * of theirs (SP03 §2) — their credentials live on their own machine, so nothing is deleted here.
+   */
   'people.revoke': [{ personId: Id; deleteCredentials: boolean }, true];
-  'invites.issue': [{ roles: Id[]; days?: number }, { code: string; expiresAt: string }];
+  /**
+   * Local mode: an invite code for a new local account, valid `days` (default 7).
+   * Connected (SP05 §3): the same question — "a code to hand over" — answered by the host.
+   * `email` + `name` create the person and their one access code (`POST /v1/admin/people`, RF-33);
+   * `personId` reissues the code of an existing person (`POST /v1/admin/people/:id/code`), revoking
+   * the previous one. `days` is local-only: SP02 §3 fixes 72 h on the host.
+   */
+  'invites.issue': [
+    { roles: Id[]; days?: number; email?: string; name?: string; personId?: Id },
+    { code: string; expiresAt: string },
+  ];
 
   'vault.list': [void, VaultItem[]];
   'vault.save': [{ toolId: Id; username: string; secret: string; label?: string }, VaultItem];
