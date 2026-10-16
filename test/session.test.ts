@@ -6,6 +6,7 @@ import { describe, expect, test } from 'bun:test';
 import { createRepo } from '../backend/repo';
 import { createSession } from '../backend/session';
 import { createVault } from '../backend/vault';
+import { HostError } from '../backend/host-client';
 import { deriveKeys, hashInviteCode, hashPassword, passwordCheck } from '../shared/auth';
 import { fromBase64url, toBase64url } from '../shared/encoding';
 import { memorySqlite } from './helpers/sqlite-bun';
@@ -1140,5 +1141,414 @@ describe('wipeVault (SP02 §7)', () => {
     expect(await vault.read(bruno, 'figma')).toEqual({ username: 'bruno', secret: 'bruno-secret' });
     // Nobody was locked out: a wipe is not a revocation.
     expect((await s.session.unlock({ email: EMAIL, password: PASSWORD })).unlocked).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- the Block 1 review fixes (F1, F2, F3, F7)
+
+/** A host call of these tests: it counts the times it was reached and answers what it was given. */
+function countedHost(answer: string | Error = 'opened') {
+  const calls: number[] = [];
+  return {
+    calls,
+    host: async (): Promise<string> => {
+      calls.push(calls.length);
+      if (answer instanceof Error) throw answer;
+      return answer;
+    },
+  };
+}
+
+/** The join of a Bond whose session is unlocked where it matters (F1/F3's own rules aside). */
+function joinAs(
+  s: SessionScene,
+  host: () => Promise<string>,
+  overrides: Partial<Parameters<Session['joinGate']>[0]> = {},
+) {
+  return s.session.joinGate({
+    email: GUILD_EMAIL,
+    adoptLocal: false,
+    hostPinned: false,
+    signIn: false,
+    host,
+    ...overrides,
+  });
+}
+
+describe('the local half of a join: joinGate (F1, F3, F7)', () => {
+  test('a first run joins with no session at all, and only then is the host asked', async () => {
+    const s = scene();
+    const checked = countedHost();
+
+    const gate = await joinAs(s, checked.host);
+
+    expect(gate).toEqual({ kind: 'join', local: null, answer: 'opened' });
+    expect(checked.calls).toHaveLength(1);
+  });
+
+  test('a Bond that already has an account refuses a locked join before the host is asked (F3)', async () => {
+    const s = scene();
+    await firstAccount(s);
+    s.session.lock();
+    const checked = countedHost();
+
+    // The refusal is the same for both handlers, and the host is not reached once: the answer is
+    // about this machine's accounts, not about the guild's.
+    for (const signIn of [false, true]) {
+      expect(await messageOf(() => joinAs(s, checked.host, { signIn }))).toBe(
+        'unlock this Bond first, then join the guild',
+      );
+    }
+    expect(checked.calls).toHaveLength(0);
+
+    // With a host row the session may stay locked: that is the signed-out sign-in F3 keeps working.
+    const gate = await joinAs(s, checked.host, { signIn: true, hostPinned: true });
+    expect(gate.kind).toBe('join');
+    expect(checked.calls).toHaveLength(1);
+  });
+
+  test('a local account holding the join email answers the choice, and nothing is sent (F1)', async () => {
+    const s = scene();
+    const local = await firstAccount(s);
+    const checked = countedHost();
+
+    const answer = await joinAs(s, checked.host, { email: EMAIL });
+
+    expect(answer).toEqual({ kind: 'choose', person: s.repo.personById(local) });
+    expect(checked.calls).toHaveLength(0);
+
+    // The decision the page sends back: the host is asked, and the local account is what the
+    // adoption will take over.
+    const decided = await joinAs(s, checked.host, { email: EMAIL, adoptLocal: true });
+    expect(decided).toEqual({ kind: 'join', local: s.repo.personById(local), answer: 'opened' });
+    expect(checked.calls).toHaveLength(1);
+  });
+
+  test('the email of another local account is refused, and its owner is the one to unlock it (F1)', async () => {
+    const s = scene();
+    await firstAccount(s);
+    const other = s.repo.createPerson({
+      email: GUILD_EMAIL,
+      name: 'Ana',
+      password: await hashPassword(PASSWORD, ITERATIONS),
+      roles: [],
+    });
+    const checked = countedHost();
+
+    expect(await messageOf(() => joinAs(s, checked.host, { adoptLocal: true }))).toBe(
+      'this email belongs to another account of this Bond — unlock it, then join',
+    );
+    expect(checked.calls).toHaveLength(0);
+
+    // Unlocked as that person, the very same join goes out with their account to adopt.
+    s.session.lock();
+    await s.session.unlock({ email: GUILD_EMAIL, password: PASSWORD });
+    const gate = await joinAs(s, checked.host, { adoptLocal: true });
+    expect(gate).toMatchObject({ kind: 'join', local: { id: other.id } });
+    expect(checked.calls).toHaveLength(1);
+  });
+
+  test('a revoked local row with the join email is adopted by an unlocked session (F1)', async () => {
+    const s = scene();
+    await firstAccount(s);
+    const gone = s.repo.createPerson({
+      email: GUILD_EMAIL,
+      name: 'Ana',
+      password: await hashPassword(PASSWORD, ITERATIONS),
+      roles: [],
+    });
+    s.repo.revokePerson(gone.id);
+    const checked = countedHost();
+
+    // Nothing of the live reads sees it, so the choice is what is answered — not a spent code.
+    const answer = await joinAs(s, checked.host);
+    expect(answer).toEqual({ kind: 'choose', person: s.repo.personByEmailAnyState(GUILD_EMAIL)?.person });
+    expect(checked.calls).toHaveLength(0);
+
+    const decided = await joinAs(s, checked.host, { adoptLocal: true });
+    expect(decided).toMatchObject({ kind: 'join', local: { id: gone.id } });
+    expect(checked.calls).toHaveLength(1);
+
+    // A revoked row can never be unlocked, so the machine's owner is the one who decides — and
+    // locked, there is nobody to decide and the join stops before the host.
+    s.session.lock();
+    expect(await messageOf(() => joinAs(s, checked.host, { adoptLocal: true }))).toBe(
+      'unlock this Bond first, then join the guild',
+    );
+    expect(checked.calls).toHaveLength(1);
+  });
+
+  test('a 401 of the host is one sentence, and a sign-in pays the unlock backoff (F3, F7)', async () => {
+    const s = scene();
+    const refused = new HostError('signed-out', 'signed out', 401);
+    const checked = countedHost(refused);
+
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      expect(await messageOf(() => joinAs(s, checked.host, { signIn: true }))).toBe('invalid code or password');
+    }
+    expect(s.repo.meta('unlock_failures')).toBe('5');
+    expect((await s.session.state()).waitMs).toBe(1000);
+
+    // The counter is the one `unlock` pays (RF-23), and inside the wait the join does not even
+    // reach the host.
+    expect(await messageOf(() => s.session.unlock({ email: GUILD_EMAIL, password: GUILD_PASSWORD }))).toBe(
+      'wait before trying again',
+    );
+    const reached = checked.calls.length;
+    expect(await messageOf(() => joinAs(s, checked.host, { signIn: true }))).toBe('wait before trying again');
+    expect(checked.calls).toHaveLength(reached);
+
+    // Past the wait, a host that answers clears the failures.
+    s.clock.advance(1000);
+    const gate = await joinAs(s, countedHost().host, { signIn: true });
+    expect(gate).toMatchObject({ kind: 'join', answer: 'opened' });
+    expect(s.repo.meta('unlock_failures')).toBe('0');
+    expect((await s.session.state()).waitMs).toBe(0);
+
+    // Only the 401 is F7's sentence: a host that was not reached keeps its own words.
+    const offline = new HostError('offline', 'could not reach the host');
+    expect(await messageOf(() => joinAs(s, countedHost(offline).host, { signIn: true }))).toBe(
+      'could not reach the host',
+    );
+    expect(s.repo.meta('unlock_failures')).toBe('0');
+  });
+});
+
+describe('adopting a local account (F1)', () => {
+  test('the account, its roles, its vault and its keychain items move to the host person', async () => {
+    const s = scene();
+    const local = await firstAccount(s);
+    s.repo.saveEntry(tool('kanban'));
+    s.repo.saveRole({ id: 'team', name: 'Team', admin: false });
+    s.repo.setRoles(local, ['admin', 'team']);
+    const vault = createVault({ repo: s.repo, keychain: s.keychain, iterations: ITERATIONS });
+    await vault.save(local, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
+    // An event of that person, recorded before the join: the audit is that person's own history.
+    s.repo.addEvent({ personId: local, toolId: 'kanban', type: 'tool_opened', url: null, result: null, detail: null });
+    expect(s.secrets.has(`bond.cred.${local}.kanban`)).toBe(true);
+
+    const state = await s.session.adoptConnectedAccount({
+      personId: HOST_PERSON_ID,
+      email: EMAIL,
+      name: 'Ana',
+      password: PASSWORD,
+      salt: HOST_SALT,
+      iterations: ITERATIONS,
+      admin: true,
+      adoptLocalId: local,
+    });
+
+    // The row is the host's person now, and the roles survived it.
+    expect(state.unlocked).toBe(true);
+    expect(state.person?.id).toBe(HOST_PERSON_ID);
+    expect(state.person?.roles).toEqual(['admin', 'team']);
+    expect(s.repo.personById(local)).toBeNull();
+    // The credential works under the new id: the index and the keychain item moved together.
+    expect(s.secrets.has(`bond.cred.${local}.kanban`)).toBe(false);
+    expect(s.secrets.has(`bond.cred.${HOST_PERSON_ID}.kanban`)).toBe(true);
+    expect(s.repo.listVault(HOST_PERSON_ID).map((item) => item.keychainKey)).toEqual([
+      `bond.cred.${HOST_PERSON_ID}.kanban`,
+    ]);
+    expect(await vault.read(HOST_PERSON_ID, 'kanban')).toEqual({ username: 'ana', secret: 'kanban-secret' });
+    // The history moved with the person, and nothing stayed under the old id.
+    const history = s.repo.listEvents({ personId: HOST_PERSON_ID }).map((event) => event.type);
+    expect(history).toContain('account_created');
+    expect(history).toContain('tool_opened');
+    expect(history).toContain('unlocked');
+    expect(s.repo.listEvents({ personId: local })).toEqual([]);
+    // The verifier is the host's: the same password over the host salt opens the row offline.
+    s.session.lock();
+    expect((await s.session.unlock({ email: EMAIL, password: PASSWORD })).person?.id).toBe(HOST_PERSON_ID);
+  });
+
+  test('the roles of the adopted account survive, and the host decides the admin flag (F1)', async () => {
+    const s = scene();
+    const local = s.repo.createPerson({
+      email: GUILD_EMAIL,
+      name: 'Ana',
+      password: await hashPassword(PASSWORD, ITERATIONS),
+      roles: [],
+    });
+    s.repo.saveRole({ id: 'team', name: 'Team', admin: false });
+    s.repo.setRoles(local.id, ['admin', 'team']);
+
+    const state = await adoptConnected(s, { email: GUILD_EMAIL, adoptLocalId: local.id, admin: false });
+
+    // The host says this person is not an admin: the flag goes, the other local role stays.
+    expect(state.person?.roles).toEqual(['team']);
+    expect(state.person?.admin).toBe(false);
+  });
+
+  test('the biometric item moves with the row (F1)', async () => {
+    const s = scene({ biometricAvailable: true });
+    const local = await firstAccount(s);
+    await s.session.enableBiometric(PASSWORD);
+    expect(s.secrets.has(`bond.bio.${local}`)).toBe(true);
+
+    await adoptConnected(s, { email: EMAIL, adoptLocalId: local });
+
+    expect(s.secrets.has(`bond.bio.${local}`)).toBe(false);
+    expect(s.secrets.get(`bond.bio.${HOST_PERSON_ID}`)).toBe(HOST_PERSON_ID);
+    // And it still opens this session, which is now the host person's.
+    s.session.lock();
+    expect((await s.session.unlockBiometric()).person?.id).toBe(HOST_PERSON_ID);
+  });
+
+  test('a revoked local row of the join email comes back as the host person (F1)', async () => {
+    const s = scene();
+    await firstAccount(s);
+    const gone = s.repo.createPerson({
+      email: GUILD_EMAIL,
+      name: 'Ana',
+      password: await hashPassword(PASSWORD, ITERATIONS),
+      roles: [],
+    });
+    s.repo.saveEntry(tool('kanban'));
+    s.repo.saveVaultItem({
+      personId: gone.id,
+      toolId: 'kanban',
+      label: 'kanban',
+      username: 'ana',
+      keychainKey: `bond.cred.${gone.id}.kanban`,
+      origin: 'https://kanban.example.test/app',
+    });
+    await s.keychain.set(`bond.cred.${gone.id}.kanban`, 'kanban-value');
+    s.repo.revokePerson(gone.id);
+
+    const state = await adoptConnected(s, { email: GUILD_EMAIL, adoptLocalId: gone.id });
+
+    expect(state.person?.id).toBe(HOST_PERSON_ID);
+    expect(s.repo.personById(HOST_PERSON_ID)).toMatchObject({ email: GUILD_EMAIL, name: 'Ana' });
+    expect(s.secrets.has(`bond.cred.${gone.id}.kanban`)).toBe(false);
+    expect(s.secrets.get(`bond.cred.${HOST_PERSON_ID}.kanban`)).toBe('kanban-value');
+    expect(s.repo.listVault(HOST_PERSON_ID)).toHaveLength(1);
+  });
+
+  test('a host person this Bond already holds is refused, and nothing moved (F1)', async () => {
+    const s = scene();
+    const local = await firstAccount(s);
+    const other = s.repo.createPerson({
+      email: GUILD_EMAIL,
+      name: 'Bia',
+      password: await hashPassword(PASSWORD, ITERATIONS),
+      roles: [],
+    });
+
+    expect(
+      await messageOf(() => adoptConnected(s, { email: EMAIL, adoptLocalId: local, personId: other.id })),
+    ).toBe('this Bond already holds an account of that guild person');
+
+    // Both rows as they were: two people are not merged into one.
+    expect(s.repo.personById(local)?.email).toBe(EMAIL);
+    expect(s.repo.personById(other.id)?.email).toBe(GUILD_EMAIL);
+    expect(s.session.current()?.id).toBe(local);
+  });
+
+  test('an email of this Bond that nothing adopts is still refused as registered (F1)', async () => {
+    const s = scene();
+    await firstAccount(s);
+    s.session.lock();
+
+    expect(await messageOf(() => adoptConnected(s, { email: EMAIL }))).toBe('email already registered');
+
+    // A revoked row of that email, with nothing adopting it, is the same clear refusal — never the
+    // raw `UNIQUE constraint failed` the email column would answer.
+    const gone = s.repo.createPerson({
+      email: GUILD_EMAIL,
+      name: 'Ana',
+      password: await hashPassword(PASSWORD, ITERATIONS),
+      roles: [],
+    });
+    s.repo.revokePerson(gone.id);
+    expect(await messageOf(() => adoptConnected(s, { email: GUILD_EMAIL }))).toBe('email already registered');
+    expect(s.repo.countPeople()).toBe(2);
+  });
+
+  test('a keychain that refuses the new key leaves the old item where it is (F1)', async () => {
+    const s = scene();
+    const local = await firstAccount(s);
+    s.repo.saveEntry(tool('kanban'));
+    s.repo.saveVaultItem({
+      personId: local,
+      toolId: 'kanban',
+      label: 'kanban',
+      username: 'ana',
+      keychainKey: `bond.cred.${local}.kanban`,
+      origin: 'https://kanban.example.test/app',
+    });
+    await s.keychain.set(`bond.cred.${local}.kanban`, 'kanban-value');
+    const real = s.keychain;
+    // The read goes through; the write of the new key is what a full keychain would refuse.
+    const refusing: SecretStore = {
+      get: (key) => real.get(key),
+      set: async (key, value) => (key === `bond.cred.${HOST_PERSON_ID}.kanban` ? false : real.set(key, value)),
+      delete: (key) => real.delete(key),
+    };
+    const session = createSession({
+      repo: s.repo,
+      keychain: refusing,
+      store: memoryStore().store,
+      authenticate: async () => true,
+      biometricAvailable: false,
+      iterations: ITERATIONS,
+      now: s.clock.now,
+    });
+
+    expect(
+      await messageOf(() =>
+        session.adoptConnectedAccount({
+          personId: HOST_PERSON_ID,
+          email: EMAIL,
+          name: 'Ana',
+          password: PASSWORD,
+          salt: HOST_SALT,
+          iterations: ITERATIONS,
+          admin: true,
+          adoptLocalId: local,
+        }),
+      ),
+    ).toBe('the system keychain refused to move the credential of kanban');
+
+    // The report is what the person sees; the value itself is not lost — it is still under the key it
+    // was written with, and the index row moved with the id.
+    expect(s.secrets.get(`bond.cred.${local}.kanban`)).toBe('kanban-value');
+    expect(s.repo.personById(local)).toBeNull();
+    expect(s.repo.listVault(HOST_PERSON_ID).map((item) => item.keychainKey)).toEqual([
+      `bond.cred.${HOST_PERSON_ID}.kanban`,
+    ]);
+  });
+});
+
+describe('reconcileConnectedIdentity (F2)', () => {
+  test('the name and the admin flag of the unlocked person follow the snapshot', async () => {
+    const s = scene();
+    // An access-code activation: the host creates the person and the local row starts with no admin.
+    await adoptConnected(s, { admin: false });
+    expect(s.session.current()?.admin).toBe(false);
+
+    expect(s.session.reconcileConnectedIdentity({ id: HOST_PERSON_ID, name: 'Ana Silva', admin: true })).toBe(true);
+    expect(s.session.current()).toMatchObject({ id: HOST_PERSON_ID, name: 'Ana Silva', admin: true });
+
+    // The same snapshot again is nothing to push.
+    expect(s.session.reconcileConnectedIdentity({ id: HOST_PERSON_ID, name: 'Ana Silva', admin: true })).toBe(false);
+
+    // Demoted on the host: the admin screens leave with the next snapshot.
+    expect(s.session.reconcileConnectedIdentity({ id: HOST_PERSON_ID, name: 'Ana Silva', admin: false })).toBe(true);
+    expect(s.session.current()?.admin).toBe(false);
+    expect(s.repo.personById(HOST_PERSON_ID)?.roles).toEqual([]);
+
+    // The snapshot of somebody else is nobody's to write here.
+    expect(s.session.reconcileConnectedIdentity({ id: 'another-person', name: 'Other', admin: true })).toBe(false);
+    expect(s.repo.countPeople()).toBe(1);
+  });
+
+  test('a locked session reconciles nothing', async () => {
+    const s = scene();
+    await adoptConnected(s, { admin: false });
+    s.session.lock();
+
+    expect(s.session.reconcileConnectedIdentity({ id: HOST_PERSON_ID, name: 'Ana Silva', admin: true })).toBe(false);
+    expect(s.repo.personById(HOST_PERSON_ID)?.name).toBe('Ana');
+    expect(s.repo.personById(HOST_PERSON_ID)?.admin).toBe(false);
   });
 });

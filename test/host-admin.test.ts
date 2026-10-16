@@ -20,18 +20,22 @@ import { join } from 'node:path';
 
 import { createHostAdmin, hostAdminFor, type HostAdmin } from '../backend/host-admin';
 import { createHostClient, hostTokenKey, type HostClient, type HostConnection } from '../backend/host-client';
+import { createConnectedCatalog } from '../backend/connected-catalog';
 import { createRepo as createBondRepo } from '../backend/repo';
+import { createSession, type Session } from '../backend/session';
 import { createSync } from '../backend/sync';
+import { createVault, type Vault } from '../backend/vault';
 import { toBase64url } from '../shared/encoding';
 import {
   HOST_ROUTES,
   type ClientEvent,
   type ErrorResponse,
+  type SaltResponse,
   type Snapshot,
   type TokenResponse,
 } from '../shared/host-api';
 import type { Device } from '../shared/host-api';
-import type { Entry, Id, Role, SecretStore } from '../shared/types';
+import type { Entry, HostState, Id, Role, SecretStore } from '../shared/types';
 import { createApp } from '../host/app';
 import { createRepo as createHostRepo, type Repo } from '../host/repo';
 import { issueSetupCode } from '../host/cli/setup-code';
@@ -548,5 +552,358 @@ describe('local mode never reaches a host (RF-30, SP05 §3)', () => {
     expect(repo.listRoles().map((item) => item.id).sort()).toEqual(['admin', 'team']);
     // The host was up and reachable the whole time, and heard nothing.
     expect(running.requests.length).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------- F1/F2/F3/F7 — the join of a Bond
+
+/** PBKDF2 with 600 000 iterations costs hundreds of ms; the Bond side of these tests uses 1000. */
+const ITERATIONS = 1000;
+const BOND_PASSWORD = 'bond-password';
+const LOCAL_EMAIL = 'bob@bond.test';
+
+/** `app.store` in memory: the same surface, nothing on disk. */
+function memoryStore(): { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<boolean> } {
+  const items = new Map<string, unknown>();
+  return {
+    get: async (key) => items.get(key) ?? null,
+    set: async (key, value) => {
+      items.set(key, value);
+      return true;
+    },
+  };
+}
+
+/** The Bond side of one machine: the real repository, session and vault over its keychain. */
+interface Bond {
+  repo: ReturnType<typeof createBondRepo>;
+  session: Session;
+  vault: Vault;
+  secrets: SecretStore;
+}
+
+function newBond(): Bond {
+  const secrets = memoryKeychain();
+  const repo = createBondRepo(memorySqlite());
+  repo.migrate();
+  repo.ensureAdminRole();
+  const session = createSession({
+    repo,
+    keychain: secrets,
+    store: memoryStore(),
+    authenticate: async () => true,
+    biometricAvailable: false,
+    iterations: ITERATIONS,
+  });
+  return { repo, session, vault: createVault({ repo, keychain: secrets, iterations: ITERATIONS }), secrets };
+}
+
+async function messageOf(action: () => Promise<unknown>): Promise<string> {
+  try {
+    await action();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return 'did not throw';
+}
+
+/** What one activation of the Bond side answers: what `backend/main.ts`'s handler would return. */
+type JoinAnswer =
+  | { kind: 'local-account'; personId: string; email: string; name: string; requests: number }
+  | { kind: 'session'; personId: string; token: string; admin: boolean; requests: number };
+
+/**
+ * One activation, the way `backend/main.ts`'s `host.activate` runs it: the session's local gate
+ * first — nothing about this Bond's accounts is decided by the host, and no request is made before
+ * the gate allows it — then the discovery and the two auth calls over the real client, then the
+ * adoption of the host's answer. `requests` is what the host's own log grew by, so "no request was
+ * made" is the host's word and not this test's.
+ */
+async function activateAs(
+  running: Running,
+  bond: Bond,
+  input: { email: string; code: string; password: string; name?: string; adoptLocal?: boolean },
+): Promise<JoinAnswer> {
+  const before = running.requests.length;
+  const setup = input.name !== undefined;
+  const gate = await bond.session.joinGate({
+    email: input.email,
+    adoptLocal: input.adoptLocal ?? false,
+    hostPinned: false,
+    signIn: false,
+    host: async () => {
+      const found = await running.client.discover(running.address);
+      const pre = running.client.connect({
+        address: found.address,
+        kid: found.pin.kid,
+        publicKey: found.pin.ed25519Public,
+        personId: '',
+      });
+      const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email: input.email });
+      const salt = randomSalt();
+      const keys = await bond.session.deriveFor(input.password, salt, published.iterations);
+      const body = {
+        email: input.email,
+        code: input.code,
+        salt,
+        authKey: toBase64url(keys.authKey),
+        device: DEVICE,
+      };
+      const opened = await pre.request<TokenResponse>(
+        'POST',
+        setup ? HOST_ROUTES.authSetup : HOST_ROUTES.authActivate,
+        setup ? { ...body, name: input.name } : body,
+      );
+      return { found, published, salt, opened };
+    },
+  });
+  if (gate.kind === 'choose') {
+    return {
+      kind: 'local-account',
+      personId: gate.person.id,
+      email: gate.person.email,
+      name: gate.person.name,
+      requests: running.requests.length - before,
+    };
+  }
+  const { found, published, salt, opened } = gate.answer;
+  const state = await bond.session.adoptConnectedAccount({
+    personId: opened.personId,
+    email: input.email,
+    name: input.name ?? gate.local?.name ?? input.email,
+    password: input.password,
+    salt,
+    iterations: published.iterations,
+    admin: setup,
+    ...(gate.local === null ? {} : { adoptLocalId: gate.local.id }),
+  });
+  bond.repo.saveHost({
+    address: found.address,
+    guild: 'Bond test guild',
+    kid: found.pin.kid,
+    publicKey: found.pin.ed25519Public,
+    personId: opened.personId,
+    salt,
+    addedAt: AT,
+  });
+  return {
+    kind: 'session',
+    personId: opened.personId,
+    token: opened.token,
+    admin: state.person !== null && state.person.admin,
+    requests: running.requests.length - before,
+  };
+}
+
+/**
+ * One sync of a joined Bond, wired the way `backend/main.ts` wires it (SP05 §2): the client over the
+ * `host` row, the effective catalog re-derived on every published state — and F2's reconcile, which
+ * is the line under test here.
+ */
+async function syncBond(running: Running, bond: Bond, person: { id: string; token: string }): Promise<HostState> {
+  const catalog = createConnectedCatalog({ now: () => Date.parse(AT) });
+  const connection = () =>
+    running.client.connect({
+      address: running.address,
+      kid: running.pin.kid,
+      publicKey: running.pin.ed25519Public,
+      personId: person.id,
+    });
+  await connection().saveToken(person.token);
+  const sync = createSync({
+    repo: bond.repo,
+    connection,
+    now: () => Date.parse(AT),
+    onState: () => {
+      // `backend/main.ts`: the catalog follows the snapshot, and so does the connected person (F2).
+      catalog.refresh(bond.repo.hostRecord());
+      const me = catalog.current()?.me ?? null;
+      if (me !== null) {
+        bond.session.reconcileConnectedIdentity({ id: me.id, name: me.name, admin: me.admin });
+      }
+    },
+    onSignedOut: () => {},
+    setInterval: () => 0,
+    clearInterval: () => {},
+  });
+  return await sync.syncNow();
+}
+
+describe('F1 — a join whose email is already an account of this Bond', () => {
+  test('the choice is answered before any host call, and the code is still redeemable', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+    const created = await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
+    const bond = newBond();
+    const localId = (await bond.session.createAccount({ email: LOCAL_EMAIL, name: 'Bob Local', password: BOND_PASSWORD })).person?.id ?? '';
+    const settled = running.requests.slice();
+
+    const choice = await activateAs(running, bond, { email: LOCAL_EMAIL, code: created.code, password: BOND_PASSWORD });
+
+    expect(choice).toEqual({
+      kind: 'local-account',
+      personId: localId,
+      email: LOCAL_EMAIL,
+      name: 'Bob Local',
+      requests: 0,
+    });
+    // The host's own log says it too: discovery, salt and the redemption were never made, so the
+    // single-use code is whole.
+    expect(running.requests).toEqual(settled);
+
+    // The decision the page sends back: the same code still redeems it.
+    const joined = await activateAs(running, bond, {
+      email: LOCAL_EMAIL,
+      code: created.code,
+      password: BOND_PASSWORD,
+      adoptLocal: true,
+    });
+    expect(joined).toMatchObject({ kind: 'session', personId: created.person.id });
+    expect(joined.requests).toBeGreaterThan(0);
+  });
+
+  test('with the choice made and the account unlocked, the join adopts it and the credential comes along', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+    const created = await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
+    const bond = newBond();
+    const localId = (await bond.session.createAccount({ email: LOCAL_EMAIL, name: 'Bob Local', password: BOND_PASSWORD })).person?.id ?? '';
+    // A local role of that account, and a credential saved before the join.
+    bond.repo.saveRole({ id: 'team', name: 'Team', admin: false });
+    bond.repo.setRoles(localId, ['admin', 'team']);
+    bond.repo.saveEntry(tool('kanban'));
+    await bond.vault.save(localId, { toolId: 'kanban', username: 'bob', secret: 'kanban-secret' });
+    expect(await bond.vault.read(localId, 'kanban')).toEqual({ username: 'bob', secret: 'kanban-secret' });
+
+    const joined = await activateAs(running, bond, {
+      email: LOCAL_EMAIL,
+      code: created.code,
+      password: BOND_PASSWORD,
+      adoptLocal: true,
+    });
+
+    expect(joined).toMatchObject({ kind: 'session', personId: created.person.id, admin: false });
+    // The row is the host's person, with the roles the local account had (the host decides only the
+    // admin flag) and the name the person typed on this machine.
+    expect(bond.repo.personById(localId)).toBeNull();
+    expect(bond.repo.personById(created.person.id)).toMatchObject({
+      email: LOCAL_EMAIL,
+      name: 'Bob Local',
+      roles: ['team'],
+    });
+    expect(bond.session.current()?.id).toBe(created.person.id);
+    // The credential is readable under the new id, the index moved with it and the old keychain key
+    // is gone: the item was renamed, not copied.
+    expect(await bond.vault.read(created.person.id, 'kanban')).toEqual({ username: 'bob', secret: 'kanban-secret' });
+    expect(await bond.secrets.get(`bond.cred.${localId}.kanban`)).toBeNull();
+    expect(bond.repo.listVault(created.person.id).map((item) => item.keychainKey)).toEqual([
+      `bond.cred.${created.person.id}.kanban`,
+    ]);
+    // The host holds that person under the very id this machine now uses (SP05 §2).
+    expect(running.repo.personById(created.person.id)).toMatchObject({ email: LOCAL_EMAIL, name: 'Bob Guild' });
+  });
+
+  test('a locked Bond that already has an account refuses the join, and no request leaves (F1, F3)', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+    const created = await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
+    const bond = newBond();
+    await bond.session.createAccount({ email: LOCAL_EMAIL, name: 'Bob Local', password: BOND_PASSWORD });
+    bond.session.lock();
+    const settled = running.requests.length;
+
+    expect(
+      await messageOf(() => activateAs(running, bond, { email: LOCAL_EMAIL, code: created.code, password: BOND_PASSWORD })),
+    ).toBe('unlock this Bond first, then join the guild');
+    // Nothing left the machine, with the collision or without it.
+    expect(running.requests.length).toBe(settled);
+    expect(await messageOf(() => activateAs(running, bond, { email: 'other@bond.test', code: created.code, password: BOND_PASSWORD }))).toBe(
+      'unlock this Bond first, then join the guild',
+    );
+    expect(running.requests.length).toBe(settled);
+
+    // The code is whole: the unlocked session redeems it.
+    await bond.session.unlock({ email: LOCAL_EMAIL, password: BOND_PASSWORD });
+    const joined = await activateAs(running, bond, {
+      email: LOCAL_EMAIL,
+      code: created.code,
+      password: BOND_PASSWORD,
+      adoptLocal: true,
+    });
+    expect(joined).toMatchObject({ kind: 'session', personId: created.person.id });
+  });
+
+  test('the first run of a Bond with no account joins with no session (F3)', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+    const created = await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
+    const bond = newBond();
+    expect((await bond.session.state()).hasAccount).toBe(false);
+
+    const joined = await activateAs(running, bond, { email: LOCAL_EMAIL, code: created.code, password: BOND_PASSWORD });
+
+    expect(joined).toMatchObject({ kind: 'session', personId: created.person.id, admin: false });
+    expect(bond.repo.personById(created.person.id)?.name).toBe(LOCAL_EMAIL);
+  });
+
+  test('a wrong code is the join\'s one sentence, not a signed-out session (F7)', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+    await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
+    const bond = newBond();
+
+    // The cause, without the join around it: the host answers 401 (SP02 §5) and the client reads
+    // every 401 as `signed-out` — a sentence about a session that was revoked.
+    const pre = running.client.connect({
+      address: running.address,
+      kid: running.pin.kid,
+      publicKey: running.pin.ed25519Public,
+      personId: '',
+    });
+    expect(
+      await messageOf(() =>
+        pre.request('POST', HOST_ROUTES.authActivate, {
+          email: LOCAL_EMAIL,
+          code: 'ZZZZ-ZZZZ',
+          salt: randomSalt(),
+          authKey: randomAuthKey(),
+          device: DEVICE,
+        }),
+      ),
+    ).toBe('signed out');
+
+    expect(
+      await messageOf(() => activateAs(running, bond, { email: LOCAL_EMAIL, code: 'ZZZZ-ZZZZ', password: BOND_PASSWORD })),
+    ).toBe('invalid code or password');
+    expect(running.requests.at(-1)).toBe('POST /v1/auth/activate');
+    // Neither a host row nor an account was written on the back of a refused join.
+    expect(bond.repo.hostRecord()).toBeNull();
+    expect((await bond.session.state()).hasAccount).toBe(false);
+  });
+});
+
+describe('F2 — the snapshot decides the connected person\'s name and admin flag', () => {
+  test('the first sync promotes the person the snapshot calls an admin, and a demotion takes it back', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+    const created = await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: ['admin'] });
+    const bond = newBond();
+    const joined = await activateAs(running, bond, { email: LOCAL_EMAIL, code: created.code, password: BOND_PASSWORD });
+
+    // An access-code activation says nothing about the roles: the local row of a connected admin
+    // starts without the flag, which is the state this finding is about.
+    expect(joined).toMatchObject({ kind: 'session', personId: created.person.id, admin: false });
+    expect(bond.session.current()?.admin).toBe(false);
+
+    const state = await syncBond(running, bond, { id: created.person.id, token: joined.kind === 'session' ? joined.token : '' });
+    expect(state.status).toBe('connected');
+    // F2: the sync's own publish ran the reconcile — the admin screens are on.
+    expect(bond.session.current()).toMatchObject({ id: created.person.id, name: 'Bob Guild', admin: true });
+
+    // Demoted on the host: the next snapshot takes the flag back.
+    await admin.setRoles(created.person.id, []);
+    const after = await syncBond(running, bond, { id: created.person.id, token: joined.kind === 'session' ? joined.token : '' });
+    expect(after.status).toBe('connected');
+    expect(bond.session.current()).toMatchObject({ id: created.person.id, admin: false });
   });
 });

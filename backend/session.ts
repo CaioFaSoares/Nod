@@ -512,7 +512,9 @@ export function createSession(deps: SessionDeps): Session {
     // `Person.admin` derives from. A non-admin gets no local role: while connected, roles and grants
     // come from the snapshot (SP05 §2), not from `role` / `person_role`.
     const roles = adopt === null ? (p.admin ? [deps.repo.ensureAdminRole().id] : []) : withHostAdmin(keptLocal, p.admin);
-    const isNew = deps.repo.personById(p.personId) === null;
+    // F1: an adopted local account is not a new one — the row exists, under another id, and what
+    // just happened to it is an unlock as much as the host's acceptance is.
+    const isNew = adopt === null && deps.repo.personById(p.personId) === null;
     if (adopt !== null) {
       const moved = deps.repo.adoptPersonId({
         fromId: adopt,
@@ -636,9 +638,9 @@ export function createSession(deps: SessionDeps): Session {
   }
 
   /**
-   * F2: see the contract. The row is the repository's (only it writes `person`); what this adds is
-   * the unlocked session following it, or locking when the snapshot was the last word on a person
-   * the host no longer has.
+   * F2: see the contract. The row is the repository's (only it writes `person`) and the repository
+   * decides whether anything moved; what this adds is the unlocked session following it — a revoked
+   * person is no name or flag of anybody's, and the repository leaves it alone.
    */
   function reconcileConnectedIdentity(me: { id: Id; name: string; admin: boolean }): boolean {
     if (current === null || current.id !== me.id) return false;

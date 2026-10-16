@@ -23,7 +23,10 @@
 // Steps 4 and 5 of SP05 §5 conflict for P (a revoked person cannot push later), so the phases run
 // in the order the acceptance needs: publish, join and reconnect, revoke, then the doomed sync.
 //
-//   phase admin-publish      SP05 §5.2  host.activate with the setup code, publish local tools,
+//   phase admin-publish      SP05 §5.2  a local account with the guild email and a credential saved
+//                                       for it, then host.activate with the setup code: the join
+//                                       answers F1's choice (nothing sent), the same code redeems
+//                                       with it, the credential comes along; publish local tools,
 //                                       create P with role `team`, grant the tool to `team`, sync
 //   phase person-join        SP05 §5.3  P activates, sees the granted tool, saves a credential
 //                            SP05 §5.5  and fills the login; host stopped: lock/unlock, tools still
@@ -644,6 +647,57 @@ function hostRows(personEmail: string): HostRows {
   }
 }
 
+// ------------------------------------------------------------- the admin Bond's own rows
+
+/** The id the host holds for an email; `null` when the host has no such person. */
+function hostPersonId(email: string): string | null {
+  const file = join(HOST_DATA, 'host.db');
+  if (!existsSync(file)) return null;
+  const db = new Database(file, { readonly: true });
+  try {
+    const row = db.query('SELECT id FROM people WHERE email = ?').get(email) as { id: string } | null;
+    return row?.id ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * The admin Bond's vault row after the run — read before `clean()` wipes the app data dir. It is F1's
+ * proof on the real surface: the credential saved **before** the join belongs to the guild person
+ * the local account became, and its keychain key was renamed with it (the keychain itself is the
+ * OS's; the page's own `vault.reveal` is what proves the value opens under the new key).
+ */
+interface AdminVault {
+  lines: string[];
+  personId: string | null;
+  keychainKey: string | null;
+}
+
+function adminVault(): AdminVault {
+  const file = join(dataDir(ADMIN_APP_ID), 'bond.db');
+  if (!existsSync(file)) return { lines: ["the admin's database is missing"], personId: null, keychainKey: null };
+  const db = new Database(file, { readonly: true });
+  try {
+    const row = db.query('SELECT person_id, keychain_key FROM vault_item WHERE tool_id = ?').get(TOOL_A_ID) as
+      | { person_id: string; keychain_key: string }
+      | null;
+    const people = db.query('SELECT COUNT(*) AS n FROM person').get() as { n: number };
+    return {
+      lines: [
+        `people: ${people.n} (expected 1: the adopted account)`,
+        `vault row of ${TOOL_A_ID}: ${
+          row === null ? '(missing)' : `person ${row.person_id}, key ${row.keychain_key}`
+        }`,
+      ],
+      personId: row?.person_id ?? null,
+      keychainKey: row?.keychain_key ?? null,
+    };
+  } finally {
+    db.close();
+  }
+}
+
 // ------------------------------------------------------------- P's own rows
 
 /**
@@ -848,6 +902,33 @@ async function main(): Promise<number> {
         `P has no credential for ${TOOL_A_ID} on ${tools.originA} (origin ${JSON.stringify(vaultRows.origin)})`,
       );
       failed = true;
+    }
+
+    // F1: the admin Bond had a local account with the guild's email and a credential saved before
+    // the join. The join adopted it, so the vault row has to carry the guild's person id and the
+    // keychain key of that id — the page's own reveal (step 2.4c) is what proves the value moved.
+    const guildPerson = hostPersonId(ADMIN_EMAIL);
+    const adopted = adminVault();
+    console.log("\nthe admin Bond's vault row after the adopt (F1):");
+    for (const line of adopted.lines) console.log(`  ${line}`);
+    if (guildPerson === null) {
+      console.error('the host holds no person for the smoke admin');
+      failed = true;
+    } else {
+      if (adopted.personId !== guildPerson) {
+        console.error(
+          `the credential of ${TOOL_A_ID} belongs to ${JSON.stringify(adopted.personId)}, ` +
+            `not to the guild person ${guildPerson}`,
+        );
+        failed = true;
+      }
+      if (adopted.keychainKey !== `bond.cred.${guildPerson}.${TOOL_A_ID}`) {
+        console.error(
+          `the keychain key of ${TOOL_A_ID} is ${JSON.stringify(adopted.keychainKey)}, ` +
+            `expected bond.cred.${guildPerson}.${TOOL_A_ID}`,
+        );
+        failed = true;
+      }
     }
 
     if (failed) {
