@@ -1,4 +1,4 @@
-# Bond
+# Nod
 
 O vocabulário do produto. **Everything is in English from 2026-10-16** (owner decision; the app was
 already English since 2026-10-15). The pt-BR terms below remain until this file is rewritten; each
@@ -6,12 +6,12 @@ term carries the identifier used in code and UI. A new term waits for the owner'
 
 ## A janela e o que ela abre
 
-**Bond** — `Bond`:
-O produto: o app que roda na máquina da pessoa e reúne as ferramentas internas da Copland.
+**Nod** — `Nod`:
+O produto: o app que roda na máquina da pessoa e reúne as ferramentas internas de um time.
 _Evite_: wrapper, launcher, hub, portal
 
 **Janela principal** — `main` (`MAIN_WINDOW`):
-A única janela para gerenciar e usar o Bond: sidebar, Home, paleta, Settings e a tela de entrada.
+A única janela para gerenciar e usar o Nod: sidebar, Home, paleta, Settings e a tela de entrada.
 _Evite_: casca, rail, painel de admin (como janela)
 
 **Sidebar** — `sidebar`:
@@ -19,7 +19,7 @@ A coluna de ícones da janela principal, um por ferramenta permitida, com dígit
 _Evite_: rail, dock, barra lateral de ícones como janela própria
 
 **Ferramenta** — `tool`:
-Um sistema web interno que o Bond abre — Affine, Kanban, webmail, Discord.
+Um sistema web interno que o Nod abre — Affine, Kanban, webmail, Discord.
 _Evite_: app, aplicativo, sistema, serviço
 
 **Janela de ferramenta** — tool window (`toolWindowId`):
@@ -27,7 +27,7 @@ A janela própria em que uma ferramenta abre, a partir da janela principal.
 _Evite_: palco, aba, painel, webview, iframe
 
 **Endereço** — `url`:
-A URL base de uma ferramenta, como `https://kanban.copland.studio`.
+A URL base de uma ferramenta, como `https://kanban.example.com`.
 _Evite_: link, host, domínio
 
 **Vista** — `View`:
@@ -48,16 +48,16 @@ A busca por teclado (`⌘K`) dentro da janela principal: ferramentas, vistas e a
 _Evite_: omnibox, launcher, janela de busca
 
 **Aba**:
-Não existe no Bond. O que a pessoa chamaria de aba é uma **janela de ferramenta** ou uma **vista**.
+Não existe no Nod. O que a pessoa chamaria de aba é uma **janela de ferramenta** ou uma **vista**.
 
 ## Pessoas e acesso
 
 **Pessoa** — `Person`:
-Quem usa o Bond numa máquina.
+Quem usa o Nod numa máquina.
 _Evite_: usuário, user, membro, funcionário
 
 **Conta** — account:
-As credenciais de uma pessoa no Bond (ou, no futuro, num host).
+As credenciais de uma pessoa no Nod (ou, no futuro, num host).
 _Evite_: login (como substantivo), perfil, cadastro
 
 **Convite** — `Invite` (`InviteSeed` no seed):
@@ -86,11 +86,11 @@ na release, aplicado no primeiro boot. Não contém segredo.
 _Evite_: config, env, seed de banco
 
 **Desbloqueio** — unlock (`session.unlock`):
-Autenticar no Bond com a senha local, ou com biometria onde existe. Uma vez só por sessão.
+Autenticar no Nod com a senha local, ou com biometria onde existe. Uma vez só por sessão.
 _Evite_: login (quando se fala do app)
 
 **Senha local** — password:
-A senha da conta no próprio Bond. Sem recuperação.
+A senha da conta no próprio Nod. Sem recuperação.
 _Evite_: master password, PIN
 
 ## Segredos e registro

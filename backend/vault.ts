@@ -62,8 +62,10 @@ export function createVault(deps: VaultDeps): Vault {
     if (username.length === 0) throw new Error(USERNAME_REQUIRED);
     // The secret is not trimmed: leading or trailing space may be part of the tool's password.
     if (p.secret.length === 0) throw new Error(SECRET_REQUIRED);
-    // The row has a foreign key to `tool`: an entry that does not exist is refused before anything
-    // is written to the keychain (the index would be impossible to keep).
+    // The entry comes from the effective catalog — `backend/main.ts` hands the vault a repository
+    // whose `entry` is the connected one while connected (SP05 §2). A tool of the guild may have no
+    // local `tool` row at all, and it is still refused when the catalog does not know it: without an
+    // entry there is no origin to bind the credential to (RF-38).
     const entry = deps.repo.entry(p.toolId);
     if (entry === null) throw new Error(UNKNOWN_TOOL);
     // RF-38: the origin is taken before the keychain write, so a refused write leaves no trace of

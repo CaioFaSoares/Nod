@@ -77,12 +77,12 @@ flowchart TB
   (applied before the first paint).
   - `parent` would give native "stays above `main`, minimizes with it, moves with it on macOS", but
     it can only be set when the window opens (`backend/tiny.d.ts`, `TinyOpenWindowOptions.parent`).
-    Detaching a child would mean reopening it and losing the page, so the Bond does those three
+    Detaching a child would mean reopening it and losing the page, so the Nod does those three
     things itself.
 - **Switching tabs**: `hide({ app: false })` on the current tab, `show` on the next. The hidden page
   stays alive with its state (`docs/tinyjs.md` §3), so switching never reloads; this is the same
   mechanism RNF-09 relies on.
-- **Following the main window** (done by the Bond on every OS):
+- **Following the main window** (done by the Nod on every OS):
   - resize: the main page watches the slot with `ResizeObserver` and sends its screen rect to the
     backend, which calls `setPosition`/`setSize` on the visible tab;
   - move: the runtime reports no move event (`onState` covers only fullscreen, maximize, minimize
@@ -101,7 +101,7 @@ flowchart TB
   checks. If an OS can't, detaching there opens the tab in a window that was framed from the start
   (tabs opened framed and visually trimmed), never through a reload.
 - **Keyboard**: shortcuts that work while a tool is focused stay global hotkeys registered only
-  while a Bond window has focus, as today (`docs/canonico.md` §7). New: ⌘T new tab, ⌘W close tab,
+  while a Nod window has focus, as today (`docs/canonico.md` §7). New: ⌘T new tab, ⌘W close tab,
   ⌃Tab next tab, ⌘⇧D detach.
 - **Restore**: open tabs, their order, addresses and docked/detached state are remembered with the
   window list (`store.json`, no secrets) and reopened on the next unlock (`docs/canonico.md` §7,
@@ -128,14 +128,14 @@ documentation link on a card. In other words, **links that come out of a tool**,
 next to the work, and sometimes kept.
 
 This lifts a v1 non-goal: "Ser navegador: não há barra de endereço livre" (`docs/canonico.md` §2).
-The Bond still isn't a browser — no history, no bookmarks bar, no extensions. Addresses outside the
+The Nod still isn't a browser — no history, no bookmarks bar, no extensions. Addresses outside the
 catalog only open in tabs, and can become sidebar items in one step.
 
 - **Links clicked inside a tool — the main path.** Today `"popups": "window"` turns every
   `window.open`/`target=_blank` into a real window, and `onWindowOpen` (`backend/main.ts`,
-  `backend/tool-windows.ts` `onPopup`) only tracks it so the lock closes it. In docked mode the Bond
+  `backend/tool-windows.ts` `onPopup`) only tracks it so the lock closes it. In docked mode the Nod
   **adopts that window as an ad-hoc tab** placed right after the tab it came from. The `open` event
-  carries `opener` and the new window id (`TinyPopupEvent`, `backend/tiny.d.ts`); the Bond drops its
+  carries `opener` and the new window id (`TinyPopupEvent`, `backend/tiny.d.ts`); the Nod drops its
   frame and puts it on the slot.
   - Because it's the same window the site opened, `window.opener` still works, and OAuth-style
     popups (Discord, `docs/canonico.md` §8) finish and close themselves as before.
@@ -148,7 +148,7 @@ catalog only open in tabs, and can become sidebar items in one step.
   restored after a lock unless saved.
 - **Open link by hand**: from the palette (⌘L or ⌘K → "Open link…", paste or type) and from a deep
   link `bond://open?url=…`. The app already declares `urlScheme: bond` with single instance
-  (`docs/tinyjs.md` §8), so another app or a script can hand a URL to the Bond. It opens as an
+  (`docs/tinyjs.md` §8), so another app or a script can hand a URL to the Nod. It opens as an
   ad-hoc tab after the current one.
 - **Save to sidebar**: one button on any tab (⌘D):
   - **Same origin as a tool you already have** (for example a specific Claude chat or a project
@@ -173,7 +173,7 @@ catalog only open in tabs, and can become sidebar items in one step.
 | RF-50 | A tool can have several tabs; switching tabs never reloads. | Two Claude tabs, a draft typed in one; switch away and back: the draft is still there. |
 | RF-51 | A tab detaches into its own window and docks back without reloading. | Type a draft in a Claude tab, detach, move it to another screen, dock it back: the draft is still there and the page never reloaded. |
 | RF-52 | Docked or Windows is a setting; Windows mode behaves exactly as today. | Switching the setting changes how the next tool opens; RF-19 still passes in Windows mode. |
-| RF-55 | Any `http(s)` link opens in the Bond: links clicked inside a tool open as a tab next to it; the palette and `bond://open?url=` open one by hand. | A documentation link on a Kanban card opens as a tab right after the Kanban tab; pasting a URL in "Open link" or calling `bond://open` does the same. |
+| RF-55 | Any `http(s)` link opens in the Nod: links clicked inside a tool open as a tab next to it; the palette and `bond://open?url=` open one by hand. | A documentation link on a Kanban card opens as a tab right after the Kanban tab; pasting a URL in "Open link" or calling `bond://open` does the same. |
 | RF-56 | Any tab is saved to the sidebar in one step: a personal view when its origin is already a tool, otherwise a personal tool with probed title and icon. | Save a Claude chat URL: it appears under Claude; save a new site: it appears as a new icon with its title and icon, no typing. |
 | RF-57 | An ad-hoc tab gets no backend methods and no autofill. | Calling `tiny.api.call` from an ad-hoc origin is refused; no credential is filled there. |
 

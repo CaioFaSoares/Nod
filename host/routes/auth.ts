@@ -5,6 +5,10 @@
 // file speaks SP02 §5's vocabulary: one `invalid credentials` for every sign-in failure, one
 // `invalid code` for every code failure, `too many attempts` once a budget of SP02 §5 is spent.
 //
+// One message is not enough on its own (F4 of the block 1 review): every `invalid code` of `activate`
+// and `setup` pays the same argon2id hash, taken before the branch that answers it, so no answer can
+// be timed into an email-existence oracle — the rule login already keeps with its dummy verify.
+//
 // Every failure body is the `ErrorResponse` of SP03 §1 with the status of its table; a body that
 // fails its schema is the 400 `host/app.ts` maps from Elysia's validation error.
 //
@@ -134,15 +138,19 @@ export const authRoutes = new Elysia({ name: 'host-auth-routes' })
     const email = normalizeEmail(ctx.body.email);
     if (!auth.limiter.allowEmail(email)) return rateLimited();
 
+    // F4 of the block 1 review: the hash is computed before the branch below, so an email nobody
+    // holds and a code the normalizer refuses pay the same argon2id cost as a wrong code of a person
+    // who exists — SP02 §5's one `invalid code` must not be told apart by the clock, exactly as login
+    // keeps one sign-in cost through its dummy hash. It also stays before the transaction, which is
+    // synchronous: the whole redemption is one unit of work (H2 decision 14).
+    const authHash = await auth.hashAuthKey(ctx.body.authKey);
+
     const codeHash = await storedCodeHash(ctx.body.code, 'access');
     // The code is bound to the person's email (SP02 §3): an email nobody holds is a code failure,
     // which is the one answer that never says whether the person exists.
     const person = codeHash === null ? null : repo.personByEmail(email);
     if (codeHash === null || person === null) return failure(auth, email, INVALID_CODE);
 
-    // The argon2id hash is computed before the transaction: `repo.transaction` is synchronous, and
-    // the whole redemption must be one unit of work (H2 decision 14).
-    const authHash = await auth.hashAuthKey(ctx.body.authKey);
     const token = auth.newToken();
     const tokenHash = await auth.tokenHash(token);
     const now = auth.now();
@@ -162,10 +170,13 @@ export const authRoutes = new Elysia({ name: 'host-auth-routes' })
     const email = normalizeEmail(ctx.body.email);
     if (!auth.limiter.allowEmail(email)) return rateLimited();
 
+    // F4 of the block 1 review: the hash comes before the branch, as in `activate`, so a code the
+    // normalizer refuses costs the same argon2id work as one that reaches `redeemCode`.
+    const authHash = await auth.hashAuthKey(ctx.body.authKey);
+
     const codeHash = await storedCodeHash(ctx.body.code, 'setup');
     if (codeHash === null) return failure(auth, email, INVALID_CODE);
 
-    const authHash = await auth.hashAuthKey(ctx.body.authKey);
     const token = auth.newToken();
     const tokenHash = await auth.tokenHash(token);
     const now = auth.now();

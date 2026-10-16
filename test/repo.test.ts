@@ -42,6 +42,19 @@ function shapeOf(db: SqlDb, table: string): unknown[] {
   return db.all(`PRAGMA table_info(${table})`);
 }
 
+/** The foreign keys of a table, by the table they point at: what a rebuild has to keep or drop. */
+function foreignKeysOf(db: SqlDb, table: string): { table: string; from: string; to: string }[] {
+  return db
+    .all<{ table: string; from: string; to: string }>(`PRAGMA foreign_key_list(${table})`)
+    .map((row) => ({ table: row.table, from: row.from, to: row.to }))
+    .sort((a, b) => a.table.localeCompare(b.table));
+}
+
+/** Whether the connection has `PRAGMA foreign_keys = ON` (what `openSqlite` sets, B9). */
+function foreignKeysOn(db: SqlDb): boolean {
+  return db.all<{ foreign_keys: number }>('PRAGMA foreign_keys')[0]?.foreign_keys === 1;
+}
+
 function entry(id: string, fields: Partial<Entry> = {}): Entry {
   return {
     id,
@@ -980,6 +993,162 @@ describe('schema version 3 — connected mode (SP05 §2)', () => {
 
     expect(userVersion(db)).toBe(3);
     expect(tableNames(db)).toContain('host_outbox');
+  });
+});
+
+/**
+ * SP05 §2: `vault_item.tool_id` stops pointing at `tool (id)`, because a credential may belong to a
+ * tool that exists only on the host — a connected entry has no local `tool` row, and the insert used
+ * to fail with `FOREIGN KEY constraint failed`.
+ */
+describe('vault_item without the tool foreign key (SP05 §2)', () => {
+  /** The vault_item of the builds before this one: the same columns, the FK to `tool` in place. */
+  function writeLegacyVaultItemTable(db: SqlDb): void {
+    db.exec('ALTER TABLE vault_item RENAME TO vault_item_legacy');
+    db.exec(`
+CREATE TABLE vault_item (
+  id TEXT PRIMARY KEY,
+  person_id TEXT NOT NULL REFERENCES person (id) ON DELETE CASCADE,
+  tool_id TEXT NOT NULL REFERENCES tool (id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  username TEXT NOT NULL,
+  keychain_key TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  origin TEXT,
+  UNIQUE (person_id, tool_id)
+);`);
+    db.exec('INSERT INTO vault_item SELECT * FROM vault_item_legacy');
+    db.exec('DROP TABLE vault_item_legacy');
+  }
+
+  /** A database of an earlier build: its people, its tool, its credential, and the FK in place. */
+  function legacyDatabase(version: number): { db: SqlDb; personId: string } {
+    const db = memorySqlite();
+    const before = createRepo(db);
+    before.migrate();
+    before.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app' }));
+    const person = before.createPerson({
+      email: 'ana@example.test',
+      name: 'Ana',
+      password: PASSWORD,
+      roles: [],
+    });
+    before.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Alpha',
+      username: 'ana',
+      keychainKey: `bond.cred.${person.id}.alpha`,
+      origin: 'https://alpha.example.test',
+    });
+    writeLegacyVaultItemTable(db);
+    db.exec(`PRAGMA user_version = ${version}`);
+    return { db, personId: person.id };
+  }
+
+  /** One credential row, written by hand, so `saveVaultItem` is not what is being measured. */
+  function insertVaultItem(db: SqlDb, personId: string, toolId: string): void {
+    db.run(
+      `INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        crypto.randomUUID(),
+        personId,
+        toolId,
+        toolId,
+        'ana',
+        `bond.cred.${personId}.${toolId}`,
+        '2026-10-15T10:00:00.000Z',
+        '2026-10-15T10:00:00.000Z',
+        `https://${toolId}.example.test`,
+      ],
+    );
+  }
+
+  test('a fresh database has the FK to person only, and a credential needs no tool row', () => {
+    const db = memorySqlite();
+    const repo = createRepo(db);
+    repo.migrate();
+
+    expect(foreignKeysOf(db, 'vault_item')).toEqual([
+      { table: 'person', from: 'person_id', to: 'id' },
+    ]);
+
+    const person = repo.createPerson({
+      email: 'ana@example.test',
+      name: 'Ana',
+      password: PASSWORD,
+      roles: [],
+    });
+    // No `tool` row for this entry: that is a tool of the guild that only the host knows (SP05 §2).
+    insertVaultItem(db, person.id, 'host-only');
+    expect(repo.vaultItem(person.id, 'host-only')?.label).toBe('host-only');
+    expect(repo.vaultOrigin(person.id, 'host-only')).toBe('https://host-only.example.test');
+
+    // The constraint that stayed is still enforced.
+    expect(() => insertVaultItem(db, 'no-such-person', 'host-only')).toThrow(/FOREIGN KEY/);
+  });
+
+  test('a database of an earlier build is rebuilt: every row kept, the FK to tool dropped', () => {
+    for (const version of [2, 3]) {
+      const { db, personId } = legacyDatabase(version);
+      // What the build before this one did with a host-only entry: the insert is refused.
+      expect(() => insertVaultItem(db, personId, 'host-only')).toThrow(/FOREIGN KEY/);
+      expect(foreignKeysOf(db, 'vault_item')).toEqual([
+        { table: 'person', from: 'person_id', to: 'id' },
+        { table: 'tool', from: 'tool_id', to: 'id' },
+      ]);
+
+      const repo = createRepo(db);
+      repo.migrate();
+
+      // The row that was there is the same row, and the shape is a fresh database's.
+      expect(repo.vaultOrigin(personId, 'alpha')).toBe('https://alpha.example.test');
+      expect(repo.listVault(personId).map((item) => item.label)).toEqual(['Alpha']);
+      expect(foreignKeysOf(db, 'vault_item')).toEqual([
+        { table: 'person', from: 'person_id', to: 'id' },
+      ]);
+      expect(userVersion(db)).toBe(SCHEMA_VERSION);
+
+      // The pragma is back on, and the entry the guild grants saves without a local row.
+      expect(foreignKeysOn(db)).toBe(true);
+      insertVaultItem(db, personId, 'host-only');
+      expect(repo.listVault(personId).map((item) => item.toolId).sort()).toEqual([
+        'alpha',
+        'host-only',
+      ]);
+      expect(() => insertVaultItem(db, 'no-such-person', 'host-only')).toThrow(/FOREIGN KEY/);
+
+      // A second migrate neither throws nor rebuilds anything away.
+      repo.migrate();
+      expect(repo.vaultOrigin(personId, 'alpha')).toBe('https://alpha.example.test');
+      expect(userVersion(db)).toBe(SCHEMA_VERSION);
+    }
+  });
+
+  test('removing a local tool still takes its vault rows with it, with no FK to do it', () => {
+    const repo = newRepo();
+    repo.saveEntry(entry('alpha'));
+    const person = repo.createPerson({
+      email: 'ana@example.test',
+      name: 'Ana',
+      password: PASSWORD,
+      roles: [],
+    });
+    repo.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Alpha',
+      username: 'ana',
+      keychainKey: `bond.cred.${person.id}.alpha`,
+      origin: 'https://alpha.example.test',
+    });
+
+    repo.removeEntry('alpha');
+
+    expect(repo.entry('alpha')).toBeNull();
+    expect(repo.listVault(person.id)).toEqual([]);
   });
 });
 

@@ -31,6 +31,10 @@
 //   phase admin-revoke       SP05 §5.4  the admin revokes P
 //   phase person-signed-out  SP05 §5.4  P's next sync: `signed-out`, org tools gone
 //
+// P's seed is not the admin's (see `temporarySeed`): the granted tool is the host's entry, with no
+// local `tool` row under it. Step 3.7/3.8 therefore prove a host-only tool receiving a credential,
+// and the fill on the host entry's origin (SP05 §2).
+//
 // No secret reaches a file, a log, an event or `store.json`: the codes live in memory (the host CLI
 // writes to a pipe, the desk answers the page), and only step names, statuses and counts are
 // printed. `resources/seed.json` is never lost: it is moved aside exactly like `run.ts --force`
@@ -115,16 +119,39 @@ function dataDir(appId: string): string {
 }
 
 /**
- * Temporary seed, the same shape `test/smoke/run.ts` writes: the gate needs the origin of every
- * entry (`login.report`, which is what the adapter calls when the tool enters the page), and both
- * app ids apply these two entries as their local catalog on first boot. The admin publishes them to
- * the host (SP05 §5.2), and the person's own local rows are what `vault.save` needs for the entry
- * that arrives from the snapshot (the id is the same on both sides).
+ * Entry ids of the temporary seeds. `TOOL_A_ID` is the admin's (and so the host's, the admin
+ * publishing its own tools), `TOOL_B_ID` the second fake tool, and `PERSON_TOOL_A_ID` the id the
+ * person's own release seed has for Tool A's address — the entry id the host does not hold.
  */
-function temporarySeed(tools: Tools): string {
+const TOOL_A_ID = 'tool-a';
+const TOOL_B_ID = 'tool-b';
+const PERSON_TOOL_A_ID = 'tool-a-old';
+
+/**
+ * Temporary seed of one app, the same shape `test/smoke/run.ts` writes: it exists only so
+ * `gen-config` builds the runtime origin gate (`docs/arquitetura.md` §2) — every entry origin gets
+ * `login.report`, which is what the adapter script calls when the tool enters the page — and so each
+ * app id applies a local catalog on first boot.
+ *
+ * The two app ids are two machines with their own release seeds, and that is what the run needs:
+ *
+ *   - the admin's seed is the guild's own machine: it holds the two fake tools, the admin publishes
+ *     them and the host keeps their ids — so `tool-a` is the granted entry the host holds;
+ *   - the person's seed is another machine's: it knows Tool A's address under the entry id that
+ *     release gave it, and nothing else. The granted entry (`tool-a`, the host's) therefore has **no
+ *     local `tool` row** on P's machine: it exists only on the host (SP05 §2), which is the case
+ *     `vault.save` had to refuse. Its origin stays in the gate, because the gate is built from this
+ *     same file — without that the tool window could not report the login the cascade filled.
+ */
+function temporarySeed(tools: Tools, appId: string): string {
   const entries = [
-    { id: 'tool-a', title: 'Tool A', url: tools.originA, order: 10 },
-    { id: 'tool-b', title: 'Tool B', url: tools.originB, order: 20 },
+    {
+      id: appId === PERSON_APP_ID ? PERSON_TOOL_A_ID : TOOL_A_ID,
+      title: 'Tool A',
+      url: tools.originA,
+      order: 10,
+    },
+    { id: TOOL_B_ID, title: 'Tool B', url: tools.originB, order: 20 },
   ].map((entry) => ({
     ...entry,
     icon: null,
@@ -339,6 +366,9 @@ async function runPhase(
   methods: Methods,
 ): Promise<{ ok: boolean; error: string | null; steps: Step[] }> {
   const nonce = crypto.randomUUID();
+  // The seed of this app id: `gen-config` reads it here (the runtime gate of `login.report`) and the
+  // app reads it at boot (its local catalog, applied on the first one). Two machines, two seeds.
+  writeFileSync(SEED, temporarySeed(tools, phase.appId));
   const gen = runGenConfig(phase.appId, phase.devPort);
   if (gen.code !== 0) {
     return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
@@ -614,6 +644,54 @@ function hostRows(personEmail: string): HostRows {
   }
 }
 
+// ------------------------------------------------------------- P's own rows
+
+/**
+ * P's database after the run — read before `clean()` wipes the app data dir, and read-only, the way
+ * the host's rows are. It is the second half of the real-surface proof of SP05 §2's vault fix: the
+ * credential P saved in step 3.7 is stored for the **host's** entry id (which is what the snapshot
+ * brought), with the host entry's origin, and the machine has no `tool` row of that id behind it —
+ * the tool exists only on the host.
+ */
+interface PersonVault {
+  lines: string[];
+  /** The item's origin, when the item of the granted tool is there; null otherwise. */
+  origin: string | null;
+  /** Local `tool` rows of the granted entry id: the fix is about this being zero. */
+  localRows: number;
+}
+
+function personVault(expectedOrigin: string): PersonVault {
+  const file = join(dataDir(PERSON_APP_ID), 'bond.db');
+  if (!existsSync(file))
+    return { lines: ["P's database is missing"], origin: null, localRows: -1 };
+  const db = new Database(file, { readonly: true });
+  try {
+    // bun:sqlite hands `get()` back as `unknown`; these three reads are the shape of this query's
+    // own SELECT, the way `hostRows` reads the host's.
+    const item = db.query('SELECT origin FROM vault_item WHERE tool_id = ?').get(TOOL_A_ID) as
+      | { origin: string | null }
+      | null;
+    const local = db.query('SELECT COUNT(*) AS n FROM tool WHERE id = ?').get(TOOL_A_ID) as {
+      n: number;
+    };
+    const all = db.query('SELECT COUNT(*) AS n FROM vault_item').get() as { n: number };
+    return {
+      lines: [
+        `vault items: ${all.n}`,
+        `item of ${TOOL_A_ID}: ${
+          item === null ? '(missing)' : `origin ${JSON.stringify(item.origin)}`
+        } (expected ${JSON.stringify(expectedOrigin)})`,
+        `local ${TOOL_A_ID} rows in tool: ${local.n} (expected 0)`,
+      ],
+      origin: item?.origin ?? null,
+      localRows: local.n,
+    };
+  } finally {
+    db.close();
+  }
+}
+
 // ------------------------------------------------------------- main
 
 async function main(): Promise<number> {
@@ -690,8 +768,10 @@ async function main(): Promise<number> {
       `local tools: A=${tools.originA} B=${tools.originB} (fake servers, loopback only)`,
     );
 
+    // Every phase writes the temporary seed of its own app id before `gen-config` runs: the admin's
+    // machine and the person's are not the same installation, and the person's has no local row for
+    // the tool the admin grants (see `temporarySeed`).
     mkdirSync(join(ROOT, 'resources'), { recursive: true });
-    writeFileSync(SEED, temporarySeed(tools));
 
     // Both app ids start from nothing: a repeated run must not inherit a host row or a person.
     for (const appId of [ADMIN_APP_ID, PERSON_APP_ID]) {
@@ -750,6 +830,23 @@ async function main(): Promise<number> {
       failed = true;
     } else if (rows.personKinds === null || (rows.personKinds['locked'] ?? 0) === 0) {
       console.error('the host holds no `locked` event of the smoke person: the offline backlog did not go up');
+      failed = true;
+    }
+
+    // SP05 §2: the credential of a tool that exists only on the host. P's seed has no row for the
+    // granted entry id, so the item can only be there if `vault.save` took the entry from the
+    // effective catalog and `vault_item` stopped requiring a local `tool` row.
+    const vaultRows = personVault(tools.originA);
+    console.log("\nP's vault rows after the run:");
+    for (const line of vaultRows.lines) console.log(`  ${line}`);
+    if (vaultRows.localRows !== 0) {
+      console.error(`P's catalog holds a local \`tool\` row for ${TOOL_A_ID}: that is not the host-only case`);
+      failed = true;
+    }
+    if (vaultRows.origin !== tools.originA) {
+      console.error(
+        `P has no credential for ${TOOL_A_ID} on ${tools.originA} (origin ${JSON.stringify(vaultRows.origin)})`,
+      );
       failed = true;
     }
 

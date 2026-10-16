@@ -82,6 +82,8 @@ interface TestHost {
   answer(patch: Partial<Answer>): void;
   /** What `/.well-known/bond` advertises from now on. */
   discovery(patch: { kid?: string; rawPublicKey?: Uint8Array<ArrayBuffer> }): void;
+  /** Where `/v1/redirect` sends the caller, or `null` for a `404` (F9). */
+  redirect(url: string | null): void;
   /** Back to the key it started with and a fresh `v1` body. */
   reset(): void;
   /** Closes the loopback server. */
@@ -102,6 +104,7 @@ async function startHost(): Promise<TestHost> {
   const calls: TestCall[] = [];
 
   let advertises = { kid, rawPublicKey: pair.publicKey };
+  let redirectsTo: string | null = null;
   const fresh = (): Answer => ({
     body: snapshotBody('v1'),
     signed: snapshotBody('v1'),
@@ -153,6 +156,11 @@ async function startHost(): Promise<TestHost> {
         });
       }
 
+      if (url.pathname === '/v1/redirect') {
+        if (redirectsTo === null) return new Response('not found', { status: 404 });
+        return new Response(null, { status: 302, headers: { location: redirectsTo } });
+      }
+
       if (url.pathname === '/v1/ping') {
         if (request.headers.get('authorization') === null) return new Response('{}', { status: 401 });
         return Response.json({ ok: true });
@@ -180,6 +188,9 @@ async function startHost(): Promise<TestHost> {
     },
     discovery: (patch) => {
       advertises = { ...advertises, ...patch };
+    },
+    redirect: (url) => {
+      redirectsTo = url;
     },
     reset: () => {
       advertises = { kid, rawPublicKey: pair.publicKey };
@@ -510,6 +521,38 @@ describe('failures of the host (SP03 §1, SP04 §3)', () => {
     });
     const refused = await failureOfCall(stalled.connect(pinned).snapshot());
     expect(refused.failure).toBe('offline');
+  });
+});
+
+describe('a redirect is refused, not followed (F9)', () => {
+  test('the bearer never reaches the origin the host points at', async () => {
+    // The origin a followed redirect would hand the bearer to (`docs/tinyjs.md` §6: the backend's
+    // fetch has no CORS limit in the way, so nothing but this refuses the hop).
+    const seen: (string | null)[] = [];
+    const elsewhere = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: (request) => {
+        seen.push(request.headers.get('authorization'));
+        return Response.json({ ok: true });
+      },
+    });
+    try {
+      const store = memoryKeychain();
+      const connection = createHostClient({ fetch, keychain: store }).connect(pinned);
+      await connection.saveToken('a-bearer-of-this-test');
+      host.redirect(`http://127.0.0.1:${elsewhere.port}${HOST_ROUTES.state}`);
+
+      const refused = await failureOfCall(connection.request('GET', '/v1/redirect'));
+
+      // A host that answers a redirect is a host that did not answer, in the words of SP04 §3.
+      expect(refused.failure).toBe('offline');
+      expect(refused.message).toBe('could not reach the host');
+      expect(seen).toEqual([]);
+    } finally {
+      host.redirect(null);
+      elsewhere.stop(true);
+    }
   });
 });
 

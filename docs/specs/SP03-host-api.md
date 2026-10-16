@@ -1,7 +1,7 @@
 # SP03 — Host API
 
 Elysia 2 (beta, pinned), one process (`host/context.md`). Request and response types live in
-`shared/host-api.ts` so the Bond and the host compile against the same shapes. Elysia validates each
+`shared/host-api.ts` so the Nod and the host compile against the same shapes. Elysia validates each
 body with a `t.*` schema derived from them.
 
 ## 1. Conventions
@@ -14,7 +14,14 @@ body with a `t.*` schema derived from them.
   - **person**: valid session, person not disabled;
   - **admin**: person with an admin role.
 - Every authenticated response sets no cookies (the app uses bearer tokens; cookies come with E04).
-- Body size limit: 256 KB, except icon uploads (`entry.icon` data URI ≤ 512 KB).
+- Body size limit: 256 KB, except icon uploads (`entry.icon` data URI ≤ 512 KB). The build answers
+  **413 `body too large`** over the limit (`host/app.ts`), and the exception is read as "the routes
+  whose body can carry an `entry.icon`": `/v1/admin/tools*` and `/v1/admin/bootstrap` get 512 KB,
+  everything else 256 KB (`bodyLimitFor`; the bootstrap body carries the seed's icons, h4).
+- Guards are Elysia plugins mounted **before** the routes they cover, and a group mounts every level
+  it needs: `adminAuth` reaches a route only when `personAuth` ran first, so an admin group mounts
+  `new Elysia().use(personAuth).use(adminAuth)` — `adminAuth` alone in a plugin group reads no
+  person and answers 500 (h5). Each guard runs once per request (`person` → `admin` → route).
 
 | Status | When |
 | --- | --- |
@@ -23,6 +30,7 @@ body with a `t.*` schema derived from them.
 | 403 | authenticated but not allowed (`admin only`, `not yours`) |
 | 404 | id not found **and** visible to the caller; otherwise 403 |
 | 409 | conflict: email taken, last admin, stale `updatedAt` |
+| 413 | body over the limit (see above) |
 | 429 | rate limit (SP02 §5) |
 
 ## 2. Routes — block 1
@@ -46,6 +54,12 @@ body with a `t.*` schema derived from them.
 
 ### Person
 
+`POST /v1/auth/logout` and `POST /v1/auth/password` landed with block 1 (`host/routes/auth.ts`).
+The rest of this table — the session list and revoke, the personal tool/view writes and the
+favorites write — did **not** land in block 1: they are the block 2 stories O1 and B7 (the Nod
+methods `host.sessions`/`host.revokeSession`, `personal.*` and `favorites.set` are likewise block 2,
+SP05 §3). The host rejects those paths with its `404` until they land.
+
 | Route | Body | Response |
 | --- | --- | --- |
 | `GET /v1/state` | — | signed `Snapshot` (SP04 §2), `304` on `If-None-Match` hit |
@@ -60,7 +74,7 @@ body with a `t.*` schema derived from them.
 | `PUT /v1/favorites` | `{ entries: Id[], updatedAt }` | `204`, replaces the ordered list |
 | `POST /v1/events` | `{ events: ClientEvent[] }` (≤ 500) | `{ acked: Id[] }` (SP04 §5) |
 
-- Personal tool ids must match `^p-[a-z0-9]{10}$`. The Bond generates them.
+- Personal tool ids must match `^p-[a-z0-9]{10}$`. The Nod generates them.
 - A `PUT` of an id owned by someone else answers 403.
 
 ### Admin

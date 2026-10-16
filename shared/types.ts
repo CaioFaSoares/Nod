@@ -279,6 +279,18 @@ export interface SessionState {
 }
 
 /**
+ * F1: what a join answers. `local-account` is the typed "this Bond already has an account with this
+ * email" of SP05 §4's flow: it is answered **before any host call**, so the code is not spent, and
+ * the page asks which account wins — the guild's (the join goes out again with `adoptLocal: true`,
+ * which re-keys the local person onto the host person id, `backend/session.ts`) or the local one (the
+ * join is cancelled and nothing is sent). `session` is the ordinary answer: the state of the joined
+ * person, already unlocked. `name` is the local person's, for the choice on screen.
+ */
+export type JoinResult =
+  | { kind: 'session'; session: SessionState }
+  | { kind: 'local-account'; personId: Id; email: string; name: string };
+
+/**
  * Connected mode (SP05 §3): the one host a Bond knows, as Settings → Hosts shows it. `none` without
  * a `host` row; `connected` after the last sync succeeded; `stale` when it failed (SP04 §3) — the
  * cache stays in use and the sidebar says `offline`; `signed-out` after a `401`, which asks the
@@ -344,7 +356,8 @@ export interface ApiContract {
   'session.lock': [void, SessionState];
 
   // connected mode (SP05 §3). `discover`, `activate` and `signIn` work with no session at all:
-  // the first run has no account yet, and the password only ever travels page → backend.
+  // the first run has no account yet, and the password only ever travels page → backend. F3: when
+  // this Bond already has an account and no host, the two joins need that account's session.
   'host.state': [void, HostState];
   'host.discover': [{ address: string }, { guild: string; fingerprint: string }];
   'host.activate': [
@@ -357,10 +370,18 @@ export interface ApiContract {
       password: string;
       /** only for a setup code: it creates the first admin of an empty host (SP02 §3) */
       name?: string;
+      /**
+       * F1: the person chose the guild account over the local account of the same email; without
+       * it a collision answers `local-account` and nothing is sent to the host.
+       */
+      adoptLocal?: boolean;
     },
-    SessionState,
+    JoinResult,
   ];
-  'host.signIn': [{ address: string; fingerprint: string; email: string; password: string }, SessionState];
+  'host.signIn': [
+    { address: string; fingerprint: string; email: string; password: string; adoptLocal?: boolean },
+    JoinResult,
+  ];
   'host.syncNow': [void, HostState];
   /** `keepPersonal` is SP05 §3's choice about the local personal tools (block 2). */
   'host.remove': [{ keepPersonal: boolean }, HostState];

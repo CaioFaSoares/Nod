@@ -142,6 +142,14 @@ interface JoinDraft {
   usePassword: boolean;
   /** the address was found and the account fields are on screen */
   discovered: boolean;
+  /**
+   * F1: the local account of this Bond that holds the join's email, as the backend answered it —
+   * `null` while the flow has not collided with one. It is what puts the choice of which account
+   * wins on screen, and the next submit carries the decision (`adoptLocal`).
+   */
+  collision: { personId: Id; email: string; name: string } | null;
+  /** F1: which account the person picked while a collision is on screen. */
+  choice: 'guild' | 'local';
 }
 
 /** Case, spaces and grouping are presentation (SP04 §1.1): one key typed two ways is one string. */
@@ -197,6 +205,8 @@ export function mountJoinFlow(
     confirm: '',
     usePassword: ctx.pinned === true || (ctx.email ?? '') !== '',
     discovered: false,
+    collision: null,
+    choice: 'guild',
   };
   let status: { kind: 'info' | 'ok' | 'error'; text: string } | null = null;
 
@@ -248,10 +258,58 @@ export function mountJoinFlow(
     return card;
   }
 
+  /**
+   * F1: the choice SP05 §4's join asks for when a local account of this Bond already holds the
+   * email the join is about. The backend answered it before any host call, so the code is whole; the
+   * select decides what the next submit does — the guild account (the local one becomes it) or the
+   * local one (the join is cancelled and nothing is sent).
+   */
+  function collisionCard(): HTMLElement {
+    const select = el(
+      'select',
+      { class: 'input', attrs: { name: 'join-choice' } },
+      el('option', { attrs: { value: 'guild' } }, 'Use the guild account'),
+      el('option', { attrs: { value: 'local' } }, 'Keep using the local account'),
+    );
+    select.value = draft.choice;
+    select.addEventListener('change', () => {
+      draft.choice = select.value === 'local' ? 'local' : 'guild';
+    });
+    const block = el(
+      'section',
+      { class: 'stack' },
+      el(
+        'p',
+        {},
+        `This Bond already has the account ${draft.collision === null ? '' : draft.collision.email} ` +
+          `${draft.collision === null || draft.collision.name === '' ? '' : `(${draft.collision.name}) `}` +
+          'saved on this machine. Which account should Bond use?',
+      ),
+      field('Account', select),
+      el(
+        'p',
+        { class: 'muted' },
+        'Use the guild account: your local account becomes the guild account, saved logins and ' +
+          'roles come with you, and your password becomes the guild password. Keep using the local ' +
+          'account: the join is cancelled and nothing is sent.',
+      ),
+    );
+    block.hidden = draft.collision === null;
+    return block;
+  }
+
   function accountCard(): HTMLElement {
+    // F1: the choice sits above the fields it decides for; the email field hides it again, because
+    // another email is another question.
+    const collision = collisionCard();
     const email = input('email', { type: 'email', autocomplete: 'username', value: draft.email });
     email.addEventListener('input', () => {
       draft.email = email.value;
+      if (draft.collision !== null) {
+        draft.collision = null;
+        draft.choice = 'guild';
+        collision.hidden = true;
+      }
     });
     const password = input('password', {
       type: 'password',
@@ -266,13 +324,16 @@ export function mountJoinFlow(
       button('Access code', () => setMode(false), { kind: draft.usePassword ? 'ghost' : 'primary' }),
       button('Password', () => setMode(true), { kind: draft.usePassword ? 'primary' : 'ghost' }),
     );
+    // F1: with a collision on screen the button is the one that carries the decision of the select.
+    const joinLabel = draft.collision === null ? 'Join the guild' : 'Continue';
+    const signInLabel = draft.collision === null ? 'Sign in' : 'Continue';
 
-    const card = el('section', { class: 'card stack' }, el('h2', {}, 'Your account'), modes);
+    const card = el('section', { class: 'card stack' }, el('h2', {}, 'Your account'), modes, collision);
     if (draft.usePassword) {
       card.append(
         el('div', { class: 'row' }, field('Email', email), field('Password', password)),
         el('p', { class: 'muted' }, 'The password you already set for this guild.'),
-        el('div', { class: 'row' }, button('Sign in', () => void submit(), { kind: 'primary' })),
+        el('div', { class: 'row' }, button(signInLabel, () => void submit(), { kind: 'primary' })),
       );
       return card;
     }
@@ -302,7 +363,7 @@ export function mountJoinFlow(
         { class: 'muted' },
         'Bond derives the keys on this machine; the password itself never reaches the host.',
       ),
-      el('div', { class: 'row' }, button('Join the guild', () => void submit(), { kind: 'primary' })),
+      el('div', { class: 'row' }, button(joinLabel, () => void submit(), { kind: 'primary' })),
     );
     return card;
   }
@@ -349,6 +410,17 @@ export function mountJoinFlow(
 
   async function submit(): Promise<void> {
     status = null;
+    // F1: the decision the select carries. Keeping the local account cancels the join here — nothing
+    // is sent, and the code the person was given is untouched.
+    if (draft.collision !== null && draft.choice === 'local') {
+      draft.collision = null;
+      draft.choice = 'guild';
+      draft.password = '';
+      draft.confirm = '';
+      status = { kind: 'info', text: 'the join was cancelled — nothing was sent to the guild' };
+      render();
+      return;
+    }
     const email = draft.email.trim();
     if (email === '') {
       status = { kind: 'error', text: 'enter your email' };
@@ -375,18 +447,32 @@ export function mountJoinFlow(
     // when there was an invite (it is the same string, or the flow already refused above).
     const fingerprint = draft.expected ?? draft.fingerprint;
     const password = draft.password;
+    // F1: with the choice on screen this submit is the person's decision, and it is what the backend
+    // reads as `adoptLocal`.
+    const adoptLocal = draft.collision === null ? {} : { adoptLocal: true };
     try {
-      if (draft.usePassword) {
-        await call('host.signIn', { address: draft.address, fingerprint, email, password });
-      } else {
-        await call('host.activate', {
-          address: draft.address,
-          fingerprint,
-          email,
-          code: draft.code,
-          password,
-          ...(setup ? { name: draft.name.trim() } : {}),
-        });
+      const answer = draft.usePassword
+        ? await call('host.signIn', { address: draft.address, fingerprint, email, password, ...adoptLocal })
+        : await call('host.activate', {
+            address: draft.address,
+            fingerprint,
+            email,
+            code: draft.code,
+            password,
+            ...(setup ? { name: draft.name.trim() } : {}),
+            ...adoptLocal,
+          });
+      if (answer.kind !== 'session') {
+        // F1: the backend answered the choice — a local account of this Bond holds the email and
+        // nothing was sent, so the code is whole. The password goes (the fields are rebuilt), the
+        // code and the address stay.
+        draft.collision = answer;
+        draft.choice = 'guild';
+        draft.password = '';
+        draft.confirm = '';
+        status = { kind: 'info', text: 'nothing was sent to the guild yet' };
+        render();
+        return;
       }
     } catch (e) {
       // A failed join keeps neither the password nor a half-written host.

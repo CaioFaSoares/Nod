@@ -1,10 +1,10 @@
-# Arquitetura do Bond — contrato de implementação (v2)
+# Arquitetura do Nod — contrato de implementação (v2)
 
 Contrato entre as fatias de implementação. O **porquê** está em `docs/canonico.md`; os fatos do
 runtime, em `docs/tinyjs.md`; os tipos, em `shared/types.ts`. Aqui mora o **onde** e o **como**.
 Mudar uma assinatura daqui é decisão do coordenador.
 
-**v2 (2026-10-15), por decisão do dono:** (1) uma janela só para gerenciar e usar o Bond — o rail de
+**v2 (2026-10-15), por decisão do dono:** (1) uma janela só para gerenciar e usar o Nod — o rail de
 ícones, a tela inicial, a paleta e as configurações vivem na janela `main`; as ferramentas abrem em
 janelas próprias a partir dela; (2) **todo o app em inglês** — interface, mensagens, identificadores,
 nomes de método, tipos, testes e comentários. From 2026-10-16, project documents are written in
@@ -20,7 +20,10 @@ tinyjs.base.json      versioned config; tinyjs.json is GENERATED (gitignored) by
 index.html            the single page (main window)
 src/                  frontend: api.ts (typed client), ui.ts (DOM helpers), app.ts, palette.ts, settings.ts, style.css
 shared/               pure logic — no tjs, no tiny, no DOM — tested with bun
-backend/              txiki.js backend (tjs, app, sqlite, keychain, windows)
+backend/              txiki.js backend (tjs, app, sqlite, keychain, windows, host client, sync)
+host/                 the guild server (Bun + Elysia 2 beta): main.ts, app.ts, config.ts, repo.ts,
+                      migrations.ts, auth.ts, snapshot.ts, keys.ts, backup.ts, routes/, cli/,
+                      Dockerfile, compose.yaml — see host/context.md and docs/specs/SP07
 resources/            seed.example.json, tray.png (versioned); seed.json (private, gitignored)
 scripts/gen-config.ts builds tinyjs.json from tinyjs.base.json + resources/seed.json
 test/                 bun test: test/*.test.ts; test/helpers/; test/smoke/ (real surface)
@@ -101,7 +104,7 @@ export async function sha256Hex(data: Uint8Array | string): Promise<string>;    
 ```
 
 ### `shared/host-api.ts` — the host API contract (`docs/specs/SP03-host-api.md` §2, §4)
-Every block 1 route body and response, shared by the host and the Bond, plus `Discovery` and the
+Every block 1 route body and response, shared by the host and the Nod, plus `Discovery` and the
 signed `Snapshot` of SP04 §1–§2 and the event batch of §5. Block 2 (SP03 §3, the optional block 2
 members of `Snapshot`) is out until its story lands. The host's SQL rows (`host/repo.ts`) carry these
 field names on purpose, so a snapshot can hand a row over without a rename.
@@ -133,6 +136,23 @@ export function normalizeCode(code: string): string | null;                     
 export function validateCode(code: string, kind: CodeKind): boolean;                // normalizeCode + that kind's length
 export function normalizeEmail(email: string): string;                              // trim + lowercase, the form SP01 §2
                                                     // stores and every lookup matches
+```
+
+### `shared/host-merge.ts` — snapshot → local view (`docs/specs/SP04-sync.md` §3–§5, B5/B10)
+```ts
+export const ORG_CACHE_DAYS = 14; export const ORG_CACHE_MS: number;
+export function orgToolsUsable(lastSyncAt: string | null, now: number): boolean;  // half-open [lastSyncAt, +14 days];
+                                                    // null or unreadable date → false (fail closed)
+export class SnapshotShapeError extends Error;      // a body that is not SP04 §2's document
+export interface SnapshotRows { me; roles; orgTools; personalTools; personalViews; favorites }
+export function parseSnapshot(value: unknown): SnapshotRows;                         // the shape check of the verified body
+export function clearOrgData(raw: string): string | null;                           // 401: drop the org half, keep me +
+                                                    // personal + favorites; null when the body was not a snapshot
+export function sidebarOrder(rows: { orgTools: Entry[]; personalTools: Entry[]; favorites: Id[] }): Entry[];
+                                                    // favorites, org, personal; an id resolving to nothing is skipped
+export type OutboxVerdict = 'drop' | 'rejected' | 'retry';
+export function outboxVerdict(status: number | null): OutboxVerdict;                // 409 drop; other 4xx rejected;
+                                                    // 401/429/network/5xx retry (SP04 §4)
 ```
 
 ### `shared/seal.ts` — credential sharing (`docs/specs/SP06-credential-sharing.md` §1–§3)
@@ -253,7 +273,10 @@ roles_json, expires_at, used_at, created_by)`, `event(id AUTOINCREMENT, at, pers
 url, result, detail)`, `meta(key, value)`. `migrate()` idempotente.
 ```ts
 migrate(): void                               // idempotent; also adds SP05 §2's columns by presence —
-                                              // `vault_item.origin` (B9), backfilled from `tool.origin`
+                                              // `vault_item.origin` (B9), backfilled from `tool.origin` —
+                                              // and rebuilds `vault_item` without the FK to `tool` when
+                                              // `PRAGMA foreign_key_list(vault_item)` still names it
+                                              // (`rebuildVaultItem`, the SQLite 12-step recipe; `user_version` stays 3)
 // people
 countPeople(): number                         // INCLUDING revoked (first-account rule, P6)
 countAdmins(): number                         // active people with an admin role
@@ -313,7 +336,12 @@ createAccount(p: { email; name; password; code? }): Promise<SessionState>
 unlock(p: { email; password }): Promise<SessionState>   // backoff in meta 'unlock_failures' / 'unlock_last_failure';
                                                        // same cost for unknown email; 'invalid credentials'; 'wait before trying again'
 unlockBiometric(): Promise<SessionState>; enableBiometric(password): Promise<SessionState>
-changePassword(current, next): Promise<void>
+adoptConnectedAccount(p: { … }): Promise<SessionState>   // after the host answered: writes the local person row for the
+                                                       // host id and unlocks; wipes the vault first when the salt changed (B2/B3)
+keys(): { authKey; vaultKey } | null                   // the keys kept in memory while unlocked; null when locked
+deriveFor(password, salt, iterations): Promise<DerivedKeys>   // one derivation, reused by unlock/adopt/change
+changePassword(current, next, host?): Promise<void>    // connected: also updates the cached host salt (saveHostSalt, B3)
+wipeVault(personId: Id): Promise<void>                 // SP02 §7 reset: removes every bond.cred.* item through the index
 lock(): SessionState
 current(): Person | null
 refresh(): void                               // reloads the current person from the repo (roles changed — A23); locks if revoked
@@ -326,7 +354,8 @@ key(personId, toolId): string                 // 'bond.cred.<person>.<tool>'
 list(personId); save(personId, p: { toolId; username; secret; label? }): Promise<VaultItem>
   // tool must exist ('unknown tool'); keychain first, index only if the keychain accepted
   // ('the system keychain refused the credential'); records `originOf(entry.url)` with the item, the
-  // origin the fill is bound to (B9, RF-38)
+  // origin the fill is bound to (B9, RF-38). The entry is read from the effective catalog while
+  // connected (main.ts), so a host-only tool — no local `tool` row — can hold a credential.
 read(personId, toolId): Promise<{ username; secret } | null>
 remove(personId, toolId); removeAllOf(personId); removeAllForTool(toolId)   // keychain + index (A6)
 export(personId, password): Promise<string>; import(personId, blob, password): Promise<number>
@@ -391,7 +420,7 @@ onHotkey(id: string): void                    // 'digit-1'..'digit-9' → open; 
 - Persistência: a lista `{ toolId, view? }` das janelas abertas vai para `store` (`open_tools`) a
   cada abrir/fechar.
 - Atalhos: `app.hotkey.register('digit-N', combo(String(N), os))` e `('palette', combo('k', os))` só
-  com alguma janela do Bond focada e `deps.hotkeys`; `unregister` quando nenhuma está.
+  com alguma janela do Nod focada e `deps.hotkeys`; `unregister` quando nenhuma está.
 
 ### `backend/login-adapter.ts`
 `export function adapterScript(o: { fill: boolean; origin: string; username?: string; secret?: string }): string`
@@ -418,11 +447,92 @@ export function gateOrigins(seed: Seed | null): string[];
 
 ### `backend/icons.ts` — `createIcons(dir)` → `{ save(i: RawIcon): Promise<string>; dataUri(hash): Promise<string | null> }`.
 
+### `backend/host-client.ts` — the host connection (`docs/specs/SP04-sync.md` §1–§2, B1)
+```ts
+export const REQUEST_TIMEOUT_MS = 10_000;               // the same ceiling as probe-net
+export const HOST_KEY_CHANGED = 'host key changed — remove and add the host again';
+export const HOST_KEY_MISMATCH = 'host key does not match the invite';
+export type HostFailure = 'offline' | 'signed-out' | 'rate-limited' | 'refused' | 'server' | 'key-changed'
+  | 'key-mismatch' | 'signature' | 'stale' | 'invalid' | 'keychain';
+export class HostError extends Error;                   // carries HostFailure + optional status
+export interface PinnedHost { address: string; kid: string; publicKey: string; personId: Id }
+export interface DiscoveryExpectation { fingerprint?: string | null; pinned?: { kid: string; ed25519Public: string } }
+export interface HostDiscovery { address: string; fingerprint: string; pin: { kid: string; ed25519Public: string };
+  document: Discovery }
+export type SnapshotResult = { notModified: true } | { notModified: false; snapshot: Snapshot; raw: string };
+export interface HostConnection {
+  readonly host: PinnedHost;
+  tokenKey(): string; saveToken(token: string): Promise<void>; forgetToken(): Promise<void>;
+  request<T>(method: HttpMethod, path: string, body?: unknown): Promise<T>;
+  snapshot(options?: { version?: string | null; notOlderThan?: string | null }): Promise<SnapshotResult>;
+}
+export interface HostClient {
+  discover(address: string, expect?: DiscoveryExpectation): Promise<HostDiscovery>;   // SP04 §1 steps 1–4, writes nothing
+  connect(host: PinnedHost): HostConnection;                                           // with a pinned host (RF-30)
+}
+export async function fingerprintOf(rawPublicKey: Uint8Array): Promise<string>;        // SP04 §1.1; a copy of
+                                                    // `shared/host-api.ts`'s private encoder until it moves there
+export function hostTokenKey(kid: string, personId: Id): string;                       // 'bond.host.<kid>.<personId>'
+export function createHostClient(deps: { fetch; keychain }): HostClient;
+```
+The bearer is read from and written to the keychain only (SP02 §5); the client never logs or reads a
+failing body (its messages are its own constants, B1).
+
+### `backend/sync.ts` — the sync loop (`docs/specs/SP04-sync.md` §3–§5, B4/B10)
+```ts
+export const SYNC_INTERVAL_MS = 5 * 60_000; export const AFTER_WRITE_MS = 1_000;
+export const BACKOFF_MS = [30_000, 60_000, 120_000, SYNC_INTERVAL_MS];
+export const EVENTS_PER_BATCH = 500;
+export const SIGNED_OUT_ERROR = 'signed out — sign in again';   // the marker it leaves in host.last_error (b4)
+export interface SyncDeps { repo; connection(); now(); onState; onSignedOut; setInterval; clearInterval }
+export interface Sync { start(); stop(); syncNow(): Promise<HostState>; state(): HostState; afterWrite() }
+export function createSync(deps: SyncDeps): Sync;
+```
+Order per run: flush the outbox, push events (`backend/sync.ts`'s `pushEvents`, up to 500 per batch,
+repeated until a batch confirms nothing), then `GET /v1/state`. A `401` writes `SIGNED_OUT_ERROR`,
+`clearOrgData` empties the org half and asks for sign-in; a changed key stops the loop as `stale`; any
+other failure goes `stale` with the backoff. `HostState`'s status derives from the row
+(`none` / `signed-out` / `stale` / `connected`).
+
+### `backend/connected-catalog.ts` — the effective catalog (`SP05 §2`, B5)
+```ts
+export interface HostSnapshotRow { snapshot: string | null; version: string | null; lastSyncAt: string | null; personId: Id }
+export interface EffectiveCatalog { version; orgUsable; me; roles; entries }
+export interface ConnectedCatalog {
+  refresh(record: HostSnapshotRow | null): boolean;   // re-derives from the row; answers "the page's view changed"
+  current(): EffectiveCatalog | null; entries(): Entry[]; roles(): Role[];
+}
+export function createConnectedCatalog(deps: { now: () => number }): ConnectedCatalog;
+```
+The body is parsed when its bytes changed (not the `version`: a `401` rewrites the body under the
+same version). The org half goes through `visibleEntries` and is shown only while `orgToolsUsable`;
+a body naming someone else is refused; no readable body yields an empty catalog, never the local
+tables.
+
+### `backend/host-admin.ts` — admin writes to the host (`SP05 §3`, B6/B8a)
+```ts
+export const BOOTSTRAP_CLOSED = 'the guild already has org tools';
+export interface HostAdmin {
+  saveTool(tool: Entry): Promise<OrgTool>; removeTool(id: Id): Promise<true>;
+  saveRole(role: Role): Promise<Role>; removeRole(id: Id): Promise<true>;
+  grant(roleId: Id, entryId: Id, granted: boolean): Promise<true>;
+  listPeople(): Promise<Person[]>; setRoles(personId, roles): Promise<Person>; disable(personId): Promise<Person>;
+  createPerson(input): Promise<PersonCreateResponse>; issueCode(personId: Id): Promise<CodeResponse>;
+  listEvents(filter): Promise<AuditEvent[]>;
+  bootstrap(tools: Entry[], roles: Role[]): Promise<{ created: number; refused: boolean }>;
+}
+export function hostAdminFor(connection: HostConnection | null): HostAdmin | null;   // null → the local path (RF-30)
+export function orgViewsOf(views: View[]): View[];                                   // strips a person's personal views
+export function createHostAdmin(connection: HostConnection): HostAdmin;
+```
+`host.bootstrap` answers the host's `409` as `{ created: 0, refused: true }` instead of throwing
+(B8a); every user-facing host-error sentence is written here, never read from a host body (B6).
+
 ### `backend/main.ts`
 - `init`: banco em `paths.data + '/bond.db'`; `migrate`; `ensureAdminRole`; seed do pacote (erro vira
   evento); `gateOrigins` do seed embutido; `capabilities()`; sessão, cofre, janelas; janela `main`
   com `setMinSize(760, 500)`; **bandeja** se a capacidade existe: `app.tray.set` com menu `open`
-  ("Open Bond"), `lock` ("Lock"), separador, `quit` ("Quit Bond"), clique = `open`; ícone macOS
+  ("Open Nod"), `lock` ("Lock"), separador, `quit` ("Quit Nod"), clique = `open`; ícone macOS
   `'sf:rectangle.stack'`, Windows `'emoji:🔗'`, Linux `paths.resources + '/tray.png'`; com bandeja,
   `setHideOnClose(true)` na `main`; sem bandeja, fechar a `main` encerra o app.
 - `api`: todas as chaves de `ApiContract` com a guarda da §2. Desbloquear/criar conta → push `session`,
@@ -434,6 +544,14 @@ export function gateOrigins(seed: Seed | null): string[];
   `bond.bio.<id>` (A14). `bond.installUpdate` registra o evento **antes** de instalar (A13).
   `catalog.save` persiste `probe` quando vem. `catalog.get` devolve `usualLogin` = resultado mais
   frequente entre os 20 últimos `loginResults`.
+- **Connected mode** (SP05 §3): the RPC methods `host.state|discover|activate|signIn|syncNow|remove|bootstrap`
+  and `events.syncStatus` land here (block 1); `host.activate`/`host.signIn` derive the keys in the
+  backend and never store or log the password. A `host` row starts the sync loop on unlock and stops
+  it on lock or `host.remove`; admin methods route to `backend/host-admin.ts` when connected and to
+  the repo otherwise; `afterWrite()` follows every admin write. The vault is built over the effective
+  catalog (`{ ...database, entry: catalogEntryOf }`), so a credential's recorded origin is the host
+  entry's url (B5), and the `login.report` origin guard reads the same catalog. The admin-catalog
+  read `catalog.get` also reads the effective catalog.
 - Hooks: `onNavigate`, `onWindowOpen`, `onDownload` (evento com `auditUrl`), `onWindowClosed`,
   `onWindowState` (foco), `onHotkey`, `onTray` (confira nomes e assinaturas no runtime).
 
@@ -441,10 +559,10 @@ export function gateOrigins(seed: Seed | null): string[];
 
 | Arquivo | Faz |
 | --- | --- |
-| `index.html` | `lang="en"`, título `Bond`, `<div id="app">`, `src/app.ts`, `src/style.css`. |
-| `src/app.ts` | Boot e roteamento. Bloqueado: tela de entrada (criar a conta de admin / entrar / entrar com convite / Touch ID / espera). Desbloqueado: **sidebar** à esquerda (logo; um ícone por ferramenta com dígito e estado — aberta, carregando, falhou; no rodapé Settings e Lock) e **conteúdo**: Home (cartões das ferramentas: abrir/focar, vistas, fechar, estado e resultado de login) ou Settings (`src/settings.ts`). Teclado: ⌘/Ctrl+1..9 abre, ⌘/Ctrl+K paleta, ⌘/Ctrl+, Settings. Ouve `session`, `tools`, `catalog`, `palette`. |
+| `index.html` | `lang="en"`, título `Nod`, `<div id="app">`, `src/app.ts`, `src/style.css`. |
+| `src/app.ts` | Boot e roteamento. Bloqueado: tela de entrada (criar a conta de admin / entrar / entrar com convite / Touch ID / espera). Desbloqueado: **sidebar** à esquerda (logo; um ícone por ferramenta com dígito e estado — aberta, carregando, falhou; no rodapé Settings e Lock) e **conteúdo**: Home (cartões das ferramentas: abrir/focar, vistas, fechar, estado e resultado de login) ou Settings (`src/settings.ts`). Teclado: ⌘/Ctrl+1..9 abre, ⌘/Ctrl+K paleta, ⌘/Ctrl+, Settings. Ouve `session`, `tools`, `catalog`, `palette`, and the connected events `host`, `join` (a `bond://join` invite) and `update` (the new-version notice). A `host` push drives the "offline" badge and the signed-out notice; a "Join a guild" path lives on the blocked screen beside create-account and invite. |
 | `src/palette.ts` | `export function openPalette(ctx): void` — overlay dentro da janela com busca (subsequência, sem acento) sobre ferramentas, vistas e ações (Home, cada aba de Settings, Lock, Quit); ↑/↓/Enter/Esc; foco preso enquanto aberta. |
-| `src/settings.ts` | `export function mountSettings(root: HTMLElement, ctx: { session: SessionState; info: AppInfo; tab?: SettingsTab }): { setTab(tab: SettingsTab): void; update(session: SessionState): void; destroy(): void }`, com `export type SettingsTab = 'account' \| 'vault' \| 'tools' \| 'roles' \| 'people' \| 'activity' \| 'catalog'`. Todas as pessoas: Account (trocar senha, habilitar Touch ID, versão, atualização) e Vault (salvar/revelar 10 s/remover; export/import com `tiny.dialog`). Só admin: Tools (colar endereço → `catalog.probe` → formulário pré-preenchido; vistas, papéis, `noFill`; aviso quando a origin não está em `info.gateOrigins`; "usually signs in via …" de `catalog.get`), Roles (CRUD + concessões), People (papéis, revogar, emitir convite mostrando o código uma vez), Activity (lista + exportar JSONL), Catalog (exportar/importar seed com modo merge/overwrite). |
+| `src/settings.ts` | `export function mountSettings(root: HTMLElement, ctx: { session: SessionState; info: AppInfo; tab?: SettingsTab }): { setTab(tab: SettingsTab): void; update(session: SessionState): void; destroy(): void }`, com `export type SettingsTab = 'account' \| 'hosts' \| 'vault' \| 'tools' \| 'roles' \| 'people' \| 'activity' \| 'catalog'`. Todas as pessoas: Account (trocar senha, habilitar Touch ID, versão, atualização) e Vault (salvar/revelar 10 s/remover; export/import com `tiny.dialog`). **Hosts** (todos, SP05 §4): without a host, address → `host.discover` → guild + fingerprint → email + code (or password) → set password; with a host, guild, address, fingerprint, last sync, pending writes, "Sync now", "Remove host" (keep-personal). Só admin: Tools (colar endereço → `catalog.probe` → formulário pré-preenchido; vistas, papéis, `noFill`; aviso quando a origin não está em `info.gateOrigins`; "usually signs in via …" de `catalog.get`), Roles (CRUD + concessões), People (papéis, revogar, emitir convite mostrando o código uma vez), Activity (lista + exportar JSONL; sent vs pending from `events.syncStatus` while a host exists), Catalog (exportar/importar seed com modo merge/overwrite). Só admin, conectado: the four admin tabs read/write the host through the same RPC and a "publish local tools" card calls `host.bootstrap` once. |
 | `src/style.css` | Tema escuro sóbrio, monospace, contraste alto, `:focus-visible`. Classes usadas por `src/ui.ts`: `.button .button-primary .button-danger .button-ghost .field .field-label .field-hint .input .message .message-error .message-ok .message-info`. |
 | `src/ui.ts` | Helpers de DOM (já escrito pelo coordenador; não editar). |
 

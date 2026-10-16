@@ -282,6 +282,47 @@ describe('origin', () => {
     expect(s.repo.vaultOrigin(s.ana.id, 'kanban')).toBe('https://moved.example.test');
   });
 
+  /**
+   * While connected the vault reads the entry of a credential from the effective catalog:
+   * `backend/main.ts` builds it over `{ ...database, entry: catalogEntryOf }` (SP05 §2). A tool the
+   * guild grants that this machine has no `tool` row for is exactly that case — the entry exists,
+   * the local row does not — and it has to be able to hold a credential all the same.
+   */
+  test('a tool that exists only on the host receives a credential, on the host entry origin', async () => {
+    const s = scene();
+    // The host entry the snapshot brought: `jitsi` has no `tool` row in this database.
+    const hostEntry: Entry = {
+      ...tool('jitsi'),
+      url: 'https://jitsi.example.test/room',
+    };
+    expect(s.repo.entry('jitsi')).toBeNull();
+    const effective: Repo = {
+      ...s.repo,
+      entry: (id) => (id === 'jitsi' ? hostEntry : s.repo.entry(id)),
+    };
+    const vault = createVault({ repo: effective, keychain: s.keychain, iterations: ITERATIONS });
+
+    const item = await vault.save(s.ana.id, {
+      toolId: 'jitsi',
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+
+    expect(item.toolId).toBe('jitsi');
+    // The origin the fill compares a window's address against is the entry's own url — the host
+    // entry's, not a local row's (RF-38).
+    expect(s.repo.vaultOrigin(s.ana.id, 'jitsi')).toBe('https://jitsi.example.test');
+    expect(await vault.read(s.ana.id, 'jitsi')).toEqual({
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+    // The index row exists without a `tool` row behind it, and the credential is the keychain's.
+    expect(s.repo.listVault(s.ana.id)).toEqual([item]);
+    expect(s.items.get(item.keychainKey)).toBe(
+      JSON.stringify({ username: 'ana', secret: KANBAN_SECRET }),
+    );
+  });
+
   test('a refused keychain writes no origin and a person without an item has none', async () => {
     const s = scene();
 

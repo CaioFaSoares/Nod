@@ -1,0 +1,53 @@
+# The host on Coolify (SP07 §2, §5.1): one compose, one replica, one volume.
+#
+# Why a second file instead of `host/compose.yaml`: that one publishes the port to the host's
+# loopback (`ports: "${BOND_BIND:-127.0.0.1}:8080:8080"`) for a deploy where the proxy lives outside
+# the compose network. On Coolify the proxy is what attaches to this service, so the service must not
+# claim a host port at all — it only *exposes* 8080 to the compose network, and Coolify's proxy
+# (Traefik) reaches it there. Point the Coolify resource at this file.
+#
+# What the owner sets in Coolify (values, never a file — `AGENTS.md`, `docs/canonico.md` §14):
+#
+#   BOND_PUBLIC_URL        required, no default: the https address the domain resolves to, exactly
+#                          what the Nod pins (SP04 §1). The host refuses to start without it.
+#   BOND_GUILD_NAME        the guild name `GET /.well-known/bond` serves.
+#   BOND_MIN_APP_VERSION   default 0.3.0.
+#   BOND_BACKUP_EVERY_HOURS / BOND_BACKUP_KEEP   defaults 24 and 14 (SP07 §4).
+#
+# The port of the domain is 8080 (the `expose` below, and the `EXPOSE` of `host/Dockerfile`). The
+# names of Coolify's own fields are the owner's to confirm; what this file fixes is the port and the
+# absence of a host bind. One replica only: SQLite has a single writer (SP01 §1).
+#
+# Local check of the file itself from the repo root:
+#
+#   BOND_PUBLIC_URL=https://bond.example docker compose -f host/compose.coolify.yaml config
+
+services:
+  host:
+    build:
+      context: ..
+      dockerfile: host/Dockerfile
+    environment:
+      BOND_PUBLIC_URL: ${BOND_PUBLIC_URL:?BOND_PUBLIC_URL is required (the https address the proxy exposes)}
+      BOND_GUILD_NAME: ${BOND_GUILD_NAME}
+      BOND_MIN_APP_VERSION: ${BOND_MIN_APP_VERSION:-0.3.0}
+      # SP07 §4: a `VACUUM INTO` pass every N hours into `/data/backups`, keeping the newest N.
+      BOND_BACKUP_EVERY_HOURS: ${BOND_BACKUP_EVERY_HOURS:-24}
+      BOND_BACKUP_KEEP: ${BOND_BACKUP_KEEP:-14}
+    # No `ports`: the container claims no host port. Coolify's proxy joins the compose network and
+    # reaches 8080 there; the process listens on every interface of the container (`host/main.ts`
+    # passes no hostname to `listen`), so no bind address is needed either.
+    expose:
+      - "8080"
+    volumes:
+      # One volume holds `host.db`, both key files and `backups/` (SP01 §1, SP07 §4). A restore into a
+      # fresh volume copies `host.db` plus the backup's key files: the same people sign in and a
+      # pinned Bond still accepts the host. Coolify keeps named volumes across redeploys.
+      - bond-data:/data
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 30s
+    restart: unless-stopped
+
+volumes:
+  bond-data:

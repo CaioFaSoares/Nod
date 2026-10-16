@@ -5,8 +5,8 @@ Two kinds of proof, matching `AGENTS.md`'s rule that nothing is "verified" witho
 | Kind | Where | Runs | Proves |
 | --- | --- | --- | --- |
 | Unit | `test/*.test.ts`, `host/**/*.test.ts` (block 1 on) | `bun test` | Pure logic in `shared/` and the host against a real temp SQLite |
-| Smoke, local | `test/smoke/` (`run.ts`, `smoke.html`, `tools.ts`) | `bun test/smoke/run.ts` | The real Bond app under tinyjs, with local fake tools, a throwaway app id (`BOND_APP_ID`) and its own data dir |
-| Smoke, connected | `test/smoke/` (`connected.ts`, `connected.html`, `tools.ts`) | `bun test/smoke/connected.ts [--force]` | The real Bond under two app ids beside a real host process: SP05 §5 steps 2–5, no external network, no container |
+| Smoke, local | `test/smoke/` (`run.ts`, `smoke.html`, `tools.ts`) | `bun test/smoke/run.ts` | The real Nod app under tinyjs, with local fake tools, a throwaway app id (`BOND_APP_ID`) and its own data dir |
+| Smoke, connected | `test/smoke/` (`connected.ts`, `connected.html`, `tools.ts`) | `bun test/smoke/connected.ts [--force]` | The real Nod under two app ids beside a real host process: SP05 §5 steps 2–5, no external network, no container |
 
 `test/helpers/sqlite-bun.ts` adapts `bun:sqlite` to the backend's `SqlDb`, so `backend/repo.ts` runs
 under Bun.
@@ -27,7 +27,7 @@ under Bun.
 | Key-derivation vectors in Bun, and the same vectors in txiki.js through the smoke | H3 |
 | Seal/open vectors across both runtimes | S0 |
 | Host route groups against a temp data dir | H4–H8 |
-| Two-instance smoke: a host process plus two Bond app ids (admin and person) | B11, K10 |
+| Two-instance smoke: a host process plus two Nod app ids (admin and person) | B11, K10 |
 
 ## The connected smoke (`test/smoke/connected.ts`)
 
@@ -41,7 +41,7 @@ What it starts, all on loopback, with no external network and no container:
 | Host | `bun host/main.ts` on a free loopback port: `BOND_DATA` in `test/smoke/.gerado/connected/host-data`, `BOND_DEV=1`, `BOND_PUBLIC_URL=http://127.0.0.1:<port>`, `BOND_GUILD_NAME=Smoke Guild` (SP04 §1 allows plain `http://` only in dev) |
 | Setup code | `bun host/cli/setup-code.ts` over the same environment; it stays in the runner's memory (never printed, never written to a file) |
 | Tools | `test/smoke/tools.ts` (A and B), the same fake servers the local smoke uses |
-| Bonds | two app ids — `studio.copland.bond.smoke-admin` and `studio.copland.bond.smoke-person` — launched one at a time the way `run.ts` launches one: temporary seed, `gen-config` with that app id, its own dev port (5199, 5200), `TINYJS_HTML=connected.html` and the result channel through `<app data>/store.json` |
+| Nods | two app ids — `studio.copland.bond.smoke-admin` and `studio.copland.bond.smoke-person` — launched one at a time the way `run.ts` launches one: temporary seed, `gen-config` with that app id, its own dev port (5199, 5200), `TINYJS_HTML=connected.html` and the result channel through `<app data>/store.json` |
 
 The page drives SP05 §5 in four phases, in this order — steps 4 and 5 conflict for P, because a
 revoked person cannot push later:

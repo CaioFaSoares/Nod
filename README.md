@@ -1,59 +1,70 @@
-# Bond
+# Nod
 
-Casca de desktop, multiplataforma, que reúne as ferramentas internas da Copland
-(`*.copland.studio` e afins) numa **janela principal única** — sidebar de ícones, Home, paleta de
-comandos (`⌘K`) e Settings — e abre cada ferramenta na **janela própria** dela; catálogo cadastrado
-pelo administrador, papéis e credenciais no chaveiro do sistema — uma senha local autentica a sessão
-e pronto.
+Nod is a desktop app that keeps your team's web tools in one place. Open it and every tool you have
+access to is a click (or a keyboard shortcut) away; each opens in its own window and stays signed in
+between sessions. You add the tools that are yours, an admin decides who sees what, and passwords sit
+in the system keychain behind a single local password — you never retype them into the app.
 
-É um TypeScript fino sobre o [tinyjs](https://tinyjs.app) — backend em txiki.js, janela nativa de
-webview do sistema, ~6 MB, sem Electron e sem servidor HTTP embutido.
+It is small and self-contained: about 6 MB, no bundled browser engine, no server required. It works
+fully offline — the catalog, your credentials and the audit log all live on your own machine. When
+your team runs the optional host, tools, roles and access sync to everyone connected, so an admin
+adds a tool once and it shows up for the right people.
 
-## Estado
+Tools are **data**, not code: addresses, names, icons and roles come from the catalog, never from the
+source. No tool or organization is built in.
 
-v2 entregue (épico B01–B04 fechado em 2026-10-16): janela única de gerenciar/usar, ferramentas em
-janelas próprias, cascata de login, cofre no chaveiro, papéis e concessões, auditoria, release com seed
-privado. Everything in English from 2026-10-16 (app and new docs). Leia `docs/canonico.md` e `docs/arquitetura.md`.
+Under the hood Nod is thin TypeScript on [tinyjs](https://tinyjs.app): a txiki.js backend and the
+system's native webview.
 
-### Pendências
+## Name
 
-- Janelas de ferramenta abrem com o mesmo tamanho e posição da janela principal (medido: bounds
-  idênticos); o tamanho próprio e a cascata de +28 px de `docs/arquitetura.md` §4 não estão sendo
-  aplicados. Causa não fechada.
-- Não exercitado de verdade: Windows, Linux, Touch ID, atalhos globais; Settings e paleta só por
-  typecheck e build.
-- Achados menores das revisões ainda abertos (persistir preferências, ações extras na paleta, etc.)
-  em `docs/handovers/`.
-- A faixa de implementação DeepSeek (`.omp/config.yml`) parou com 401 de chave inválida; trocar a
-  chave antes de despachar subagentes de novo.
+The project and this repository are **Nod** (GitHub `CaioFaSoares/Nod`, renamed from `Bond` on
+2026-10-16). Documents written from that date name it Nod. Some internal identifiers still carry the
+old name on purpose — the app id, the keychain keys under `bond.*`, the `BOND_*` environment
+variables, `bond://` links, the database file and the `/.well-known/bond` discovery path — because
+changing them would lose data or break already-installed apps and deployed hosts. The rename
+decision and plan are in `docs/canonico.md` §22 and `docs/rename-nod.md`.
 
-Distribuição: o dono manda releases privadas com as regras do sistema embutidas (seed fora do git) e,
-depois, isso passa a ser validado online e a se atualizar sozinho — ver §19 do `canonico.md`.
+## Features
 
-## Como ler
+- One main window to manage and switch tools; each tool in its own native window, sessions kept
+  across restarts.
+- Login cascade: existing session, form fill from the vault, or the site's own provider, with a
+  visible manual fallback.
+- Vault in the system keychain, bound to the origin each credential was saved for.
+- Roles, grants and a local, exportable audit log.
+- Private releases with an embedded seed (catalog, roles, grants) kept out of git.
+- Optional host (`host/`, Bun + Elysia): one guild per container; people, roles, grants and tools
+  sync to every connected Nod. Without a host, Nod works fully offline.
 
-| Documento | O que tem |
+## Status
+
+Read `docs/canonico.md` (requirements and decisions) and `docs/arquitetura.md` (architecture).
+Story status lives in the GitHub issues, not in the docs.
+
+## Documents
+
+| Document | Contents |
 | --- | --- |
-| `docs/canonico.md` | A base de requisitos: escopo, RF, RNF, modelo de dados, segurança, roadmap, registro de decisões, questões abertas. |
-| `docs/tinyjs.md` | O que o runtime faz e o que ele proíbe, com fontes. É a casa dos fatos do runtime. |
-| `docs/downscale-carna.md` | O que o Bond herda da Carna e o que fica de fora. |
-| `CONTEXT.md` | Vocabulário. Termo novo só entra depois de leitura do dono. |
-| `AGENTS.md` | Regras para agentes que trabalham aqui. |
+| `docs/canonico.md` | Requirements: scope, functional and non-functional requirements, data model, security, roadmap, decision log, open questions. |
+| `docs/arquitetura.md` | Modules, contracts and data shapes. |
+| `docs/tinyjs.md` | What the runtime does and forbids, with sources. |
+| `docs/specs/` | Exact contracts for the host and connected mode. |
+| `docs/epics/` | Epics and effort blocks. |
+| `docs/distribuicao.md` | Building, releasing and installing. |
+| `CONTEXT.md` | Vocabulary. |
+| `AGENTS.md` | Rules for agents working here. |
 
-## Ferramentas de hoje
-
-Affine, Kanban (Planka), webmail, Discord e o que mais entrar — todas cadastradas como **dado**, não
-como código. Ver `docs/canonico.md` §4.
-
-## Como rodar
+## Running
 
 ```
 bun install
-bun run app:dev         # dev (roda sem o seed privado)
-bun test                # shared/, scripts/ e backend/
-bun run typecheck       # tsc do frontend e do backend
-bun run app:build       # release (exige resources/seed.json)
-bun test/smoke/run.ts   # smoke na superfície real (abre o app)
+bun run app:dev         # development (runs without the private seed)
+bun test                # unit tests
+bun run typecheck       # tsc for frontend and backend
+bun run app:build       # release (requires resources/seed.json)
+bun test/smoke/run.ts   # smoke test on the real app (opens it)
 ```
 
-O passo a passo de distribuição e liberação está em `docs/distribuicao.md`.
+The seed format is in `resources/seed.example.json`. Distribution steps are in
+`docs/distribuicao.md`.

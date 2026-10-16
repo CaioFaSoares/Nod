@@ -20,9 +20,10 @@ import {
   verifyStoredPassword,
 } from '../shared/auth';
 import { fromBase64url, toBase64url } from '../shared/encoding';
+import { HostError } from './host-client';
 import type { DerivedKeys, PasswordHashV2 } from '../shared/auth';
 import type { PasswordChangeRequest } from '../shared/host-api';
-import type { EventType, Id, PasswordHash, Person, SecretStore, SessionState } from '../shared/types';
+import type { EventType, Id, PasswordHash, Person, SecretStore, SessionState, VaultItem } from '../shared/types';
 import type { Repo } from './repo';
 
 /** Last person used: only the id; it drives biometrics and the pre-filled sign-in screen. */
@@ -47,6 +48,19 @@ const BIOMETRICS_DECLINED = 'biometrics were declined';
 const BIOMETRICS_DISABLED = 'biometrics are not enabled';
 /** A connected change needs the row's `authKey` (SP02 §7): a v1 row has none to send. */
 const NOT_CONNECTED = 'this account has no host password to change';
+/**
+ * F3: a Bond that already has an account is not connected to a guild from the lock screen — the
+ * person who holds this machine's keychain decides what happens to its accounts.
+ */
+const JOIN_NEEDS_UNLOCK = 'unlock this Bond first, then join the guild';
+/** F1: the join's email is an account of this Bond, and not the one the session was unlocked as. */
+const JOIN_OTHER_ACCOUNT = 'this email belongs to another account of this Bond — unlock it, then join';
+/**
+ * F7: the join's own refusal. `preAuthConnection`'s routes answer `401` for a wrong code or password
+ * (SP02 §5), and the client reads every `401` as "signed out" — a sentence about a session that was
+ * revoked, which is not what a wrong code did.
+ */
+const INVALID_CODE_OR_PASSWORD = 'invalid code or password';
 
 // Fixed hash a single derivation is spent against when the email does not exist. Without it the
 // response time would tell which emails have an account — an existence oracle. Salt of 16 zero
@@ -76,6 +90,16 @@ export interface SessionDeps {
   now?: () => Date;
 }
 
+/**
+ * F1/F3: what the local side of a join decided before any host call (`Session.joinGate`). `join`
+ * means the host may be asked, and `local` is the account of this Bond the host person will replace
+ * (`null` when the email is nobody's here); `choose` means a local person holds the join's email and
+ * the person has not said which account wins — nothing was sent and the code is not spent.
+ */
+export type JoinGate<T> =
+  | { kind: 'join'; local: Person | null; answer: T }
+  | { kind: 'choose'; person: Person };
+
 /** What `createSession` returns (§4). Declared apart so the contract has a name of its own. */
 export interface Session {
   /** `SessionState` is synchronous logic against the repository plus one keychain read. */
@@ -86,6 +110,11 @@ export interface Session {
    * person whose id is the host person id, writes the V2 verifier over the **host** salt and leaves
    * the session unlocked with the keys of that salt. B2 calls it from `host.activate` / `host.signIn`
    * once the host answered, and calls `wipeVault(id)` first when the salt changed (SP02 §7).
+   *
+   * F1: with `adoptLocalId` the local account of that id — the one `joinGate` found holding the
+   * email — becomes the host person: the row, its roles, its vault index, its events and its
+   * keychain items move to `personId` in one go, before the verifier is written. Its roles survive,
+   * with the host's `admin` flag reconciled on top of them.
    */
   adoptConnectedAccount(p: {
     personId: Id;
@@ -96,7 +125,30 @@ export interface Session {
     salt: string;
     iterations: number;
     admin: boolean;
+    /** F1: the local person (`JoinGate.local`) this host person replaces, if any. */
+    adoptLocalId?: Id;
   }): Promise<SessionState>;
+  /**
+   * F1, F3, F7: the local half of a join, in the one order the rules need. Everything this machine
+   * knows is decided before the host hears anything — F1's collision and the choice that follows it,
+   * F3's unlocked session — and the host call is `host`, the caller's own (`backend/main.ts` owns the
+   * client, the discovery and the `host` row), so a join this side refuses makes no request at all.
+   *
+   * A `401` out of `host` is F7's one sentence for a wrong code or password, not the `signed-out` of
+   * a revoked session; with `signIn` the attempt pays RF-23's backoff, which `unlock` shares (F3).
+   * Throws with the sentence the join screen shows when the join must not go out at all.
+   */
+  joinGate<T>(p: {
+    email: string;
+    /** F1: the person chose the guild account over the local account of the same email. */
+    adoptLocal: boolean;
+    /** F3: the caller's own reading of the `host` row — a Bond with an account *and* a host is not
+     *  the lock-screen case F3 is about. */
+    hostPinned: boolean;
+    /** F3: this join is a sign-in, so it pays the unlock backoff like any other password check. */
+    signIn: boolean;
+    host: () => Promise<T>;
+  }): Promise<JoinGate<T>>;
   unlock(p: { email: string; password: string }): Promise<SessionState>;
   unlockBiometric(): Promise<SessionState>;
   enableBiometric(password: string): Promise<SessionState>;
@@ -124,6 +176,13 @@ export interface Session {
   ): Promise<void>;
   /** SP02 §7: every `bond.cred.<person>.*` item of the keychain and the index rows of that person. */
   wipeVault(personId: Id): Promise<void>;
+  /**
+   * F2: the snapshot's `me` (SP04 §2) is the last word on the connected person — its name and its
+   * admin flag. The unlocked person follows it, and `true` means the caller has a session state
+   * worth pushing to the page (an access-code admin reaches the admin screens, a demoted one leaves
+   * them). A snapshot of somebody else, or no unlocked session, is nothing to reconcile.
+   */
+  reconcileConnectedIdentity(me: { id: Id; name: string; admin: boolean }): boolean;
   lock(): SessionState;
   current(): Person | null;
   refresh(): void;
@@ -413,6 +472,11 @@ export function createSession(deps: SessionDeps): Session {
    * id as its id, and SP02 §6 gives it the V2 verifier over the host salt — the same keys the host
    * has, so unlocking works offline afterwards. Being adopted means a host just accepted the
    * password, so the session starts unlocked.
+   *
+   * F1: with `adoptLocalId` the local account of that id is what the host person replaces — the
+   * person chose the guild account over their local one at the join, and the row, its roles, its
+   * vault index, its events and its keychain items move to the host person id before the verifier is
+   * written.
    */
   async function adoptConnectedAccount(p: {
     personId: Id;
@@ -422,6 +486,7 @@ export function createSession(deps: SessionDeps): Session {
     salt: string;
     iterations: number;
     admin: boolean;
+    adoptLocalId?: Id;
   }): Promise<SessionState> {
     const email = p.email.trim().toLowerCase();
     if (!email.includes('@')) throw new Error(INVALID_EMAIL);
@@ -429,15 +494,33 @@ export function createSession(deps: SessionDeps): Session {
     if (name.length === 0) throw new Error(NAME_REQUIRED);
     const problem = validateNewPassword(p.password);
     if (problem !== null) throw new Error(problem);
-    const taken = deps.repo.personByEmail(email);
-    if (taken !== null && taken.person.id !== p.personId) throw new Error(EMAIL_TAKEN);
+    // F1: `personByEmail` (revoked rows aside) is not the read here — the row that holds the email
+    // decides whether this is an adoption or a refusal, and the adopted one is exactly the row the
+    // unique index would refuse to leave behind.
+    const holder = deps.repo.personByEmailAnyState(email);
+    if (holder !== null && holder.person.id !== p.personId && holder.person.id !== p.adoptLocalId) {
+      throw new Error(EMAIL_TAKEN);
+    }
+    const adopt = p.adoptLocalId !== undefined && p.adoptLocalId !== p.personId ? p.adoptLocalId : null;
 
     const keys = await deriveFor(p.password, p.salt, p.iterations);
+    // F1: the roles of an adopted local account survive the re-key, and the host's flag is
+    // reconciled on top of them — the admin of a local Bond that joins as a plain member keeps
+    // every other local role, and the snapshot has the last word about the flag anyway (F2).
+    const keptLocal = adopt !== null && holder !== null && holder.person.id === adopt ? holder.person.roles : [];
     // `admin` is the host's flag; the local row carries it through the admin role, which is what
     // `Person.admin` derives from. A non-admin gets no local role: while connected, roles and grants
     // come from the snapshot (SP05 §2), not from `role` / `person_role`.
-    const roles = p.admin ? [deps.repo.ensureAdminRole().id] : [];
+    const roles = adopt === null ? (p.admin ? [deps.repo.ensureAdminRole().id] : []) : withHostAdmin(keptLocal, p.admin);
     const isNew = deps.repo.personById(p.personId) === null;
+    if (adopt !== null) {
+      const moved = deps.repo.adoptPersonId({
+        fromId: adopt,
+        toId: p.personId,
+        keychainKeyOf: (item) => credentialKey(p.personId, item.toolId),
+      });
+      await moveCredentials(moved, adopt, p.personId);
+    }
     const person = deps.repo.saveConnectedPerson({
       id: p.personId,
       email,
@@ -451,6 +534,117 @@ export function createSession(deps: SessionDeps): Session {
     current = person;
     currentKeys = keys;
     return state();
+  }
+
+  /** The host's `admin` flag over the local roles of an adopted account (F1). */
+  function withHostAdmin(kept: Id[], admin: boolean): Id[] {
+    const adminRoleId = deps.repo.ensureAdminRole().id;
+    const rest = kept.filter((id) => id !== adminRoleId);
+    return admin ? [...rest, adminRoleId] : rest;
+  }
+
+  /** The keychain key of one credential: `bond.cred.<person>.<tool>` (`backend/vault.ts`). */
+  function credentialKey(personId: Id, toolId: Id): string {
+    return `bond.cred.${personId}.${toolId}`;
+  }
+
+  /**
+   * F1: the credentials of an adopted account keep working under the host person id. The index rows
+   * already point at the new key (`Repo.adoptPersonId`); this moves the values themselves — read,
+   * write under the new key, delete the old one. A value the index knows and the keychain does not
+   * (an orphan) is nothing to move, and a keychain that refuses stops this where it is: the old item
+   * stays intact and the report names the credential.
+   */
+  async function moveCredentials(items: VaultItem[], from: Id, to: Id): Promise<void> {
+    for (const item of items) {
+      const value = await deps.keychain.get(item.keychainKey);
+      if (value === null) continue;
+      if (!(await deps.keychain.set(credentialKey(to, item.toolId), value))) {
+        throw new Error(`the system keychain refused to move the credential of ${item.toolId}`);
+      }
+      if (!(await deps.keychain.delete(item.keychainKey))) {
+        throw new Error(`the credential of ${item.toolId} stayed under its old key`);
+      }
+    }
+    // SP02 §9: the biometric item is keyed by person id and holds the person id as its marker today
+    // (V1 puts `base64url(vaultKey)` there instead, and the keys of this adoption are in hand). It
+    // moves with the row, or biometrics would go on unlocking nobody.
+    const marker = await deps.keychain.get(`${BIOMETRIC_PREFIX}${from}`);
+    if (marker === null) return;
+    if (!(await deps.keychain.set(`${BIOMETRIC_PREFIX}${to}`, to))) {
+      throw new Error('the system keychain refused to move the biometric item');
+    }
+    await deps.keychain.delete(`${BIOMETRIC_PREFIX}${from}`);
+  }
+
+  // ---------------------------------------------------------------- the local half of a join (F1, F3, F7)
+
+  /**
+   * F1, F3, F7: see the contract. The order is the requirement: the collision, the choice and the
+   * unlocked session are decided here, and `host` — the caller's call — runs only after that.
+   */
+  async function joinGate<T>(p: {
+    email: string;
+    adoptLocal: boolean;
+    hostPinned: boolean;
+    signIn: boolean;
+    host: () => Promise<T>;
+  }): Promise<JoinGate<T>> {
+    const email = p.email.trim().toLowerCase();
+    if (!email.includes('@')) throw new Error(INVALID_EMAIL);
+
+    // F1: whoever holds the email of this join, in any state.
+    const holder = deps.repo.personByEmailAnyState(email);
+    // F3: a Bond that already has an account is not connected to a guild from the lock screen —
+    // only somebody who can open this Bond's accounts decides that. The first run (no account at
+    // all) keeps working without a session, which is what the third path of SP05 §4 is for.
+    if (current === null && (holder !== null || (!p.hostPinned && deps.repo.countPeople() > 0))) {
+      throw new Error(JOIN_NEEDS_UNLOCK);
+    }
+
+    let local: Person | null = null;
+    if (holder !== null) {
+      // F1: a live local account of another person is not the session's to give away — it is theirs
+      // to unlock, exactly like the account of the email itself. A revoked row can never be unlocked
+      // again (every read of `person` hides it), so what it holds is dead weight: the host's account
+      // takes the email over and the row comes back with it.
+      if (current !== null && !holder.revoked && holder.person.id !== current.id) {
+        throw new Error(JOIN_OTHER_ACCOUNT);
+      }
+      // F1: the choice itself. The join answers it without calling the host, so the code the person
+      // was given is still whole when they decide.
+      if (!p.adoptLocal) return { kind: 'choose', person: holder.person };
+      local = holder.person;
+    }
+
+    // F3: a sign-in is a password check against the host, and it pays the backoff an unlock pays —
+    // the failures are one counter, so a run of wrong passwords cannot be walked around by locking
+    // and signing in instead (RF-23).
+    if (p.signIn && waitMs() > 0) throw new Error(WAIT_BEFORE_RETRY);
+    try {
+      const answer = await p.host();
+      if (p.signIn) deps.repo.setMeta(META_FAILURES, '0');
+      return { kind: 'join', local, answer };
+    } catch (error) {
+      // F7: a `401` of SP02 §4's auth routes is a wrong code or password, and it is counted like one.
+      if (error instanceof HostError && error.status === 401) {
+        if (p.signIn) registerFailure();
+        throw new Error(INVALID_CODE_OR_PASSWORD);
+      }
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  /**
+   * F2: see the contract. The row is the repository's (only it writes `person`); what this adds is
+   * the unlocked session following it, or locking when the snapshot was the last word on a person
+   * the host no longer has.
+   */
+  function reconcileConnectedIdentity(me: { id: Id; name: string; admin: boolean }): boolean {
+    if (current === null || current.id !== me.id) return false;
+    if (!deps.repo.saveConnectedIdentity(me.id, { name: me.name, admin: me.admin })) return false;
+    refresh();
+    return true;
   }
 
   // ---------------------------------------------------------------- password, lock and refresh
@@ -547,6 +741,7 @@ export function createSession(deps: SessionDeps): Session {
     state,
     createAccount,
     adoptConnectedAccount,
+    joinGate,
     unlock,
     unlockBiometric,
     enableBiometric,
@@ -554,6 +749,7 @@ export function createSession(deps: SessionDeps): Session {
     deriveFor,
     changePassword,
     wipeVault,
+    reconcileConnectedIdentity,
     lock,
     current: currentPerson,
     refresh,

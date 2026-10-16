@@ -28,7 +28,7 @@ CMD ["bun", "host/main.ts"]
 - The install happens **inside `host/`**, from `host/bun.lock` — not through a workspace filter. The
   root `package.json` declares no `workspaces`, so `bun install --filter ./host` at the root matches
   no package and installs nothing (`docs/handovers/h1.md`, measured). The property this bullet keeps
-  is the one that matters: `host/package.json` holds only the host's dependency, so the Bond app's
+  is the one that matters: `host/package.json` holds only the host's dependency, so the Nod app's
   dependencies never enter the image. A filtered root install would need the root `package.json` to
   declare `"workspaces": ["host"]` and one root lockfile — a decision for that file's owner.
 - The Bun version is pinned to the one the repo pins (`.github/workflows/release.yml`), and Elysia to
@@ -66,6 +66,10 @@ volumes:
 - One replica only: SQLite has a single writer (SP01).
 - TLS ends at Coolify's proxy; the container serves plain HTTP on 8080 inside its network.
 - The host refuses to start when `BOND_PUBLIC_URL` isn't `https://`, except in dev.
+- `GET /.well-known/bond` serves `guild` = `BOND_GUILD_NAME` (may be empty when the deployment
+  leaves it unset) and `minAppVersion` = `BOND_MIN_APP_VERSION` (default `0.3.0`), read from the
+  environment. `meta.guild_name` (SP01 §2) still has no writer; the moment boot writes that row the
+  route should read it instead (h6).
 
 ## 3. Commands
 
@@ -73,7 +77,7 @@ volumes:
 | --- | --- |
 | `bun run setup-code` (in the container) | Prints a setup code (SP02 §3) to the terminal only; refuses if an admin exists |
 | `bun run backup-now` | Runs §4 once |
-| `bun run restore <file>` | Stops serving, checks `PRAGMA integrity_check` on the file, swaps it in, restarts |
+| `bun run restore <file>` | Refuses a target data dir that already holds anything (the acceptance is a fresh volume), checks `PRAGMA integrity_check` on the file, copies it and the backup's key files in, restarts (h9) |
 
 They're scripts in `host/package.json`, run through Coolify's terminal.
 
@@ -81,8 +85,10 @@ They're scripts in `host/package.json`, run through Coolify's terminal.
 
 - Every `BOND_BACKUP_EVERY_HOURS`: `VACUUM INTO '/data/backups/host-<ISO>.db'`.
 - Keep the newest `BOND_BACKUP_KEEP` files.
-- The key files (`signing-key.json`, `host-secret`) are copied beside each backup. A restore without
-  them makes every pinned Bond refuse the host (SP04 §1).
+- The key files (`signing-key.json`, `host-secret`) are copied beside each backup under the backup's
+  own timestamp stem: `<host-<ISO>>.signing-key.json` and `<host-<ISO>>.host-secret`, so a pass never
+  overwrites another's pair and rotation removes the triple together; `restore <file>` finds them
+  from the file name (h9). A restore without them makes every pinned Nod refuse the host (SP04 §1).
 - Copying off the VPS is the owner's choice (E01 question 7); until then, Coolify's volume backup or
   a manual copy.
 
@@ -93,7 +99,7 @@ They're scripts in `host/package.json`, run through Coolify's terminal.
 Coolify builds the compose from the repository. The address is set in Coolify's environment and never
 written into a file (`AGENTS.md`; `docs/canonico.md` §14 "Host address").
 
-1. **Resource** — New Resource → Docker Compose → the repository (`CaioFaSoares/Bond`, `main`) with the
+1. **Resource** — New Resource → Docker Compose → the repository (`CaioFaSoares/Nod`, `main`) with the
    compose location `host/compose.yaml`: the build context `..` inside that file resolves within the
    repository, and the Dockerfile builds from the repo root (§1). `[INFERENCE]` the Coolify field
    names; the substance is the compose file, not the UI.
@@ -106,7 +112,7 @@ written into a file (`AGENTS.md`; `docs/canonico.md` §14 "Host address").
      service still runs one replica only (SP01 §1).
 3. **Domain and TLS** — point the domain at the published port; TLS ends at Coolify's proxy and the
    container speaks plain HTTP (§2). The value of the domain is exactly `BOND_PUBLIC_URL`: it is what
-   discovery returns and what the Bond pins (SP03 §3, SP04 §1).
+   discovery returns and what the Nod pins (SP03 §3, SP04 §1).
 4. **Volume** — the named volume `bond-data` at `/data` holds `host.db`, both key files and
    `backups/`. Coolify keeps named volumes across redeploys; no bind mount is required.
 5. **Health** — `GET /health` answers `ok`; the compose healthcheck probes
@@ -129,4 +135,4 @@ written into a file (`AGENTS.md`; `docs/canonico.md` §14 "Host address").
 - Deploy on Coolify from the repo; `GET /health` is green through the public address.
 - Redeploy: data and key files survive.
 - `bun run backup-now`, then `bun run restore` of that file into a fresh volume: the same people
-  sign in, and a pinned Bond accepts the host.
+  sign in, and a pinned Nod accepts the host.

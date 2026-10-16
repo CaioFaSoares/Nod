@@ -17,6 +17,7 @@ import type {
   Id,
   InviteSeed,
   JoinInvite,
+  JoinResult,
   LoginResult,
   Method,
   Person,
@@ -174,6 +175,9 @@ export async function init(app: TinyApp): Promise<void> {
       // SP05 §2: a run that moved the snapshot moves the catalog with it, and the page hears it once
       // — a `304` advances `last_sync_at` alone, and the catalog it would push is the same one.
       if (refreshConnectedCatalog()) afterCatalogChange();
+      // F2: the snapshot's `me` is also what the local person follows — the name and the admin flag
+      // of a connected account are the host's to say, and the page hears about it when they move.
+      void reconcileConnectedIdentity();
     },
     onSignedOut: () => {
       // SP04 §3/RF-39: the session is gone — the bearer is dropped and the page asks to sign in.
@@ -514,7 +518,10 @@ function guarded<M extends Method>(method: M, handler: Handler<M>): TinyApiHandl
 
 function requireToolOrigin(toolId: Id, origin: string | undefined): void {
   if (origin === undefined || origin === '') return; // Windows/Linux do not stamp the origin
-  const entry = required(repo, 'login.report').entry(toolId);
+  // The effective catalog (SP05 §2): a connected entry comes from the snapshot and may have no local
+  // `tool` row at all, and its window is still the entry's own origin. In local mode this is the
+  // same `repo.entry` it always was.
+  const entry = catalogEntryOf(toolId);
   if (entry === null) throw new Error('unknown tool');
   if (origin !== originOf(entry.url)) throw new Error('login.report only comes from the tool origin');
 }
@@ -633,6 +640,30 @@ function reason(error: unknown): string {
 
 function push<K extends keyof PushEvents>(event: K, data: PushEvents[K]): void {
   if (runtime !== null) runtime.push(event, data);
+}
+
+/**
+ * F1: the typed answer of a join whose email is a local account of this Bond and whose person has
+ * not decided which one wins. It is answered before any host call — the code the person was given is
+ * whole — and the page asks (SP05 §4's join flow, `src/settings.ts`).
+ */
+function localAccountChoice(person: Person): JoinResult {
+  return { kind: 'local-account', personId: person.id, email: person.email, name: person.name };
+}
+
+/**
+ * F2: the snapshot's `me` (SP04 §2) is the last word on the connected person — its name and its
+ * admin flag. It runs on every state the sync publishes (an applied snapshot included), so an admin
+ * created by an access code reaches the admin screens after the first sync and a demoted one leaves
+ * them. The push only happens when something moved, and only the session: the catalog and the tools
+ * are `refreshConnectedCatalog`'s own.
+ */
+async function reconcileConnectedIdentity(): Promise<void> {
+  const s = session;
+  const me = connected === null ? null : (connected.current()?.me ?? null);
+  if (s === null || me === null) return;
+  if (!s.reconcileConnectedIdentity({ id: me.id, name: me.name, admin: me.admin })) return;
+  push('session', await s.state());
 }
 
 /**
@@ -974,6 +1005,7 @@ const methods: { [M in Method]: Handler<M> } = {
     const code = text(p.code, 'invalid code');
     const password = text(p.password, 'invalid password');
     const name = optional(p.name, (value) => text(value, 'invalid name'));
+    const adoptLocal = optional(p.adoptLocal, (value) => booleanValue(value, 'invalid join')) ?? false;
 
     // SP05 §2 keeps one guild at a time. Replacing the row here would drop the current host's
     // bearer and snapshot without a word, so the person removes the host first.
@@ -981,33 +1013,50 @@ const methods: { [M in Method]: Handler<M> } = {
       throw new Error('Bond is already connected to a host — remove it first');
     }
 
-    // SP04 §1.3: the invite's `fp` must be the key the host answers. A mismatch throws here, before
-    // any request past the discovery, and stores nothing.
-    const found = await c.discover(address, { fingerprint });
-    const pre = preAuthConnection(found);
-    // SP02 §4: the host's iteration count for this derivation (it answers for any email).
-    const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
-    // SP02 §1: at activation the Bond chooses the person's salt. SP02 §7's reset is a new salt, so
-    // the one the host answers is only read, never stored — another machine's cached salt is what
-    // notices a reset, and it must never match by accident.
-    const salt = randomSalt();
-    const keys = await s.deriveFor(password, salt, published.iterations);
-
-    const body: ActivateRequest = {
-      email,
-      code,
-      salt,
-      // SP02 §1–§2: only this one derived key travels; the password stays on this machine.
-      authKey: toBase64url(keys.authKey),
-      device: await deviceOf(),
-    };
     const setup = name !== undefined;
-    // SP02 §3: the setup code creates the first admin; an access code redeems one person's row.
-    const opened = await pre.request<TokenResponse>(
-      'POST',
-      setup ? HOST_ROUTES.authSetup : HOST_ROUTES.authActivate,
-      setup ? { ...body, name } : body,
-    );
+    // F1/F3/F7: the local half of the join first — the collision with a local account of this Bond
+    // and the choice it asks for, the unlocked session F3 demands, and the one sentence a wrong code
+    // becomes. Nothing here has reached the host yet: a join the page has not decided does not spend
+    // the code (`hostPinned` is `false` by construction — activation refuses over an existing host).
+    const gate = await s.joinGate({
+      email,
+      adoptLocal,
+      hostPinned: false,
+      signIn: false,
+      host: async () => {
+        // SP04 §1.3: the invite's `fp` must be the key the host answers. A mismatch throws here,
+        // before any request past the discovery, and stores nothing.
+        const found = await c.discover(address, { fingerprint });
+        const pre = preAuthConnection(found);
+        // SP02 §4: the host's iteration count for this derivation (it answers for any email).
+        const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
+        // SP02 §1: at activation the Bond chooses the person's salt. SP02 §7's reset is a new salt,
+        // so the one the host answers is only read, never stored — another machine's cached salt is
+        // what notices a reset, and it must never match by accident.
+        const salt = randomSalt();
+        const keys = await s.deriveFor(password, salt, published.iterations);
+
+        const body: ActivateRequest = {
+          email,
+          code,
+          salt,
+          // SP02 §1–§2: only this one derived key travels; the password stays on this machine.
+          authKey: toBase64url(keys.authKey),
+          device: await deviceOf(),
+        };
+        // SP02 §3: the setup code creates the first admin; an access code redeems one person's row.
+        const opened = await pre.request<TokenResponse>(
+          'POST',
+          setup ? HOST_ROUTES.authSetup : HOST_ROUTES.authActivate,
+          setup ? { ...body, name } : body,
+        );
+        return { found, published, salt, opened };
+      },
+    });
+    // F1: the typed answer of a join the person has not decided yet: nothing was sent, the code is
+    // whole, and the page asks which of the two accounts wins.
+    if (gate.kind === 'choose') return localAccountChoice(gate.person);
+    const { found, published, salt, opened } = gate.answer;
 
     const connection = c.connect({
       address: found.address,
@@ -1019,13 +1068,15 @@ const methods: { [M in Method]: Handler<M> } = {
       personId: opened.personId,
       email,
       // The host knows the person's name; an access-code activation learns it from the first
-      // snapshot, and the local row carries the email until then.
-      name: name ?? email,
+      // snapshot, and the local row carries the email until then. An adopted local account has one
+      // of its own, which is the better of the two until the snapshot answers (F2).
+      name: name ?? gate.local?.name ?? email,
       password,
       salt,
       iterations: published.iterations,
       // An access-code activation says nothing about the roles: the snapshot fills them (B4/B5).
       admin: setup,
+      ...(gate.local === null ? {} : { adoptLocalId: gate.local.id }),
     });
     await connection.saveToken(opened.token);
     r.saveHost({
@@ -1038,7 +1089,7 @@ const methods: { [M in Method]: Handler<M> } = {
       addedAt: new Date().toISOString(),
     });
     pendingJoin = null;
-    return afterUnlock(state);
+    return { kind: 'session', session: await afterUnlock(state) } satisfies JoinResult;
   },
 
   'host.signIn': async (params) => {
@@ -1050,25 +1101,45 @@ const methods: { [M in Method]: Handler<M> } = {
     const fingerprint = text(p.fingerprint, 'invalid fingerprint');
     const email = text(p.email, 'invalid email').trim();
     const password = text(p.password, 'invalid password');
+    const adoptLocal = optional(p.adoptLocal, (value) => booleanValue(value, 'invalid join')) ?? false;
 
     const row = r.hostRecord();
-    // SP04 §1: a host that is already added is pinned, so a second key is never accepted silently;
-    // a host that is not has only the fingerprint the person confirmed (or the invite carried).
-    const found = await c.discover(
-      address,
-      row === null
-        ? { fingerprint }
-        : { pinned: { kid: row.kid, ed25519Public: row.publicKey } },
-    );
-    const pre = preAuthConnection(found);
-    // SP02 §4: the person's own salt for an activated account (a fake one would sign nobody in).
-    const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
-    const keys = await s.deriveFor(password, published.salt, published.iterations);
-    const opened = await pre.request<TokenResponse>('POST', HOST_ROUTES.authLogin, {
+    // F3: with a host row this is the sign-in of the host this Bond already has. It goes to the
+    // address the row pinned and to no other — the page prefills it from the row, so a different one
+    // is a Bond being pointed at a second host, not a sign-in.
+    if (row !== null && originOf(address) !== originOf(row.address)) {
+      throw new Error('this Bond is connected to another host — remove it first');
+    }
+    // F1/F3/F7: the same local gate. With a host row the session may stay locked (that is the
+    // signed-out case F3 is about) and the attempt pays the unlock backoff; without one, a Bond that
+    // already has an account needs that account's session like `host.activate` does.
+    const gate = await s.joinGate({
       email,
-      authKey: toBase64url(keys.authKey),
-      device: await deviceOf(),
-    } satisfies LoginRequest);
+      adoptLocal,
+      hostPinned: row !== null,
+      signIn: true,
+      host: async () => {
+        // SP04 §1: a host that is already added is pinned, so a second key is never accepted
+        // silently; a host that is not has only the fingerprint the person confirmed (or the invite
+        // carried).
+        const found = await c.discover(
+          row === null ? address : row.address,
+          row === null ? { fingerprint } : { pinned: { kid: row.kid, ed25519Public: row.publicKey } },
+        );
+        const pre = preAuthConnection(found);
+        // SP02 §4: the person's own salt for an activated account (a fake one would sign nobody in).
+        const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
+        const keys = await s.deriveFor(password, published.salt, published.iterations);
+        const opened = await pre.request<TokenResponse>('POST', HOST_ROUTES.authLogin, {
+          email,
+          authKey: toBase64url(keys.authKey),
+          device: await deviceOf(),
+        } satisfies LoginRequest);
+        return { found, published, opened };
+      },
+    });
+    if (gate.kind === 'choose') return localAccountChoice(gate.person);
+    const { found, published, opened } = gate.answer;
 
     // SP02 §7: the host answered a salt other than the one this machine cached, so the account was
     // reset somewhere else. The saved logins of this machine go before the new keys are adopted
@@ -1086,12 +1157,13 @@ const methods: { [M in Method]: Handler<M> } = {
     const state = await s.adoptConnectedAccount({
       personId: opened.personId,
       email,
-      name: local === null ? email : local.name,
+      name: local === null ? (gate.local?.name ?? email) : local.name,
       password,
       salt: published.salt,
       iterations: published.iterations,
       // The snapshot is what says who is an admin (B4/B5); the local row is the last word until then.
       admin: local !== null && local.admin,
+      ...(gate.local === null || gate.local.id === opened.personId ? {} : { adoptLocalId: gate.local.id }),
     });
     await connection.saveToken(opened.token);
     r.saveHost({
@@ -1104,7 +1176,7 @@ const methods: { [M in Method]: Handler<M> } = {
       addedAt: same && row !== null ? row.addedAt : new Date().toISOString(),
     });
     pendingJoin = null;
-    return afterUnlock(state);
+    return { kind: 'session', session: await afterUnlock(state) } satisfies JoinResult;
   },
 
   'host.syncNow': async () => {

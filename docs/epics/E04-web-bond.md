@@ -1,7 +1,7 @@
 ---
 id: E04
 frente: bond
-titulo: Web Bond — an optional browser version served by the host, for people and clients without the app
+titulo: Web Nod — an optional browser version served by the host, for people and clients without the app
 status: proposto
 tipo: epico
 origem: dono
@@ -9,7 +9,7 @@ aberta_em: 2026-10-16
 depende_de: E01
 ---
 
-# E04 — Web Bond
+# E04 — Web Nod
 
 Owner, 2026-10-16:
 
@@ -17,7 +17,7 @@ Owner, 2026-10-16:
 > onde uma pessoa pode acessar o bond via acesso da sua propria maquina. isso provavelmente seria algo
 > posterior mas é bom para fazer isso para clientes acessarem material nosso se precisar
 
-Later phase, after E01's host and Bond connected mode. Proposal waiting for the owner's reading
+Later phase, after E01's host and Nod connected mode. Proposal waiting for the owner's reading
 (`AGENTS.md`). It's the "host the shell on the web" idea that `docs/canonico.md` §2 and §23 q11
 deferred, now with a concrete reason: clients reaching our material without installing anything.
 
@@ -25,7 +25,7 @@ Evidence: `leitura` of `src/api.ts`, `src/settings.ts` and the repo docs. Nothin
 
 ## 1. What it is
 
-- **Optional**: the same host container serves a browser version of the Bond when an env flag turns
+- **Optional**: the same host container serves a browser version of the Nod when an env flag turns
   it on (`WEB_UI=true`). Off, the host stays API-only, as E01 defines it.
 - **Same guild, same accounts**: sign-in, roles, grants and catalog are the host's (E01 §6–§7). A
   person can use the app at work and the browser elsewhere.
@@ -50,7 +50,7 @@ keychain.
 
 So for a client it's a **portal**: sign in, see the links granted to you (a shared Affine page, a
 public board, a delivery folder), open them. The tools still decide who gets in: an Affine document
-needs a public share link or a client account in Affine; the Bond only lists and organizes.
+needs a public share link or a client account in Affine; the Nod only lists and organizes.
 
 ## 3. Shape
 
@@ -61,7 +61,7 @@ flowchart LR
         WEB["/ static web UI (WEB_UI=true)"]
         DB[("host.db")]
     end
-    APP["Bond app"] -->|bearer token| API
+    APP["Nod app"] -->|bearer token| API
     BR["Browser (person or client)"] -->|HttpOnly session cookie| WEB
     WEB --> API
     API --- DB

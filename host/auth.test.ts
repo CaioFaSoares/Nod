@@ -232,6 +232,26 @@ function captureConsole() {
   return { lines, restore: () => Object.assign(console, originals) };
 }
 
+/**
+ * F4 of the block 1 review: the real auth routes of `routes/auth.ts` over the booted repo, with the
+ * service's argon2 hash counted. The routes read `auth` off the request context, so the same plugin
+ * runs unchanged over a service that counts `hashAuthKey` and delegates to the real one — no mock of
+ * the database, the repo or the app, only an observation of how often argon2id is asked for.
+ */
+function countHashes(auth: AuthService): { auth: AuthService; hashes(): number } {
+  let calls = 0;
+  return {
+    auth: {
+      ...auth,
+      hashAuthKey: async (authKey: string) => {
+        calls += 1;
+        return await auth.hashAuthKey(authKey);
+      },
+    },
+    hashes: () => calls,
+  };
+}
+
 // ---------------------------------------------------------------- setup code (SP07 §3, SP02 §3)
 
 describe('setup code', () => {
@@ -391,6 +411,40 @@ describe('POST /v1/auth/setup', () => {
     expect(admin.status).toBe(200);
     expect(host.repo.adminCount()).toBe(1);
   });
+
+  // F4 of the block 1 review: the same shape as `activate` — a malformed code used to answer before
+  // any argon2id work, while a well-formed code paid the hash `redeemCode` needed. Both cost one now.
+  test('a malformed code and a real redemption pay one argon2id hash each', async () => {
+    const host = await startHost();
+    const counted = countHashes(host.auth);
+    const app = new Elysia().decorate({ repo: host.repo, auth: counted.auth }).use(authRoutes);
+
+    const beforeMalformed = counted.hashes();
+    const malformed = await post(app, HOST_ROUTES.authSetup, {
+      email: ADMIN_EMAIL,
+      name: 'Ada',
+      code: 'nope',
+      salt: randomSalt(),
+      authKey: randomAuthKey(),
+      device: DEVICE,
+    });
+    expect(malformed.status).toBe(401);
+    expect(await malformed.json()).toEqual({ error: INVALID_CODE });
+    expect(counted.hashes() - beforeMalformed).toBe(1);
+
+    const { code } = await seedCode(host, 'setup', null);
+    const beforeRedeem = counted.hashes();
+    const admin = await post(app, HOST_ROUTES.authSetup, {
+      email: ADMIN_EMAIL,
+      name: 'Ada',
+      code,
+      salt: randomSalt(),
+      authKey: randomAuthKey(),
+      device: DEVICE,
+    });
+    expect(admin.status).toBe(200);
+    expect(counted.hashes() - beforeRedeem).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------- activate (SP02 §3, RF-33)
@@ -516,6 +570,58 @@ describe('POST /v1/auth/activate', () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: INVALID_CODE });
     expect(host.repo.personById(person.id)?.activatedAt).toBeNull();
+  });
+
+  // F4 of the block 1 review: the timing oracle. An unknown email and a malformed code used to return
+  // before `hashAuthKey`, while a known email with a wrong code paid the argon2id hash — one
+  // `invalid code`, told apart by the clock and so a way to ask who exists. Every branch pays it now.
+  test('an unknown email, a malformed code and a wrong code each pay one argon2id hash', async () => {
+    const host = await startHost();
+    const counted = countHashes(host.auth);
+    const app = new Elysia().decorate({ repo: host.repo, auth: counted.auth }).use(authRoutes);
+
+    async function attempt(
+      email: string,
+      code: string,
+    ): Promise<{ status: number; cost: number; text: string }> {
+      const before = counted.hashes();
+      const response = await post(app, HOST_ROUTES.authActivate, {
+        email,
+        code,
+        salt: randomSalt(),
+        authKey: randomAuthKey(),
+        device: DEVICE,
+      });
+      return { status: response.status, cost: counted.hashes() - before, text: await response.text() };
+    }
+
+    // The reference: the success path hashes the `authKey` it is about to store.
+    const person = seedMember(host);
+    const { code } = await seedCode(host, 'activate', person.id);
+    const success = await attempt(MEMBER_EMAIL, code);
+    expect(success.status).toBe(200);
+    expect(success.cost).toBe(1);
+    expect(host.repo.personById(person.id)?.activatedAt).not.toBeNull();
+
+    // An email nobody holds, with a code of the right shape the host never issued.
+    const unknown = await attempt('ghost@bond.test', generateCode('access'));
+    // A malformed code on an email that does exist: the normalizer refuses before any lookup.
+    const malformed = await attempt(MEMBER_EMAIL, 'nope');
+    // A well-formed code of another person: `redeemCode` finds no live row with that hash.
+    const other = seedMember(host, 'other@bond.test');
+    await seedCode(host, 'activate', other.id);
+    const wrongCode = await attempt('other@bond.test', generateCode('access'));
+
+    // One status, one body, one argon2id hash: nothing separates the three failures.
+    expect([unknown.status, malformed.status, wrongCode.status]).toEqual([401, 401, 401]);
+    expect(unknown.text).toBe(malformed.text);
+    expect(malformed.text).toBe(wrongCode.text);
+    expect(JSON.parse(unknown.text)).toEqual({ error: INVALID_CODE });
+    expect([unknown.cost, malformed.cost, wrongCode.cost]).toEqual([1, 1, 1]);
+
+    // Neither failure wrote anything: no person was invented, no code was spent.
+    expect(host.repo.personAuthByEmail('ghost@bond.test')).toBeNull();
+    expect(host.repo.personById(other.id)?.activatedAt).toBeNull();
   });
 });
 

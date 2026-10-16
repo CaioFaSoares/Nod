@@ -83,6 +83,13 @@ interface Harness {
   /** The delay of the one armed timer, or null when nothing is armed. */
   delay: () => number | null;
   armed: () => number;
+  /**
+   * Waits for the run already in flight — `start()`'s or a timer's — and answers the state it
+   * published. F5 gave `syncNow()` another meaning while a run is going (it asks for a run of its
+   * own, chained behind it), so "wait for the run that is going" needs its own way in: every run
+   * that reaches the host publishes exactly once, and that is the line this waits on.
+   */
+  settle: () => Promise<HostState>;
   /** Fires the armed timer the way the runtime would, and waits for the run it started. */
   fire: () => Promise<void>;
 }
@@ -131,6 +138,8 @@ function harness(script: Partial<Script> = {}): Harness {
   const timers = new Map<number, { run: () => void; ms: number }>();
   let nextTimer = 1;
   const states: HostState[] = [];
+  /** Resolves when a run publishes its state, oldest waiter first: the signal `settle` waits on. */
+  const published: (() => void)[] = [];
   let signedOuts = 0;
 
   const deps: SyncDeps = {
@@ -139,6 +148,7 @@ function harness(script: Partial<Script> = {}): Harness {
     now: () => clock,
     onState: (state) => {
       states.push(state);
+      published.shift()?.();
     },
     onSignedOut: () => {
       signedOuts += 1;
@@ -155,6 +165,18 @@ function harness(script: Partial<Script> = {}): Harness {
   };
 
   const sync = createSync(deps);
+
+  const settle = async (): Promise<HostState> => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    published.push(resolve);
+    await promise;
+    // The run published what it saw; its tail — the `finally` that clears the run in flight and the
+    // loop's re-arm — is a couple of microtasks of its own, and a few turns of the queue land them
+    // (turns, not a duration: the queue is deterministic and no clock is involved).
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+    return states.at(-1) ?? sync.state();
+  };
+
   return {
     repo,
     sync,
@@ -170,12 +192,13 @@ function harness(script: Partial<Script> = {}): Harness {
     },
     delay: () => [...timers.values()][0]?.ms ?? null,
     armed: () => timers.size,
+    settle,
     fire: async () => {
       const [id, timer] = [...timers.entries()][0] ?? [];
       if (id === undefined || timer === undefined) throw new Error('no timer armed');
       timers.delete(id);
       timer.run();
-      await sync.syncNow();
+      await settle();
     },
   };
 }
@@ -221,7 +244,7 @@ describe('triggers', () => {
   test('start() syncs once and arms the five-minute timer', async () => {
     const h = harness();
     h.sync.start();
-    const state = await h.sync.syncNow();
+    const state = await h.settle();
     expect(h.calls.snapshot).toBe(1);
     expect(h.delay()).toBe(SYNC_INTERVAL_MS);
     expect(state.status).toBe('connected');
@@ -242,7 +265,7 @@ describe('triggers', () => {
   test('the five-minute timer runs the next sync', async () => {
     const h = harness();
     h.sync.start();
-    await h.sync.syncNow();
+    await h.settle();
     h.advance(SYNC_INTERVAL_MS);
     await h.fire();
     expect(h.calls.snapshot).toBe(2);
@@ -260,7 +283,7 @@ describe('triggers', () => {
   test('stop() clears the timer and a manual sync afterwards arms nothing', async () => {
     const h = harness();
     h.sync.start();
-    await h.sync.syncNow();
+    await h.settle();
     expect(h.armed()).toBe(1);
     h.sync.stop();
     h.sync.stop();
@@ -273,7 +296,7 @@ describe('triggers', () => {
   test('a write asks for a near-immediate sync, and a burst becomes one', async () => {
     const h = harness();
     h.sync.start();
-    await h.sync.syncNow();
+    await h.settle();
     h.sync.afterWrite();
     h.sync.afterWrite();
     expect(h.armed()).toBe(1);
@@ -287,6 +310,46 @@ describe('triggers', () => {
     const h = harness();
     h.sync.afterWrite();
     expect(h.armed()).toBe(0);
+  });
+
+  test('a syncNow() during an in-flight run chains one more run, which sees what changed', async () => {
+    const h = harness();
+    // The catalog the write produced: the run in flight below read the row before it existed.
+    const newer: Snapshot = { ...BODY, version: 'v2', favorites: ['jitsi', 'kanban'] };
+    const newerRaw = JSON.stringify(newer);
+    let served = 0;
+    h.script.snapshot = () => {
+      served += 1;
+      return served === 1 ? fullBody() : { notModified: false, snapshot: newer, raw: newerRaw };
+    };
+
+    h.sync.start(); // the run in flight
+    const first = h.sync.syncNow(); // F5: this caller is answered by a run of its own
+    const second = h.sync.syncNow(); // and this one waits for the same follow-up
+    expect(second).toBe(first);
+
+    const state = await first;
+    expect(served).toBe(2);
+    expect(h.calls.snapshot).toBe(2);
+    expect(state.status).toBe('connected');
+    expect(state.lastError).toBeNull();
+    // The follow-up's answer is what landed, not the one the in-flight run had read.
+    expect(h.repo.hostRecord()?.version).toBe('v2');
+    expect(h.repo.hostRecord()?.snapshot).toBe(newerRaw);
+    expect(h.armed()).toBe(1);
+  });
+
+  test('a write asked for during an in-flight run keeps its one-second deadline', async () => {
+    const h = harness();
+    h.sync.start();
+    h.sync.afterWrite(); // SP04 §3: the write's own sync, one second from now
+    await h.settle(); // the run ends and asks for the five minutes
+
+    // F5: the run's re-arm must not push that write's sync back by up to five minutes.
+    expect(h.delay()).toBe(AFTER_WRITE_MS);
+    await h.fire();
+    expect(h.calls.snapshot).toBe(2);
+    expect(h.delay()).toBe(SYNC_INTERVAL_MS);
   });
 
   test('without a host row no sync reaches anywhere', async () => {
@@ -324,7 +387,7 @@ describe('snapshot', () => {
     const h = harness({ snapshot: offline });
     const raw = cachedSnapshot(h);
     h.sync.start();
-    const first = await h.sync.syncNow();
+    const first = await h.settle();
     expect(first.status).toBe('stale');
     expect(first.lastError).toBe('could not reach the host');
     expect(first.lastSyncAt).toBe(EARLIER);
@@ -348,7 +411,7 @@ describe('snapshot', () => {
       },
     });
     h.sync.start();
-    const state = await h.sync.syncNow();
+    const state = await h.settle();
     expect(state.status).toBe('stale');
     expect(state.lastError).toBe(HOST_KEY_CHANGED);
     expect(state.guild).toBe('Guild');
@@ -364,7 +427,7 @@ describe('401', () => {
     enqueue(h, 'PUT', '/v1/favorites', { entries: ['jitsi'], updatedAt: EARLIER }, EARLIER);
     h.sync.start();
 
-    const state = await h.sync.syncNow();
+    const state = await h.settle();
     expect(h.keychain.has(TOKEN_KEY)).toBe(false);
     expect(state.status).toBe('signed-out');
     expect(state.lastError).toBe(SIGNED_OUT_ERROR);
@@ -568,8 +631,9 @@ describe('event push', () => {
     expect(failed.status).toBe('stale');
     expect(failed.lastError).toBe('could not reach the host');
     expect(h.repo.eventSyncCounts()).toEqual({ sent: 0, pending: 2 });
-    // The run stopped at the push: the state of SP04 §3 was not fetched.
-    expect(h.calls.snapshot).toBe(0);
+    // F6: the push stopped, and the state of SP04 §3 came anyway — the person kept receiving the org
+    // half of the catalog while their own activity waited (the script's snapshot is offline too).
+    expect(h.calls.snapshot).toBe(1);
     const first = batchesOf(h);
     expect(first).toHaveLength(1);
 
@@ -645,5 +709,155 @@ describe('event push', () => {
     expect(h.repo.listOutbox()).toEqual([]);
     expect(h.repo.listEvents({})).toEqual([]);
     expect(state.status).toBe('connected');
+  });
+
+  test('a batch the host refuses with a 400 still brings the snapshot, noted once', async () => {
+    const h = harness({
+      request: (_method, path) => {
+        if (path === HOST_ROUTES.events) throw new HostError('refused', 'the host refused the request', 400);
+        return undefined;
+      },
+    });
+    recordEvent(h, EARLIER);
+
+    const state = await h.sync.syncNow();
+
+    // F6: a refused push used to end the run here, and the person stopped receiving org changes.
+    expect(h.calls.snapshot).toBe(1);
+    expect(h.repo.hostRecord()?.snapshot).toBe(BODY_RAW);
+    expect(state.status).toBe('stale');
+    expect(state.lastError).toBe('the host refused the request');
+    // SP04 §5 has no verdict for a batch refused for good: the events stay pending and the refusal
+    // is one event of this run — the status and the route, never the events themselves (canonico §13).
+    expect(h.repo.listEvents({}).map((event) => [event.type, event.result, event.detail])).toEqual([
+      ['sync.rejected', '400', `POST ${HOST_ROUTES.events}`],
+      ['tool_opened', null, null],
+    ]);
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 0, pending: 2 });
+
+    // The same batch refused again is the same refusal: it is noted once, not once per run.
+    await h.sync.syncNow();
+    expect(h.repo.listEvents({}).filter((event) => event.type === 'sync.rejected')).toHaveLength(1);
+  });
+
+  test('a batch the host never received keeps the events pending and still brings the snapshot', async () => {
+    const h = harness({
+      request: (_method, path) => {
+        if (path === HOST_ROUTES.events) throw new HostError('server', 'the host failed to answer', 500);
+        return undefined;
+      },
+    });
+    recordEvent(h, EARLIER);
+
+    const state = await h.sync.syncNow();
+
+    expect(h.calls.snapshot).toBe(1);
+    expect(h.repo.hostRecord()?.snapshot).toBe(BODY_RAW);
+    expect(state.status).toBe('stale');
+    expect(state.lastError).toBe('the host failed to answer');
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 0, pending: 1 });
+    // A `5xx` is a host that may still take the batch: no `sync.rejected` for it.
+    expect(h.repo.listEvents({}).map((event) => event.type)).toEqual(['tool_opened']);
+  });
+
+  test('a 401 on the push is still the sign-out path, not a failure to retry', async () => {
+    const h = harness({
+      request: (_method, path) => {
+        if (path === HOST_ROUTES.events) throw new HostError('signed-out', 'signed out', 401);
+        return undefined;
+      },
+    });
+    recordEvent(h, EARLIER);
+
+    const state = await h.sync.syncNow();
+
+    // F6 leaves this path alone (SP04 §3, RF-39): the session ended, so there is no snapshot to ask
+    // for and no note about a batch that was never judged.
+    expect(state.status).toBe('signed-out');
+    expect(state.lastError).toBe(SIGNED_OUT_ERROR);
+    expect(h.keychain.has(TOKEN_KEY)).toBe(false);
+    expect(h.signedOutCount()).toBe(1);
+    expect(h.calls.snapshot).toBe(0);
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 0, pending: 1 });
+    expect(h.repo.listEvents({}).map((event) => event.type)).toEqual(['tool_opened']);
+  });
+});
+
+describe('a run that outlives its host (F8)', () => {
+  /** Another host — another `kid` and another add instant — added while a run was in flight. */
+  const OTHER = {
+    address: 'https://other.example.test',
+    guild: 'Other Guild',
+    kid: 'kid-2',
+    publicKey: PUBLIC_KEY,
+    personId: 'p1',
+    salt: 'c2FsdA',
+    addedAt: '2026-10-16T09:00:00.000Z',
+  };
+
+  test('remove and re-add during an in-flight run leaves the new row untouched', async () => {
+    const h = harness();
+    h.sync.start(); // the run in flight, holding the host it read
+    h.repo.clearHost(); // `host.remove`
+    h.repo.saveHost({ ...OTHER, addedAt: '2026-10-16T09:30:00.000Z' }); // the host added in its place
+
+    const state = await h.settle();
+
+    // The verified body of the old host is not the new row's to receive (F8).
+    const record = h.repo.hostRecord();
+    expect(record?.kid).toBe(OTHER.kid);
+    expect(record?.snapshot).toBeNull();
+    expect(record?.version).toBeNull();
+    expect(record?.issuedAt).toBeNull();
+    expect(record?.lastSyncAt).toBeNull();
+    expect(record?.lastError).toBeNull();
+    // What the loop shows is the row that is there now, and nothing was said about the old one.
+    expect(state.guild).toBe('Other Guild');
+    expect(state.status).toBe('connected');
+  });
+
+  test('a failure of a run whose host was replaced does not mark the new row', async () => {
+    const h = harness({ snapshot: offline });
+    h.sync.start();
+    h.repo.clearHost();
+    h.repo.saveHost(OTHER);
+
+    await h.settle();
+
+    expect(h.repo.hostRecord()?.lastError).toBeNull();
+  });
+
+  test('a 401 that outlives its host neither forgets the token nor signs the new row out', async () => {
+    // The same host added again: its keychain item is the same `bond.host.<kid>.<personId>`.
+    const h = harness({ snapshot: signedOut });
+    h.sync.start();
+    h.repo.clearHost();
+    h.repo.saveHost({ ...OTHER, kid: HOST.kid });
+    h.keychain.set(TOKEN_KEY, 'the-token-of-the-new-sign-in');
+
+    await h.settle();
+
+    expect(h.keychain.get(TOKEN_KEY)).toBe('the-token-of-the-new-sign-in');
+    expect(h.signedOutCount()).toBe(0);
+    expect(h.repo.hostRecord()?.lastError).toBeNull();
+    expect(h.repo.hostRecord()?.snapshot).toBeNull();
+  });
+
+  test('a host replaced while the bearer is being forgotten is not written either', async () => {
+    const h = harness({ snapshot: signedOut });
+    // The keychain is the slow part of the sign-out: the person removes the host and adds another
+    // while it is busy.
+    h.connection.forgetToken = async () => {
+      h.keychain.delete(TOKEN_KEY);
+      h.repo.clearHost();
+      h.repo.saveHost(OTHER);
+    };
+
+    await h.sync.syncNow();
+
+    expect(h.repo.hostRecord()?.kid).toBe(OTHER.kid);
+    expect(h.repo.hostRecord()?.lastError).toBeNull();
+    expect(h.repo.hostRecord()?.snapshot).toBeNull();
+    expect(h.signedOutCount()).toBe(0);
   });
 });

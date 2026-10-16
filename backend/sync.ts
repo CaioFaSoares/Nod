@@ -78,12 +78,20 @@ export function createSync(deps: SyncDeps): Sync {
 
   /** The armed timer: the next sync, or a write's near-immediate one. */
   let timer: unknown | null = null;
+  /** When that timer fires, so an ask that comes later does not push an earlier one back (F5). */
+  let timerAt = 0;
   /** `start()` was called and `stop()` has not: only then does a finished run re-arm. */
   let running = false;
   /** Consecutive runs that did not reach the host: indexes into `BACKOFF_MS`. */
   let failures = 0;
   /** The run in flight, so a timer and a manual "Sync now" never overlap. */
   let current: Promise<HostState> | null = null;
+  /** F5: the one run chained behind the one in flight, while it is queued. Every caller that
+   *  arrives before it starts waits for this same promise. */
+  let queued: Promise<HostState> | null = null;
+  /** F6: the first client id of the batch the host refused for good, so a refusal is recorded once
+   *  per batch instead of once per retry. */
+  let refusedBatch: string | null = null;
   /** The pinned key's fingerprint, computed once per key (`fingerprintOf` is async). */
   let fingerprint: { kid: string; publicKey: string; value: string } | null = null;
 
@@ -99,27 +107,35 @@ export function createSync(deps: SyncDeps): Sync {
    * Schedules one run `ms` from now. The pair the runtime gives us is an interval; a one-shot is an
    * interval that clears itself the first time it fires, so `arm` is also how a burst of writes
    * coalesces (`AFTER_WRITE_MS`) into one sync.
+   *
+   * The earlier deadline wins (F5): a run that ends while a write's one-second timer is armed asks
+   * for SP04 §3's five minutes and would drop that write's own sync — up to five minutes late. A
+   * shorter ask still replaces a longer one, which is what makes "Sync now" and a write immediate.
    */
   function arm(ms: number): void {
+    const at = deps.now() + ms;
+    if (timer !== null && timerAt <= at) return;
     disarm();
+    timerAt = at;
     let fired = false;
     const handle = setInterval(() => {
       if (fired) return;
       fired = true;
       clearInterval(handle);
-      if (timer === handle) timer = null;
+      if (timer === handle) {
+        timer = null;
+        timerAt = 0;
+      }
       run();
     }, ms);
     timer = handle;
   }
 
   /** A run rung by a timer. The loop must survive it: `runOnce` already turned every host failure
-   *  into state, so what rejects here is a bug in our own code or in the repository — and the loop
-   *  keeps its cadence instead of dying silently, leaving the next tick to try again. */
+   *  into state, so what rejects here is a bug in our own code or in the repository — and `beginRun`
+   *  has already re-armed the loop, leaving the next tick to try again. */
   function run(): void {
-    void syncNow().catch(() => {
-      if (running) arm(nextDelay());
-    });
+    void syncNow().catch(() => undefined);
   }
 
   /** SP04 §3's schedule: the five minutes when all is well, the backoff otherwise. */
@@ -149,15 +165,53 @@ export function createSync(deps: SyncDeps): Sync {
     arm(AFTER_WRITE_MS);
   }
 
+  /**
+   * SP04 §3's "Sync now", and what a write's own sync ends in. A run already in flight read the
+   * snapshot before this call, so answering the caller with it would hand over the catalog of a
+   * moment ago (F5). When one is in flight, the caller is answered by a run chained behind it
+   * instead — and every caller that arrives before that run starts waits for the same promise, so a
+   * burst of "Sync now" or of writes costs one extra run, not one per caller.
+   */
   function syncNow(): Promise<HostState> {
-    if (current !== null) return current;
-    current = runOnce().finally(() => {
+    if (current !== null) {
+      queued ??= chain();
+      return queued;
+    }
+    return beginRun();
+  }
+
+  /** The run that begins when the one in flight settles. */
+  function chain(): Promise<HostState> {
+    const inFlight = current as Promise<HostState>;
+    // Whatever the run in flight ends with — a state, or a bug of ours — the follow-up begins, and
+    // from that moment it is the run in flight: `queued` holds it only until it starts, so the next
+    // caller chains one behind it in turn instead of waiting for a run that read the row before it.
+    const start = (): Promise<HostState> => {
+      queued = null;
+      return beginRun();
+    };
+    return inFlight.then(start, start);
+  }
+
+  /** One run, kept as the one in flight until it settles, with the loop's cadence re-armed after. */
+  function beginRun(): Promise<HostState> {
+    const run = runOnce().then(
+      (state) => {
+        if (running) arm(nextDelay());
+        return state;
+      },
+      (error: unknown) => {
+        if (running) arm(nextDelay());
+        throw error;
+      },
+    );
+    current = run.finally(() => {
+      // Only one run is in flight at a time, and the run queued behind this one begins only after
+      // this `finally` has run (`chain` waits for the promise it is replacing): the clear can never
+      // drop a run that is going.
       current = null;
     });
-    return current.then((state) => {
-      if (running) arm(nextDelay());
-      return state;
-    });
+    return current;
   }
 
   // ---------------------------------------------------------------- one run
@@ -172,13 +226,32 @@ export function createSync(deps: SyncDeps): Sync {
     try {
       // SP04 §3's order: the outbox, then the events, then the state.
       await flushOutbox(connection);
-      await pushEvents(connection, at);
-      await fetchSnapshot(connection, record, at);
-      failures = 0;
-      return publish();
     } catch (error) {
       return failed(connection, record, error);
     }
+    // F6: a push the host refused or never received used to end the run here, and the org half of
+    // the catalog stopped arriving for as long as the events were stuck. The events stay pending for
+    // the next run, the failure is recorded below, and the snapshot comes either way.
+    let refused: HostError | null = null;
+    try {
+      await pushEvents(connection, at);
+    } catch (error) {
+      if (!(error instanceof HostError)) throw error;
+      if (error.failure === 'signed-out' || error.failure === 'key-changed' || error.failure === 'key-mismatch') {
+        return failed(connection, record, error);
+      }
+      refused = error;
+    }
+    try {
+      await fetchSnapshot(connection, record, at);
+    } catch (error) {
+      return failed(connection, record, error);
+    }
+    // The state of a run whose events did not go up is the stale one of SP04 §3, after the snapshot
+    // it did receive: the person sees that their activity is behind without losing the catalog.
+    if (refused !== null) return failed(connection, record, refused);
+    failures = 0;
+    return publish();
   }
 
   /**
@@ -197,24 +270,38 @@ export function createSync(deps: SyncDeps): Sync {
       notOlderThan: record.issuedAt,
     });
     if (!result.notModified) {
-      repo.saveHostSnapshot({
-        snapshot: result.raw,
-        version: result.snapshot.version,
-        issuedAt: result.snapshot.issuedAt,
-        syncedAt: at,
-      });
+      if (stillTheHost(record)) {
+        repo.saveHostSnapshot({
+          snapshot: result.raw,
+          version: result.snapshot.version,
+          issuedAt: result.snapshot.issuedAt,
+          syncedAt: at,
+        });
+      }
       return;
     }
     // Only a conditional request is answered with `304`, and that needs the whole cached row.
     if (record.snapshot === null || record.version === null || record.issuedAt === null) {
       throw new Error('the host answered 304 with no cached snapshot');
     }
+    if (!stillTheHost(record)) return;
     repo.saveHostSnapshot({
       snapshot: record.snapshot,
       version: record.version,
       issuedAt: record.issuedAt,
       syncedAt: at,
     });
+  }
+
+  /**
+   * F8: the pin is the row's identity, and a run writes only into the row it read. `host.remove` and
+   * the `saveHost` of another host can land between the two ends of a run — the body verified against
+   * the old key and the sign-out of its session are not the new row's to receive. `addedAt` is the
+   * instant the person added this host: no two hosts of one Bond share the pair with `kid`.
+   */
+  function stillTheHost(record: HostRecord): boolean {
+    const pinned = repo.hostRecord();
+    return pinned !== null && pinned.kid === record.kid && pinned.addedAt === record.addedAt;
   }
 
   /**
@@ -279,9 +366,11 @@ export function createSync(deps: SyncDeps): Sync {
    *
    * Only the ids the host acked are marked, so a partial ack leaves the rest pending for the next
    * round; a batch that acks nothing ends the push instead of asking for the same rows forever. A
-   * failure — the host did not answer, answered `5xx`, or refused the batch — raises out of here and
-   * the run reacts to it as a whole (SP04 §3): the events stay pending, with their client ids, and the
-   * next run sends exactly the same ones.
+   * failure — the host did not answer, answered `5xx`, or refused the batch — stops the push here, and
+   * the run goes on to the snapshot (F6): the events stay pending, with their client ids, and the next
+   * run sends exactly the same ones. SP04 §5 has no verdict for a batch refused for good, so the
+   * refusal is left visible to the person as one `sync.rejected` event per batch — the status and the
+   * route only, no part of the events themselves (canonico §13).
    *
    * `url` travels as the row holds it (`origin + pathname`, canonico §13) — the host strips it too —
    * and nothing else of the event is added: the body has no field the route does not declare.
@@ -299,7 +388,26 @@ export function createSync(deps: SyncDeps): Sync {
         result: e.result,
         detail: e.detail,
       }));
-      const answer = await connection.request<EventsResponse>('POST', HOST_ROUTES.events, { events });
+      let answer: EventsResponse;
+      try {
+        answer = await connection.request<EventsResponse>('POST', HOST_ROUTES.events, { events });
+      } catch (error) {
+        // A `4xx` other than the 401 and the 429 the host client names is the host refusing this
+        // batch for good; a retry cannot fix it, and one note per batch is enough (F6).
+        if (error instanceof HostError && error.failure === 'refused' && refusedBatch !== pending[0]?.clientId) {
+          refusedBatch = pending[0]?.clientId ?? null;
+          repo.addEvent({
+            personId: connection.host.personId,
+            toolId: null,
+            type: 'sync.rejected',
+            url: null,
+            result: String(error.status),
+            detail: `POST ${HOST_ROUTES.events}`,
+          });
+        }
+        throw error;
+      }
+      refusedBatch = null;
       // The host answers every id it now holds, in batch order; the set is what matters, so an id it
       // already had from an earlier batch is acked just the same.
       const acked = new Set(answer.acked);
@@ -317,7 +425,7 @@ export function createSync(deps: SyncDeps): Sync {
     if (error.failure === 'key-changed' || error.failure === 'key-mismatch') {
       // SP04 §1: nothing is replaced silently. The client's own message is what the screen shows,
       // and the loop stops: retrying cannot fix a key that has to be confirmed by a person.
-      repo.saveHostError(error.message);
+      if (stillTheHost(record)) repo.saveHostError(error.message);
       stop();
       return publish();
     }
@@ -328,7 +436,7 @@ export function createSync(deps: SyncDeps): Sync {
     // a body that did not verify or was older than the last accepted one — leaves the cache in use,
     // shows the failure and backs off (SP04 §3, §6).
     failures = Math.min(failures + 1, BACKOFF_MS.length);
-    repo.saveHostError(error.message);
+    if (stillTheHost(record)) repo.saveHostError(error.message);
     return publish();
   }
 
@@ -336,9 +444,17 @@ export function createSync(deps: SyncDeps): Sync {
    * SP04 §3, RF-39: the host refused the session. The bearer goes (it was revoked or expired), the
    * org half of the cache is dropped while the personal half stays, and the app is asked for a
    * sign-in — once per ended session, not once per retry.
+   *
+   * F8: the run may have outlived its host — a `host.remove` and a new `saveHost` while the 401 was
+   * in flight. The new row's token can even be the same keychain item (same host, added again), so
+   * neither the keychain nor the row of another host is touched: nothing of this sign-out is its.
    */
   async function signedOut(connection: HostConnection, record: HostRecord): Promise<HostState> {
+    if (!stillTheHost(record)) return publish();
     await connection.forgetToken();
+    // The bearer is gone; the keychain took its time, and the row could have gone with it. The cache
+    // of another host is not this run's to empty and its sign-out marker is not this run's to write.
+    if (!stillTheHost(record)) return publish();
     if (record.snapshot !== null && record.lastSyncAt !== null) {
       const cleared = clearOrgData(record.snapshot);
       if (cleared !== null) {

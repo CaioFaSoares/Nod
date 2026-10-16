@@ -42,7 +42,7 @@ Owner, 2026-10-16:
 > como preferir.
 
 Product reading (`CONTEXT.md`): the server is the **host**; users are **people**; permissions are
-**roles** and **grants**. The Bond is the edge that groups self-hosted open-source tools on one
+**roles** and **grants**. The Nod is the edge that groups self-hosted open-source tools on one
 screen — not a Teams clone.
 
 ## 2. The flow
@@ -52,7 +52,7 @@ sequenceDiagram
     participant O as Owner (admin)
     participant C as Coolify
     participant H as Host
-    participant B as Bond (person)
+    participant B as Nod (person)
     O->>C: deploy compose (host + volume)
     C->>H: first boot: empty DB, signing key; operator runs setup-code in the container terminal
     O->>B: Settings → Hosts → Add host (address)
@@ -65,7 +65,7 @@ sequenceDiagram
     B->>H: person: Add host → email + access code → set password → first sync
     H-->>B: signed snapshot: org tools visible to my roles + my personal tools + my favorites
     O->>B: admin adds Jitsi, grants role "team"
-    B->>H: every connected Bond: next sync
+    B->>H: every connected Nod: next sync
     H-->>B: Jitsi appears for people with "team"
 ```
 
@@ -73,17 +73,17 @@ sequenceDiagram
 
 Done when observed on the real surface:
 
-1. A Bond with no host behaves exactly as today (RF-01…RF-29).
+1. A Nod with no host behaves exactly as today (RF-01…RF-29).
 2. The host comes up from one compose on Coolify, with its data on a volume that survives redeploys.
 3. Settings → Hosts → Add host, sign in, and the org tools granted to the person's roles appear.
 4. The admin creates a person and hands over a short access code; the person redeems it, sets a
    password, and from then on signs in with email + password. The host never holds the password.
-5. The admin adds a tool, edits a grant or revokes a person; every connected Bond reflects it at its
+5. The admin adds a tool, edits a grant or revokes a person; every connected Nod reflects it at its
    next sync, with no new release.
 6. A person adds a personal tool on one machine and sees it on another machine signed in to the same
    host; nobody else sees it.
 7. A person favorites org tools; the favorites follow them across machines.
-8. A connected Bond without network unlocks and shows the cached tools with the last-sync time.
+8. A connected Nod without network unlocks and shows the cached tools with the last-sync time.
 
 ## 4. Non-goals
 
@@ -92,7 +92,7 @@ Done when observed on the real surface:
 - Syncing the vault: each machine keeps its own (`docs/canonico.md` §17). Moving a credential to
   another person is an end-to-end share (`docs/epics/E02-credential-sharing.md`), not sync.
 - SSO into the tools in this epic's first phases (§13, M4 keeps it as a later milestone).
-- Several guilds at once: one host serves one guild, and one Bond is in **one guild at a time**
+- Several guilds at once: one host serves one guild, and one Nod is in **one guild at a time**
   (owner, 2026-10-16: "no momento nao. se sair e voltar ele poderia entrar em outra"). Removing the
   host (§5) and adding another is how a person changes guild.
 
@@ -125,7 +125,7 @@ are removed (question 4).
 
 ## 6. What lives where
 
-| Fact | Owner | Bond holds |
+| Fact | Owner | Nod holds |
 | --- | --- | --- |
 | People, sign-in methods, host sessions | host | own token in keychain |
 | Roles, person ↔ role | host | cache |
@@ -161,21 +161,21 @@ then personal tools. `⌘1`…`⌘9` follow that order.
   - Single use, valid 72 h, stored hashed, bound to that email.
   - 5 wrong tries kill it; reissuing one kills the previous one.
   - The admin hands it over by any channel. No email (owner, 2026-10-16).
-- **Activation.** Bond → Add host → email + access code → the person sets a password, minimum 8
+- **Activation.** Nod → Add host → email + access code → the person sets a password, minimum 8
   characters, the same rule as `validateNewPassword` in `shared/auth.ts` → session.
 - **Sign-in after that**: email + password.
 - **Reset**: the admin reissues an access code; the person activates again with a new password
   (consequence for the vault below).
 - **Errors** are one message for every failure; rate limit per identity and IP — both reused from
-  the Carna pattern (`docs/downscale-carna.md`, "O que o Bond herda").
+  the Carna pattern (`docs/downscale-carna.md`, "O que o Nod herda").
 - **Session**: random bearer token, stored hashed, 14 days, one row per device, revocable by the
   person and the admin (keeps RF-17's "revoga a linha no host").
 
 ### One password, two keys: the host never sees the password
 
 Owner, 2026-10-16: the password signs in **and** opens a private local vault that the server
-can't access. If the Bond sent the password to the host, whoever runs the host could log it and
-open the vault. So the Bond derives two keys and sends only one of them, the scheme Bitwarden-style
+can't access. If the Nod sent the password to the host, whoever runs the host could log it and
+open the vault. So the Nod derives two keys and sends only one of them, the scheme Bitwarden-style
 managers use:
 
 ```text
@@ -190,14 +190,14 @@ vaultKey = HMAC-SHA256(master, "bond/vault/v1")           → never leaves the m
 - Sign-in is two calls:
   1. `POST /v1/auth/salt {email}` → salt. An unknown email gets a fake salt that stays the same for
      that email, `HMAC(hostSecret, email)`, so the reply doesn't reveal who exists.
-  2. The Bond derives the keys and sends `POST /v1/auth/login {email, authKey}`.
-- PBKDF2, HMAC and AES-GCM are native in the Bond runtime (`docs/tinyjs.md` §5). The iteration
+  2. The Nod derives the keys and sends `POST /v1/auth/login {email, authKey}`.
+- PBKDF2, HMAC and AES-GCM are native in the Nod runtime (`docs/tinyjs.md` §5). The iteration
   count is the same as the local password's (`PBKDF2_ITERATIONS` in `shared/auth.ts`). Its cost is
   still to be measured (`docs/canonico.md` §23 q6).
 - **One password per person.** In connected mode the local password **is** the host password. The
-  Bond keeps its local verifier (`docs/canonico.md` §9), so unlocking works offline.
-- **Changing the password** (online, from Bond Settings):
-  - the Bond sends the old `authKey` and the new one;
+  Nod keeps its local verifier (`docs/canonico.md` §9), so unlocking works offline.
+- **Changing the password** (online, from Nod Settings):
+  - the Nod sends the old `authKey` and the new one;
   - it re-encrypts the local vault with the new `vaultKey`.
 
   Credentials survive (RF-24).
@@ -224,23 +224,23 @@ Owner, 2026-10-16: "vamos desconsiderar o sistema de email agora". Kept as the d
 returns; nothing below is in M1.
 
 A plain magic link (`click → you're in`) is built for browsers: the link opens in whatever browser
-or phone the email is read on, and that browser isn't the Bond. So the link **approves a sign-in
-the Bond started**, and the Bond collects the result itself:
+or phone the email is read on, and that browser isn't the Nod. So the link **approves a sign-in
+the Nod started**, and the Nod collects the result itself:
 
 ```mermaid
 sequenceDiagram
-    participant B as Bond backend
+    participant B as Nod backend
     participant H as Host
     participant M as Mail (SMTP)
     participant P as Person (any browser, any device)
     B->>H: POST /v1/auth/email {email, deviceName, verifierHash}
     H-->>B: {requestId, matchCode "47"}  (same reply whether or not the email exists)
-    H->>M: email: link https://host/a/<token> + code 123456 + "Bond shows 47"
+    H->>M: email: link https://host/a/<token> + code 123456 + "Nod shows 47"
     Note over B: shows "check your email — 47"; polls every 2 s (backend timer)
     alt person clicks the link
-        P->>H: GET /a/<token> → page "Sign in Bond on <deviceName>? Bond shows 47" [Approve]
+        P->>H: GET /a/<token> → page "Sign in Nod on <deviceName>? Nod shows 47" [Approve]
         P->>H: POST /a/<token> (approve)
-    else person types the code in Bond
+    else person types the code in Nod
         B->>H: POST /v1/auth/email/code {requestId, code}
     end
     B->>H: POST /v1/auth/email/poll {requestId, verifier}
@@ -252,18 +252,18 @@ Rules:
 - **The click needs a button**, not just a GET. Mail scanners (corporate link checkers) fetch links
   before the person does, and a link that signs in on GET would be used up, or approved, by the
   scanner.
-- **Only the Bond that started the request gets the token.** It holds a random `verifier` and sent
+- **Only the Nod that started the request gets the token.** It holds a random `verifier` and sent
   only its hash. A forwarded or leaked link approves a request whose token nobody else can collect.
-- **The match code** ("Bond shows 47") is on both the approval page and the Bond. A person who
+- **The match code** ("Nod shows 47") is on both the approval page and the Nod. A person who
   receives an email they didn't ask for sees a request that doesn't match their screen.
-- **The link works from the phone.** Approving on the phone signs in the Bond on the computer.
+- **The link works from the phone.** Approving on the phone signs in the Nod on the computer.
 - **Limits**:
   - TTL of 15 minutes, single use;
   - token and code stored hashed;
   - per email: 5 code attempts and 3 emails every 15 minutes;
   - per IP: rate limited;
   - the same reply whether or not the email exists.
-- **Optional shortcut**: after approving, the page can offer `bond://signed-in` to bring the Bond
+- **Optional shortcut**: after approving, the page can offer `bond://signed-in` to bring the Nod
   to the front (`urlScheme`, single instance — `docs/tinyjs.md` §8). Polling already finished the
   sign-in, so the shortcut is cosmetic.
 
@@ -271,9 +271,8 @@ Rules:
 
 Observed by execution, 2026-10-16 (public DNS and an SMTP greeting only; no login, no mail sent):
 
-- `copland.studio` MX → `mail.copland.studio` (85.31.231.38).
-- SPF: `v=spf1 ip4:85.31.231.38 include:amazonses.com -all`. Mail leaving that server passes SPF;
-  Amazon SES is also authorized.
+- the domain has an MX that points at the team's mail server.
+- SPF authorizes that server and Amazon SES; mail leaving it passes SPF.
 - DMARC `p=quarantine`: mail that doesn't align goes to spam, so the host must send *through* this
   server or SES, never directly from the VPS.
 - The server is **Haraka**, with submission on **465 (TLS)** and **587 (STARTTLS)**, both offering
@@ -300,7 +299,7 @@ SMTP client per stack:
   `{ version, issuedAt, keyId, me, roles, orgTools, personalTools, favorites }`, filtered to the
   person. Full snapshot, not deltas: small, and "host wins" stays trivial.
 - **Writes**:
-  - admin: org tools, roles, grants, people — direct API calls from Bond Settings; online only.
+  - admin: org tools, roles, grants, people — direct API calls from Nod Settings; online only.
   - person: personal tools, favorites — through a local **outbox** replayed in order; one writer
     (the person) per record, so last-write-wins by `updatedAt` is enough.
 - `POST /v1/events` — batches with client ids; idempotent; the host acks the highest id.
@@ -308,7 +307,7 @@ SMTP client per stack:
   "Sync now".
 - **Trust**: the host key is pinned at Add host (fingerprint shown to confirm, or carried by an
   invite link `bond://join?host=…&code=…&fp=…`); every snapshot must verify against it; a key change
-  is an explicit re-add, never silent. Ed25519 is native in the Bond runtime (`docs/tinyjs.md` §5).
+  is an explicit re-add, never silent. Ed25519 is native in the Nod runtime (`docs/tinyjs.md` §5).
 - **Vault binding**: each vault item stores the origin it was saved for; the login adapter never
   fills when the tool's origin differs. With the host able to change any tool URL, this is what
   keeps a swapped URL from receiving a credential.
@@ -323,14 +322,14 @@ A tool added on the host appears for everyone with no release. Two things still 
   doesn't report back until a release lists it.
 - **Camera / mic**: only origins in the release's gate skip the system prompt (`docs/canonico.md`
   §8). A host-added org tool still gets camera and mic, but behind the system prompt (macOS,
-  Windows) and denied on Linux until a release lists it; the Bond must not label it as "outside
+  Windows) and denied on Linux until a release lists it; the Nod must not label it as "outside
   the org". Details: `docs/tinyjs.md` §6.
 
 Both gaps are a delay, not a permanent limit (owner, 2026-10-16): once the host and the `release-*`
 pipeline with auto-update (RF-55, `docs/distribuicao.md` §8) work, the next release closes them.
 Proposed: the release build takes the gate origins from the host's org tools — the signed
 snapshot, verified against the pinned key — besides the seed, so a tool added on the host reaches
-every Bond's gate at the next `release-*` without editing the seed by hand.
+every Nod's gate at the next `release-*` without editing the seed by hand.
 
 ## 10. Deployment on Coolify
 
@@ -359,9 +358,9 @@ The owner's ask: very simple, without pulling code from elsewhere. Same host sco
 | Password hash | `Bun.password` (argon2id), built in (`https://bun.com/docs/runtime/hashing`) | same | generated by `phx.gen.auth` | built in |
 | Email code / magic link | ours: ~a page of code | ours | `phx.gen.auth` in 1.8 generates magic-link login into your app (`https://hexdocs.pm/phoenix/changelog.html`) | OTP built in (`https://pocketbase.io/docs/authentication/`) |
 | Sending mail | dependency or hand-written SMTP, or `fetch` to an HTTP mail API | same | Swoosh (comes with Phoenix) | SMTP built in |
-| Admin UI | Bond Settings | Bond Settings | Bond Settings (or LiveView) | its dashboard for free, or Bond Settings |
+| Admin UI | Nod Settings | Nod Settings | Nod Settings (or LiveView) | its dashboard for free, or Nod Settings |
 | Session revocation | our token rows | ours | generated token table | **stateless JWT, no logout endpoint**; revoke by changing password or collection secret (same doc) |
-| Shares code with the Bond | **yes**: `shared/types.ts` and `shared/catalog.ts` import only types (`leitura` of their imports) and already run under `bun test` | yes | no: second language, contract by JSON | no: rules in collections, hooks in Go or JS |
+| Shares code with the Nod | **yes**: `shared/types.ts` and `shared/catalog.ts` import only types (`leitura` of their imports) and already run under `bun test` | yes | no: second language, contract by JSON | no: rules in collections, hooks in Go or JS |
 | Stability | Bun stable | 1.x stable, 2.x beta | stable | "full backward compatibility is not guaranteed before reaching v1.0.0" (PocketBase README) |
 | Carna reuse | patterns only | patterns only | invite, token, rate limit code (`docs/canonico.md` §18) | none |
 | Dev loop | `bun --watch` | same | `mix phx.server` reload | `air` |
@@ -401,9 +400,9 @@ transaction. SQLite has one writer, so only one process should own the file. Cos
 - with Phoenix as the data side, ~190 MiB idle for a part that `bun:sqlite` does in-process.
 
 The TypeScript sharing works without a second service. It's a module boundary inside one Bun
-process, the same layout the Bond already uses:
+process, the same layout the Nod already uses:
 
-- `shared/`: pure rules and types, tested by `bun test`, imported by both Bond and host;
+- `shared/`: pure rules and types, tested by `bun test`, imported by both Nod and host;
 - `host/repo.ts`: the only module touching SQLite, like `backend/repo.ts`;
 - `host/http.ts`: routes that call rules and repo.
 
@@ -423,7 +422,7 @@ database access.
   line: 1.4.30). Pin the exact beta in `bun.lock` and bump on purpose, one beta at a time. Each
   bump runs the host tests, and a regression found goes upstream as an issue.
 - **Elysia's role**: routes, request/response schemas (`t.*`), and a typed client usable from the
-  Bond backend (Eden, `[INFERENCE]` from Elysia's docs, not checked in the tinyjs runtime).
+  Nod backend (Eden, `[INFERENCE]` from Elysia's docs, not checked in the tinyjs runtime).
 - **Layout**:
   - `shared/`: pure rules and types, used by both sides;
   - `host/repo.ts`: the only module touching `bun:sqlite`;
@@ -438,7 +437,7 @@ database access.
 | A different server answers at the same address later | Pinned key; mismatch refuses sync until an explicit re-add. |
 | Access-code guessing | 40-bit code, single use, 72 h TTL, hashed, bound to one email, dead after 5 wrong tries; IP rate limit; one error message. |
 | Host operator reading vaults | The password never reaches the host; only `authKey` does, and `vaultKey` can't be derived from it (§7). Offline guessing costs PBKDF2 + argon2id per try. |
-| Admin reissues a code to get into someone's Bond | Reset wipes that machine's vault; the old one can't be opened with the new password. |
+| Admin reissues a code to get into someone's Nod | Reset wipes that machine's vault; the old one can't be opened with the new password. |
 | Setup code stolen from the operator's terminal | Single use, 24 h TTL, only while no admin exists; running the command again replaces it. |
 | Stolen host token | Keychain only, behind local unlock; per-device rows revocable by person and admin. |
 | Personal tools read by others | API filters by owner; host DB operator can read (not E2E). |
@@ -453,7 +452,7 @@ Stories, points and effort blocks: `docs/epics/blocks.md`.
 | --- | --- | --- |
 | **M0 — decide** | Nothing pending for M1: stack, sign-in, biometrics, tenancy decided (`docs/canonico.md` §22) | — |
 | **M1 — host** | Compose; schema (people with salt and `argon2id(authKey)`, sessions, access codes, roles, person_role, entries with scope/owner, views, grants, favorites, events, meta); setup code; access-code activation; salt + login; admin API; `/v1/state` signed; personal + favorites API; events ingest; backup job | Deployed on Coolify; snapshot verifies with the published key; duplicate event batch is a no-op; restart keeps data; the host DB holds no password and no `vaultKey` |
-| **M2 — Bond connected** | Settings → Hosts (add, sign in, status, last sync, sync now, remove); cache; outbox; admin screens against the host; personal tools; favorites; sidebar order; local-tools migration; origin-bound vault | Outcomes 1, 3–8 on two machines |
+| **M2 — Nod connected** | Settings → Hosts (add, sign in, status, last sync, sync now, remove); cache; outbox; admin screens against the host; personal tools; favorites; sidebar order; local-tools migration; origin-bound vault | Outcomes 1, 3–8 on two machines |
 | **M3 — operations** | Sessions per device with revoke; minimum app version; auto-update manifest served from the host (`docs/canonico.md` §19, F5) | Revoked device stops syncing; old app is told to update |
 | **M4 — later: SSO into tools** | Tools sign in through one identity provider so opening a tool needs no form: either the host becomes an OIDC provider, or a ready one (Pocket ID `https://github.com/pocket-id/pocket-id`, Authelia `https://www.authelia.com/integration/openid-connect/introduction`) syncs people and roles from the host. Needs the passkey/OIDC-in-webview spike (`docs/canonico.md` §23 q3) and the per-tool OIDC inventory (§23 q1) | Separate epic when M2 lands |
 
@@ -463,20 +462,20 @@ These requirements entered `docs/canonico.md` §14 on 2026-10-16 (RF-30 to RF-43
 
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
-| RF-30 | Without a host, the Bond makes no call to any host. | Network capture of a local session shows only tool traffic. |
+| RF-30 | Without a host, the Nod makes no call to any host. | Network capture of a local session shows only tool traffic. |
 | RF-31 | Add host pins the host key; later snapshots must verify against it. | Wrong `fp` aborts with one error, nothing stored; a host answering with another key is refused until re-added. |
 | RF-32 | The host boots empty with a one-time setup code that creates the first admin. | Code works once; second use fails with the single error. |
-| RF-33 | The admin creates a person and gets a short access code shown once; the person redeems it in the Bond and sets a password; later sign-ins use email + password. | Code works once and dies after 5 wrong tries or 72 h; wrong code or password returns one message. |
-| RF-34 | Org tools, roles and grants come from the host; admin changes reach every connected Bond at next sync, no release. | Admin adds Jitsi granted to "team"; after "Sync now" only people with "team" see it. |
+| RF-33 | The admin creates a person and gets a short access code shown once; the person redeems it in the Nod and sets a password; later sign-ins use email + password. | Code works once and dies after 5 wrong tries or 72 h; wrong code or password returns one message. |
+| RF-34 | Org tools, roles and grants come from the host; admin changes reach every connected Nod at next sync, no release. | Admin adds Jitsi granted to "team"; after "Sync now" only people with "team" see it. |
 | RF-35 | A person adds personal tools, visible only to them, on every machine signed in to the host. | Personal tool added on machine A appears on machine B after sync; another person and the admin don't see it. |
 | RF-36 | A person favorites org tools; favorites and their order follow the person. | Favorite on A shows first in the sidebar on B. |
-| RF-37 | Connected Bond works offline from cache; personal edits made offline sync later. | Network off: unlock, sidebar, Home work; add a personal tool; network on: it reaches the host. |
+| RF-37 | Connected Nod works offline from cache; personal edits made offline sync later. | Network off: unlock, sidebar, Home work; add a personal tool; network on: it reaches the host. |
 | RF-38 | The vault never fills a login on an origin other than the one the credential was saved for. | Admin changes a tool URL; form fill stops for it. |
 | RF-39 | Revoking a person or a device on the host ends that session. | Next sync fails with "signed out"; the cache is cleared of org tools. |
 | RF-40 | Adding a host offers local tools as personal tools; an empty host's first admin may publish them as org tools. | After Add host, no local tool disappears. |
 | RF-41 | The host runs as one compose with data on a volume and a scheduled backup. | Redeploy keeps data; a backup restores into a fresh host. |
 | RF-42 | The password never leaves the machine: the host receives only `authKey`. | A capture of activation, sign-in and password change shows no password; the host DB has only `argon2id(authKey)` and the salt. |
-| RF-43 | Vault values in the keychain are encrypted with `vaultKey`; a password reset by access code wipes that machine's vault. | Reading `bond.cred.*` with the system keychain tool shows ciphertext; after a reset, the old credentials are gone and the Bond asks for them again. |
+| RF-43 | Vault values in the keychain are encrypted with `vaultKey`; a password reset by access code wipes that machine's vault. | Reading `bond.cred.*` with the system keychain tool shows ciphertext; after a reset, the old credentials are gone and the Nod asks for them again. |
 
 ## 15. Open questions for the owner
 

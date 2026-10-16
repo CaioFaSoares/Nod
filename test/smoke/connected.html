@@ -17,8 +17,9 @@
       //
       //   admin-publish      SP05 §5.2  setup code, publish the local tools, create P with role
       //                                 `team`, grant Tool A to `team`, sync; hand P's code over
-      //   person-join        SP05 §5.3  P activates, the granted tool appears, the vault fills on
-      //                     SP05 §5.5  its origin; host stopped: lock/unlock, tools from the cache,
+      //   person-join        SP05 §5.3  P activates, the granted tool appears (it is the host's
+      //                     SP05 §5.5  entry: P's own seed has no row for it), the vault fills on
+      //                                 its origin; host stopped: lock/unlock, tools from the cache,
       //                                 `stale`; host restarted: the events go up
       //   admin-revoke       SP05 §5.4  the admin revokes P
       //   person-signed-out  SP05 §5.4  P's next sync: `signed-out`, the org tools gone

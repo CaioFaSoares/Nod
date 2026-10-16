@@ -1,14 +1,15 @@
 # SP02 — Auth and keys
 
-Why: `docs/epics/E01-connected-mode.md` §7. Where the code goes: `shared/auth.ts` (derivation,
-code format, both runtimes), `host/auth.ts` (host side), `backend/session.ts` and `backend/vault.ts`
-(Bond side).
+Why: `docs/epics/E01-connected-mode.md` §7. Where the code goes: `shared/auth.ts` (derivation, both
+runtimes), `shared/host-api.ts` (the access-code format — generate/format/normalize/validate and
+`normalizeEmail`; they landed there, not in `shared/auth.ts`, c1), `host/auth.ts` (host side),
+`backend/session.ts` and `backend/vault.ts` (Nod side).
 
 ## 1. Password → keys
 
 ```text
 password  = the typed string, Unicode NFC, UTF-8 bytes
-salt      = 16 random bytes (host: per person, chosen by the Bond at activation; local mode: per local account)
+salt      = 16 random bytes (host: per person, chosen by the Nod at activation; local mode: per local account)
 master    = PBKDF2-HMAC-SHA256(password, salt, iterations = PBKDF2_ITERATIONS (600 000), 32 bytes)
 authKey   = HMAC-SHA256(key = master, data = UTF-8 "bond/auth/v1")    → 32 bytes, sent as base64url
 vaultKey  = HMAC-SHA256(key = master, data = UTF-8 "bond/vault/v1")   → 32 bytes, never leaves the machine
@@ -17,12 +18,12 @@ localKey  = HMAC-SHA256(key = master, data = UTF-8 "bond/local/v1")   → 32 byt
 
 - One PBKDF2 per unlock or sign-in; the three HMACs are cheap.
 - `shared/auth.ts` exports `deriveKeys(password, salt, iterations) → { authKey, vaultKey, localKey }`
-  using only `crypto.subtle` (PBKDF2 and HMAC are native in the Bond runtime, `docs/tinyjs.md` §5,
+  using only `crypto.subtle` (PBKDF2 and HMAC are native in the Nod runtime, `docs/tinyjs.md` §5,
   and in Bun).
 - **Test vectors** (story H3): the test suite fixes three `(password, salt, iterations)` triples,
   including a non-ASCII password, with the expected outputs computed under Bun. The same vectors
-  run inside the Bond backend under txiki.js through the smoke harness. Same bytes, or H3 fails.
-- H3 also measures one `deriveKeys` at 600 000 iterations in the Bond runtime on the owner's
+  run inside the Nod backend under txiki.js through the smoke harness. Same bytes, or H3 fails.
+- H3 also measures one `deriveKeys` at 600 000 iterations in the Nod runtime on the owner's
   machine, and records it in `docs/tinyjs.md` §5 (answers `docs/canonico.md` §23 q6).
 
 ## 2. Host storage of `authKey`
@@ -72,7 +73,7 @@ the host verifies against a fixed dummy hash, so timing doesn't tell who exists 
   - the person, for any of their sessions;
   - the admin, for anyone's;
   - disabling the person, which revokes all of theirs.
-- **Bond side**: the token lives in the keychain under `bond.host.<hostKid>.<personId>`, never in
+- **Nod side**: the token lives in the keychain under `bond.host.<hostKid>.<personId>`, never in
   SQLite or `store.json`. It is read only after the local unlock (§6).
 - Errors: every sign-in failure answers `401 { "error": "invalid credentials" }`; every code failure
   answers `401 { "error": "invalid code" }`.
@@ -80,7 +81,7 @@ the host verifies against a fixed dummy hash, so timing doesn't tell who exists 
   - per IP: 30 auth requests per minute;
   - per email: 10 failed attempts per 15 minutes.
 
-## 6. Local unlock (Bond)
+## 6. Local unlock (Nod)
 
 The local account keeps working offline. Today it stores a `PasswordHash` (`shared/types.ts`). New
 format, `PasswordHashV2`:
@@ -92,7 +93,7 @@ format, `PasswordHashV2`:
 - Unlock: `deriveKeys(password, salt)`, compare `SHA-256(localKey)` to `check` in constant time. On
   success, `vaultKey` and (connected) `authKey` are kept in memory for the session. `lock()`
   forgets them.
-- **Connected mode**: the salt is the host salt. The Bond caches it next to the host record (SP05
+- **Connected mode**: the salt is the host salt. The Nod caches it next to the host record (SP05
   §2), so offline unlock derives the same keys.
 - **Migration**: the first unlock of a v1 account verifies the old PBKDF2 hash, then writes
   `PasswordHashV2` with a fresh salt. Local mode only; a connected account is created with V2.
@@ -102,10 +103,10 @@ format, `PasswordHashV2`:
 
 - **Change** (online): `POST /v1/auth/password { currentAuthKey, newSalt, newAuthKey }` with the
   session. The host verifies the current key, stores the new salt and hash, and keeps the session.
-  The Bond then re-encrypts every vault item with the new `vaultKey` (§8) and rewrites
-  `PasswordHashV2`, in that order. If the Bond crashes between the two steps, the next unlock tries
+  The Nod then re-encrypts every vault item with the new `vaultKey` (§8) and rewrites
+  `PasswordHashV2`, in that order. If the Nod crashes between the two steps, the next unlock tries
   the new password first and re-encrypts any item that still opens with the old key.
-- **Reset** (new access code): activation stores a new salt. The Bond detects a salt change at
+- **Reset** (new access code): activation stores a new salt. The Nod detects a salt change at
   sign-in (cached salt ≠ host salt). It then:
   - tells the person their saved logins on this machine will be removed;
   - deletes every `bond.cred.<person>.*` item and its index;

@@ -1,6 +1,6 @@
-# backend/ — the Bond's system side
+# backend/ — Nod's system side
 
-The txiki.js process behind every Bond window: SQLite, keychain, tool windows, the login cascade,
+The txiki.js process behind every Nod window: SQLite, keychain, tool windows, the login cascade,
 and (from block 1) the host client and sync. Module by module, with signatures:
 `docs/arquitetura.md` §4. Runtime facts: `docs/tinyjs.md`.
 
@@ -8,21 +8,26 @@ and (from block 1) the host client and sync. Module by module, with signatures:
 
 - The local database (`repo.ts`, `tjs:sqlite`), and the only path to the OS keychain (`vault.ts`,
   `session.ts`).
-- Every network call the Bond makes. The page never talks to the network (`docs/tinyjs.md` §10).
+- Every network call the Nod makes. The page never talks to the network (`docs/tinyjs.md` §10).
 - The RPC gate in `main.ts`: which window and which session may call which method
   (`docs/arquitetura.md` §2).
 - Tool windows, popups, shortcuts and the login adapter (`tool-windows.ts`, `login-adapter.ts`).
 
-## Changes planned (blocks 1–2)
+## Modules (block 1 landed; block 2 pending)
 
-| Module | Change | Story |
+| Module | What it does now | Story |
 | --- | --- | --- |
-| `host-client.ts` (new) | Discovery, bearer, signature check, error mapping | B1 |
-| `sync.ts` (new) | Timer, outbox, event push, snapshot apply, stale state | B4, B5, B7, B10 |
-| `repo.ts` | `user_version = 3`: host, outbox, event sent state, vault origin, password V2, tool scope | B1–B4, B9 |
-| `session.ts` | `PasswordHashV2`, keys in memory while unlocked, `vaultKey` behind biometrics | B3, V1 |
-| `vault.ts` | Fill only on the saved origin; `bv1.` encryption; keys for E02 | B9, V1, K1 |
-| `main.ts` | `host.*`, `personal.*`, `favorites.*` methods; admin methods routed to the host | B2, B6, B7 |
+| `host-client.ts` | Discovery, bearer in the keychain, signature check, error mapping (SP04 §1–§2) | B1 |
+| `sync.ts` | Timer, outbox flush, event push, snapshot apply, stale/signed-out state, backoff (SP04 §3–§5) | B4, B5, B10 |
+| `connected-catalog.ts` | The effective org catalog from the verified `host.snapshot`, parsed once per change | B5 |
+| `host-admin.ts` | Admin writes routed to the host routes when connected | B6, B8a |
+| `repo.ts` | `user_version = 3`: `host`, `host_outbox`, `event.client_id`/`sent_at`, `vault_item.origin`, password V2, `tool.scope` | B1–B4, B9 |
+| `session.ts` | `PasswordHashV2`, keys in memory while unlocked, `adoptConnectedAccount`, `wipeVault` (SP02 §6–§7) | B2, B3 |
+| `vault.ts` | Fill only on the origin the credential was saved for (RF-38) | B9 |
+| `main.ts` | `host.*` (`state`/`discover`/`activate`/`signIn`/`syncNow`/`remove`/`bootstrap`), `events.syncStatus`; admin methods routed to the host | B2, B6, B8a |
+
+Block 2 still to come: the `personal.*` and `favorites.*` methods (B7), `bv1.` vault encryption (V1),
+the E02 key pairs and the share flows (K1–K10).
 
 Contracts: `docs/specs/SP02-auth-and-keys.md`, `SP04-sync.md`, `SP05-bond-connected.md`,
 `SP06-credential-sharing.md`.

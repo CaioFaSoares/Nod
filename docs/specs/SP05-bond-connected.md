@@ -1,6 +1,6 @@
-# SP05 — Bond connected mode
+# SP05 — Nod connected mode
 
-The Bond side of E01 (and the Bond parts of E02's foundation). Today's modules are described in
+The Nod side of E01 (and the Nod parts of E02's foundation). Today's modules are described in
 `docs/arquitetura.md` §3–§5; this spec only lists what changes. Rules from `docs/arquitetura.md` §2
 still hold: secrets only in the keychain, the page only calls `src/api.ts`, the backend gate in
 `backend/main.ts`.
@@ -9,8 +9,8 @@ still hold: secrets only in the keychain, the page only calls `src/api.ts`, the 
 
 | Module | Change |
 | --- | --- |
-| `shared/auth.ts` | `deriveKeys`, `PasswordHashV2`, access-code normalize/format (SP02 §1, §3, §6) |
-| `shared/host-api.ts` (new) | Types of SP03/SP04: `Discovery`, `Snapshot`, request/response bodies |
+| `shared/auth.ts` | `deriveKeys`, `PasswordHashV2` (SP02 §1, §6) |
+| `shared/host-api.ts` (new) | Types of SP03/SP04: `Discovery`, `Snapshot`, request/response bodies; **and** the code helpers — `CODE_ALPHABET`, `CODE_BYTES`, `CODE_LENGTH`, `generateCode`, `formatCode`, `normalizeCode`, `validateCode`, `normalizeEmail` (SP02 §3). They landed here, not in `shared/auth.ts` (c1); `shared/auth.ts` keeps the derivation. |
 | `shared/types.ts` | `Entry.scope/ownerId`, `View.id/scope/ownerId`, `HostState`, new `ApiContract` methods (§3) |
 | `shared/host-merge.ts` (new) | Pure: snapshot → local rows; sidebar order (favorites, org, personal); outbox replay decisions |
 | `backend/host-client.ts` (new) | `fetch` to the host; bearer from the keychain; discovery; signature check; error mapping |
@@ -58,6 +58,22 @@ ALTER TABLE tool ADD COLUMN scope TEXT NOT NULL DEFAULT 'org';
 ALTER TABLE tool ADD COLUMN owner_id TEXT;
 ```
 
+- **The sign-out state is the marker in `host.last_error`** — `SIGNED_OUT_ERROR` = "signed out —
+  sign in again" (`backend/sync.ts`). The `host` table has no sign-out column, and the fact has to
+  survive a restart and guard the `ETag`: after a `401` the cached body is no longer what the host
+  signed, so offering its `version` as `If-None-Match` would earn a `304` that keeps the org half
+  emptied. The marker is sticky until a sync succeeds; while set, the request goes out without
+  `If-None-Match` and Settings → Hosts shows it verbatim (b4).
+- **`vault_item` carries `origin` and does not require a local `tool` row.** `tool_id` stays
+  `TEXT NOT NULL` with its FK to `person` and the `UNIQUE(person_id, tool_id)`, but the FK to
+  `tool(id)` is gone — a constraint written twice, like the added columns, with a rebuild instead of
+  an `ALTER`: `migrate()` rebuilds an existing table (`rebuildVaultItem`, the SQLite 12-step recipe)
+  when `PRAGMA foreign_key_list(vault_item)` still names `tool`, so the guard is the constraint, not
+  `user_version`, which stays **3**. Removing a local tool still deletes its vault rows only through
+  `removeEntry`'s explicit `DELETE FROM vault_item WHERE tool_id = ?`. `vault.save` reads the entry —
+  and its `origin` — from the effective catalog while connected (`main.ts` builds it over
+  `{ ...database, entry: catalogEntryOf }`), and the `login.report` origin guard reads the same
+  catalog, so a host-only tool's window can report its fill (B5, host-only-tool story).
 - **Connected catalog**: the backend reads org tools, roles and grants from `host.snapshot` (parsed
   once per change and kept in memory), not from the `tool`/`role` tables. Those tables keep the
   local-mode catalog, untouched while connected. Removing the host returns to them.
@@ -77,6 +93,8 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
 | `host.signIn` | `{ address, fingerprint, email, password }` | `SessionState` | no session needed |
 | `host.syncNow` | — | `HostState` | unlocked |
 | `host.remove` | `{ keepPersonal: boolean }` | `HostState` | unlocked |
+| `host.bootstrap` | — | `{ created: number; refused: boolean }` | unlocked, admin (B8a); publishes the local org tools to an empty host; the host's `409` is `{ created: 0, refused: true }` |
+| `events.syncStatus` | — | counts of sent and pending events | unlocked (B10); the two numbers Settings → Activity shows |
 | `host.sessions` / `host.revokeSession` | `— / { id }` | `DeviceSession[] / true` | unlocked (block 2, O1) |
 | `personal.saveTool` / `personal.removeTool` | `{ entry }` / `{ id }` | `Entry` / `true` | unlocked (block 2) |
 | `personal.saveView` / `personal.removeView` | `{ view }` / `{ id }` | `View` / `true` | unlocked (block 2) |
@@ -85,7 +103,8 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
 - Existing admin methods (`catalog.save`, `roles.*`, `people.*`, `invites.issue`) keep their names.
   When connected, the backend sends them to SP03 admin routes.
 - `invites.issue` becomes "create person + access code" (`POST /v1/admin/people`), or "reissue code"
-  for an existing person.
+  for an existing person. It keeps its `{ code, expiresAt }` answer and gains optional `email` +
+  `name` (create) or `personId` (reissue); `days` stays local-only, since the host fixes 72 h (B6).
 - `host.activate` and `host.signIn` receive the password once, derive the keys in the backend, and
   never store or log the password. `TINYJS_DEBUG=1` prints page→backend calls with their params, so
   the warning in `AGENTS.md` now covers these two methods too; add them to its list.
@@ -111,7 +130,11 @@ On two machines, or two app ids on one machine (`BOND_APP_ID`, as `test/smoke/ru
 1. Without a host, the existing smoke passes unchanged.
 2. Admin: Add host with the setup code; publish local tools (B8a); create person P with role
    `team`; grant Jitsi to `team`.
-3. P: Join a guild with P's access code; Jitsi appears; the vault fills only on its origin.
+3. P: Join a guild with P's access code; Jitsi appears; the vault fills only on its origin. The two
+   app ids get different temporary seeds (P's release names the tool with another entry id), so the
+   granted host entry has **no local `tool` row** on P's machine — the smoke reads P's SQLite and
+   proves a host-only tool holds a credential and fills on its origin (SP05 §2; `backend/vault.ts`,
+   `test/smoke/connected.ts`).
 4. Admin revokes P → P's next sync shows signed out and the org tools disappear.
 5. Network off on P: unlock works, tools show, "offline" badge; network on: events are sent and
    show on the host.

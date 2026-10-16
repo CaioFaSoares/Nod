@@ -34,6 +34,10 @@ import type {
 // for a database that does not exist yet, and in `addColumns()`, for one that does — every `CREATE`
 // below is `IF NOT EXISTS` and would be skipped whole.
 //
+// A *constraint* that a later build removes from a table that already exists is the same problem the
+// other way round: SQLite cannot drop one with an `ALTER`, so `migrate()` rebuilds the table
+// (`rebuildVaultItem`, for the foreign key to `tool` that SP05 §2 takes off `vault_item`).
+//
 // The `host` and `host_outbox` tables of SP05 §2 are new: no earlier build wrote them, so the
 // `IF NOT EXISTS` here creates them on a fresh database and on an existing one alike. `host` has no
 // token column and never will (SP02 §5): the bearer lives in the system keychain.
@@ -89,7 +93,7 @@ CREATE TABLE IF NOT EXISTS tool_grant (
 CREATE TABLE IF NOT EXISTS vault_item (
   id TEXT PRIMARY KEY,
   person_id TEXT NOT NULL REFERENCES person (id) ON DELETE CASCADE,
-  tool_id TEXT NOT NULL REFERENCES tool (id) ON DELETE CASCADE,
+  tool_id TEXT NOT NULL,
   label TEXT NOT NULL,
   username TEXT NOT NULL,
   keychain_key TEXT NOT NULL,
@@ -370,6 +374,14 @@ export interface Repo {
    */
   personAuthByEmail(email: string): { person: Person; password: StoredPassword } | null;
   /**
+   * F1: whoever holds this email, revoked included, or `null`. It is the read a join makes before it
+   * asks the host, and the one its adoption re-keys: `personByEmail` ignores a revoked row, and the
+   * join that ignored it ended in a raw `UNIQUE constraint failed` — the email column is unique
+   * across every state (the `person` table's `email TEXT NOT NULL COLLATE NOCASE UNIQUE`). `revoked`
+   * says whether the row is the one the state hides.
+   */
+  personByEmailAnyState(email: string): { person: Person; revoked: boolean } | null;
+  /**
    * Creates — or updates in place — the local person of a connected account (SP05 §2): the host
    * person id is the local id, the row carries the V2 verifier over the host salt and no v1 hash,
    * and a revoked row comes back. Roles are replaced wholesale, like `setRoles`.
@@ -382,11 +394,34 @@ export interface Repo {
     roles: Id[];
   }): Person;
   /**
+   * F1: the local account of `fromId` becomes the host person `toId`, in one transaction — its
+   * `person` row (the id, and nothing else of it), its `person_role` rows, its `vault_item` rows and
+   * every `event` that named it (the audit is that person's own history, `docs/canonico.md` §13).
+   *
+   * A credential's keychain key carries the person id (`bond.cred.<person>.<tool>`,
+   * `backend/vault.ts`), so each row's `keychain_key` is rewritten with `keychainKeyOf(item)` and the
+   * answer carries the items exactly as they were read — the old key included. Renaming the keychain
+   * items themselves is the caller's: only the session reaches the keychain.
+   *
+   * The children move before the parent and the parent's key changes last, so SQLite's foreign keys
+   * (on at runtime, `backend/sqlite.ts`) would refuse the intermediate state: the transaction
+   * defers them to the commit. A `person` row that already holds `toId` is the caller's to refuse —
+   * this would merge two rows and their `vault_item`s collide on `UNIQUE (person_id, tool_id)`.
+   */
+  adoptPersonId(p: { fromId: Id; toId: Id; keychainKeyOf: (item: VaultItem) => string }): VaultItem[];
+  /**
    * Rewrites the local verifier as V2 (SP02 §6): the salt, the iterations and the check move to the
    * row, the algorithm is stamped and the v1 hash is emptied. A revoked or unknown person is a
    * no-op.
    */
   savePasswordCheck(personId: Id, password: PasswordHashV2): void;
+  /**
+   * F2: the snapshot's `me` is the last word on the connected person (SP04 §2) — after every applied
+   * snapshot the local row's name and its local admin role follow it, so an access-code admin reaches
+   * the admin screens and a demoted one leaves them. Answers whether anything changed; an empty name
+   * is ignored and a revoked or unknown person is a no-op.
+   */
+  saveConnectedIdentity(personId: Id, identity: { name: string; admin: boolean }): boolean;
   /** Ignores revoked people. */
   personById(id: Id): Person | null;
   /** Ignores revoked people. */
@@ -597,6 +632,64 @@ export function createRepo(db: SqlDb): Repo {
   }
 
   /**
+   * SP05 §2: `vault_item.tool_id` no longer has a foreign key to `tool (id)`. A credential may
+   * belong to a tool that exists only on the host — a connected entry has no local `tool` row — and
+   * with `PRAGMA foreign_keys = ON` (B9's schema) that insert would fail with `FOREIGN KEY
+   * constraint failed`. The DDL above is already the new shape; a database whose `vault_item` was
+   * created with the constraint keeps it, because `CREATE TABLE IF NOT EXISTS` skips the whole
+   * statement — so the table is rebuilt here.
+   *
+   * The guard is the constraint itself and not `user_version`: a v2 database and a block-1 one both
+   * carry it (both are completed, unversioned or stamped), and a database this build already
+   * rebuilt answers `false` here, which is what makes `migrate()` idempotent. The recipe is the
+   * SQLite documentation's "making other kinds of table schema changes": `foreign_keys` off —
+   * outside the transaction, where the pragma is a silent no-op —, the new table, the rows, `DROP`,
+   * `RENAME`, all inside one transaction, and the pragma back where it was. Every row, the
+   * constraint on `person`, the `UNIQUE (person_id, tool_id)` and the `origin` column come along.
+   *
+   * Removing a local tool still takes its vault rows with it: with the FK gone that is
+   * `removeEntry`'s explicit `DELETE FROM vault_item WHERE tool_id = ?`, which it already does.
+   */
+  function rebuildVaultItem(): void {
+    const pointsAtTool = db
+      .all<{ table: string }>('PRAGMA foreign_key_list(vault_item)')
+      .some((row) => row.table === 'tool');
+    if (!pointsAtTool) return;
+    const foreignKeysOn = singleRow<{ foreign_keys: number }>('PRAGMA foreign_keys')?.foreign_keys === 1;
+    if (foreignKeysOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      transaction(() => {
+        // The shape of the `vault_item` of `SCHEMA` above, table name apart — the same double
+        // writing `addColumns` explains, in the direction of a constraint instead of a column.
+        db.exec(`
+CREATE TABLE vault_item_rebuilt (
+  id TEXT PRIMARY KEY,
+  person_id TEXT NOT NULL REFERENCES person (id) ON DELETE CASCADE,
+  tool_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  username TEXT NOT NULL,
+  keychain_key TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  origin TEXT,
+  UNIQUE (person_id, tool_id)
+);`);
+        db.run(
+          `INSERT INTO vault_item_rebuilt
+             (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin)
+           SELECT id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin
+             FROM vault_item`,
+        );
+        db.exec('DROP TABLE vault_item');
+        db.exec('ALTER TABLE vault_item_rebuilt RENAME TO vault_item');
+      });
+    } finally {
+      // Back on before anything else runs: the rest of the session relies on it (B9).
+      if (foreignKeysOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+
+  /**
    * B9/RF-38: an item saved before the column existed takes the origin of its tool. That is the
    * address the entry had when the credential was saved — the same value `saveVaultItem` writes
    * today — and the only origin the item can be attributed to. An item that already carries one
@@ -616,9 +709,10 @@ export function createRepo(db: SqlDb): Repo {
    * all is a database from before the versioning — empty (a fresh install), v2-shaped (an earlier
    * v2 build: completed and stamped) or v1, which leaves as `LegacyDatabaseError` without a single
    * write. The columns and tables of SP05 §2 come after the DDL, by presence, and the origin of the
-   * items written before that column is filled in there. Nothing here reads or rewrites the rows of
-   * a v2 database: local-mode data — people, tools, views, grants, vault items, events — is left
-   * exactly as it was, and only the missing columns are appended.
+   * items written before that column is filled in there. Nothing here rewrites the *values* of a v2
+   * database: local-mode data — people, tools, views, grants, vault items, events — is left exactly
+   * as it was. What does move is the shape of `vault_item`, whose foreign key to `tool` SP05 §2
+   * takes off (`rebuildVaultItem`), and even that keeps every row as it stands.
    */
   function migrate(): void {
     const version = singleRow<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
@@ -630,6 +724,7 @@ export function createRepo(db: SqlDb): Repo {
     }
     db.exec(SCHEMA);
     addColumns();
+    rebuildVaultItem();
     backfillVaultOrigin();
     if (version !== SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
@@ -789,6 +884,13 @@ export function createRepo(db: SqlDb): Repo {
     };
   }
 
+  function personByEmailAnyState(email: string): { person: Person; revoked: boolean } | null {
+    const row = singleRow<PersonRow>('SELECT * FROM person WHERE email = ?', [
+      email.trim().toLowerCase(),
+    ]);
+    return row === null ? null : { person: buildPerson(row), revoked: row.revoked_at !== null };
+  }
+
   function saveConnectedPerson(p: {
     id: Id;
     email: string;
@@ -825,6 +927,37 @@ export function createRepo(db: SqlDb): Repo {
     return orFail(personById(p.id), 'person not found');
   }
 
+  function adoptPersonId(p: {
+    fromId: Id;
+    toId: Id;
+    keychainKeyOf: (item: VaultItem) => string;
+  }): VaultItem[] {
+    return transaction(() => {
+      // A `person` row already holding `toId` is not adoptable: two rows would merge and their
+      // `vault_item`s would collide on `UNIQUE (person_id, tool_id)`. Refusing here keeps the join
+      // from ending in a raw SQLite message — and the transaction leaves both rows as they were.
+      if (singleRow<{ id: Id }>('SELECT id FROM person WHERE id = ?', [p.toId]) !== null) {
+        throw new Error('this Bond already holds an account of that guild person');
+      }
+      const items = db
+        .all<VaultRow>('SELECT * FROM vault_item WHERE person_id = ?', [p.fromId])
+        .map(buildVaultItem);
+      for (const item of items) {
+        db.run('UPDATE vault_item SET keychain_key = ? WHERE id = ?', [p.keychainKeyOf(item), item.id]);
+      }
+      // The children first and the key last, with the foreign keys deferred to the commit: the
+      // runtime turns them on (`backend/sqlite.ts`), and the state between the two halves of a
+      // re-key — child rows pointing at a person that no longer has that id — is not one SQLite
+      // checks, it is the middle of one transaction.
+      db.exec('PRAGMA defer_foreign_keys = ON');
+      db.run('UPDATE person_role SET person_id = ? WHERE person_id = ?', [p.toId, p.fromId]);
+      db.run('UPDATE vault_item SET person_id = ? WHERE person_id = ?', [p.toId, p.fromId]);
+      db.run('UPDATE event SET person_id = ? WHERE person_id = ?', [p.toId, p.fromId]);
+      db.run('UPDATE person SET id = ? WHERE id = ?', [p.toId, p.fromId]);
+      return items;
+    });
+  }
+
   function savePasswordCheck(personId: Id, password: PasswordHashV2): void {
     db.run(
       `UPDATE person
@@ -833,6 +966,28 @@ export function createRepo(db: SqlDb): Repo {
         WHERE id = ? AND revoked_at IS NULL`,
       [password.salt, password.iterations, password.check, PASSWORD_V2_ALGORITHM, personId],
     );
+  }
+
+  function saveConnectedIdentity(personId: Id, identity: { name: string; admin: boolean }): boolean {
+    const row = singleRow<PersonRow>('SELECT * FROM person WHERE id = ? AND revoked_at IS NULL', [personId]);
+    if (row === null) return false;
+    // The host's name is never empty (SP04 §2's `me.name` is a required string): a blank one is not
+    // a name to write, and the local row keeps what it has.
+    const name = identity.name.trim();
+    const wanted = name === '' || name === row.name ? null : name;
+    const adminRole = ensureAdminRole().id;
+    // `me.admin` is derived from the guild's roles; the local row carries it as the local admin role
+    // (SP05 §2), which is what `Person.admin` reads.
+    const admins = rolesOf(personId).includes(adminRole);
+    if (wanted === null && admins === identity.admin) return false;
+    transaction(() => {
+      if (wanted !== null) db.run('UPDATE person SET name = ? WHERE id = ?', [wanted, personId]);
+      if (admins !== identity.admin) {
+        const kept = rolesOf(personId).filter((id) => id !== adminRole);
+        replaceRoles(personId, identity.admin ? [...kept, adminRole] : kept);
+      }
+    });
+    return true;
   }
 
   function personById(id: Id): Person | null {
@@ -1441,8 +1596,11 @@ export function createRepo(db: SqlDb): Repo {
     createPersonWithInvite,
     personByEmail,
     personAuthByEmail,
+    personByEmailAnyState,
     saveConnectedPerson,
+    adoptPersonId,
     savePasswordCheck,
+    saveConnectedIdentity,
     personById,
     listPeople,
     setRoles,

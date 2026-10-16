@@ -1,6 +1,6 @@
 # tinyjs — o que o runtime faz, e o que ele proíbe
 
-Levantamento do runtime sobre o qual a casca do Bond é construída. Só fatos verificáveis: cada
+Levantamento do runtime sobre o qual a casca do Nod é construída. Só fatos verificáveis: cada
 afirmação diz de onde veio. Nenhum item foi obtido por execução; tudo é `leitura`.
 
 Este arquivo é a casa dos fatos do runtime. O `canonico.md` aponta para cá e não repete nada.
@@ -152,7 +152,7 @@ caminho real é `template/types/tiny.d.ts`.
   PBKDF2 e HMAC-SHA256 (H3) e X25519, Ed25519, AES-GCM e HKDF (S0): medidos por execução em
   2026-10-16, nos dois parágrafos abaixo.
 
-**Observed by execution (2026-10-16): PBKDF2 and HMAC-SHA256 in the Bond runtime** (story H3,
+**Observed by execution (2026-10-16): PBKDF2 and HMAC-SHA256 in the Nod runtime** (story H3,
 `docs/specs/SP02-auth-and-keys.md` §1). Method: `~/.tinyjs/bin/tjs run` on a bundle of the real
 `shared/auth.ts` built by `Bun.build` (`target: 'browser'`) — the same txiki.js binary the tinyjs
 launcher uses for the app backend — 5 rounds after one warm-up derivation, `Date.now()` around each
@@ -175,7 +175,7 @@ of `test/auth.test.ts`.
   paragraph below; with the two above they answer the three items of `docs/canonico.md` §23 q6
   (PBKDF2 cost, AES-GCM cost, `subtle` behaviour for X25519).
 
-**Observed by execution (2026-10-16): X25519, Ed25519, AES-256-GCM and the SP06 §3 seal in the Bond
+**Observed by execution (2026-10-16): X25519, Ed25519, AES-256-GCM and the SP06 §3 seal in the Nod
 runtime** (story S0, `docs/specs/SP06-credential-sharing.md` §1, §3). Method: the same as H3's
 paragraph above — `~/.tinyjs/bin/tjs run` on a bundle of the real `shared/seal.ts` built by
 `Bun.build` (`target: 'browser'`), the txiki.js binary the tinyjs launcher uses for the app backend;
@@ -184,7 +184,7 @@ per-call figure taken as batch ÷ 200. Both runtimes produce the pinned `sealed`
 `test/seal.test.ts` byte for byte, and `test/smoke/run.ts` re-runs those same vectors under this
 runtime as `seal vectors: ok …` (SP06 §6, S0).
 
-- **Cost per operation**, Bond runtime → Bun, median of the 5 rounds: `seal` (fresh ephemeral X25519
+- **Cost per operation**, Nod runtime → Bun, median of the 5 rounds: `seal` (fresh ephemeral X25519
   pair, ECDH, HKDF-SHA256 over HMAC, AES-256-GCM, Ed25519 over the body) **1.51 ms → 0.10 ms**;
   `open` (signature verify, ECDH, HKDF, AES-GCM decrypt) **1.21 ms → 0.09 ms**; `sign` (Ed25519 over
   40 bytes) **0.86 ms → 0.02 ms**; `verify` **0.85 ms → 0.03 ms**. A share to 20 people therefore
@@ -219,7 +219,7 @@ runtime as `seal vectors: ok …` (SP06 §6, S0).
   `media.microphone`, and macOS kills a bundle that captures without the usage strings; in dev the
   grants and the `Info.plist` belong to the shared launcher. Fix: `"permissions"` in
   `tinyjs.base.json` (→ `NSCameraUsageDescription`/`NSMicrophoneUsageDescription`) and the media
-  keys on seed origins (→ `TinyjsMediaOrigins`), both confirmed with `plutil` on `dist/Bond.app`
+  keys on seed origins (→ `TinyjsMediaOrigins`), both confirmed with `plutil` on `dist/Nod.app`
   (`execucao`, 2026-10-16). Camera use from the built app not yet re-run.
 - `tiny.fetch` roda **no backend**: sem CORS, sem CSP, sem limite de mixed content, com
   `{ stream: true }`; certos casos caem no `curl` do sistema (`docs.html`).

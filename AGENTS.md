@@ -1,12 +1,12 @@
-# AGENTS.md — Bond
+# AGENTS.md — Nod
 
 Antes de qualquer coisa, leia `docs/canonico.md`. Ele é a fonte única do escopo e dos requisitos.
 Os fatos do runtime estão em `docs/tinyjs.md`; o que veio da Carna, em `docs/downscale-carna.md`;
 o vocabulário, em `CONTEXT.md`.
 
-## O que é o Bond
+## O que é o Nod
 
-Uma casca de desktop (TypeScript fino sobre tinyjs) que reúne as ferramentas internas da Copland numa
+Uma casca de desktop (TypeScript fino sobre tinyjs) que reúne as ferramentas internas de um time numa
 janela de catálogo e em janelas de ferramenta, com papéis, concessões e credenciais no chaveiro do
 sistema. É um downscale da Carna, não uma continuação dela.
 
@@ -21,7 +21,7 @@ sistema. É um downscale da Carna, não uma continuação dela.
 | Epics (what and why) and effort blocks with story points | `docs/epics/` (`blocks.md` for points and blocks) |
 | Exact contracts: schemas, endpoints, payloads, key formats | `docs/specs/` |
 | Role and rules of each part of the code | `context.md` in each folder: `host/`, `backend/`, `shared/`, `src/`, `test/` |
-| Story issues for blocks 1–2 (status lives there, not in the docs) | GitHub issues of `CaioFaSoares/Bond`, milestones "Block 1" and "Block 2" |
+| Story issues for blocks 1–2 (status lives there, not in the docs) | GitHub issues of `CaioFaSoares/Nod`, milestones "Block 1" and "Block 2" |
 | Código (quando existir) | raiz do projeto, conforme a fase do roadmap |
 | Processo do dono (proposta, issue, frente) | `_research/_Guia/` do `_Aleph` (`/Users/caio/_Eclaire/_Workspace/Projects/_Aleph/`) — vale para trabalho lá dentro; aqui o registro é este repositório |
 
@@ -36,7 +36,7 @@ sistema. É um downscale da Carna, não uma continuação dela.
 - **Sem fallback de toolchain.** Ferramenta ausente vira bloqueio declarado, não uma segunda
   superfície de runtime.
 - **Ferramenta é dado.** Endereço, produto, ícone e papéis das ferramentas são conteúdo do catálogo;
-  o código não conhece `copland.studio` nem nome de produto de terceiro.
+  o código não conhece o domínio do time nem nome de produto de terceiro.
 - **O seed privado não entra no git.** Ele vive fora do repositório, é listado em `resources/` e vai
   embutido na release (§19 do `canonico.md`). No lugar dele, só `seed.example.json` com dados falsos.
 

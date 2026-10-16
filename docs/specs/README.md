@@ -11,12 +11,16 @@ wins on intent, and the spec is fixed.
 | `SP02-auth-and-keys.md` | Password → keys, access and setup codes, sessions, local verifier, vault encryption | H3, H4, B3, V1, O1 |
 | `SP03-host-api.md` | Every host route: auth, request, response, errors | H4–H8, O1, O2, K3 |
 | `SP04-sync.md` | Discovery, key pinning, signed snapshot, outbox, events | H6, H8, B1, B4, B5, B7, B10 |
-| `SP05-bond-connected.md` | Bond side: new RPC methods, local tables, modules, screens, migrations | B1–B11, H7/B7, V1, O1 |
+| `SP05-bond-connected.md` | Nod side: new RPC methods, local tables, modules, screens, migrations | B1–B11, H7/B7, V1, O1 |
 | `SP06-credential-sharing.md` | Key pairs, seal and signature format, scope, holders, assign | S0, K1–K10 |
 | `SP07-host-deployment.md` | Container, compose, env, setup-code command, backup and restore | H1, H9 |
 
-Status: proposal, like the epics. Nothing here was executed. A value marked `[INFERENCE]` is a
-guess to confirm in the story that first touches it.
+Status: the block 1 parts of these specs are **implemented** (2026-10-16, milestone
+"Block 1 — One guild, synced", commit `6af9e64`); the block 2 parts (SP01 §3, SP02 §8–§9, SP03 §3,
+SP04 §2's optional members, SP06, the E02 stories) are still proposal. Where the build decided a
+reading of a line, the spec carries it inline with the handover it comes from
+(`docs/handovers/`). A value marked `[INFERENCE]` is a guess to confirm in the story that first
+touches it; a resolved one says what was chosen.
 
 Shared rules for all specs:
 

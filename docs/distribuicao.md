@@ -1,6 +1,6 @@
-# Distribuição do Bond
+# Distribuição do Nod
 
-Como montar, publicar e liberar uma release do Bond. O **porquê** e as decisões do dono estão em
+Como montar, publicar e liberar uma release do Nod. O **porquê** e as decisões do dono estão em
 `docs/canonico.md` §19; os fatos do runtime, em `docs/tinyjs.md` §1 e §8. Aqui só o passo a passo.
 
 ## 1. Montar o seed privado
@@ -40,7 +40,7 @@ API. A lista do que não pode está em `AGENTS.md`.
 
 O artefato sai em `dist/`, por sistema (`docs/tinyjs.md` §8):
 
-- **macOS**: binário + `Bond.app` codesigned em modo ad-hoc (`--dmg` para o instalador,
+- **macOS**: binário + `Nod.app` codesigned em modo ad-hoc (`--dmg` para o instalador,
   `--arch`/`--universal` para as CPUs).
 - **Windows**: pasta `dist/` portátil.
 - **Linux**: pasta portátil, empacotada como tarball por arquitetura.
@@ -50,12 +50,12 @@ O artefato sai em `dist/`, por sistema (`docs/tinyjs.md` §8):
 Ad-hoc só roda na máquina que construiu; nas outras o Gatekeeper bloqueia. Decisão do dono em
 `docs/canonico.md` §19: o passo de liberação é aceitável, feito à mão por quem recebe.
 
-Na máquina de destino, com o `Bond.app` em `/Applications`:
+Na máquina de destino, com o `Nod.app` em `/Applications`:
 
 1. abrir **Ajustes do Sistema → Privacidade e Segurança**;
-2. na seção de segurança, clicar em **Abrir assim mesmo** para o Bond (no macOS 15+ o atalho de
+2. na seção de segurança, clicar em **Abrir assim mesmo** para o Nod (no macOS 15+ o atalho de
    right-click não funciona mais); ou, no terminal,
-3. `xattr -d com.apple.quarantine /Applications/Bond.app`.
+3. `xattr -d com.apple.quarantine /Applications/Nod.app`.
 
 Distribuição sem esse passo exige **Developer ID Application + notarização** (Apple Developer
 Program) — melhoria opcional, ver `docs/canonico.md` §19.
@@ -70,8 +70,8 @@ execução. Requisitos de sistema por SO (macOS 15+, Windows 10/11 com WebView2,
 **Bandeja** (`docs/canonico.md` §7): o ícone do Linux é o `resources/tray.png` empacotado; lá a
 bandeja depende de um **AppIndicator** instalado no ambiente (`libayatana-appindicator`). Com
 bandeja, fechar a janela principal apenas a **esconde** — as janelas de ferramenta continuam abertas
-e o menu da bandeja traz `Open Bond`, `Lock` e `Quit Bond`. Sem bandeja (Linux sem AppIndicator),
-fechar a janela principal **encerra** o Bond.
+e o menu da bandeja traz `Open Nod`, `Lock` e `Quit Nod`. Sem bandeja (Linux sem AppIndicator),
+fechar a janela principal **encerra** o Nod.
 
 ## 5. Convites entre máquinas
 
@@ -129,9 +129,9 @@ dados falsos.
 
   GitHub caps a secret at 48 KB. If the icons don't fit, put them in the seed as data URIs.
 - Auto-update from GitHub Releases: the seed's `update.url` must be
-  `https://github.com/CaioFaSoares/Bond/releases/latest/download/manifest.json`. `tinyjs publish`
+  `https://github.com/CaioFaSoares/Nod/releases/latest/download/manifest.json`. `tinyjs publish`
   derives every download URL from that address, and the release job warns when they don't point at
-  the release repository. With the channel set, an installed Bond that finds a newer release shows
+  the release repository. With the channel set, an installed Nod that finds a newer release shows
   the notice by itself (RF-55, `docs/canonico.md` §14): no step in the app and no release by hand.
 
 **Caveats:**
@@ -139,7 +139,7 @@ dados falsos.
 - **Version bump.** Pushing again with the same `version` replaces the release's files. Installed
   apps only update when `version` in `tinyjs.base.json` goes up.
 - **Public repository: auto-update works.** The repository is public, so release files download
-  without authentication and an installed Bond fetches its manifest and its archives straight from
+  without authentication and an installed Nod fetches its manifest and its archives straight from
   GitHub Releases. The release repository is this one — `RELEASE_REPO` already defaults to
   `github.repository`. `BOND_RELEASE_REPO` plus a `BOND_RELEASE_TOKEN` with `contents: write` are
   only for putting the release in *another* repository, which then has to be public too.

@@ -45,12 +45,12 @@ the admin for assigned credentials:
 | **Blocked** | nobody: it can't be sent or re-shared |
 | **Org** | anyone in the guild |
 
-The scope travels inside the sealed share. The receiver's Bond enforces it on any re-send, and the
-host enforces the recipient list from roles it already knows. A modified Bond could still decrypt
+The scope travels inside the sealed share. The receiver's Nod enforces it on any re-send, and the
+host enforces the recipient list from roles it already knows. A modified Nod could still decrypt
 and pass a secret along by hand; scope is a rule between honest clients, not a cryptographic
 barrier.
 
-Reading note: the owner wrote "mesma role acima". Roles in the Bond are flat — named sets, with
+Reading note: the owner wrote "mesma role acima". Roles in the Nod are flat — named sets, with
 only `admin` set apart (`docs/canonico.md` §10) — so "acima" is read as "mentioned above", not as a
 role hierarchy. To confirm (question 1).
 
@@ -74,7 +74,7 @@ Each person, at activation (E01 §7), generates on their machine:
 - an **X25519 key pair** for receiving;
 - an **Ed25519 key pair** for signing what they send.
 
-Both are native in the Bond runtime (`docs/tinyjs.md` §5).
+Both are native in the Nod runtime (`docs/tinyjs.md` §5).
 
 - The **public keys** go to the host, attached to the person, and come down in the snapshot.
 - The **private keys** stay local, encrypted with `vaultKey`.
@@ -84,7 +84,7 @@ Both are native in the Bond runtime (`docs/tinyjs.md` §5).
 **Trusting someone else's public key.** The host could hand out a fake public key and read what is
 sent to it. Defense:
 
-- The Bond **pins** each colleague's keys the first time it sees them.
+- The Nod **pins** each colleague's keys the first time it sees them.
 - A key change shows a warning and requires confirmation before anything is sent again.
 - Each person has a short **fingerprint** in Settings, to compare in person or on a call when it
   matters.
@@ -95,9 +95,9 @@ The owner runs the host, so this is a guard against a compromised host, not agai
 
 ```mermaid
 sequenceDiagram
-    participant A as Alice's Bond
+    participant A as Alice's Nod
     participant H as Host (relay)
-    participant B as Bob's Bond
+    participant B as Bob's Nod
     A->>A: gate (biometrics) → read credential from vault
     A->>A: seal to Bob's X25519 key + sign with Alice's Ed25519 key
     A->>H: POST /v1/shares {to: bob, toolId, ciphertext, signature}
@@ -116,14 +116,14 @@ sequenceDiagram
 - **Bound to the tool's origin.** The share names the tool entry, and the receiver stores it bound
   to that entry's origin (E01 RF-38). A share for a tool the receiver can't see is held until they
   can, or declined.
-- **Assign to a role**: the admin's Bond seals one copy per current member of the role.
-  - New members later: the host can't produce a copy. The admin's Bond, on its next sync, sees
+- **Assign to a role**: the admin's Nod seals one copy per current member of the role.
+  - New members later: the host can't produce a copy. The admin's Nod, on its next sync, sees
     "role team has 1 member without the Jitsi login" and seals the missing copy after a gate
     prompt.
 - **Share with updates**: the share remembers the recipients, so a rotation by the owner re-seals
   to each of them.
 - **Revocation**: removing someone from a share, or revoking a person, can't erase what their
-  machine already decrypted. The Bond marks the credential **rotation pending** on the owner's
+  machine already decrypted. The Nod marks the credential **rotation pending** on the owner's
   side; that state already exists in the admin's vault screen (`docs/canonico.md` §12).
 - **Expiry**: an unaccepted share expires after 14 days, and the host deletes its ciphertext.
 
@@ -133,7 +133,7 @@ sequenceDiagram
 
 | Action | Gate |
 | --- | --- |
-| Unlock the Bond | biometrics or password |
+| Unlock the Nod | biometrics or password |
 | Reveal a credential | biometrics; the secret then stays visible for **a few seconds with a countdown indicator** (proposal: 10 s), and hides itself at zero. Revealing again asks again |
 | Copy a credential | biometrics |
 | Accept an incoming share | biometrics |
@@ -166,7 +166,7 @@ Stories, points and effort blocks: `docs/epics/blocks.md`.
 
 | Milestone | Scope | Proof |
 | --- | --- | --- |
-| **S0 — spike** | X25519 + HKDF + AES-GCM seal and Ed25519 sign/verify running in the Bond backend (txiki.js `subtle`) and in Bun (for tests), with the same bytes on both sides | A sealed test credential opens on the other runtime; cost measured (`docs/canonico.md` §23 q6) |
+| **S0 — spike** | X25519 + HKDF + AES-GCM seal and Ed25519 sign/verify running in the Nod backend (txiki.js `subtle`) and in Bun (for tests), with the same bytes on both sides | A sealed test credential opens on the other runtime; cost measured (`docs/canonico.md` §23 q6) |
 | **M1 — send** | Keys at activation, key pinning, send/accept/decline, gate, Settings → Vault inbox | Alice sends Bob a login; the host DB holds only ciphertext; Bob sees it only after the gate |
 | **M2 — assign** | Admin assigns to a person or a role; missing-copy list; rotation pending | New member of "team" gets the Jitsi login after the admin's next sync |
 | **M3 — share with updates** | Recipients remembered; rotation re-seals | Owner changes the password; recipients get it at the next sync |
@@ -178,9 +178,9 @@ These requirements entered `docs/canonico.md` §14 on 2026-10-16 (RF-44 to RF-48
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
 | RF-44 | Credentials cross the host only sealed to the receiver's key and signed by the sender. | The host DB and a traffic capture show no username or secret in clear; a share with a bad signature is refused. |
-| RF-45 | A changed public key of a colleague blocks sending until confirmed. | Swapping Bob's key on the host makes Alice's Bond warn and refuse until she confirms. |
+| RF-45 | A changed public key of a colleague blocks sending until confirmed. | Swapping Bob's key on the host makes Alice's Nod warn and refuse until she confirms. |
 | RF-46 | Revealing, copying, accepting and sending a credential each pass the gate; a revealed secret hides itself after a visible countdown. | With biometrics cancelled, nothing is shown, copied, accepted or sent; a revealed secret shows a countdown and is hidden when it ends. |
-| RF-47 | Assigning to a role reaches every current member, and the admin sees members still missing a copy. | Add a member to the role; the list shows them until the admin's Bond seals their copy. |
+| RF-47 | Assigning to a role reaches every current member, and the admin sees members still missing a copy. | Add a member to the role; the list shows them until the admin's Nod seals their copy. |
 | RF-48 | Revoking someone from a shared credential marks it rotation pending. | After revocation, the owner's vault shows "rotation pending" for that tool. |
 | RF-53 | Each credential has a sharing scope — role, blocked or org — enforced on send and re-send. | A "role" credential can't be sent to someone with no common role; a "blocked" one offers no send at all. |
 | RF-54 | Each credential shows its holders. | After Alice sends Figma to Bob, both see "Alice, Bob" with date and scope. |

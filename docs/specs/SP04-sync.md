@@ -20,7 +20,7 @@ interface Discovery {
 **Fingerprint**: SHA-256 of the raw public key, first 10 bytes, Crockford base32, grouped
 `XXXX-XXXX-XXXX-XXXX`.
 
-**Add host (Bond)**:
+**Add host (Nod)**:
 
 1. Normalize the address: `https://` only, except `http://127.0.0.1` and `http://localhost` for
    dev; no path, no user info.
@@ -42,16 +42,22 @@ ETag: "<version>"
 Bond-Signature: kid=<kid>; sig=<base64url Ed25519 signature over the exact response body bytes>
 ```
 
-- The Bond verifies the signature over the bytes as received, before parsing. No canonical JSON:
+- The Nod verifies the signature over the bytes as received, before parsing. No canonical JSON:
   whatever bytes were signed are the bytes checked.
 - `version` = base64url of the first 16 bytes of SHA-256 of the unsigned body. The host computes it
-  per person and answers `304` when `If-None-Match` matches.
+  per person and answers `304` when `If-None-Match` matches. Read literally "the unsigned body"
+  cannot include its own `version`, so the digest is taken over the body with `version` empty (h6).
+- `issuedAt` is the instant the content appeared, **not** the instant of the response: it is part of
+  the signed body, so a fresh value per response would give every poll a new `version` and the `304`
+  could never happen. The host keeps, per person, the instant it issued last and repeats it while the
+  content holds (in memory, like the rate limits); after a restart the next answer re-issues a newer
+  instant, which this rule allows (h6).
 
 ```ts
 interface Snapshot {
   api: 1;
   version: string;
-  issuedAt: string;              // the Bond refuses a snapshot older than the last accepted one
+  issuedAt: string;              // the Nod refuses a snapshot older than the last accepted one
   me: { id: Id; email: string; name: string; roles: Id[]; admin: boolean; kind: 'member' | 'client' };
   roles: Role[];                 // all roles (names are not secret inside the guild)
   orgTools: Entry[];             // org entries granted to me (all, if admin), with org views; Entry.roles filled
@@ -70,7 +76,7 @@ interface Snapshot {
 `ownerId`. Both changes land in `shared/types.ts`. Local mode fills `scope: 'org'`, `ownerId:
 null`, so today's code keeps working.
 
-## 3. When the Bond syncs
+## 3. When the Nod syncs
 
 - **Triggers**:
   - right after unlock;
@@ -95,15 +101,20 @@ person's writes: personal tools, personal views, favorites.
   - `409` (stale): drop the row and accept the host's version at the next snapshot.
   - `4xx` other: drop the row and raise an event `sync.rejected`.
   - `5xx` or network: stop and retry at the next sync.
-- `updatedAt` is set by the Bond at write time; the host keeps the newest (last-write-wins; one
+- `updatedAt` is set by the Nod at write time; the host keeps the newest (last-write-wins; one
   writer per record).
 
 ## 5. Events
 
 - The existing local events (`docs/canonico.md` §13) gain `sent_at`.
-- **Push**: up to 500 unsent events, oldest first. Each has a stable client id (the local event id).
-  The host inserts with `ON CONFLICT(id) DO NOTHING` and returns every id it now holds. The Bond
-  marks those `sent_at`.
+- **Push**: up to 500 unsent events, oldest first, repeated until a batch confirms nothing. Each has
+  a stable client id (a uuid generated when the local row is created). The host inserts with
+  `ON CONFLICT(id) DO NOTHING` and returns every id it now holds — **table-wide**, not only the
+  caller's rows (SP04 §5 read literally), so a collision is acked and the first writer's row stands
+  (h8). The Nod marks those `sent_at`.
+- The backlog is **not** cut off at Add host: every event a local-mode Nod recorded before a host
+  existed is unsent and goes up with the first sync (b10). The counters are the `events.syncStatus`
+  RPC (B10), and the JSONL export gains `clientId`/`sentAt` additively.
 - Settings → Activity shows sent vs pending, the "what was sent" view of `docs/canonico.md` §13.
 - Events keep the rule: no secret, URL as `origin + pathname` only.
 

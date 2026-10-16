@@ -288,7 +288,11 @@ export function createHostClient(deps: HostClientDeps): HostClient {
     // one is needed, and that 401 becomes the `signed-out` failure.
     if (token !== null && token !== '') headers.authorization = `Bearer ${token}`;
 
-    const init: RequestInit = { method, headers };
+    // `redirect: 'error'` on every call (F9): the runtime's `fetch` follows a `3xx` by default, and a
+    // followed redirect would hand the `Authorization` header of this host to whatever origin the
+    // answer names (`docs/tinyjs.md` §6: the backend's fetch has no CORS limit to stop it). A host
+    // that answers a redirect is a host that did not answer, which is the `offline` failure below.
+    const init: RequestInit = { method, headers, redirect: 'error' };
     if (body !== undefined) init.body = JSON.stringify(body);
 
     let response: Response;
