@@ -1,0 +1,383 @@
+// Vault (`backend/vault.ts`) against in-memory SQLite and an in-memory keychain: proves this
+// slice's acceptance criteria — index without a secret, value only in the keychain, a tool that
+// does not exist, the keychain refusing, removal (one item, one person, one tool) and the encrypted
+// export/import round trip.
+import { describe, expect, test } from 'bun:test';
+
+import { createRepo } from '../backend/repo';
+import { createVault } from '../backend/vault';
+import { memorySqlite } from './helpers/sqlite-bun';
+import type { Repo } from '../backend/repo';
+import type { Vault } from '../backend/vault';
+import type { Entry, PasswordHash, Person, SecretStore } from '../shared/types';
+
+// The export's PBKDF2 with 1000 iterations: the runtime cost (600 000) does not fit in a test (§3).
+const ITERATIONS = 1000;
+const LOCAL_PASSWORD: PasswordHash = {
+  algorithm: 'PBKDF2-SHA256',
+  hash: 'aGFzaC1ub3QtdXNlZA==',
+  salt: 'c2FsdC1ub3QtdXNlZA==',
+  iterations: ITERATIONS,
+};
+const KANBAN_SECRET = 'kanban-subscription-secret';
+
+function memoryKeychain() {
+  const items = new Map<string, string>();
+  let refused = false;
+  const keychain: SecretStore = {
+    async get(key) {
+      return items.get(key) ?? null;
+    },
+    async set(key, value) {
+      if (refused) return false;
+      items.set(key, value);
+      return true;
+    },
+    async delete(key) {
+      return items.delete(key);
+    },
+  };
+  return {
+    keychain,
+    items,
+    refuse: (): void => {
+      refused = true;
+    },
+    accept: (): void => {
+      refused = false;
+    },
+  };
+}
+
+/** Minimal valid entry: a vault item has a foreign key to `tool`. */
+function tool(id: string): Entry {
+  return {
+    id,
+    title: id,
+    url: `https://${id}.example.test/app`,
+    icon: null,
+    order: 1,
+    roles: [],
+    views: [],
+    auth: null,
+    active: true,
+  };
+}
+
+interface VaultScene {
+  repo: Repo;
+  vault: Vault;
+  keychain: SecretStore;
+  items: Map<string, string>;
+  refuse(): void;
+  accept(): void;
+  ana: Person;
+  bruno: Person;
+}
+
+function scene(): VaultScene {
+  const repo = createRepo(memorySqlite());
+  repo.migrate();
+  repo.ensureAdminRole();
+  // A vault item has a foreign key to `tool`: those rows have to exist.
+  for (const id of ['kanban', 'affine', 'orphan']) repo.saveEntry(tool(id));
+
+  const { keychain, items, refuse, accept } = memoryKeychain();
+  const vault = createVault({ repo, keychain, iterations: ITERATIONS });
+  const ana = repo.createPerson({
+    email: 'ana@example.test',
+    name: 'Ana',
+    password: LOCAL_PASSWORD,
+    roles: [],
+  });
+  const bruno = repo.createPerson({
+    email: 'bruno@example.test',
+    name: 'Bruno',
+    password: LOCAL_PASSWORD,
+    roles: [],
+  });
+  return { repo, vault, keychain, items, refuse, accept, ana, bruno };
+}
+
+async function messageOf(action: () => Promise<unknown>): Promise<string> {
+  try {
+    await action();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return 'did not throw';
+}
+
+describe('key and index', () => {
+  test('the keychain key is bond.cred.<person>.<tool>', () => {
+    const s = scene();
+
+    expect(s.vault.key(s.ana.id, 'kanban')).toBe(`bond.cred.${s.ana.id}.kanban`);
+    expect(s.vault.list(s.ana.id)).toEqual([]);
+  });
+
+  test('save writes the index without the secret and the value as JSON in the keychain', async () => {
+    const s = scene();
+
+    const item = await s.vault.save(s.ana.id, {
+      toolId: 'kanban',
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+
+    expect(item.keychainKey).toBe(`bond.cred.${s.ana.id}.kanban`);
+    // Default label: the tool id.
+    expect(item.label).toBe('kanban');
+    expect(item.username).toBe('ana');
+    // The index has no secret field, and the value is nowhere in the record.
+    expect('secret' in item).toBe(false);
+    expect(JSON.stringify(item)).not.toContain(KANBAN_SECRET);
+    expect(s.items.get(item.keychainKey)).toBe(
+      JSON.stringify({ username: 'ana', secret: KANBAN_SECRET }),
+    );
+
+    expect(s.vault.list(s.ana.id)).toEqual([item]);
+    expect(await s.vault.read(s.ana.id, 'kanban')).toEqual({
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+  });
+
+  test('an explicit label and saving the same pair again update the same item', async () => {
+    const s = scene();
+
+    const first = await s.vault.save(s.ana.id, {
+      toolId: 'affine',
+      username: 'ana',
+      secret: 'one',
+      label: 'Team Affine',
+    });
+    const second = await s.vault.save(s.ana.id, {
+      toolId: 'affine',
+      username: 'ana',
+      secret: 'two',
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(second.createdAt).toBe(first.createdAt);
+    // Without a label on the rewrite, the default goes back to being the tool id.
+    expect(second.label).toBe('affine');
+    expect(s.vault.list(s.ana.id)).toHaveLength(1);
+    expect(await s.vault.read(s.ana.id, 'affine')).toEqual({ username: 'ana', secret: 'two' });
+  });
+
+  test('an empty username and an empty secret are refused without touching the keychain or the index', async () => {
+    const s = scene();
+
+    expect(
+      await messageOf(() => s.vault.save(s.ana.id, { toolId: 'kanban', username: '   ', secret: 'x' })),
+    ).toBe('a username is required');
+    expect(
+      await messageOf(() => s.vault.save(s.ana.id, { toolId: 'kanban', username: 'ana', secret: '' })),
+    ).toBe('a secret is required');
+    expect(s.items.size).toBe(0);
+    expect(s.repo.listVault(s.ana.id)).toEqual([]);
+  });
+
+  test('a tool that does not exist is refused before the keychain is written', async () => {
+    const s = scene();
+
+    expect(
+      await messageOf(() =>
+        s.vault.save(s.ana.id, { toolId: 'no-such-tool', username: 'ana', secret: 'x' }),
+      ),
+    ).toBe('unknown tool');
+    expect(s.items.size).toBe(0);
+    expect(s.repo.vaultItem(s.ana.id, 'no-such-tool')).toBeNull();
+  });
+
+  test('a keychain that refuses the credential: error and no new or changed index row', async () => {
+    const s = scene();
+
+    s.refuse();
+    expect(
+      await messageOf(() => s.vault.save(s.ana.id, { toolId: 'kanban', username: 'ana', secret: 'new' })),
+    ).toBe('the system keychain refused the credential');
+    expect(s.items.size).toBe(0);
+    expect(s.repo.vaultItem(s.ana.id, 'kanban')).toBeNull();
+
+    // With the keychain accepting again the item goes in; a later refusal leaves it untouched.
+    s.accept();
+    const item = await s.vault.save(s.ana.id, {
+      toolId: 'kanban',
+      username: 'ana',
+      secret: 'old',
+    });
+    s.refuse();
+    expect(
+      await messageOf(() =>
+        s.vault.save(s.ana.id, { toolId: 'kanban', username: 'ana', secret: 'newer' }),
+      ),
+    ).toBe('the system keychain refused the credential');
+    expect(s.repo.vaultItem(s.ana.id, 'kanban')?.id).toBe(item.id);
+    expect(await s.vault.read(s.ana.id, 'kanban')).toEqual({ username: 'ana', secret: 'old' });
+  });
+
+  test('read returns null without an index, without a keychain value or with an unreadable value', async () => {
+    const s = scene();
+
+    expect(await s.vault.read(s.ana.id, 'kanban')).toBeNull();
+
+    const item = await s.vault.save(s.ana.id, {
+      toolId: 'kanban',
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+    s.items.delete(item.keychainKey);
+    expect(await s.vault.read(s.ana.id, 'kanban')).toBeNull();
+
+    for (const junk of [
+      'not json',
+      '42',
+      '"text"',
+      'null',
+      '{"username":"ana"}',
+      '{"username":1,"secret":"x"}',
+    ]) {
+      s.items.set(item.keychainKey, junk);
+      expect(await s.vault.read(s.ana.id, 'kanban')).toBeNull();
+    }
+
+    s.items.set(item.keychainKey, JSON.stringify({ username: 'ana', secret: KANBAN_SECRET }));
+    expect(await s.vault.read(s.ana.id, 'kanban')).toEqual({
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+  });
+});
+
+describe('remove', () => {
+  test('remove deletes the keychain key and the index row', async () => {
+    const s = scene();
+    const item = await s.vault.save(s.ana.id, {
+      toolId: 'kanban',
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+
+    await s.vault.remove(s.ana.id, 'kanban');
+
+    expect(s.items.has(item.keychainKey)).toBe(false);
+    expect(s.repo.vaultItem(s.ana.id, 'kanban')).toBeNull();
+    expect(await s.vault.read(s.ana.id, 'kanban')).toBeNull();
+
+    // Removing what does not exist does not throw.
+    await s.vault.remove(s.ana.id, 'no-such-tool');
+  });
+
+  test('removeAllOf clears only the requested person', async () => {
+    const s = scene();
+    const kanban = await s.vault.save(s.ana.id, { toolId: 'kanban', username: 'ana', secret: 'one' });
+    const affine = await s.vault.save(s.ana.id, { toolId: 'affine', username: 'ana', secret: 'two' });
+    const hers = await s.vault.save(s.bruno.id, {
+      toolId: 'kanban',
+      username: 'bruno',
+      secret: 'three',
+    });
+
+    await s.vault.removeAllOf(s.ana.id);
+
+    expect(s.items.has(kanban.keychainKey)).toBe(false);
+    expect(s.items.has(affine.keychainKey)).toBe(false);
+    expect(s.repo.listVault(s.ana.id)).toEqual([]);
+    expect(s.repo.listVault(s.bruno.id)).toHaveLength(1);
+    expect(s.items.get(hers.keychainKey)).toBe(JSON.stringify({ username: 'bruno', secret: 'three' }));
+  });
+
+  test('removeAllForTool clears every person item and index row of that tool (A6)', async () => {
+    const s = scene();
+    const anaKanban = await s.vault.save(s.ana.id, {
+      toolId: 'kanban',
+      username: 'ana',
+      secret: 'one',
+    });
+    const brunoKanban = await s.vault.save(s.bruno.id, {
+      toolId: 'kanban',
+      username: 'bruno',
+      secret: 'two',
+    });
+    const anaAffine = await s.vault.save(s.ana.id, {
+      toolId: 'affine',
+      username: 'ana',
+      secret: 'three',
+    });
+
+    await s.vault.removeAllForTool('kanban');
+
+    expect(s.items.has(anaKanban.keychainKey)).toBe(false);
+    expect(s.items.has(brunoKanban.keychainKey)).toBe(false);
+    expect(s.repo.vaultItemsByTool('kanban')).toEqual([]);
+    expect(s.repo.listVault(s.ana.id)).toEqual([anaAffine]);
+    expect(s.repo.listVault(s.bruno.id)).toEqual([]);
+    expect(s.items.get(anaAffine.keychainKey)).toBe(JSON.stringify({ username: 'ana', secret: 'three' }));
+  });
+});
+
+describe('export and import', () => {
+  test('the encrypted round trip restores the items in another person keychain', async () => {
+    const s = scene();
+    await s.vault.save(s.ana.id, { toolId: 'kanban', username: 'ana', secret: 'secret-one' });
+    await s.vault.save(s.ana.id, {
+      toolId: 'affine',
+      username: 'ana',
+      secret: 'secret-two',
+      label: 'Affine',
+    });
+    // Index without a keychain value: it stays out of the file.
+    s.repo.saveVaultItem({
+      personId: s.ana.id,
+      toolId: 'orphan',
+      label: 'orphan',
+      username: 'ana',
+      keychainKey: `bond.cred.${s.ana.id}.orphan`,
+    });
+
+    const blob = await s.vault.export(s.ana.id, 'export-password');
+    expect(typeof blob).toBe('string');
+    // The file is encrypted: no secret shows up in it.
+    expect(blob).not.toContain('secret-one');
+    expect(blob).not.toContain('secret-two');
+    expect(JSON.parse(atob(blob)).alg).toBe('PBKDF2-SHA256+AES-256-GCM');
+
+    const total = await s.vault.import(s.bruno.id, blob, 'export-password');
+
+    expect(total).toBe(2);
+    expect(await s.vault.read(s.bruno.id, 'kanban')).toEqual({
+      username: 'ana',
+      secret: 'secret-one',
+    });
+    expect(await s.vault.read(s.bruno.id, 'affine')).toEqual({
+      username: 'ana',
+      secret: 'secret-two',
+    });
+    expect(
+      s.vault
+        .list(s.bruno.id)
+        .map((item) => item.label)
+        .sort(),
+    ).toEqual(['Affine', 'kanban']);
+    // The source vault keeps its own items.
+    expect(s.repo.listVault(s.ana.id)).toHaveLength(3);
+  });
+
+  test('a wrong password imports nothing and an empty vault exports an importable file', async () => {
+    const s = scene();
+    await s.vault.save(s.ana.id, { toolId: 'kanban', username: 'ana', secret: 'secret-one' });
+    const blob = await s.vault.export(s.ana.id, 'export-password');
+
+    expect(await messageOf(() => s.vault.import(s.bruno.id, blob, 'wrong-password'))).toBe(
+      'wrong password or invalid file',
+    );
+    expect(s.repo.listVault(s.bruno.id)).toEqual([]);
+    expect(s.items.size).toBe(1);
+
+    const empty = await s.vault.export(s.bruno.id, 'another-password');
+    expect(await s.vault.import(s.bruno.id, empty, 'another-password')).toBe(0);
+    expect(s.repo.listVault(s.bruno.id)).toEqual([]);
+  });
+});

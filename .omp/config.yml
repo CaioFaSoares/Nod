@@ -1,0 +1,45 @@
+# Configuração do omp para o Bond — espelha a divisão de modelos do EnochDB
+# (`_Aleph/EnochDB/.omp/config.yml`).
+#
+# O roster de papéis vem do `_Aleph` (`.omp/agents` é um symlink para
+# `_Aleph/.aleph/agents`) e não carrega modelo no contrato; a escolha de modelo
+# por ambiente mora aqui.
+#
+# Divisão de trabalho:
+#   Opus     — só a sessão principal: conversa e planejamento com o dono.
+#   Sonnet   — advisor do DeepSeek e revisor: julga, revisa, fatia e integra.
+#   DeepSeek — a maioria das tarefas: geração de código, execução mecânica,
+#              varredura e leitura.
+
+modelRoles:
+  default: anthropic/claude-opus-5-5
+  plan: anthropic/claude-opus-5-5
+  advisor: anthropic/claude-sonnet-5-5:high
+  task: opencode-go/deepseek-v4.1-flash
+
+advisor:
+  enabled: true
+
+task:
+  agentModelOverrides:
+    # Sonnet — orquestra, revisa decisão, revisa entrega e fatia o trabalho.
+    00-orchestration-icm: anthropic/claude-sonnet-5-5
+    01-orchestration-reviewer: anthropic/claude-sonnet-5-5
+    20-architecture-keeper: anthropic/claude-sonnet-5-5
+    21-architecture-data: anthropic/claude-sonnet-5-5
+    30-ticketing-slicer: anthropic/claude-sonnet-5-5
+    60-sprint-review: anthropic/claude-sonnet-5-5
+    # DeepSeek — leitura, varredura e experimento.
+    02-orchestration-status: opencode-go/deepseek-v4.1-flash
+    10-discovery-backlog: opencode-go/deepseek-v4.1-flash
+    11-discovery-rubberduck: opencode-go/deepseek-v4.1-flash
+    52-integration-poc: opencode-go/deepseek-v4.1-flash
+    53-doubt-explorer: opencode-go/deepseek-v4.1-flash
+    54-code-explorer: opencode-go/deepseek-v4.1-flash
+    # DeepSeek — faixa de implementação.
+    40-implementation-loop: opencode-go/deepseek-v4.1-flash
+    41-implementation-captain: opencode-go/deepseek-v4.1-flash
+    42-implementation-backend: opencode-go/deepseek-v4.1-flash
+    43-implementation-frontend: opencode-go/deepseek-v4.1-flash
+    44-implementation-integration: opencode-go/deepseek-v4.1-flash
+    45-implementation-troubleshooter: opencode-go/deepseek-v4.1-flash

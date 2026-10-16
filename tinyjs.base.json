@@ -1,0 +1,19 @@
+{
+  "name": "bond",
+  "title": "Bond",
+  "size": "1100x720",
+  "id": "studio.copland.bond",
+  "version": "0.2.0",
+  "minTinyjsVersion": "0.57.2",
+  "backend": "backend/main.ts",
+  "frontend": {
+    "build": "bun run build",
+    "dist": "dist",
+    "dev": "bun run dev",
+    "devUrl": "http://127.0.0.1:5173"
+  },
+  "urlScheme": "bond",
+  "popups": "window",
+  "downloads": "auto",
+  "contextMenu": true
+}

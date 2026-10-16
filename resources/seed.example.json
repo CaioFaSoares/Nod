@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "generatedAt": "2026-10-15T00:00:00.000Z",
+  "roles": [
+    { "id": "admin", "name": "Admin", "admin": true },
+    { "id": "team", "name": "Team", "admin": false }
+  ],
+  "entries": [
+    {
+      "id": "kanban",
+      "title": "Kanban",
+      "url": "https://kanban.example.com",
+      "icon": null,
+      "order": 10,
+      "roles": ["team"],
+      "views": [
+        { "label": "Sprint", "url": "https://kanban.example.com/boards/1", "mode": "window" }
+      ],
+      "auth": null,
+      "active": true
+    },
+    {
+      "id": "docs",
+      "title": "Docs",
+      "url": "https://docs.example.com",
+      "icon": null,
+      "order": 20,
+      "roles": ["team"],
+      "views": [],
+      "auth": null,
+      "active": true
+    }
+  ],
+  "invites": [],
+  "update": null
+}

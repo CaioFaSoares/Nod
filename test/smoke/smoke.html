@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Bond — real-surface smoke</title>
+  </head>
+  <body>
+    <pre id="log">Bond smoke: waiting for the runtime…</pre>
+    <script>
+      // Test page for the smoke (runtime recipe "Self-driving test page":
+      // TINYJS_HTML=/abs/page.html tinyjs dev). Plain JavaScript, no bundler.
+      // This file is a TEMPLATE: test/smoke/run.ts replaces its one config marker with the JSON
+      // { originA, originB, originC, exportPath } and writes the generated page to
+      // test/smoke/.gerado/smoke.html (never `.build/`, which `tinyjs dev` recreates).
+      // The page drives the API through the real path (tiny.api.call) and writes the result to the
+      // app store (tiny.store.set), which the runner reads at <app data>/store.json.
+      (async function () {
+        'use strict';
+
+        const CONFIG = __CONFIG__;
+
+        // The same pair test/smoke/tools.ts makes server A accept and this page saves in the vault.
+        const USERNAME = 'person@test';
+        const SECRET_A = 'secret-a';
+        const WRONG_SECRET = 'wrong';
+        const ACCOUNT_PASSWORD = 'smoke-account-1';
+        const WRONG_PASSWORD = 'smoke-wrong-password';
+        const TINY_WAIT_MS = 30000;
+        const STATE_TIMEOUT_MS = 20000;
+        const RESTORE_TIMEOUT_MS = 15000;
+        const POLL_INTERVAL_MS = 200;
+        const HOT_LIMIT_MS = 150;
+        const C_SETTLE_MS = 8000;
+
+        const log = document.getElementById('log');
+        const steps = [];
+        let probeA = null;
+
+        function sleep(ms) {
+          return new Promise((resolve) => setTimeout(resolve, ms));
+        }
+
+        function message(error) {
+          if (error instanceof Error) return error.message;
+          if (typeof error === 'string') return error;
+          return 'unknown error';
+        }
+
+        function expect(condition, text) {
+          if (!condition) throw new Error(text);
+        }
+
+        function call(method, params) {
+          return window.tiny.api.call(method, params || {});
+        }
+
+        function record(step, ok, detail, ms) {
+          steps.push({
+            step: step,
+            ok: !!ok,
+            detail: String(detail === null || detail === undefined ? '' : detail),
+            ms: Math.max(0, Math.round(ms || 0)),
+          });
+          log.textContent = steps
+            .map((s) => (s.ok ? 'ok ' : 'FAILED ') + s.step + ' (' + s.ms + ' ms) ' + s.detail)
+            .join('\n');
+        }
+
+        async function writeResult(done, error) {
+          // The runner reads this object in store.json; `done: true` ends its wait. The intermediate
+          // writes (done: false) leave the partial visible if something hangs.
+          try {
+            await window.tiny.store.set('smoke_result', {
+              done: !!done,
+              steps: steps,
+              error: error || null,
+            });
+          } catch (e) {
+            /* without the store there is no result; the runner falls back to the timeout */
+          }
+        }
+
+        function summarize(value) {
+          try {
+            return JSON.stringify(value).slice(0, 600);
+          } catch (error) {
+            return String(value);
+          }
+        }
+
+        async function waitUntil(read, accept, timeoutMs, summary) {
+          const start = Date.now();
+          let last = null;
+          for (;;) {
+            last = await read();
+            if (accept(last)) return last;
+            if (Date.now() - start > timeoutMs) {
+              throw new Error(
+                'timeout (' + timeoutMs + ' ms); last state: ' + (summary ? summary(last) : summarize(last)),
+              );
+            }
+            await sleep(POLL_INTERVAL_MS);
+          }
+        }
+
+        function toolOf(state, id) {
+          const list = (state && state.tools) || [];
+          return list.find((t) => t.id === id) || null;
+        }
+
+        function loginOf(state, id) {
+          const tool = toolOf(state, id);
+          return tool ? tool.login : null;
+        }
+
+        async function waitForTiny() {
+          const start = Date.now();
+          while (!window.tiny) {
+            if (Date.now() - start > TINY_WAIT_MS) {
+              throw new Error('the tiny global did not show up in ' + TINY_WAIT_MS + ' ms');
+            }
+            await sleep(100);
+          }
+        }
+
+        // 1 — a new account: there is no person in the local database yet.
+        async function step1() {
+          const state = await call('session.state');
+          expect(state.hasAccount === false, 'hasAccount = ' + JSON.stringify(state.hasAccount) + ' (expected false)');
+          expect(state.unlocked === false, 'unlocked = ' + JSON.stringify(state.unlocked) + ' (expected false)');
+          return 'no account and locked';
+        }
+
+        // 2 — the first account (no invites) is created as admin and unlocked.
+        async function step2() {
+          const state = await call('session.createAccount', {
+            email: USERNAME,
+            name: 'Smoke Person',
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          expect(
+            !!state.person && state.person.admin === true,
+            'admin = ' + JSON.stringify(state.person && state.person.admin),
+          );
+          return 'account created; person is admin and the session is unlocked';
+        }
+
+        // 3 — assisted registration against server A.
+        async function step3() {
+          const probe = await call('catalog.probe', { url: CONFIG.originA });
+          expect(probe.title === 'Tool A', 'title = ' + JSON.stringify(probe.title));
+          expect(probe.hasLoginForm === true, 'hasLoginForm = ' + JSON.stringify(probe.hasLoginForm));
+          expect(
+            !!probe.icon && probe.icon.type === 'png' && typeof probe.icon.base64 === 'string' && probe.icon.base64.length > 0,
+            'icon = ' + JSON.stringify(probe.icon && probe.icon.type),
+          );
+          probeA = probe;
+          return 'title ' + probe.title + ', login form, ' + probe.icon.type + ' icon';
+        }
+
+        // 4 — both smoke entries: A with the icon and probe of step 3, B with the SSO view.
+        async function step4() {
+          const entryA = {
+            id: 'tool-a',
+            title: 'Tool A',
+            url: CONFIG.originA,
+            icon: null,
+            order: 10,
+            roles: [],
+            views: [],
+            auth: null,
+            active: true,
+          };
+          await call('catalog.save', { entry: entryA, icon: probeA.icon, probe: probeA });
+
+          const entryB = {
+            id: 'tool-b',
+            title: 'Tool B',
+            url: CONFIG.originB,
+            icon: null,
+            order: 20,
+            roles: [],
+            views: [{ label: 'SSO', url: CONFIG.originB + '/sso', mode: 'window' }],
+            auth: null,
+            active: true,
+          };
+          await call('catalog.save', { entry: entryB });
+
+          const list = await call('catalog.list');
+          expect(Array.isArray(list), 'catalog.list returned ' + typeof list);
+          const a = list.find((e) => e.id === 'tool-a');
+          const b = list.find((e) => e.id === 'tool-b');
+          expect(!!a && !!b, 'tool-a/tool-b missing from the list (' + list.length + ' entries)');
+          expect(
+            typeof a.icon === 'string' && a.icon.indexOf('data:image/png;base64,') === 0,
+            'tool-a icon = ' + JSON.stringify(a.icon === null ? null : String(a.icon).slice(0, 40)),
+          );
+          expect(b.views.length === 1, 'tool-b views = ' + JSON.stringify(b.views.length));
+
+          const details = await call('catalog.get', { id: 'tool-a' });
+          expect(
+            !!details.probe && details.probe.title === 'Tool A',
+            'tool-a probe title = ' + JSON.stringify(details.probe && details.probe.title),
+          );
+          return 'tool-a and tool-b in the catalog; tool-a has a data URI icon and the saved probe';
+        }
+
+        // 5 — the credential goes to the keychain and only the index to the database: no secret back.
+        async function step5() {
+          await call('vault.save', { toolId: 'tool-a', username: USERNAME, secret: SECRET_A });
+          const items = await call('vault.list');
+          expect(Array.isArray(items), 'vault.list returned ' + typeof items);
+          expect(
+            items.some((i) => i.toolId === 'tool-a'),
+            'tool-a missing from the vault',
+          );
+          expect(JSON.stringify(items).indexOf(SECRET_A) === -1, 'the secret showed up in vault.list');
+          return 'credential in the keychain; vault.list does not show the secret';
+        }
+
+        // 6 — RF-09: the form is filled with the credential from the vault.
+        async function step6() {
+          await call('tools.open', { id: 'tool-a' });
+          const state = await waitUntil(
+            () => call('tools.state'),
+            (s) => loginOf(s, 'tool-a') === 'filled',
+            STATE_TIMEOUT_MS,
+            (s) => 'tool-a.login=' + JSON.stringify(loginOf(s, 'tool-a')),
+          );
+          const tool = toolOf(state, 'tool-a');
+          return 'tool-a opened filled' + (tool.error ? ' (error: ' + tool.error + ')' : '');
+        }
+
+        // 7 — RF-09: no credential and no form in the page, so the result is an existing session.
+        async function step7() {
+          await call('tools.open', { id: 'tool-b' });
+          await waitUntil(
+            () => call('tools.state'),
+            (s) => loginOf(s, 'tool-b') === 'session',
+            STATE_TIMEOUT_MS,
+            (s) => 'tool-b.login=' + JSON.stringify(loginOf(s, 'tool-b')),
+          );
+          return 'tool-b opened without a login: result session';
+        }
+
+        // 8 — RNF-09: bringing a warm tool to the front takes less than 150 ms and opens no window.
+        async function step8() {
+          const start = Date.now();
+          const state = await call('tools.open', { id: 'tool-a' });
+          const ms = Date.now() - start;
+          expect(ms < HOT_LIMIT_MS, 'warm open took ' + ms + ' ms (limit ' + HOT_LIMIT_MS + ')');
+          const tool = toolOf(state, 'tool-a');
+          expect(!!tool && tool.openWindows === 1, 'tool-a.openWindows = ' + JSON.stringify(tool && tool.openWindows));
+          return 'warm open in ' + ms + ' ms; tool-a keeps 1 window';
+        }
+
+        // 9 — RF-09: the SSO view leaves for the provider and comes back; the result is provider.
+        async function step9() {
+          await call('tools.openView', { toolId: 'tool-b', index: 0 });
+          await waitUntil(
+            async () => ({
+              tools: await call('tools.state'),
+              events: await call('events.list', { toolId: 'tool-b' }),
+            }),
+            (v) => (v.events || []).some((e) => e.type === 'login' && e.result === 'provider'),
+            STATE_TIMEOUT_MS,
+            (v) => {
+              const tool = toolOf(v.tools, 'tool-b');
+              return (
+                'tool-b.openWindows=' +
+                JSON.stringify(tool && tool.openWindows) +
+                ', login events of tool-b=' +
+                JSON.stringify((v.events || []).filter((e) => e.type === 'login').map((e) => e.result))
+              );
+            },
+          );
+          return 'SSO view resolved by the provider';
+        }
+
+        // 10 — login-loop regression: an origin outside the seed is filled exactly once.
+        async function step10() {
+          const entryC = {
+            id: 'tool-c',
+            title: 'Tool C',
+            url: CONFIG.originC,
+            icon: null,
+            order: 30,
+            roles: [],
+            views: [],
+            auth: null,
+            active: true,
+          };
+          await call('catalog.save', { entry: entryC });
+          await call('vault.save', { toolId: 'tool-c', username: USERNAME, secret: WRONG_SECRET });
+          await call('tools.open', { id: 'tool-c' });
+          // The tool window now covers this page; an occluded WebKit page throttles its timers, so
+          // bring the main window back before waiting, and ask the backend for the counter
+          // (tiny.fetch) instead of a cross-origin page fetch.
+          await tiny.win.show();
+          await sleep(C_SETTLE_MS);
+          const response = await tiny.fetch(CONFIG.originC + '/stats');
+          const stats = await response.json();
+          expect(
+            stats.posts === 1,
+            'tool-c received ' + JSON.stringify(stats.posts) + ' POSTs to /login (expected exactly 1)',
+          );
+          return 'tool-c was filled once; no login loop in ' + C_SETTLE_MS + ' ms';
+        }
+
+        // 11 — RF-12: the audit exports JSONL to the file the runner hands in.
+        async function step11() {
+          const ok = await call('events.exportToFile', { path: CONFIG.exportPath });
+          expect(ok === true, 'events.exportToFile returned ' + JSON.stringify(ok));
+          return 'exported to ' + CONFIG.exportPath;
+        }
+
+        // 12 — locking closes the tool windows and the protected methods refuse.
+        async function step12() {
+          const state = await call('session.lock');
+          expect(state.unlocked === false, 'unlocked = ' + JSON.stringify(state.unlocked));
+
+          let how = 'tools.state throws while locked';
+          let guarded = false;
+          try {
+            await call('tools.state');
+          } catch (error) {
+            guarded = true;
+            how = 'tools.state throws: ' + message(error);
+          }
+          if (!guarded) {
+            const start = Date.now();
+            let open = await call('tools.state');
+            while (!open.tools.every((t) => t.openWindows === 0) && Date.now() - start < STATE_TIMEOUT_MS) {
+              await sleep(POLL_INTERVAL_MS);
+              open = await call('tools.state');
+            }
+            const left = open.tools.filter((t) => t.openWindows > 0).map((t) => t.id + ':' + t.openWindows);
+            expect(left.length === 0, 'windows left open while locked: ' + JSON.stringify(left));
+            how = 'tools.state answers and every openWindows is 0';
+          }
+
+          let refused = false;
+          let text = '';
+          try {
+            await call('catalog.list');
+          } catch (error) {
+            refused = true;
+            text = message(error);
+          }
+          expect(refused, 'catalog.list worked with the session locked');
+          return 'locked; ' + how + '; catalog.list threw: ' + text;
+        }
+
+        // 13 — the wrong password is refused with the single message; the right one unlocks and the
+        // tool windows come back.
+        async function step13() {
+          let wrongText = null;
+          try {
+            await call('session.unlock', { email: USERNAME, password: WRONG_PASSWORD });
+          } catch (error) {
+            wrongText = message(error);
+          }
+          expect(wrongText !== null, 'the wrong password did not throw');
+          expect(
+            wrongText.indexOf('invalid credentials') !== -1,
+            'wrong-password message = ' + JSON.stringify(wrongText),
+          );
+
+          const state = await call('session.unlock', { email: USERNAME, password: ACCOUNT_PASSWORD });
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          await waitUntil(
+            () => call('tools.state'),
+            (s) => {
+              const tool = toolOf(s, 'tool-a');
+              return !!tool && tool.openWindows >= 1;
+            },
+            RESTORE_TIMEOUT_MS,
+            (s) => 'tool-a.openWindows=' + JSON.stringify(toolOf(s, 'tool-a') && toolOf(s, 'tool-a').openWindows),
+          );
+          return 'wrong password refused; unlocked with the right one; tool-a restored';
+        }
+
+        // 14 — cleanup: both credentials leave the vault.
+        async function step14() {
+          await call('vault.remove', { toolId: 'tool-a' });
+          await call('vault.remove', { toolId: 'tool-c' });
+          const items = await call('vault.list');
+          const left = items.filter((i) => i.toolId === 'tool-a' || i.toolId === 'tool-c').map((i) => i.toolId);
+          expect(left.length === 0, 'still in the vault: ' + JSON.stringify(left));
+          return 'credentials of tool-a and tool-c removed';
+        }
+
+        const sequence = [
+          ['1 session.state', step1],
+          ['2 session.createAccount', step2],
+          ['3 catalog.probe (tool-a)', step3],
+          ['4 catalog.save (tool-a, tool-b)', step4],
+          ['5 vault.save (tool-a)', step5],
+          ['6 tools.open (tool-a, form)', step6],
+          ['7 tools.open (tool-b, session)', step7],
+          ['8 tools.open (tool-a again, warm)', step8],
+          ['9 tools.openView (tool-b, SSO/provider)', step9],
+          ['10 tools.open (tool-c, login loop)', step10],
+          ['11 events.exportToFile', step11],
+          ['12 session.lock', step12],
+          ['13 session.unlock', step13],
+          ['14 vault.remove (tool-a, tool-c)', step14],
+        ];
+
+        async function run() {
+          let stopped = false;
+          for (const [name, fn] of sequence) {
+            if (stopped) {
+              record(name, false, 'did not run', 0);
+              continue;
+            }
+            const start = Date.now();
+            let ok = false;
+            let detail = '';
+            try {
+              detail = await fn();
+              ok = true;
+            } catch (error) {
+              ok = false;
+              detail = 'error: ' + message(error);
+            }
+            record(name, ok, detail, Date.now() - start);
+            stopped = !ok;
+            await writeResult(false, null);
+          }
+          await writeResult(true, null);
+        }
+
+        try {
+          await waitForTiny();
+          await run();
+        } catch (error) {
+          record('0 setup', false, 'error: ' + message(error), 0);
+          await writeResult(true, message(error));
+        }
+      })();
+    </script>
+  </body>
+</html>
