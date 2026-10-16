@@ -1,6 +1,6 @@
 ---
 id: E03
-frente: bond
+frente: nod
 titulo: Docked view, tabs and quick links — tools in the main window's center panel, several tabs per tool, detachable without reload, open and save any link
 status: proposto
 tipo: epico
@@ -147,7 +147,7 @@ catalog only open in tabs, and can become sidebar items in one step.
 - **Ad-hoc tabs are temporary.** They're marked "not saved". Closing one forgets it, and they are not
   restored after a lock unless saved.
 - **Open link by hand**: from the palette (⌘L or ⌘K → "Open link…", paste or type) and from a deep
-  link `bond://open?url=…`. The app already declares `urlScheme: bond` with single instance
+  link `nod://open?url=…`. The app already declares `urlScheme: nod` with single instance
   (`docs/tinyjs.md` §8), so another app or a script can hand a URL to the Nod. It opens as an
   ad-hoc tab after the current one.
 - **Save to sidebar**: one button on any tab (⌘D):
@@ -173,7 +173,7 @@ catalog only open in tabs, and can become sidebar items in one step.
 | RF-50 | A tool can have several tabs; switching tabs never reloads. | Two Claude tabs, a draft typed in one; switch away and back: the draft is still there. |
 | RF-51 | A tab detaches into its own window and docks back without reloading. | Type a draft in a Claude tab, detach, move it to another screen, dock it back: the draft is still there and the page never reloaded. |
 | RF-52 | Docked or Windows is a setting; Windows mode behaves exactly as today. | Switching the setting changes how the next tool opens; RF-19 still passes in Windows mode. |
-| RF-55 | Any `http(s)` link opens in the Nod: links clicked inside a tool open as a tab next to it; the palette and `bond://open?url=` open one by hand. | A documentation link on a Kanban card opens as a tab right after the Kanban tab; pasting a URL in "Open link" or calling `bond://open` does the same. |
+| RF-55 | Any `http(s)` link opens in the Nod: links clicked inside a tool open as a tab next to it; the palette and `nod://open?url=` open one by hand. | A documentation link on a Kanban card opens as a tab right after the Kanban tab; pasting a URL in "Open link" or calling `nod://open` does the same. |
 | RF-56 | Any tab is saved to the sidebar in one step: a personal view when its origin is already a tool, otherwise a personal tool with probed title and icon. | Save a Claude chat URL: it appears under Claude; save a new site: it appears as a new icon with its title and icon, no typing. |
 | RF-57 | An ad-hoc tab gets no backend methods and no autofill. | Calling `tiny.api.call` from an ad-hoc origin is refused; no credential is filled there. |
 

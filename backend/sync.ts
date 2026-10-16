@@ -1,4 +1,4 @@
-// The sync loop of a connected Bond: the triggers, the outbox flush, the event push, the snapshot
+// The sync loop of a connected Nod: the triggers, the outbox flush, the event push, the snapshot
 // apply, the stale state and the backoff (SP04 §3–§5, SP05 §1–§2; RF-37, RF-39).
 //
 // The runtime arrives as parameters — the repository, the connection, the clock and the interval pair
@@ -25,7 +25,7 @@ export const SYNC_INTERVAL_MS = 5 * 60_000;
 
 /**
  * SP04 §5: how many events one `POST /v1/events` carries. The host refuses the 501st with a `400`
- * that writes nothing (SP03 §2, `host/routes/events.ts`), so the Bond never assembles one: the
+ * that writes nothing (SP03 §2, `host/routes/events.ts`), so the Nod never assembles one: the
  * number is the client's own choice inside the "up to 500" rule.
  */
 export const EVENTS_PER_BATCH = 500;
@@ -297,7 +297,7 @@ export function createSync(deps: SyncDeps): Sync {
    * F8: the pin is the row's identity, and a run writes only into the row it read. `host.remove` and
    * the `saveHost` of another host can land between the two ends of a run — the body verified against
    * the old key and the sign-out of its session are not the new row's to receive. `addedAt` is the
-   * instant the person added this host: no two hosts of one Bond share the pair with `kid`.
+   * instant the person added this host: no two hosts of one Nod share the pair with `kid`.
    */
   function stillTheHost(record: HostRecord): boolean {
     const pinned = repo.hostRecord();

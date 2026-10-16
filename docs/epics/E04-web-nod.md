@@ -1,6 +1,6 @@
 ---
 id: E04
-frente: bond
+frente: nod
 titulo: Web Nod — an optional browser version served by the host, for people and clients without the app
 status: proposto
 tipo: epico

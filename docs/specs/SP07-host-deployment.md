@@ -18,7 +18,7 @@ WORKDIR /app
 COPY --from=deps /app/host/node_modules ./host/node_modules
 COPY shared ./shared
 COPY host ./host
-ENV NODE_ENV=production BOND_DATA=/data PORT=8080
+ENV NODE_ENV=production NOD_DATA=/data PORT=8080
 RUN mkdir -p /data && chown bun:bun /data
 USER bun
 EXPOSE 8080
@@ -48,26 +48,26 @@ services:
       context: ..
       dockerfile: host/Dockerfile
     environment:
-      BOND_PUBLIC_URL: ${BOND_PUBLIC_URL}        # https address Coolify exposes; used in discovery and links
-      BOND_GUILD_NAME: ${BOND_GUILD_NAME}
-      BOND_MIN_APP_VERSION: ${BOND_MIN_APP_VERSION:-0.3.0}
-      BOND_BACKUP_EVERY_HOURS: ${BOND_BACKUP_EVERY_HOURS:-24}
-      BOND_BACKUP_KEEP: ${BOND_BACKUP_KEEP:-14}
+      NOD_PUBLIC_URL: ${NOD_PUBLIC_URL}        # https address Coolify exposes; used in discovery and links
+      NOD_GUILD_NAME: ${NOD_GUILD_NAME}
+      NOD_MIN_APP_VERSION: ${NOD_MIN_APP_VERSION:-0.3.0}
+      NOD_BACKUP_EVERY_HOURS: ${NOD_BACKUP_EVERY_HOURS:-24}
+      NOD_BACKUP_KEEP: ${NOD_BACKUP_KEEP:-14}
     volumes:
-      - bond-data:/data
+      - nod-data:/data
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1))"]
       interval: 30s
     restart: unless-stopped
 volumes:
-  bond-data:
+  nod-data:
 ```
 
 - One replica only: SQLite has a single writer (SP01).
 - TLS ends at Coolify's proxy; the container serves plain HTTP on 8080 inside its network.
-- The host refuses to start when `BOND_PUBLIC_URL` isn't `https://`, except in dev.
-- `GET /.well-known/bond` serves `guild` = `BOND_GUILD_NAME` (may be empty when the deployment
-  leaves it unset) and `minAppVersion` = `BOND_MIN_APP_VERSION` (default `0.3.0`), read from the
+- The host refuses to start when `NOD_PUBLIC_URL` isn't `https://`, except in dev.
+- `GET /.well-known/nod` serves `guild` = `NOD_GUILD_NAME` (may be empty when the deployment
+  leaves it unset) and `minAppVersion` = `NOD_MIN_APP_VERSION` (default `0.3.0`), read from the
   environment. `meta.guild_name` (SP01 §2) still has no writer; the moment boot writes that row the
   route should read it instead (h6).
 
@@ -83,8 +83,8 @@ They're scripts in `host/package.json`, run through Coolify's terminal.
 
 ## 4. Backup
 
-- Every `BOND_BACKUP_EVERY_HOURS`: `VACUUM INTO '/data/backups/host-<ISO>.db'`.
-- Keep the newest `BOND_BACKUP_KEEP` files.
+- Every `NOD_BACKUP_EVERY_HOURS`: `VACUUM INTO '/data/backups/host-<ISO>.db'`.
+- Keep the newest `NOD_BACKUP_KEEP` files.
 - The key files (`signing-key.json`, `host-secret`) are copied beside each backup under the backup's
   own timestamp stem: `<host-<ISO>>.signing-key.json` and `<host-<ISO>>.host-secret`, so a pass never
   overwrites another's pair and rotation removes the triple together; `restore <file>` finds them
@@ -104,27 +104,27 @@ written into a file (`AGENTS.md`; `docs/canonico.md` §14 "Host address").
    repository, and the Dockerfile builds from the repo root (§1). `[INFERENCE]` the Coolify field
    names; the substance is the compose file, not the UI.
 2. **Environment** — in Coolify's variables, not in a committed `.env`:
-   - `BOND_PUBLIC_URL=https://<the address the proxy exposes>` — required and without a default; the
+   - `NOD_PUBLIC_URL=https://<the address the proxy exposes>` — required and without a default; the
      host refuses to start when it is missing, and refuses a non-`https://` value outside dev (§2).
-   - `BOND_GUILD_NAME=<guild name>`, `BOND_MIN_APP_VERSION` (default `0.3.0`).
-   - `BOND_BACKUP_EVERY_HOURS` (default `24`) and `BOND_BACKUP_KEEP` (default `14`) — §4.
-   - `BOND_BIND=0.0.0.0` so the proxy, which is outside the compose network, reaches `8080`; the
+   - `NOD_GUILD_NAME=<guild name>`, `NOD_MIN_APP_VERSION` (default `0.3.0`).
+   - `NOD_BACKUP_EVERY_HOURS` (default `24`) and `NOD_BACKUP_KEEP` (default `14`) — §4.
+   - `NOD_BIND=0.0.0.0` so the proxy, which is outside the compose network, reaches `8080`; the
      service still runs one replica only (SP01 §1).
 3. **Domain and TLS** — point the domain at the published port; TLS ends at Coolify's proxy and the
-   container speaks plain HTTP (§2). The value of the domain is exactly `BOND_PUBLIC_URL`: it is what
+   container speaks plain HTTP (§2). The value of the domain is exactly `NOD_PUBLIC_URL`: it is what
    discovery returns and what the Nod pins (SP03 §3, SP04 §1).
-4. **Volume** — the named volume `bond-data` at `/data` holds `host.db`, both key files and
+4. **Volume** — the named volume `nod-data` at `/data` holds `host.db`, both key files and
    `backups/`. Coolify keeps named volumes across redeploys; no bind mount is required.
 5. **Health** — `GET /health` answers `ok`; the compose healthcheck probes
    `http://127.0.0.1:8080/health` every 30 s (§2).
 6. **First admin** — in the service terminal, `cd /app/host && bun run setup-code` prints the one-time
    setup code to that terminal only and refuses once an admin exists (SP02 §3). The container starts
    the service from `/app`, so the scripts of `host/package.json` are run from `/app/host`.
-7. **Backups** — the scheduled pass starts with the process (`BOND_BACKUP_EVERY_HOURS`, §4); a fresh
+7. **Backups** — the scheduled pass starts with the process (`NOD_BACKUP_EVERY_HOURS`, §4); a fresh
    deploy has no backup until the first interval, so run `cd /app/host && bun run backup-now` once.
 8. **Restore** — keep the backup triple outside the data dir first (Coolify's volume backup, or
    `docker cp` out of the container): the `.db` file and both key files must travel together. Stop the
-   service, then `cd /app/host && BOND_DATA=/data bun run restore <path to the .db file>` and start the
+   service, then `cd /app/host && NOD_DATA=/data bun run restore <path to the .db file>` and start the
    service again. The target must be empty — a fresh volume, or the previous one moved aside — because
    the command refuses to write over a data dir that still holds anything; a backup that is still
    inside the volume being replaced is copied to `/tmp` inside the container first. The restored dir

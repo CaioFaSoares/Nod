@@ -40,13 +40,13 @@ const dirs: string[] = [];
 
 /** A directory that lives only for the duration of the test; `tempDir()` keeps it empty. */
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bond-backup-'));
+  const dir = mkdtempSync(join(tmpdir(), 'nod-backup-'));
   dirs.push(dir);
   return dir;
 }
 
 function tempConfig(dataDir: string = tempDir()): HostConfig {
-  return { dataDir, publicUrl: 'https://bond.example', port: DEFAULT_PORT, dev: false };
+  return { dataDir, publicUrl: 'https://nod.example', port: DEFAULT_PORT, dev: false };
 }
 
 /** The ISO instant every dated assertion pins: `<2026-10-16T18:00:00.000Z>` → `host-…Z.db`. */
@@ -200,7 +200,7 @@ describe('restore', () => {
 
     const host = await bootHost(tempConfig(restored));
     try {
-      // Same pair: a Bond that pinned the host before the restore still accepts it (SP04 §1).
+      // Same pair: a Nod that pinned the host before the restore still accepts it (SP04 §1).
       expect(host.signingKey.kid).toBe(kid);
       // Same rows: the person and the credentials to sign in with are the ones that were backed up.
       const repo = createRepo(host.db);
@@ -252,7 +252,7 @@ describe('restore', () => {
     writeFileSync(asFile, 'not a directory\n');
     expect(() => restoreBackup(backup.file, asFile, DATABASE_FILE)).toThrow('is not a directory');
 
-    // A database whose key files did not travel: a restore would leave every pinned Bond refusing.
+    // A database whose key files did not travel: a restore would leave every pinned Nod refusing.
     rmSync(keyCopyPath(backup.file, HOST_SECRET_FILE));
     const bare = tempDir();
     expect(() => restoreBackup(backup.file, bare, DATABASE_FILE)).toThrow('missing');
@@ -263,18 +263,18 @@ describe('restore', () => {
 describe('settings', () => {
   test('the defaults are SP07 §2 defaults and a fractional interval is allowed', () => {
     expect(loadBackupSettings({})).toEqual({ everyHours: 24, keep: 14 });
-    expect(loadBackupSettings({ BOND_BACKUP_EVERY_HOURS: '6', BOND_BACKUP_KEEP: '7' })).toEqual({
+    expect(loadBackupSettings({ NOD_BACKUP_EVERY_HOURS: '6', NOD_BACKUP_KEEP: '7' })).toEqual({
       everyHours: 6,
       keep: 7,
     });
-    expect(loadBackupSettings({ BOND_BACKUP_EVERY_HOURS: '0.01' }).everyHours).toBe(0.01);
+    expect(loadBackupSettings({ NOD_BACKUP_EVERY_HOURS: '0.01' }).everyHours).toBe(0.01);
   });
 
   test('refuses a cadence or a rotation that would not back anything up', () => {
-    expect(() => loadBackupSettings({ BOND_BACKUP_EVERY_HOURS: '0' })).toThrow(
-      'invalid BOND_BACKUP_EVERY_HOURS: 0',
+    expect(() => loadBackupSettings({ NOD_BACKUP_EVERY_HOURS: '0' })).toThrow(
+      'invalid NOD_BACKUP_EVERY_HOURS: 0',
     );
-    expect(() => loadBackupSettings({ BOND_BACKUP_KEEP: '-1' })).toThrow('invalid BOND_BACKUP_KEEP: -1');
-    expect(() => loadBackupSettings({ BOND_BACKUP_KEEP: '2.5' })).toThrow('invalid BOND_BACKUP_KEEP: 2.5');
+    expect(() => loadBackupSettings({ NOD_BACKUP_KEEP: '-1' })).toThrow('invalid NOD_BACKUP_KEEP: -1');
+    expect(() => loadBackupSettings({ NOD_BACKUP_KEEP: '2.5' })).toThrow('invalid NOD_BACKUP_KEEP: 2.5');
   });
 });

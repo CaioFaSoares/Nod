@@ -1,10 +1,10 @@
 # The host's one service (SP07 §2): one compose, one replica, one volume. TLS ends at the proxy, so
 # the container serves plain HTTP on 8080.
 #
-# `BOND_PUBLIC_URL` is required and has no default: it is the address the Bond pins, and the host
+# `NOD_PUBLIC_URL` is required and has no default: it is the address the Nod pins, and the host
 # refuses to start without it (SP07 §2). Local smoke from the repo root:
 #
-#   BOND_PUBLIC_URL=https://bond.example docker compose -f host/compose.yaml up -d --build
+#   NOD_PUBLIC_URL=https://nod.example docker compose -f host/compose.yaml up -d --build
 
 services:
   host:
@@ -12,25 +12,25 @@ services:
       context: ..
       dockerfile: host/Dockerfile
     environment:
-      BOND_PUBLIC_URL: ${BOND_PUBLIC_URL:?BOND_PUBLIC_URL is required (the https address the proxy exposes)}
-      BOND_GUILD_NAME: ${BOND_GUILD_NAME}
-      BOND_MIN_APP_VERSION: ${BOND_MIN_APP_VERSION:-0.3.0}
+      NOD_PUBLIC_URL: ${NOD_PUBLIC_URL:?NOD_PUBLIC_URL is required (the https address the proxy exposes)}
+      NOD_GUILD_NAME: ${NOD_GUILD_NAME}
+      NOD_MIN_APP_VERSION: ${NOD_MIN_APP_VERSION:-0.3.0}
       # SP07 §4: a `VACUUM INTO` pass every N hours into `/data/backups`, keeping the newest N.
-      BOND_BACKUP_EVERY_HOURS: ${BOND_BACKUP_EVERY_HOURS:-24}
-      BOND_BACKUP_KEEP: ${BOND_BACKUP_KEEP:-14}
+      NOD_BACKUP_EVERY_HOURS: ${NOD_BACKUP_EVERY_HOURS:-24}
+      NOD_BACKUP_KEEP: ${NOD_BACKUP_KEEP:-14}
     ports:
-      # The deploy picks the interface: loopback by default, `BOND_BIND=0.0.0.0` where the proxy
+      # The deploy picks the interface: loopback by default, `NOD_BIND=0.0.0.0` where the proxy
       # lives outside the compose network. No address is written here.
-      - "${BOND_BIND:-127.0.0.1}:8080:8080"
+      - "${NOD_BIND:-127.0.0.1}:8080:8080"
     volumes:
       # One volume holds `host.db`, both key files and `backups/` (SP01 §1, SP07 §4). A restore into a
       # fresh volume copies `host.db` plus the backup's key files: the same people sign in and a
-      # pinned Bond still accepts the host.
-      - bond-data:/data
+      # pinned Nod still accepts the host.
+      - nod-data:/data
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1))"]
       interval: 30s
     restart: unless-stopped
 
 volumes:
-  bond-data:
+  nod-data:

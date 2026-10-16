@@ -1,4 +1,4 @@
-// Pure merge of one verified host snapshot into the Bond's own shapes (SP04 §2, §4, SP05 §1–§2,
+// Pure merge of one verified host snapshot into the Nod's own shapes (SP04 §2, §4, SP05 §1–§2,
 // §4): the rows the catalog layer keeps, the sidebar order, the one decision an outbox replay asks
 // for and the window in which the cached org half may still be shown.
 //
@@ -12,7 +12,7 @@ import type { Entry, Id, Role } from './types';
 // ---------------------------------------------------------------- the cached org window
 
 /**
- * `docs/canonico.md` §22, "Stale cache" (owner, 2026-10-16): a connected Bond that is offline keeps
+ * `docs/canonico.md` §22, "Stale cache" (owner, 2026-10-16): a connected Nod that is offline keeps
  * showing org tools from the cache for 14 days after the last successful sync, and after that hides
  * them until a sync succeeds (RF-37, RF-39). `backend/sync.ts` keeps the cache; the catalog layer
  * decides with `orgToolsUsable` whether the org half of it is still shown.
@@ -147,7 +147,7 @@ function readBody(value: unknown): SnapshotBody {
 }
 
 /**
- * SP04 §2's snapshot body, read into the rows the Bond keeps. `backend/host-client.ts` has already
+ * SP04 §2's snapshot body, read into the rows the Nod keeps. `backend/host-client.ts` has already
  * checked the bytes with the pinned key; this is the shape check of the document itself, which is
  * where the rest of the body stops being `unknown` (B1 left it here on purpose).
  */
@@ -157,7 +157,7 @@ export function parseSnapshot(value: unknown): SnapshotRows {
 
 /**
  * SP04 §3, RF-39: a `401` drops the org half of the cache and keeps the personal half. `raw` is the
- * body the Bond holds; the answer is the body to hold instead, with the guild's roles and org tools
+ * body the Nod holds; the answer is the body to hold instead, with the guild's roles and org tools
  * gone and `me`, the personal tools, the personal views and the favorites keeping their place.
  *
  * The body no longer carries the bytes the host signed, so the caller must not offer its `version`

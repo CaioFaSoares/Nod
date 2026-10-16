@@ -34,7 +34,7 @@ Evidência obtida por `leitura` de código e de documentação.
 | Cofre E2E com libsodium, `UserKeys/ProjectKey/KeyGrant/Secret` | O Nod não tem servidor que precise não ler: o segredo é do chaveiro do SO, por pessoa, e nunca sai da máquina |
 | LiveKit, Phoenix Channels, Presence, ingest, object storage | Sem comunicação nem mídia próprias: quem tem chat é o Discord |
 | Extensões (registro, manifesto, actor, WASM/Extism, iframes de terceiros) | O Nod cadastra endereços, não hospeda código de terceiros |
-| Feederações entre hosts, `carna://` links, clientes iOS e de terminal | Um host, um cliente desktop; `bond://` é deep link local |
+| Feederações entre hosts, `carna://` links, clientes iOS e de terminal | Um host, um cliente desktop; `nod://` é deep link local |
 | Tauri | Trocado por tinyjs, que é o runtime pedido: TS fino, ~6 MB, mesma webview nativa |
 | Casca web (Expo/Caddy) e monorepo de sete releases | O Nod é um app só; sem web própria, sem Docker no cliente |
 

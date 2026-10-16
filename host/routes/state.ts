@@ -1,4 +1,4 @@
-// H6's route group (SP03 §2): the public `GET /.well-known/bond` of SP04 §1 and the signed
+// H6's route group (SP03 §2): the public `GET /.well-known/nod` of SP04 §1 and the signed
 // `GET /v1/state` of SP04 §2. `host/app.ts` mounts this plugin with one `.use(...)`, the way it mounts
 // `routes/auth.ts`.
 //
@@ -32,8 +32,8 @@ import {
 const IF_NONE_MATCH_HEADER = 'If-None-Match';
 
 /** SP07 §2's two deployment values of the discovery: `host/compose.yaml` sets both. */
-export const GUILD_NAME_ENV = 'BOND_GUILD_NAME';
-export const MIN_APP_VERSION_ENV = 'BOND_MIN_APP_VERSION';
+export const GUILD_NAME_ENV = 'NOD_GUILD_NAME';
+export const MIN_APP_VERSION_ENV = 'NOD_MIN_APP_VERSION';
 /** SP07 §2: the compose default, applied when the deployment leaves the variable unset. */
 export const DEFAULT_MIN_APP_VERSION = '0.3.0';
 
@@ -66,7 +66,7 @@ function signingKeyOf(dataDir: string): Promise<SigningKey> {
 }
 
 export const stateRoutes = new Elysia({ name: 'host-state-routes' })
-  // SP04 §1: public. The Bond shows the guild and the fingerprint, and pins the key, before anyone
+  // SP04 §1: public. The Nod shows the guild and the fingerprint, and pins the key, before anyone
   // signs in; this route reads no caller and no table.
   .get(HOST_ROUTES.discovery, async (ctx) => {
     const { config } = stateOf(ctx);

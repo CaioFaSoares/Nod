@@ -2,10 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Bond — connected smoke (two instances)</title>
+    <title>Nod — connected smoke (two instances)</title>
   </head>
   <body>
-    <pre id="log">Bond connected smoke: waiting for the runtime…</pre>
+    <pre id="log">Nod connected smoke: waiting for the runtime…</pre>
     <script>
       // Test page for the two-instance smoke (SP05 §5). Plain JavaScript, no bundler.
       // This file is a TEMPLATE: test/smoke/connected.ts replaces its one config marker with the
@@ -39,7 +39,7 @@
          *  app data dirs under the smoke's own ids, and it never leaves this page. */
         const ACCOUNT_PASSWORD = 'smoke-connected-1';
 
-        /** F1: the credential the admin Bond saves before the join. Not a secret either: it is a
+        /** F1: the credential the admin Nod saves before the join. Not a secret either: it is a
          *  throwaway value of a throwaway keychain, and it is compared, never printed. */
         const LOCAL_SECRET = 'smoke-local-secret';
 
@@ -59,7 +59,7 @@
           personCode: null,
           toolId: null,
           personId: null,
-          /** F1: the local account of the admin Bond before the join, and the credential it saved. */
+          /** F1: the local account of the admin Nod before the join, and the credential it saved. */
           localPersonId: null,
           localToolId: null,
           /** The guild person id the local account became. */
@@ -209,7 +209,7 @@
         }
 
         /**
-         * F1: the admin's Bond is not a blank machine — it already has a local account with the very
+         * F1: the admin's Nod is not a blank machine — it already has a local account with the very
          * email the setup code will claim. Creating it here is what makes the join answer the choice
          * instead of adopting without asking.
          */
@@ -262,7 +262,7 @@
         }
 
         /**
-         * F1: the setup code against a Bond that already holds that email. The join answers the
+         * F1: the setup code against a Nod that already holds that email. The join answers the
          * choice — `local-account` — **before any host call**, so the single-use setup code is not
          * spent deciding; the next step is the one that redeems it.
          */
@@ -323,7 +323,7 @@
             'the item belongs to ' + summarize(item.personId) + ', not to the guild person',
           );
           expect(
-            item.keychainKey === 'bond.cred.' + shared.guildPersonId + '.' + shared.localToolId,
+            item.keychainKey === 'nod.cred.' + shared.guildPersonId + '.' + shared.localToolId,
             'the keychain key is ' + summarize(item.keychainKey),
           );
           const revealed = await call('vault.reveal', { toolId: shared.localToolId });
@@ -491,8 +491,8 @@
             password: ACCOUNT_PASSWORD,
           });
           shared.personCode = null;
-          // This Bond has no account at all (F3's first run), so the join answers the session
-          // outright — the choice only comes up when the email is already an account of this Bond.
+          // This Nod has no account at all (F3's first run), so the join answers the session
+          // outright — the choice only comes up when the email is already an account of this Nod.
           expect(answer && answer.kind === 'session', 'host.activate answered ' + summarize(answer));
           const state = answer.session;
           expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));

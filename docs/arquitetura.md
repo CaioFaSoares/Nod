@@ -48,12 +48,12 @@ Imports sem extensão. Arquivos removidos na v2 (cada fatia apaga os seus): `adm
   aceita `meta.window === 'main'`. `login.report` só aceita janelas de ferramenta (`toolOfWindow`
   não-nulo) e, quando `meta.origin` vem preenchido, só se for igual à origin da entrada daquela janela.
   Sem sessão só passam `session.state`, `session.createAccount`, `session.unlock`,
-  `session.unlockBiometric`, `bond.info`, `bond.quit`. **Métodos de admin** (pessoa desbloqueada com
+  `session.unlockBiometric`, `nod.info`, `nod.quit`. **Métodos de admin** (pessoa desbloqueada com
   `admin = true`): `catalog.get|probe|save|remove|exportToFile|importFromFile`,
-  `roles.save|remove|grant`, `people.*`, `invites.issue`, `events.*`, `bond.installUpdate`. O resto
+  `roles.save|remove|grant`, `people.*`, `invites.issue`, `events.*`, `nod.installUpdate`. O resto
   exige sessão desbloqueada. Erro = `throw new Error('<English message>')`.
 - **Gate de origin do runtime** (`scripts/gen-config.ts`): `file://*` e (só em dev)
-  `http://127.0.0.1:<BOND_DEV_PORT ou 5173>` ganham `"all"`; cada origin exata de entrada do seed ganha
+  `http://127.0.0.1:<NOD_DEV_PORT ou 5173>` ganham `"all"`; cada origin exata de entrada do seed ganha
   `["login.report", "media.camera", "media.microphone"]` (canonico §8). The build fails when
   `tinyjs.base.json` lacks `permissions.camera`/`permissions.microphone`.
   Nunca `*` em chave de ferramenta (o gerador lança se aparecer), nunca `"all"` para ferramenta.
@@ -124,7 +124,7 @@ export interface ErrorResponse { error: string }                                
 //        FavoritesRequest
 // events: ClientEvent, EventsRequest, EventsResponse, HostEvent, AdminEventsQuery
 // discovery and snapshot: Discovery, SignInMethod, Snapshot, SnapshotEnvelope, SnapshotSignature,
-//        SNAPSHOT_ETAG_HEADER ('ETag'), SNAPSHOT_SIGNATURE_HEADER ('Bond-Signature')
+//        SNAPSHOT_ETAG_HEADER ('ETag'), SNAPSHOT_SIGNATURE_HEADER ('Nod-Signature')
 export type CodeKind = 'access' | 'setup';                                          // 'access' is purpose 'activate' of SP01 §2
 export const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';                    // Crockford base32 (SP02 §3)
 export const CODE_BYTES: Readonly<Record<CodeKind, number>>;                        // 5 and 10 bytes → 8 and 16 chars
@@ -341,16 +341,16 @@ adoptConnectedAccount(p: { … }): Promise<SessionState>   // after the host ans
 keys(): { authKey; vaultKey } | null                   // the keys kept in memory while unlocked; null when locked
 deriveFor(password, salt, iterations): Promise<DerivedKeys>   // one derivation, reused by unlock/adopt/change
 changePassword(current, next, host?): Promise<void>    // connected: also updates the cached host salt (saveHostSalt, B3)
-wipeVault(personId: Id): Promise<void>                 // SP02 §7 reset: removes every bond.cred.* item through the index
+wipeVault(personId: Id): Promise<void>                 // SP02 §7 reset: removes every nod.cred.* item through the index
 lock(): SessionState
 current(): Person | null
 refresh(): void                               // reloads the current person from the repo (roles changed — A23); locks if revoked
 ```
-Biometria: `enableBiometric` grava `bond.bio.<person>` no chaveiro e `last_person` no `store`.
+Biometria: `enableBiometric` grava `nod.bio.<person>` no chaveiro e `last_person` no `store`.
 
 ### `backend/vault.ts` — `export function createVault(deps: { repo; keychain; iterations? }): Vault`
 ```ts
-key(personId, toolId): string                 // 'bond.cred.<person>.<tool>'
+key(personId, toolId): string                 // 'nod.cred.<person>.<tool>'
 list(personId); save(personId, p: { toolId; username; secret; label? }): Promise<VaultItem>
   // tool must exist ('unknown tool'); keychain first, index only if the keychain accepted
   // ('the system keychain refused the credential'); records `originOf(entry.url)` with the item, the
@@ -472,7 +472,7 @@ export interface HostClient {
 }
 export async function fingerprintOf(rawPublicKey: Uint8Array): Promise<string>;        // SP04 §1.1; a copy of
                                                     // `shared/host-api.ts`'s private encoder until it moves there
-export function hostTokenKey(kid: string, personId: Id): string;                       // 'bond.host.<kid>.<personId>'
+export function hostTokenKey(kid: string, personId: Id): string;                       // 'nod.host.<kid>.<personId>'
 export function createHostClient(deps: { fetch; keychain }): HostClient;
 ```
 The bearer is read from and written to the keychain only (SP02 §5); the client never logs or reads a
@@ -529,7 +529,7 @@ export function createHostAdmin(connection: HostConnection): HostAdmin;
 (B8a); every user-facing host-error sentence is written here, never read from a host body (B6).
 
 ### `backend/main.ts`
-- `init`: banco em `paths.data + '/bond.db'`; `migrate`; `ensureAdminRole`; seed do pacote (erro vira
+- `init`: banco em `paths.data + '/nod.db'`; `migrate`; `ensureAdminRole`; seed do pacote (erro vira
   evento); `gateOrigins` do seed embutido; `capabilities()`; sessão, cofre, janelas; janela `main`
   com `setMinSize(760, 500)`; **bandeja** se a capacidade existe: `app.tray.set` com menu `open`
   ("Open Nod"), `lock` ("Lock"), separador, `quit` ("Quit Nod"), clique = `open`; ícone macOS
@@ -541,7 +541,7 @@ export function createHostAdmin(connection: HostConnection): HostAdmin;
   `catalog.remove` → `vault.removeAllForTool` antes de apagar (A6). `people.revoke`: recusa a própria
   pessoa (`"you can't revoke yourself"`) e o último admin (`'the last admin cannot be revoked'`);
   sempre remove o índice do cofre da pessoa; apaga do chaveiro só com `deleteCredentials`; apaga
-  `bond.bio.<id>` (A14). `bond.installUpdate` registra o evento **antes** de instalar (A13).
+  `nod.bio.<id>` (A14). `nod.installUpdate` registra o evento **antes** de instalar (A13).
   `catalog.save` persiste `probe` quando vem. `catalog.get` devolve `usualLogin` = resultado mais
   frequente entre os 20 últimos `loginResults`.
 - **Connected mode** (SP05 §3): the RPC methods `host.state|discover|activate|signIn|syncNow|remove|bootstrap`
@@ -560,7 +560,7 @@ export function createHostAdmin(connection: HostConnection): HostAdmin;
 | Arquivo | Faz |
 | --- | --- |
 | `index.html` | `lang="en"`, título `Nod`, `<div id="app">`, `src/app.ts`, `src/style.css`. |
-| `src/app.ts` | Boot e roteamento. Bloqueado: tela de entrada (criar a conta de admin / entrar / entrar com convite / Touch ID / espera). Desbloqueado: **sidebar** à esquerda (logo; um ícone por ferramenta com dígito e estado — aberta, carregando, falhou; no rodapé Settings e Lock) e **conteúdo**: Home (cartões das ferramentas: abrir/focar, vistas, fechar, estado e resultado de login) ou Settings (`src/settings.ts`). Teclado: ⌘/Ctrl+1..9 abre, ⌘/Ctrl+K paleta, ⌘/Ctrl+, Settings. Ouve `session`, `tools`, `catalog`, `palette`, and the connected events `host`, `join` (a `bond://join` invite) and `update` (the new-version notice). A `host` push drives the "offline" badge and the signed-out notice; a "Join a guild" path lives on the blocked screen beside create-account and invite. |
+| `src/app.ts` | Boot e roteamento. Bloqueado: tela de entrada (criar a conta de admin / entrar / entrar com convite / Touch ID / espera). Desbloqueado: **sidebar** à esquerda (logo; um ícone por ferramenta com dígito e estado — aberta, carregando, falhou; no rodapé Settings e Lock) e **conteúdo**: Home (cartões das ferramentas: abrir/focar, vistas, fechar, estado e resultado de login) ou Settings (`src/settings.ts`). Teclado: ⌘/Ctrl+1..9 abre, ⌘/Ctrl+K paleta, ⌘/Ctrl+, Settings. Ouve `session`, `tools`, `catalog`, `palette`, and the connected events `host`, `join` (a `nod://join` invite) and `update` (the new-version notice). A `host` push drives the "offline" badge and the signed-out notice; a "Join a guild" path lives on the blocked screen beside create-account and invite. |
 | `src/palette.ts` | `export function openPalette(ctx): void` — overlay dentro da janela com busca (subsequência, sem acento) sobre ferramentas, vistas e ações (Home, cada aba de Settings, Lock, Quit); ↑/↓/Enter/Esc; foco preso enquanto aberta. |
 | `src/settings.ts` | `export function mountSettings(root: HTMLElement, ctx: { session: SessionState; info: AppInfo; tab?: SettingsTab }): { setTab(tab: SettingsTab): void; update(session: SessionState): void; destroy(): void }`, com `export type SettingsTab = 'account' \| 'hosts' \| 'vault' \| 'tools' \| 'roles' \| 'people' \| 'activity' \| 'catalog'`. Todas as pessoas: Account (trocar senha, habilitar Touch ID, versão, atualização) e Vault (salvar/revelar 10 s/remover; export/import com `tiny.dialog`). **Hosts** (todos, SP05 §4): without a host, address → `host.discover` → guild + fingerprint → email + code (or password) → set password; with a host, guild, address, fingerprint, last sync, pending writes, "Sync now", "Remove host" (keep-personal). Só admin: Tools (colar endereço → `catalog.probe` → formulário pré-preenchido; vistas, papéis, `noFill`; aviso quando a origin não está em `info.gateOrigins`; "usually signs in via …" de `catalog.get`), Roles (CRUD + concessões), People (papéis, revogar, emitir convite mostrando o código uma vez), Activity (lista + exportar JSONL; sent vs pending from `events.syncStatus` while a host exists), Catalog (exportar/importar seed com modo merge/overwrite). Só admin, conectado: the four admin tabs read/write the host through the same RPC and a "publish local tools" card calls `host.bootstrap` once. |
 | `src/style.css` | Tema escuro sóbrio, monospace, contraste alto, `:focus-visible`. Classes usadas por `src/ui.ts`: `.button .button-primary .button-danger .button-ghost .field .field-label .field-hint .input .message .message-error .message-ok .message-info`. |
@@ -573,7 +573,7 @@ export function createHostAdmin(connection: HostConnection): HostAdmin;
 - `scripts/gen-config.ts <dev|build>`: lê `tinyjs.base.json` e `resources/seed.json` (validado). Em
   `build`, seed ausente/inválido → sai 1 com `private seed missing: resources/seed.json (see resources/seed.example.json)`
   (RF-26); grava `"resources": ["seed.json", "tray.png", …ícones relativos]`. Gate da §2;
-  `update` do seed → `{ url, auto: 'daily' }`; env `BOND_APP_ID` substitui `id`; env `BOND_DEV_PORT`
+  `update` do seed → `{ url, auto: 'daily' }`; env `NOD_APP_ID` substitui `id`; env `NOD_DEV_PORT`
   (padrão 5173) muda a porta do Vite, o `devUrl` e a origin de dev — o smoke usa 5199 para conviver com
   um `app:dev` aberto.
 - Gates: `bun test test/`, `bunx tsc -p tsconfig.json`, `bunx tsc -p backend/tsconfig.json`,

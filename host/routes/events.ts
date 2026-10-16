@@ -1,9 +1,9 @@
-// The event group of SP03 §2: `POST /v1/events`, the host's half of the Bond's event push (SP04 §5).
+// The event group of SP03 §2: `POST /v1/events`, the host's half of the Nod's event push (SP04 §5).
 //
-// A batch is at most 500 events, each carrying the Bond's stable client id. That id is the
+// A batch is at most 500 events, each carrying the Nod's stable client id. That id is the
 // idempotency key: the insert is `ON CONFLICT(id) DO NOTHING`, so replaying a batch leaves one row
 // per event, and the answer is every id the host now holds — the ones this batch inserted and the
-// ones it already had (SP04 §5). The Bond marks exactly those `sent_at`.
+// ones it already had (SP04 §5). The Nod marks exactly those `sent_at`.
 //
 // The caller is the session's person: the body has no person field, and one sent anyway is dropped
 // by the schema below and never read. The URL of SP01 §2 (`origin + pathname` only) is the repo's
@@ -63,7 +63,7 @@ const KINDS = Object.keys(KIND_SET) as EventType[];
 /** `ClientEvent` types `toolId`, `url`, `result` and `detail` as `X | null`: null is a value. */
 const nullableText = t.Union([t.String(), t.Null()]);
 
-/** SP04 §5's `ClientEvent`, with the `at` the Bond's clock produced and the id it is keyed by. */
+/** SP04 §5's `ClientEvent`, with the `at` the Nod's clock produced and the id it is keyed by. */
 const clientEvent = t.Object({
   id: t.String({ minLength: 1 }),
   at: t.String({ minLength: 1 }),

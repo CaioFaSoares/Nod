@@ -117,7 +117,7 @@ describe('sha256Hex', () => {
   });
 
   test('answers lowercase hex of 32 bytes', async () => {
-    const digest = await sha256Hex('bond');
+    const digest = await sha256Hex('nod');
     expect(digest).toMatch(/^[0-9a-f]{64}$/);
     expect(fromHex(digest)).toHaveLength(32);
   });

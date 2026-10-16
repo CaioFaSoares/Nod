@@ -5,7 +5,7 @@
 // `adminAuth` covers every route below it, so a caller who is not an admin person never reaches a
 // handler (SP03 §1). The bodies are the shapes of `shared/host-api.ts` — `PersonCreateRequest`,
 // `PersonUpdateRequest`, `RoleRequest`, `GrantRequest`, `OrgTool`, `PromoteRequest`,
-// `BootstrapRequest`, `AdminEventsQuery` — so the Bond and the host validate the same fields; a body
+// `BootstrapRequest`, `AdminEventsQuery` — so the Nod and the host validate the same fields; a body
 // that fails its schema is the 400 `app.ts` builds, naming the field.
 //
 // The repo owns every rule and every status (`host/repo.ts`, SP01 §2): a taken email, a stale
@@ -15,7 +15,7 @@
 // No secret leaves here. The access code is generated once (SP02 §3), stored as the hex SHA-256 of
 // its normalized form, and returned only in the answer that created it: never listed, never logged,
 // and `GET /v1/admin/people` carries no salt and no hash (H2 decision 2). Admin tool writes pass the
-// host clock as `updatedAt`; only the personal writes of SP03 §2 carry the Bond's (SP04 §4).
+// host clock as `updatedAt`; only the personal writes of SP03 §2 carry the Nod's (SP04 §4).
 
 import { Elysia, status, t } from 'elysia';
 
@@ -48,7 +48,7 @@ import {
 /** SP01 §2: an entry id is a slug, the same pattern `shared/catalog.ts` validates a catalog with. */
 const ENTRY_ID = '^[a-z0-9][a-z0-9-]{0,39}$';
 
-/** SP03 §2: the personal tool ids the Bond generates. */
+/** SP03 §2: the personal tool ids the Nod generates. */
 const PERSONAL_ID = '^p-[a-z0-9]{10}$';
 
 /** A uuid (person, session, view id); the length bounds a value a caller cannot usefully exceed. */
@@ -328,7 +328,7 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
     const { repo, auth } = hostOf(ctx);
     const id = ctx.params.id;
     if (ctx.body.id !== id) return status(400, { error: 'invalid body: id must match the path id' });
-    // The host clock, never the body's: an org write has no `updatedAt` of the Bond's (SP04 §4).
+    // The host clock, never the body's: an org write has no `updatedAt` of the Nod's (SP04 §4).
     const saved: OrgTool = repo.saveOrgTool(toToolInput(id, ctx.body), auth.now());
     return saved;
   })

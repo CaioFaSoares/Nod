@@ -1,4 +1,4 @@
-// Tipos mínimos do global `tjs` do txiki.js — só o que o backend do Bond usa.
+// Tipos mínimos do global `tjs` do txiki.js — só o que o backend do Nod usa.
 // Assinaturas conforme a documentação do tinyjs (docs/tinyjs.md §1) e txikijs.org.
 declare const tjs: {
   readFile(path: string): Promise<Uint8Array>;

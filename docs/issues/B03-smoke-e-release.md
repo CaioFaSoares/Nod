@@ -1,6 +1,6 @@
 ---
 id: B03
-frente: bond
+frente: nod
 titulo: smoke na superfície real e release privada com seed travado
 status: fechada
 tipo: cobertura

@@ -109,10 +109,10 @@ async function messageOf(action: () => Promise<unknown>): Promise<string> {
 }
 
 describe('key and index', () => {
-  test('the keychain key is bond.cred.<person>.<tool>', () => {
+  test('the keychain key is nod.cred.<person>.<tool>', () => {
     const s = scene();
 
-    expect(s.vault.key(s.ana.id, 'kanban')).toBe(`bond.cred.${s.ana.id}.kanban`);
+    expect(s.vault.key(s.ana.id, 'kanban')).toBe(`nod.cred.${s.ana.id}.kanban`);
     expect(s.vault.list(s.ana.id)).toEqual([]);
   });
 
@@ -125,7 +125,7 @@ describe('key and index', () => {
       secret: KANBAN_SECRET,
     });
 
-    expect(item.keychainKey).toBe(`bond.cred.${s.ana.id}.kanban`);
+    expect(item.keychainKey).toBe(`nod.cred.${s.ana.id}.kanban`);
     // Default label: the tool id.
     expect(item.label).toBe('kanban');
     expect(item.username).toBe('ana');
@@ -420,7 +420,7 @@ describe('export and import', () => {
       toolId: 'orphan',
       label: 'orphan',
       username: 'ana',
-      keychainKey: `bond.cred.${s.ana.id}.orphan`,
+      keychainKey: `nod.cred.${s.ana.id}.orphan`,
       origin: 'https://orphan.example.test',
     });
 

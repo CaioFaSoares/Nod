@@ -43,12 +43,13 @@ export interface KdfVector {
  * The three SP02 §1 vectors. The hex was computed once with this same code under Bun and checked
  * against an independent implementation (Node `pbkdf2Sync` + `createHmac`, NFC applied by hand).
  *
- * `test/smoke/run.ts` imports this table: the Bond runtime (txiki.js) derives the same triples and
+ * `test/smoke/run.ts` imports this table: the Nod runtime (txiki.js) derives the same triples and
  * the smoke compares them against this same pinned hex.
  *
  * Vectors 1 and 2 stay at 1000 iterations to keep the suite fast; vector 3 uses the production count
  * (`PBKDF2_ITERATIONS`), which is what the host and the unlock path actually pay.
  */
+// frozen protocol label (kept 'bond' on purpose: changing it changes every derived key)
 export const KDF_VECTORS: KdfVector[] = [
   {
     password: 'correct horse battery staple',
@@ -142,7 +143,7 @@ describe('hashPassword and verifyPassword', () => {
 });
 
 // SP02 §1: one PBKDF2 and three HMACs, pinned so a change in the derivation, in a label or in the
-// NFC step fails here first. The smoke derives these same vectors in the Bond runtime (txiki.js).
+// NFC step fails here first. The smoke derives these same vectors in the Nod runtime (txiki.js).
 describe('deriveKeys (SP02 §1)', () => {
   test('the three pinned vectors derive the pinned bytes', async () => {
     for (const vector of KDF_VECTORS) {

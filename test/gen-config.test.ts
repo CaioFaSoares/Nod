@@ -9,9 +9,9 @@ import { validateSeed } from '../shared/catalog';
 import type { Entry, Seed } from '../shared/types';
 
 const BASE: Record<string, unknown> = {
-  name: 'bond',
-  title: 'Bond',
-  id: 'studio.copland.bond',
+  name: 'nod',
+  title: 'Nod',
+  id: 'copland.nod',
   version: '0.1.0',
   frontend: { dist: 'dist', devUrl: 'http://127.0.0.1:5173' },
   permissions: { camera: 'why camera', microphone: 'why microphone' },
@@ -86,8 +86,8 @@ describe('generateConfig', () => {
     const config = generateConfig(BASE, await exampleSeed(), 'build');
 
     expect(config.resources).toEqual(['seed.json', 'tray.png']);
-    expect(config.name).toBe('bond');
-    expect(config.id).toBe('studio.copland.bond');
+    expect(config.name).toBe('nod');
+    expect(config.id).toBe('copland.nod');
     expect(config.frontend).toEqual(BASE.frontend);
     expect(config.update).toBeUndefined();
   });
@@ -181,17 +181,17 @@ describe('generateConfig', () => {
   test('seed update turns on the daily update', () => {
     const config = generateConfig(
       BASE,
-      seed([], { update: { url: 'https://releases.example.com/bond' } }),
+      seed([], { update: { url: 'https://releases.example.com/nod' } }),
       'build',
     );
 
-    expect(config.update).toEqual({ url: 'https://releases.example.com/bond', auto: 'daily' });
+    expect(config.update).toEqual({ url: 'https://releases.example.com/nod', auto: 'daily' });
   });
 
   test('appId replaces the base id', () => {
-    expect(generateConfig(BASE, null, 'dev', 'com.example.bond.smoke').id).toBe(
-      'com.example.bond.smoke',
+    expect(generateConfig(BASE, null, 'dev', 'com.example.nod.smoke').id).toBe(
+      'com.example.nod.smoke',
     );
-    expect(generateConfig(BASE, null, 'dev').id).toBe('studio.copland.bond');
+    expect(generateConfig(BASE, null, 'dev').id).toBe('copland.nod');
   });
 });

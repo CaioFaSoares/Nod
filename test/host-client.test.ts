@@ -73,14 +73,14 @@ interface Answer {
 interface TestHost {
   origin: string;
   kid: string;
-  /** base64url raw public key: what the Bond pins. */
+  /** base64url raw public key: what the Nod pins. */
   publicKey: string;
   rawPublicKey: Uint8Array<ArrayBuffer>;
   fingerprint: string;
   calls: TestCall[];
   /** What `/v1/state` answers from now on. */
   answer(patch: Partial<Answer>): void;
-  /** What `/.well-known/bond` advertises from now on. */
+  /** What `/.well-known/nod` advertises from now on. */
   discovery(patch: { kid?: string; rawPublicKey?: Uint8Array<ArrayBuffer> }): void;
   /** Where `/v1/redirect` sends the caller, or `null` for a `404` (F9). */
   redirect(url: string | null): void;
@@ -151,7 +151,7 @@ async function startHost(): Promise<TestHost> {
           status: 200,
           headers: {
             ETag: `"${answer.etag}"`,
-            'Bond-Signature': `kid=${answer.kid}; sig=${signature}`,
+            'Nod-Signature': `kid=${answer.kid}; sig=${signature}`,
           },
         });
       }
@@ -261,8 +261,8 @@ describe('RF-30 — no host call without a host', () => {
   });
 
   test('the pin names the keychain item of SP02 §5', () => {
-    expect(hostTokenKey(host.kid, PERSON)).toBe(`bond.host.${host.kid}.${PERSON}`);
-    expect(client.connect(pinned).tokenKey()).toBe(`bond.host.${host.kid}.${PERSON}`);
+    expect(hostTokenKey(host.kid, PERSON)).toBe(`nod.host.${host.kid}.${PERSON}`);
+    expect(client.connect(pinned).tokenKey()).toBe(`nod.host.${host.kid}.${PERSON}`);
   });
 });
 
@@ -313,7 +313,7 @@ describe('discovery (SP04 §1)', () => {
   });
 
   test('an added host answering another key is the changed-key error', async () => {
-    // The key the Bond pinned is the one the host still presents: accepted.
+    // The key the Nod pinned is the one the host still presents: accepted.
     const same = await client.discover(host.origin, {
       pinned: { kid: host.kid, ed25519Public: host.publicKey },
     });
@@ -331,14 +331,14 @@ describe('discovery (SP04 §1)', () => {
 
   test('plain http to a real host is refused before a byte leaves the machine', async () => {
     const before = host.calls.length;
-    await expect(client.discover('http://bond.example.test')).rejects.toThrow('address must be https');
+    await expect(client.discover('http://nod.example.test')).rejects.toThrow('address must be https');
     expect(host.calls.length).toBe(before);
   });
 
   test('connecting to a pinned address that is real http is refused the same way', () => {
     expect(() =>
       client.connect({
-        address: 'http://bond.example.test',
+        address: 'http://nod.example.test',
         kid: host.kid,
         publicKey: host.publicKey,
         personId: PERSON,

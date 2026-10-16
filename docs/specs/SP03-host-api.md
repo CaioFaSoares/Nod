@@ -40,7 +40,7 @@ body with a `t.*` schema derived from them.
 | Route | Body | Response |
 | --- | --- | --- |
 | `GET /health` | — | `200 ok` (text) |
-| `GET /.well-known/bond` | — | `Discovery` (SP04 §1) |
+| `GET /.well-known/nod` | — | `Discovery` (SP04 §1) |
 | `POST /v1/auth/salt` | `{ email }` | `{ salt, iterations }` (SP02 §4) |
 | `POST /v1/auth/activate` | `{ email, code, salt, authKey, device }` | `{ token, personId }` |
 | `POST /v1/auth/setup` | `{ email, name, code, salt, authKey, device }` | `{ token, personId }`, first admin |

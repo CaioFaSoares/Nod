@@ -18,9 +18,9 @@ import type { Entry, SecretStore, SqlDb } from '../shared/types';
 
 // PBKDF2 with 600 000 iterations costs hundreds of ms per derivation; the tests use 1000 (§3).
 const ITERATIONS = 1000;
-const PASSWORD = 'bond-password';
-const NEW_PASSWORD = 'bond-password-new';
-const WRONG_PASSWORD = 'bond-password-wrong';
+const PASSWORD = 'nod-password';
+const NEW_PASSWORD = 'nod-password-new';
+const WRONG_PASSWORD = 'nod-password-wrong';
 const EMAIL = 'ana@example.test';
 const NOW = '2026-10-15T12:00:00.000Z';
 const EXPIRES = '2026-11-01T00:00:00.000Z';
@@ -574,7 +574,7 @@ describe('biometrics', () => {
     );
     // The password is checked first: with a wrong password the error is the usual one.
     expect(await messageOf(() => s.session.enableBiometric(WRONG_PASSWORD))).toBe('invalid credentials');
-    expect(s.secrets.has(`bond.bio.${id}`)).toBe(false);
+    expect(s.secrets.has(`nod.bio.${id}`)).toBe(false);
 
     s.session.lock();
     expect(await messageOf(() => s.session.unlockBiometric())).toBe(
@@ -589,7 +589,7 @@ describe('biometrics', () => {
     const id = await firstAccount(s);
 
     expect((await s.session.enableBiometric(PASSWORD)).biometric).toBe(true);
-    expect(s.secrets.get(`bond.bio.${id}`)).toBe(id);
+    expect(s.secrets.get(`nod.bio.${id}`)).toBe(id);
     expect(s.saved.get('last_person')).toBe(id);
 
     const locked = s.session.lock();
@@ -597,7 +597,7 @@ describe('biometrics', () => {
     expect(locked.biometric).toBe(true);
 
     const state = await s.session.unlockBiometric();
-    expect(s.reasons).toEqual(['Unlock Bond']);
+    expect(s.reasons).toEqual(['Unlock Nod']);
     expect(state.unlocked).toBe(true);
     expect(state.person?.id).toBe(id);
     expect(state.biometric).toBe(true);
@@ -613,7 +613,7 @@ describe('biometrics', () => {
 
     expect(await messageOf(() => s.session.unlockBiometric())).toBe('biometrics were declined');
     expect((await s.session.state()).unlocked).toBe(false);
-    expect(s.secrets.get(`bond.bio.${id}`)).toBe(id);
+    expect(s.secrets.get(`nod.bio.${id}`)).toBe(id);
   });
 
   test('without a key in the keychain or with a revoked person, biometrics opens nothing', async () => {
@@ -621,7 +621,7 @@ describe('biometrics', () => {
     const id = await firstAccount(s);
     s.session.lock();
 
-    // Never enabled: `last_person` exists, the `bond.bio.<person>` key does not.
+    // Never enabled: `last_person` exists, the `nod.bio.<person>` key does not.
     expect(await messageOf(() => s.session.unlockBiometric())).toBe('biometrics are not enabled');
 
     // `unlock` is asynchronous: without the `await`, `enableBiometric` would find a locked session.
@@ -944,7 +944,7 @@ describe('changePassword against the host (SP02 §7)', () => {
 
     // The OS keychain was not touched: the autofill keeps working after the change (RF-24).
     expect(s.repo.listVault(id)).toHaveLength(1);
-    expect(s.secrets.has(`bond.cred.${id}.kanban`)).toBe(true);
+    expect(s.secrets.has(`nod.cred.${id}.kanban`)).toBe(true);
     expect(await vault.read(id, 'kanban')).toEqual({ username: 'ana', secret: 'kanban-secret' });
     expect(eventTypes(s)).toContain('password_changed');
 
@@ -1135,9 +1135,9 @@ describe('wipeVault (SP02 §7)', () => {
     await s.session.wipeVault(ana);
 
     expect(s.repo.listVault(ana)).toEqual([]);
-    expect(s.secrets.has(`bond.cred.${ana}.kanban`)).toBe(false);
+    expect(s.secrets.has(`nod.cred.${ana}.kanban`)).toBe(false);
     expect(s.repo.listVault(bruno)).toHaveLength(1);
-    expect(s.secrets.has(`bond.cred.${bruno}.figma`)).toBe(true);
+    expect(s.secrets.has(`nod.cred.${bruno}.figma`)).toBe(true);
     expect(await vault.read(bruno, 'figma')).toEqual({ username: 'bruno', secret: 'bruno-secret' });
     // Nobody was locked out: a wipe is not a revocation.
     expect((await s.session.unlock({ email: EMAIL, password: PASSWORD })).unlocked).toBe(true);
@@ -1159,7 +1159,7 @@ function countedHost(answer: string | Error = 'opened') {
   };
 }
 
-/** The join of a Bond whose session is unlocked where it matters (F1/F3's own rules aside). */
+/** The join of a Nod whose session is unlocked where it matters (F1/F3's own rules aside). */
 function joinAs(
   s: SessionScene,
   host: () => Promise<string>,
@@ -1186,7 +1186,7 @@ describe('the local half of a join: joinGate (F1, F3, F7)', () => {
     expect(checked.calls).toHaveLength(1);
   });
 
-  test('a Bond that already has an account refuses a locked join before the host is asked (F3)', async () => {
+  test('a Nod that already has an account refuses a locked join before the host is asked (F3)', async () => {
     const s = scene();
     await firstAccount(s);
     s.session.lock();
@@ -1196,7 +1196,7 @@ describe('the local half of a join: joinGate (F1, F3, F7)', () => {
     // about this machine's accounts, not about the guild's.
     for (const signIn of [false, true]) {
       expect(await messageOf(() => joinAs(s, checked.host, { signIn }))).toBe(
-        'unlock this Bond first, then join the guild',
+        'unlock this Nod first, then join the guild',
       );
     }
     expect(checked.calls).toHaveLength(0);
@@ -1236,7 +1236,7 @@ describe('the local half of a join: joinGate (F1, F3, F7)', () => {
     const checked = countedHost();
 
     expect(await messageOf(() => joinAs(s, checked.host, { adoptLocal: true }))).toBe(
-      'this email belongs to another account of this Bond — unlock it, then join',
+      'this email belongs to another account of this Nod — unlock it, then join',
     );
     expect(checked.calls).toHaveLength(0);
 
@@ -1273,7 +1273,7 @@ describe('the local half of a join: joinGate (F1, F3, F7)', () => {
     // locked, there is nobody to decide and the join stops before the host.
     s.session.lock();
     expect(await messageOf(() => joinAs(s, checked.host, { adoptLocal: true }))).toBe(
-      'unlock this Bond first, then join the guild',
+      'unlock this Nod first, then join the guild',
     );
     expect(checked.calls).toHaveLength(1);
   });
@@ -1325,7 +1325,7 @@ describe('adopting a local account (F1)', () => {
     await vault.save(local, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
     // An event of that person, recorded before the join: the audit is that person's own history.
     s.repo.addEvent({ personId: local, toolId: 'kanban', type: 'tool_opened', url: null, result: null, detail: null });
-    expect(s.secrets.has(`bond.cred.${local}.kanban`)).toBe(true);
+    expect(s.secrets.has(`nod.cred.${local}.kanban`)).toBe(true);
 
     const state = await s.session.adoptConnectedAccount({
       personId: HOST_PERSON_ID,
@@ -1344,10 +1344,10 @@ describe('adopting a local account (F1)', () => {
     expect(state.person?.roles).toEqual(['admin', 'team']);
     expect(s.repo.personById(local)).toBeNull();
     // The credential works under the new id: the index and the keychain item moved together.
-    expect(s.secrets.has(`bond.cred.${local}.kanban`)).toBe(false);
-    expect(s.secrets.has(`bond.cred.${HOST_PERSON_ID}.kanban`)).toBe(true);
+    expect(s.secrets.has(`nod.cred.${local}.kanban`)).toBe(false);
+    expect(s.secrets.has(`nod.cred.${HOST_PERSON_ID}.kanban`)).toBe(true);
     expect(s.repo.listVault(HOST_PERSON_ID).map((item) => item.keychainKey)).toEqual([
-      `bond.cred.${HOST_PERSON_ID}.kanban`,
+      `nod.cred.${HOST_PERSON_ID}.kanban`,
     ]);
     expect(await vault.read(HOST_PERSON_ID, 'kanban')).toEqual({ username: 'ana', secret: 'kanban-secret' });
     // The history moved with the person, and nothing stayed under the old id.
@@ -1383,12 +1383,12 @@ describe('adopting a local account (F1)', () => {
     const s = scene({ biometricAvailable: true });
     const local = await firstAccount(s);
     await s.session.enableBiometric(PASSWORD);
-    expect(s.secrets.has(`bond.bio.${local}`)).toBe(true);
+    expect(s.secrets.has(`nod.bio.${local}`)).toBe(true);
 
     await adoptConnected(s, { email: EMAIL, adoptLocalId: local });
 
-    expect(s.secrets.has(`bond.bio.${local}`)).toBe(false);
-    expect(s.secrets.get(`bond.bio.${HOST_PERSON_ID}`)).toBe(HOST_PERSON_ID);
+    expect(s.secrets.has(`nod.bio.${local}`)).toBe(false);
+    expect(s.secrets.get(`nod.bio.${HOST_PERSON_ID}`)).toBe(HOST_PERSON_ID);
     // And it still opens this session, which is now the host person's.
     s.session.lock();
     expect((await s.session.unlockBiometric()).person?.id).toBe(HOST_PERSON_ID);
@@ -1409,22 +1409,22 @@ describe('adopting a local account (F1)', () => {
       toolId: 'kanban',
       label: 'kanban',
       username: 'ana',
-      keychainKey: `bond.cred.${gone.id}.kanban`,
+      keychainKey: `nod.cred.${gone.id}.kanban`,
       origin: 'https://kanban.example.test/app',
     });
-    await s.keychain.set(`bond.cred.${gone.id}.kanban`, 'kanban-value');
+    await s.keychain.set(`nod.cred.${gone.id}.kanban`, 'kanban-value');
     s.repo.revokePerson(gone.id);
 
     const state = await adoptConnected(s, { email: GUILD_EMAIL, adoptLocalId: gone.id });
 
     expect(state.person?.id).toBe(HOST_PERSON_ID);
     expect(s.repo.personById(HOST_PERSON_ID)).toMatchObject({ email: GUILD_EMAIL, name: 'Ana' });
-    expect(s.secrets.has(`bond.cred.${gone.id}.kanban`)).toBe(false);
-    expect(s.secrets.get(`bond.cred.${HOST_PERSON_ID}.kanban`)).toBe('kanban-value');
+    expect(s.secrets.has(`nod.cred.${gone.id}.kanban`)).toBe(false);
+    expect(s.secrets.get(`nod.cred.${HOST_PERSON_ID}.kanban`)).toBe('kanban-value');
     expect(s.repo.listVault(HOST_PERSON_ID)).toHaveLength(1);
   });
 
-  test('a host person this Bond already holds is refused, and nothing moved (F1)', async () => {
+  test('a host person this Nod already holds is refused, and nothing moved (F1)', async () => {
     const s = scene();
     const local = await firstAccount(s);
     const other = s.repo.createPerson({
@@ -1436,7 +1436,7 @@ describe('adopting a local account (F1)', () => {
 
     expect(
       await messageOf(() => adoptConnected(s, { email: EMAIL, adoptLocalId: local, personId: other.id })),
-    ).toBe('this Bond already holds an account of that guild person');
+    ).toBe('this Nod already holds an account of that guild person');
 
     // Both rows as they were: two people are not merged into one.
     expect(s.repo.personById(local)?.email).toBe(EMAIL);
@@ -1444,7 +1444,7 @@ describe('adopting a local account (F1)', () => {
     expect(s.session.current()?.id).toBe(local);
   });
 
-  test('an email of this Bond that nothing adopts is still refused as registered (F1)', async () => {
+  test('an email of this Nod that nothing adopts is still refused as registered (F1)', async () => {
     const s = scene();
     await firstAccount(s);
     s.session.lock();
@@ -1473,15 +1473,15 @@ describe('adopting a local account (F1)', () => {
       toolId: 'kanban',
       label: 'kanban',
       username: 'ana',
-      keychainKey: `bond.cred.${local}.kanban`,
+      keychainKey: `nod.cred.${local}.kanban`,
       origin: 'https://kanban.example.test/app',
     });
-    await s.keychain.set(`bond.cred.${local}.kanban`, 'kanban-value');
+    await s.keychain.set(`nod.cred.${local}.kanban`, 'kanban-value');
     const real = s.keychain;
     // The read goes through; the write of the new key is what a full keychain would refuse.
     const refusing: SecretStore = {
       get: (key) => real.get(key),
-      set: async (key, value) => (key === `bond.cred.${HOST_PERSON_ID}.kanban` ? false : real.set(key, value)),
+      set: async (key, value) => (key === `nod.cred.${HOST_PERSON_ID}.kanban` ? false : real.set(key, value)),
       delete: (key) => real.delete(key),
     };
     const session = createSession({
@@ -1511,10 +1511,10 @@ describe('adopting a local account (F1)', () => {
 
     // The report is what the person sees; the value itself is not lost — it is still under the key it
     // was written with, and the index row moved with the id.
-    expect(s.secrets.get(`bond.cred.${local}.kanban`)).toBe('kanban-value');
+    expect(s.secrets.get(`nod.cred.${local}.kanban`)).toBe('kanban-value');
     expect(s.repo.personById(local)).toBeNull();
     expect(s.repo.listVault(HOST_PERSON_ID).map((item) => item.keychainKey)).toEqual([
-      `bond.cred.${HOST_PERSON_ID}.kanban`,
+      `nod.cred.${HOST_PERSON_ID}.kanban`,
     ]);
   });
 });

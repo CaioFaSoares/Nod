@@ -1,52 +1,24 @@
 # Renaming Bond to Nod
 
 Decided by the owner on 2026-10-16: the project and the repository are **Nod** (GitHub
-`CaioFaSoares/Nod`, renamed on GitHub on 2026-10-16). This file records the decision and the plan for
-the parts of the rename that are still open. `docs/canonico.md` §22 carries the decision; documents
-written from that date name the project Nod.
+`CaioFaSoares/Nod`, renamed on GitHub on 2026-10-16). `docs/canonico.md` §22 carries the decision;
+documents written from that date name the project Nod.
 
-The old name still appears in identifiers on purpose. Identifiers come in three kinds, and they cost
-different amounts to change.
+## Status (2026-10-16)
 
-| Kind | Examples | Cost of changing |
-| --- | --- | --- |
-| **Cosmetic** | window title, UI text, docs, README, package `name`, release asset names | None: change at will |
-| **Wire contract** | `GET /.well-known/bond`, RPC names `bond.*`, host env `BOND_*`, `bond://` deep links | Host and app must change together; old invite links and deployed hosts break |
-| **Persisted on the person's machine** | the app id in `tinyjs.base.json`, keychain keys under `bond.*`, database `bond.db`, `store.json` keys | Without a migration, an update looks like a fresh install: account, catalog, vault and tool sessions are lost |
+The identifier rename **landed in 0.3.5 as a clean cutover**. Owner, 2026-10-16: "pode renomear, tem
+problema nao, limpa no 0.3.5". No data migration and no compatibility aliases.
 
-## What this rename changes
-
-Name only, in docs, the README and the repository: **Nod**. No identifier below the wire or on disk
-changes in this step. The naming surfaces (README, `CONTEXT.md`, `AGENTS.md`, `docs/canonico.md`,
-`docs/arquitetura.md`, the specs and the epics) now say Nod; the internal identifiers they quote stay
-exactly as they are.
-
-## What it deliberately does not change yet
-
-- The app id, the `bond.*` keychain keys and `bond.db`: changing them is a full rename with a
-  migration (below). Until then an installed app keeps its data and a deployed host keeps working.
-- `/.well-known/bond`, the `bond.*` RPC names, the `BOND_*` environment variables and `bond://`:
-  these are wire contracts between the app and the host.
-
-## Later, if the internal names are renamed (full rename with migration)
-
-1. **New identifiers.** App id (reverse-DNS under a domain the owner controls), `urlScheme` `nod`,
-   keychain prefixes `nod.*`, database `nod.db`, RPC prefix `nod.*`, discovery `/.well-known/nod`,
-   env `NOD_*`, package `name`.
-2. **Host compatibility window.** Serve both `/.well-known/bond` and `/.well-known/nod`; read `NOD_*`
-   first, then `BOND_*`, for one release. No permanent alias.
-3. **App migration on first run**, in `backend/main.ts`, before opening the database: copy the old
-   database (with its WAL files) and `store.json` when the new data dir is empty; rewrite each
-   `bond.cred.*` / `bond.bio.*` keychain item under the new prefix; record one migration event, with
-   no value in it. Whether the new id can read the old keychain items must be proved on macOS,
-   Windows and Linux first.
-4. **Tool sessions are lost** either way: the browser profile belongs to the old id.
-5. **Deep links**: invite links using `bond://` stop opening the app; re-issue them after the switch.
-6. **Smoke and tests**: the smoke app ids, `test/gen-config.test.ts` and the host tests that read
-   `BOND_*`.
-7. **Specs**: rename `docs/specs/SP05-bond-connected.md` and update every reference.
-
-## When
-
-The name (docs and repository) is done. The identifier rename waits for the owner; when it happens it
-is one commit, with `bun run typecheck`, `bun test test/ host/` and the smoke green afterwards.
+- The app id is `copland.nod`; with it changed are the `urlScheme` and the `nod://join` / `nod://open`
+  deep links, the `nod.*` RPC methods, the `NOD_*` environment variables, the `/.well-known/nod`
+  discovery path, the `Nod-Signature` header, the `nod.db` database and the keychain keys under
+  `nod.*` (`nod.cred.*`, `nod.host.*`, `nod.bio.*`, `nod.keys.*`).
+- An installed 0.3.0 **starts fresh**: the new app id, database file and keychain prefix mean the old
+  account, catalog, vault and tool sessions are not read. That is the accepted cost of the cutover.
+- The cryptographic protocol labels keep `bond` on purpose: the KDF/HKDF/seal domain-separation
+  labels and info strings (`bond/auth/v1`, `bond/vault/v1`, `bond/local/v1`, `bond/share/v1`) and
+  the algorithm name `BOND-KDF-V1`, with their pinned test vectors. Changing them would change every
+  derived key.
+- Old invite links using `bond://` no longer open the app; re-issue them after the switch.
+- Hosts must be **redeployed with `NOD_*` env**: the compose (env vars, the `nod-data` volume) and
+  the `/.well-known/nod` route are the new contract.

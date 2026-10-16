@@ -1,4 +1,4 @@
-// Settings of the main window: the single place to manage the Bond account and vault (every
+// Settings of the main window: the single place to manage the Nod account and vault (every
 // person) and the catalog, roles, people, activity and seed (admin). Contract:
 // docs/arquitetura.md §5; requirements: docs/canonico.md §9-§13. The page talks to the backend
 // only through src/api.ts; the only other runtime surface it touches is `tiny.dialog`, to choose
@@ -143,7 +143,7 @@ interface JoinDraft {
   /** the address was found and the account fields are on screen */
   discovered: boolean;
   /**
-   * F1: the local account of this Bond that holds the join's email, as the backend answered it —
+   * F1: the local account of this Nod that holds the join's email, as the backend answered it —
    * `null` while the flow has not collided with one. It is what puts the choice of which account
    * wins on screen, and the next submit carries the decision (`adoptLocal`).
    */
@@ -166,7 +166,7 @@ function isSetupCode(code: string): boolean {
 
 /** What the join screen starts with, per SP05 §4. */
 export interface JoinFlowOptions {
-  /** a prefilled address and fingerprint: a `bond://join` invite, or what an added host knows */
+  /** a prefilled address and fingerprint: a `nod://join` invite, or what an added host knows */
   prefill?: JoinInvite | null;
   /** the prefill is the host this machine already pinned, so another key is SP04 §1.4's refusal */
   pinned?: boolean;
@@ -224,7 +224,7 @@ export function mountJoinFlow(
   }
 
   function addressCard(): HTMLElement {
-    const address = input('address', { value: draft.address, placeholder: 'bond.example.com' });
+    const address = input('address', { value: draft.address, placeholder: 'nod.example.com' });
     address.addEventListener('input', () => {
       draft.address = address.value;
     });
@@ -259,7 +259,7 @@ export function mountJoinFlow(
   }
 
   /**
-   * F1: the choice SP05 §4's join asks for when a local account of this Bond already holds the
+   * F1: the choice SP05 §4's join asks for when a local account of this Nod already holds the
    * email the join is about. The backend answered it before any host call, so the code is whole; the
    * select decides what the next submit does — the guild account (the local one becomes it) or the
    * local one (the join is cancelled and nothing is sent).
@@ -281,9 +281,9 @@ export function mountJoinFlow(
       el(
         'p',
         {},
-        `This Bond already has the account ${draft.collision === null ? '' : draft.collision.email} ` +
+        `This Nod already has the account ${draft.collision === null ? '' : draft.collision.email} ` +
           `${draft.collision === null || draft.collision.name === '' ? '' : `(${draft.collision.name}) `}` +
-          'saved on this machine. Which account should Bond use?',
+          'saved on this machine. Which account should Nod use?',
       ),
       field('Account', select),
       el(
@@ -361,7 +361,7 @@ export function mountJoinFlow(
       el(
         'p',
         { class: 'muted' },
-        'Bond derives the keys on this machine; the password itself never reaches the host.',
+        'Nod derives the keys on this machine; the password itself never reaches the host.',
       ),
       el('div', { class: 'row' }, button(joinLabel, () => void submit(), { kind: 'primary' })),
     );
@@ -463,7 +463,7 @@ export function mountJoinFlow(
             ...adoptLocal,
           });
       if (answer.kind !== 'session') {
-        // F1: the backend answered the choice — a local account of this Bond holds the email and
+        // F1: the backend answered the choice — a local account of this Nod holds the email and
         // nothing was sent, so the code is whole. The password goes (the fields are rebuilt), the
         // code and the address stay.
         draft.collision = answer;
@@ -511,7 +511,7 @@ export function mountSettings(
     tab?: SettingsTab;
     /** SP05 §3: the last host state the page knows, before this tab reads one of its own */
     host?: HostState | null;
-    /** SP04 §1.3: the invite a `bond://join` link carried, for the Hosts tab to prefill */
+    /** SP04 §1.3: the invite a `nod://join` link carried, for the Hosts tab to prefill */
     join?: JoinInvite | null;
   },
 ): {
@@ -584,7 +584,7 @@ export function mountSettings(
     host: ctx.host ?? null,
     /** SP04 §5: sent vs pending of the Activity tab, read while a host is known; null without one. */
     eventSync: null as EventSyncStatus | null,
-    /** SP04 §1.3: the invite a `bond://join` link carried, spent by the join flow on mount. */
+    /** SP04 §1.3: the invite a `nod://join` link carried, spent by the join flow on mount. */
     join: ctx.join ?? null,
   };
 
@@ -867,7 +867,7 @@ export function mountSettings(
         el(
           'p',
           { class: 'message message-info' },
-          `Offline — Bond is showing the cached guild${host.lastError === null ? '' : ` (${host.lastError})`}.`,
+          `Offline — Nod is showing the cached guild${host.lastError === null ? '' : ` (${host.lastError})`}.`,
         ),
       );
     } else if (host.lastError !== null) {
@@ -891,7 +891,7 @@ export function mountSettings(
       el(
         'p',
         { class: 'muted' },
-        `Bond goes back to its local catalog and stops showing anything from ${host.guild ?? 'the guild'}.`,
+        `Nod goes back to its local catalog and stops showing anything from ${host.guild ?? 'the guild'}.`,
       ),
       checkboxField('Keep my personal tools', keep),
       el(
@@ -953,7 +953,7 @@ export function mountSettings(
       el(
         'p',
         { class: 'muted' },
-        `This guild has no org tool yet. Bond can publish the tools and roles of this machine to ${host.guild ?? 'it'} — once; from then on the guild catalog belongs to the host.`,
+        `This guild has no org tool yet. Nod can publish the tools and roles of this machine to ${host.guild ?? 'it'} — once; from then on the guild catalog belongs to the host.`,
       ),
       el(
         'div',
@@ -975,7 +975,7 @@ export function mountSettings(
         el(
           'p',
           { class: 'muted' },
-          'This Bond is not connected to a guild. Join one with the address and the fingerprint your admin gave you.',
+          'This Nod is not connected to a guild. Join one with the address and the fingerprint your admin gave you.',
         ),
         joinSection('join'),
       );
@@ -1095,7 +1095,7 @@ export function mountSettings(
       el(
         'p',
         { class: 'muted' },
-        `Bond ${state.info.version} · seed ${state.info.seedVersion ?? 'none'} · ${state.info.os}`,
+        `Nod ${state.info.version} · seed ${state.info.seedVersion ?? 'none'} · ${state.info.os}`,
       ),
       el(
         'div',
@@ -1126,7 +1126,7 @@ export function mountSettings(
     }
 
     if (!state.info.tray) {
-      card.append(el('p', { class: 'muted' }, 'Closing the window quits Bond on this system.'));
+      card.append(el('p', { class: 'muted' }, 'Closing the window quits Nod on this system.'));
     }
     return card;
   }
@@ -1194,7 +1194,7 @@ export function mountSettings(
     state.status = { kind: 'info', text: 'Checking for updates…' };
     render();
     try {
-      state.update = await call('bond.checkUpdate');
+      state.update = await call('nod.checkUpdate');
       state.status = null;
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
@@ -1206,7 +1206,7 @@ export function mountSettings(
     state.status = { kind: 'info', text: 'Installing the update…' };
     render();
     try {
-      await call('bond.installUpdate');
+      await call('nod.installUpdate');
       state.status = { kind: 'ok', text: 'Update installed' };
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
@@ -1423,7 +1423,7 @@ export function mountSettings(
       return;
     }
     try {
-      const path = await tiny.dialog.saveFile({ types: ['bondvault'], name: 'bond-vault.bondvault' });
+      const path = await tiny.dialog.saveFile({ types: ['nodvault'], name: 'nod-vault.nodvault' });
       if (path === null) {
         render();
         return;
@@ -1444,7 +1444,7 @@ export function mountSettings(
       return;
     }
     try {
-      const path = await tiny.dialog.openFile({ types: ['bondvault'] });
+      const path = await tiny.dialog.openFile({ types: ['nodvault'] });
       if (path === null) {
         render();
         return;
@@ -2085,7 +2085,7 @@ export function mountSettings(
       el(
         'p',
         { class: 'muted' },
-        'Bond creates the person on the host and answers one access code. Hand it over now: the host will not show it again.',
+        'Nod creates the person on the host and answers one access code. Hand it over now: the host will not show it again.',
       ),
       el('div', { class: 'row' }, field('Email', email), field('Name', name)),
       roleCheckboxes(
@@ -2261,7 +2261,7 @@ export function mountSettings(
   // ---------------------------------------------------------------- tab: activity
 
   /**
-   * Whether the Bond knows a host at all. `host.state` answers `none` rather than `null` for a Bond
+   * Whether the Nod knows a host at all. `host.state` answers `none` rather than `null` for a Nod
    * that was never connected — and `host.remove` leaves the same shape — so the absence of a host is
    * this status, not a missing object (SP05 §3).
    */
@@ -2382,7 +2382,7 @@ export function mountSettings(
   async function exportEvents(): Promise<void> {
     state.status = null;
     try {
-      const path = await tiny.dialog.saveFile({ types: ['jsonl'], name: 'bond-activity.jsonl' });
+      const path = await tiny.dialog.saveFile({ types: ['jsonl'], name: 'nod-activity.jsonl' });
       if (path === null) {
         render();
         return;
@@ -2464,7 +2464,7 @@ export function mountSettings(
       state.entries = await call('catalog.list');
       state.roles = await call('roles.list');
       // The seed version shown by the Account tab is a property of the backend, not of the mount.
-      state.info = await call('bond.info');
+      state.info = await call('nod.info');
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
     }

@@ -6,7 +6,7 @@
 //
 // What runs here, all on loopback and with no external network:
 //
-//   - the real host (`bun host/main.ts`) on a free port, over a temp data dir, with `BOND_DEV=1`;
+//   - the real host (`bun host/main.ts`) on a free port, over a temp data dir, with `NOD_DEV=1`;
 //   - the setup code of that host (`bun host/cli/setup-code.ts`, the same environment) — held in
 //     memory, never printed, never written to a file;
 //   - the local fake tools of `test/smoke/tools.ts` (the stand-ins for the internal tools);
@@ -51,8 +51,8 @@ import type { Tools } from './tools';
 import { startTools } from './tools';
 
 /** The two app ids of the smoke: the real installation is never touched. */
-const ADMIN_APP_ID = 'studio.copland.bond.smoke-admin';
-const PERSON_APP_ID = 'studio.copland.bond.smoke-person';
+const ADMIN_APP_ID = 'copland.nod.smoke-admin';
+const PERSON_APP_ID = 'copland.nod.smoke-person';
 
 /** One dev port per instance: neither is 5173, which a developer's `bun run app:dev` takes. */
 const ADMIN_DEV_PORT = 5199;
@@ -62,7 +62,7 @@ const PERSON_DEV_PORT = 5200;
 const ADMIN_EMAIL = 'admin@smoke.test';
 const PERSON_EMAIL = 'person@smoke.test';
 
-/** The guild name the host is booted with (`BOND_GUILD_NAME`), asserted by both pages. */
+/** The guild name the host is booted with (`NOD_GUILD_NAME`), asserted by both pages. */
 const GUILD_NAME = 'Smoke Guild';
 
 const ROOT = join(import.meta.dir, '..', '..');
@@ -240,10 +240,10 @@ function resolveMethods(): Methods {
 /** `bun scripts/gen-config.ts dev`, with the smoke id and dev port; the last call drops both. */
 function runGenConfig(appId: string | null, devPort: number | null): { code: number; output: string } {
   const env: Record<string, string | undefined> = { ...process.env };
-  if (appId !== null) env.BOND_APP_ID = appId;
-  else delete env.BOND_APP_ID;
-  if (devPort !== null) env.BOND_DEV_PORT = String(devPort);
-  else delete env.BOND_DEV_PORT;
+  if (appId !== null) env.NOD_APP_ID = appId;
+  else delete env.NOD_APP_ID;
+  if (devPort !== null) env.NOD_DEV_PORT = String(devPort);
+  else delete env.NOD_DEV_PORT;
   const result = Bun.spawnSync(['bun', 'scripts/gen-config.ts', 'dev'], {
     cwd: ROOT,
     env,
@@ -385,8 +385,8 @@ async function runPhase(
     env: {
       ...process.env,
       TINYJS_HTML: page,
-      BOND_APP_ID: phase.appId,
-      BOND_DEV_PORT: String(phase.devPort),
+      NOD_APP_ID: phase.appId,
+      NOD_DEV_PORT: String(phase.devPort),
     },
   });
   let output = '';
@@ -448,10 +448,10 @@ function hostControl(dataDirPath: string): HostControl {
   const port = freePort();
   const env: Record<string, string | undefined> = {
     ...process.env,
-    BOND_DATA: dataDirPath,
-    BOND_DEV: '1',
-    BOND_PUBLIC_URL: `http://127.0.0.1:${port}`,
-    BOND_GUILD_NAME: GUILD_NAME,
+    NOD_DATA: dataDirPath,
+    NOD_DEV: '1',
+    NOD_PUBLIC_URL: `http://127.0.0.1:${port}`,
+    NOD_GUILD_NAME: GUILD_NAME,
     PORT: String(port),
   };
   let child: ChildProcess | null = null;
@@ -647,7 +647,7 @@ function hostRows(personEmail: string): HostRows {
   }
 }
 
-// ------------------------------------------------------------- the admin Bond's own rows
+// ------------------------------------------------------------- the admin Nod's own rows
 
 /** The id the host holds for an email; `null` when the host has no such person. */
 function hostPersonId(email: string): string | null {
@@ -663,7 +663,7 @@ function hostPersonId(email: string): string | null {
 }
 
 /**
- * The admin Bond's vault row after the run — read before `clean()` wipes the app data dir. It is F1's
+ * The admin Nod's vault row after the run — read before `clean()` wipes the app data dir. It is F1's
  * proof on the real surface: the credential saved **before** the join belongs to the guild person
  * the local account became, and its keychain key was renamed with it (the keychain itself is the
  * OS's; the page's own `vault.reveal` is what proves the value opens under the new key).
@@ -675,7 +675,7 @@ interface AdminVault {
 }
 
 function adminVault(): AdminVault {
-  const file = join(dataDir(ADMIN_APP_ID), 'bond.db');
+  const file = join(dataDir(ADMIN_APP_ID), 'nod.db');
   if (!existsSync(file)) return { lines: ["the admin's database is missing"], personId: null, keychainKey: null };
   const db = new Database(file, { readonly: true });
   try {
@@ -716,7 +716,7 @@ interface PersonVault {
 }
 
 function personVault(expectedOrigin: string): PersonVault {
-  const file = join(dataDir(PERSON_APP_ID), 'bond.db');
+  const file = join(dataDir(PERSON_APP_ID), 'nod.db');
   if (!existsSync(file))
     return { lines: ["P's database is missing"], origin: null, localRows: -1 };
   const db = new Database(file, { readonly: true });
@@ -904,12 +904,12 @@ async function main(): Promise<number> {
       failed = true;
     }
 
-    // F1: the admin Bond had a local account with the guild's email and a credential saved before
+    // F1: the admin Nod had a local account with the guild's email and a credential saved before
     // the join. The join adopted it, so the vault row has to carry the guild's person id and the
     // keychain key of that id — the page's own reveal (step 2.4c) is what proves the value moved.
     const guildPerson = hostPersonId(ADMIN_EMAIL);
     const adopted = adminVault();
-    console.log("\nthe admin Bond's vault row after the adopt (F1):");
+    console.log("\nthe admin Nod's vault row after the adopt (F1):");
     for (const line of adopted.lines) console.log(`  ${line}`);
     if (guildPerson === null) {
       console.error('the host holds no person for the smoke admin');
@@ -922,10 +922,10 @@ async function main(): Promise<number> {
         );
         failed = true;
       }
-      if (adopted.keychainKey !== `bond.cred.${guildPerson}.${TOOL_A_ID}`) {
+      if (adopted.keychainKey !== `nod.cred.${guildPerson}.${TOOL_A_ID}`) {
         console.error(
           `the keychain key of ${TOOL_A_ID} is ${JSON.stringify(adopted.keychainKey)}, ` +
-            `expected bond.cred.${guildPerson}.${TOOL_A_ID}`,
+            `expected nod.cred.${guildPerson}.${TOOL_A_ID}`,
         );
         failed = true;
       }

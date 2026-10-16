@@ -19,11 +19,13 @@ system's native webview.
 ## Name
 
 The project and this repository are **Nod** (GitHub `CaioFaSoares/Nod`, renamed from `Bond` on
-2026-10-16). Documents written from that date name it Nod. Some internal identifiers still carry the
-old name on purpose — the app id, the keychain keys under `bond.*`, the `BOND_*` environment
-variables, `bond://` links, the database file and the `/.well-known/bond` discovery path — because
-changing them would lose data or break already-installed apps and deployed hosts. The rename
-decision and plan are in `docs/canonico.md` §22 and `docs/rename-nod.md`.
+2026-10-16). Documents written from that date name it Nod, and the internal identifiers were renamed
+with them, as a clean cutover in release 0.3.5: the app id is `copland.nod`, and the keychain keys,
+the environment variables, the deep links, the database file and the discovery path all use `nod`.
+There is no migration and no compatibility alias — an install of 0.3.0 becomes a fresh install. Only
+the cryptographic protocol labels stay as they were, on purpose, because changing them would change
+every derived key. The rename decision and plan are in `docs/canonico.md` §22 and
+`docs/rename-nod.md`.
 
 ## Features
 

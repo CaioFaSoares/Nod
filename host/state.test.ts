@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createHostClient, fingerprintOf as bondFingerprintOf } from '../backend/host-client';
+import { createHostClient, fingerprintOf as nodFingerprintOf } from '../backend/host-client';
 import { fromBase64url, sha256Hex, toBase64url } from '../shared/encoding';
 import {
   HOST_ROUTES,
@@ -38,10 +38,10 @@ import { fingerprintOf, publicKeyOf, serializeSnapshot, snapshotVersion } from '
 /** SP07 §2's deployment value the discovery reads; any guild name would do. */
 const GUILD = 'Testguild';
 const MIN_APP_VERSION = '0.4.0';
-const DEVICE: Device = { name: 'bond-test', os: 'macos', appVersion: MIN_APP_VERSION };
+const DEVICE: Device = { name: 'nod-test', os: 'macos', appVersion: MIN_APP_VERSION };
 const NOW = new Date().toISOString();
 
-/** SP03 §2's personal tool id: the Bond generates them, and the repo stores what it is given. */
+/** SP03 §2's personal tool id: the Nod generates them, and the repo stores what it is given. */
 const BOB_TOOL = 'p-bobnotes01';
 const CARA_TOOL = 'p-caranotes01';
 
@@ -61,11 +61,11 @@ const hosts: TestHost[] = [];
 const dirs: string[] = [];
 
 async function startHost(): Promise<TestHost> {
-  const dir = mkdtempSync(join(tmpdir(), 'bond-state-'));
+  const dir = mkdtempSync(join(tmpdir(), 'nod-state-'));
   dirs.push(dir);
   const config: HostConfig = {
     dataDir: dir,
-    publicUrl: 'https://bond.example',
+    publicUrl: 'https://nod.example',
     port: DEFAULT_PORT,
     dev: false,
   };
@@ -111,7 +111,7 @@ afterEach(() => {
 // ---------------------------------------------------------------- requests
 
 function url(path: string): string {
-  return `http://bond.test${path}`;
+  return `http://nod.test${path}`;
 }
 
 async function get(
@@ -150,7 +150,7 @@ async function stateSnapshot(host: TestHost, token: string): Promise<Snapshot> {
 /** SP04 §2's header, exactly as `backend/host-client.ts` reads it. */
 function parseSignature(header: string | null): { kid: string; sig: string } {
   const match = /^kid=([^;]+); sig=([A-Za-z0-9_-]+)$/.exec(header ?? '');
-  if (match === null) throw new Error('the state answer carries no Bond-Signature');
+  if (match === null) throw new Error('the state answer carries no Nod-Signature');
   return { kid: match[1] as string, sig: match[2] as string };
 }
 
@@ -196,15 +196,15 @@ function seedGuild(host: TestHost) {
 
   return {
     ada: repo.createPerson(
-      { id: crypto.randomUUID(), email: 'ada@bond.test', name: 'Ada', roles: ['admin'] },
+      { id: crypto.randomUUID(), email: 'ada@nod.test', name: 'Ada', roles: ['admin'] },
       NOW,
     ),
     bob: repo.createPerson(
-      { id: crypto.randomUUID(), email: 'bob@bond.test', name: 'Bob', roles: ['team'] },
+      { id: crypto.randomUUID(), email: 'bob@nod.test', name: 'Bob', roles: ['team'] },
       NOW,
     ),
     cara: repo.createPerson(
-      { id: crypto.randomUUID(), email: 'cara@bond.test', name: 'Cara', roles: ['other'] },
+      { id: crypto.randomUUID(), email: 'cara@nod.test', name: 'Cara', roles: ['other'] },
       NOW,
     ),
   };
@@ -276,7 +276,7 @@ const toolIds = (snapshot: Snapshot): string[] => snapshot.orgTools.map((entry) 
 
 // ---------------------------------------------------------------- discovery (SP04 §1)
 
-describe('GET /.well-known/bond (SP04 §1)', () => {
+describe('GET /.well-known/nod (SP04 §1)', () => {
   test('answers the guild, the pinned key, the fingerprint and the minimum app version', async () => {
     const host = await startHost();
     process.env[MIN_APP_VERSION_ENV] = MIN_APP_VERSION;
@@ -296,15 +296,15 @@ describe('GET /.well-known/bond (SP04 §1)', () => {
     }
   });
 
-  test('the fingerprint is the Bond’s own fingerprintOf for the same key', async () => {
+  test('the fingerprint is the Nod’s own fingerprintOf for the same key', async () => {
     const host = await startHost();
     const document = await discovery(host);
     const raw = fromBase64url(document.key.ed25519Public);
     // SP04 §1.1's shape: 16 Crockford characters in four groups (`U`, `I`, `L` and `O` are not in it).
     expect(document.fingerprint).toMatch(/^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$/);
     // The host's copy and `backend/host-client.ts`'s must answer one string for one key.
-    expect(await fingerprintOf(raw)).toBe(await bondFingerprintOf(raw));
-    expect(document.fingerprint).toBe(await bondFingerprintOf(raw));
+    expect(await fingerprintOf(raw)).toBe(await nodFingerprintOf(raw));
+    expect(document.fingerprint).toBe(await nodFingerprintOf(raw));
   });
 
   test('applies the SP07 §2 default when the deployment sets no minimum version', async () => {
@@ -418,7 +418,7 @@ describe('GET /v1/state (SP04 §2)', () => {
     expect(toolIds(bobSnapshot)).toEqual(['jitsi']);
     expect(bobSnapshot.me).toEqual({
       id: bob.id,
-      email: 'bob@bond.test',
+      email: 'bob@nod.test',
       name: 'Bob',
       roles: ['team'],
       admin: false,
@@ -502,7 +502,7 @@ describe('GET /v1/state (SP04 §2)', () => {
 
 // ---------------------------------------------------------------- the two sides together (SP04 §1–§2)
 
-describe('the Bond side against the real app (SP04 §1–§2)', () => {
+describe('the Nod side against the real app (SP04 §1–§2)', () => {
   test('discovers, pins, verifies the signature and 304s on the version it accepted', async () => {
     const host = await startHost();
     const { bob } = seedGuild(host);
@@ -516,7 +516,7 @@ describe('the Bond side against the real app (SP04 §1–§2)', () => {
     });
     try {
       const client = createHostClient({ fetch, keychain: memoryKeychain() });
-      // SP04 §1: the Bond recomputes the fingerprint and refuses a document that disagrees with it.
+      // SP04 §1: the Nod recomputes the fingerprint and refuses a document that disagrees with it.
       const found = await client.discover(`http://127.0.0.1:${server.port}`);
       expect(found.document.guild).toBe(GUILD);
       expect(found.fingerprint).toBe(found.document.fingerprint);
@@ -532,12 +532,12 @@ describe('the Bond side against the real app (SP04 §1–§2)', () => {
 
       // SP04 §2: the client verifies the signature over the bytes as received, then parses them.
       const first = await connection.snapshot();
-      if (first.notModified) throw new Error('the Bond had never seen this state');
-      expect(first.snapshot.me.email).toBe('bob@bond.test');
+      if (first.notModified) throw new Error('the Nod had never seen this state');
+      expect(first.snapshot.me.email).toBe('bob@nod.test');
       expect(first.snapshot.favorites).toEqual(['jitsi']);
       expect(first.snapshot.personalTools.map((entry) => entry.id)).toEqual([BOB_TOOL]);
 
-      // The version the Bond accepted is the one the host answers `304` for.
+      // The version the Nod accepted is the one the host answers `304` for.
       expect(await connection.snapshot({ version: first.snapshot.version })).toEqual({
         notModified: true,
       });

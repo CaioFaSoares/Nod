@@ -90,7 +90,7 @@ export function createApp(deps: AppDeps) {
       if (error instanceof NotFound) return status(404, { error: 'not found' });
       // Never the message: an unexpected error may carry a value from the request (SP03 §1), and no
       // request body is ever logged (host/context.md). The path alone is enough to find it.
-      console.error(`bond host: unexpected error on ${request.method} ${new URL(request.url).pathname}`);
+      console.error(`nod host: unexpected error on ${request.method} ${new URL(request.url).pathname}`);
       return status(500, { error: 'internal error' });
     })
 

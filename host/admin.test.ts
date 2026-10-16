@@ -27,9 +27,9 @@ import { DEFAULT_PORT, type HostConfig } from './config';
 import { bootHost, type Host } from './main';
 import { createRepo, type Repo } from './repo';
 
-const DEVICE: Device = { name: 'bond-admin-test', os: 'macos', appVersion: '0.3.0' };
-const ADMIN_EMAIL = 'ada@bond.test';
-const MEMBER_EMAIL = 'bob@bond.test';
+const DEVICE: Device = { name: 'nod-admin-test', os: 'macos', appVersion: '0.3.0' };
+const ADMIN_EMAIL = 'ada@nod.test';
+const MEMBER_EMAIL = 'bob@nod.test';
 const PERSONAL_ID = 'p-abc1234567';
 const HOUR_MS = 3_600_000;
 
@@ -49,11 +49,11 @@ const hosts: TestHost[] = [];
 const dirs: string[] = [];
 
 async function startHost(): Promise<TestHost> {
-  const dir = mkdtempSync(join(tmpdir(), 'bond-admin-'));
+  const dir = mkdtempSync(join(tmpdir(), 'nod-admin-'));
   dirs.push(dir);
   const config: HostConfig = {
     dataDir: dir,
-    publicUrl: 'https://bond.example',
+    publicUrl: 'https://nod.example',
     port: DEFAULT_PORT,
     dev: false,
   };
@@ -84,7 +84,7 @@ function call(
   token: string | null = null,
 ): Promise<Response> {
   return host.app.handle(
-    new Request(`http://bond.test${path}`, {
+    new Request(`http://nod.test${path}`, {
       method,
       headers: {
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
@@ -293,7 +293,7 @@ describe('people', () => {
     const unknownRole = await post(
       host,
       HOST_ROUTES.adminPeople,
-      { email: 'carol@bond.test', name: 'Carol', roles: ['ghost'] },
+      { email: 'carol@nod.test', name: 'Carol', roles: ['ghost'] },
       admin.token,
     );
     expect(unknownRole.status).toBe(404);
@@ -619,7 +619,7 @@ describe('org tools', () => {
           { label: 'Meet', url: 'https://jitsi.example.test/meet', mode: 'window' },
           { id: crypto.randomUUID(), label: 'Rooms', url: 'https://jitsi.example.test/rooms', mode: 'navigate' },
         ],
-        // SP04 §4: an org write has no `updatedAt` of the Bond's, so one sent is not the host's.
+        // SP04 §4: an org write has no `updatedAt` of the Nod's, so one sent is not the host's.
         updatedAt: '2000-01-01T00:00:00.000Z',
       }),
       admin.token,
@@ -875,7 +875,7 @@ describe('access, validation and logs', () => {
       ['GET /v1/admin/people', (token) => get(host, HOST_ROUTES.adminPeople, token)],
       [
         'POST /v1/admin/people',
-        (token) => post(host, HOST_ROUTES.adminPeople, { email: 'zed@bond.test', name: 'Zed', roles: [] }, token),
+        (token) => post(host, HOST_ROUTES.adminPeople, { email: 'zed@nod.test', name: 'Zed', roles: [] }, token),
       ],
       [
         'PATCH /v1/admin/people/:id',

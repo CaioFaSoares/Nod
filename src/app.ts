@@ -1,4 +1,4 @@
-// The Bond main window: boot, locked screen, sidebar, Home and Settings routing
+// The Nod main window: boot, locked screen, sidebar, Home and Settings routing
 // (docs/arquitetura.md §5, canonico §7).
 // The page talks to the backend only through `./api`, and only with methods of `ApiContract`.
 // No password or invite code ever leaves this module except as the parameter of `call(...)`:
@@ -27,7 +27,7 @@ type View = 'home' | SettingsTab;
 /** English text of each cascade result (canonico §8, §11). */
 const LOGIN_TEXT: Record<LoginResult, string> = {
   session: 'Signed in with session',
-  filled: 'Signed in by Bond',
+  filled: 'Signed in by Nod',
   provider: 'Signed in via provider',
   manual: 'Sign in manually',
   failed: 'Sign-in failed',
@@ -60,7 +60,7 @@ const root: HTMLElement = requireRoot();
 
 /** Last known session: the answer of `session.state` or the push `session`. */
 let session: SessionState | null = null;
-/** Answer of `bond.info`; Settings needs it. */
+/** Answer of `nod.info`; Settings needs it. */
 let info: AppInfo | null = null;
 /** Answer of `tools.state` or the push `tools`. */
 let tools: ToolStatus[] = [];
@@ -72,7 +72,7 @@ let update: UpdateInfo | null = null;
 let host: HostState | null = null;
 /** SP05 §4: the first-run screen is on "Join a guild" instead of create/invite. */
 let joiningGuild = false;
-/** SP04 §1.3: the invite a `bond://join` link carried, until the join flow spends it. */
+/** SP04 §1.3: the invite a `nod://join` link carried, until the join flow spends it. */
 let joinInvite: JoinInvite | null = null;
 /** Handle of the join flow on the locked screen, so a second link re-aims it. */
 let lockedJoin: { setPrefill(invite: JoinInvite | null): void } | null = null;
@@ -131,7 +131,7 @@ function renderLocked(): void {
 /**
  * SP05 §4's third path of the first-run screen: "Join a guild". The host flow of `host.activate`
  * and `host.signIn` needs no local session, so this screen replaces the create/invite pair before
- * a person exists; a deep link (`bond://join`) lands here with the invite already filled in.
+ * a person exists; a deep link (`nod://join`) lands here with the invite already filled in.
  */
 function renderJoin(card: HTMLElement): void {
   authHeader(card, 'Join a guild', 'The address and the fingerprint your admin gave you.');
@@ -205,7 +205,7 @@ function renderUnlock(card: HTMLElement, state: SessionState): void {
     button('Join a guild', () => {
       joiningGuild = true;
       render();
-    }, { kind: 'ghost', title: 'Connect this Bond to a guild host' }),
+    }, { kind: 'ghost', title: 'Connect this Nod to a guild host' }),
   );
 
   if (state.waitMs > 0) armWait(state.waitMs, submit, wait);
@@ -270,7 +270,7 @@ function renderCreateAccount(card: HTMLElement, state: SessionState): void {
     button('Join a guild', () => {
       joiningGuild = true;
       render();
-    }, { kind: 'ghost', title: 'Connect this Bond to a guild host' }),
+    }, { kind: 'ghost', title: 'Connect this Nod to a guild host' }),
   );
 }
 
@@ -379,7 +379,7 @@ async function waitFromState(): Promise<number> {
 // ------------------------------------------------------------ unlocked shell
 
 function buildShell(): void {
-  const sidebar = el('aside', { class: 'sidebar', aria: { label: 'Bond' } });
+  const sidebar = el('aside', { class: 'sidebar', aria: { label: 'Nod' } });
   const notice = el('div', { class: 'notice-slot' });
   const banner = el('div', { class: 'banner' });
   const content = el('div', { class: 'content' });
@@ -409,7 +409,7 @@ function renderSidebar(): void {
           'span',
           {
             class: 'badge badge-offline',
-            title: `Offline — Bond is showing the cached guild${host.lastError === null ? '' : ` (${host.lastError})`}`,
+            title: `Offline — Nod is showing the cached guild${host.lastError === null ? '' : ` (${host.lastError})`}`,
           },
           'offline',
         )
@@ -614,7 +614,7 @@ function renderHostNotice(slot: HTMLElement): void {
     el(
       'div',
       { class: 'notice notice-warn', role: 'status' },
-      el('p', { class: 'notice-text' }, `${state.guild ?? 'The guild'} signed this Bond out`),
+      el('p', { class: 'notice-text' }, `${state.guild ?? 'The guild'} signed this Nod out`),
       el(
         'div',
         { class: 'notice-actions' },
@@ -633,7 +633,7 @@ function renderHostNotice(slot: HTMLElement): void {
 /**
  * RF-55: the newer release the backend found on its own, on top of the main window — the person
  * does not open Settings to learn about it. Installing stays a decision (A13): the button exists
- * only for an admin, who is the one `bond.installUpdate` accepts.
+ * only for an admin, who is the one `nod.installUpdate` accepts.
  */
 function renderUpdateNotice(slot: HTMLElement): void {
   const notice = update;
@@ -688,7 +688,7 @@ async function installUpdateNow(): Promise<void> {
   if (target === null) return;
   message(target.banner, 'info', 'Installing the update…');
   try {
-    await call('bond.installUpdate');
+    await call('nod.installUpdate');
   } catch (e) {
     showBanner(e);
     return;
@@ -699,7 +699,7 @@ async function installUpdateNow(): Promise<void> {
 /** RF-55: the dismissal is per version, and the backend keeps it in the machine's preferences. */
 async function dismissNotice(version: string): Promise<void> {
   try {
-    await call('bond.dismissUpdate', { version });
+    await call('nod.dismissUpdate', { version });
   } catch (e) {
     showBanner(e);
     return;
@@ -813,7 +813,7 @@ function render(): void {
 
 async function boot(): Promise<void> {
   try {
-    const [state, appInfo] = await Promise.all([call('session.state'), call('bond.info')]);
+    const [state, appInfo] = await Promise.all([call('session.state'), call('nod.info')]);
     session = state;
     info = appInfo;
   } catch (e) {
@@ -886,8 +886,8 @@ on('host', (next) => {
 });
 
 /**
- * SP04 §1.3: a `bond://join` link. Unlocked, it opens Settings → Hosts with the invite prefilled;
- * locked, it opens the join screen — a Bond with no account at all is the usual case.
+ * SP04 §1.3: a `nod://join` link. Unlocked, it opens Settings → Hosts with the invite prefilled;
+ * locked, it opens the join screen — a Nod with no account at all is the usual case.
  */
 on('join', (invite) => {
   if (invite === null) return;

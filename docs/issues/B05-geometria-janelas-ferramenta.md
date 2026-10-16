@@ -1,6 +1,6 @@
 ---
 id: B05
-frente: bond
+frente: nod
 titulo: janelas de ferramenta abrem com o tamanho e a posição da janela principal
 status: aberta
 tipo: bug
@@ -14,8 +14,8 @@ aberta_em: 2026-10-16
 da janela `main`, em cascata (+28 px), aplicando `setPosition`/`setSize` no handle logo depois do
 `win.open`.
 
-Observado por execução (2026-10-16, instância de captura com `studio.copland.bond.ui`, bounds lidos
-por `CGWindowListCopyWindowInfo`): `Bond`, `Kanban` e `Affine` com bounds idênticos —
+Observado por execução (2026-10-16, instância de captura com `copland.nod.ui`, bounds lidos
+por `CGWindowListCopyWindowInfo`): `Nod`, `Kanban` e `Affine` com bounds idênticos —
 `X 4853, Y -1350, 1235×1312` (segunda tela). As ferramentas funcionam, mas abrem exatamente por cima
 da janela principal.
 

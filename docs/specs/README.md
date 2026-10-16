@@ -11,7 +11,7 @@ wins on intent, and the spec is fixed.
 | `SP02-auth-and-keys.md` | Password → keys, access and setup codes, sessions, local verifier, vault encryption | H3, H4, B3, V1, O1 |
 | `SP03-host-api.md` | Every host route: auth, request, response, errors | H4–H8, O1, O2, K3 |
 | `SP04-sync.md` | Discovery, key pinning, signed snapshot, outbox, events | H6, H8, B1, B4, B5, B7, B10 |
-| `SP05-bond-connected.md` | Nod side: new RPC methods, local tables, modules, screens, migrations | B1–B11, H7/B7, V1, O1 |
+| `SP05-nod-connected.md` | Nod side: new RPC methods, local tables, modules, screens, migrations | B1–B11, H7/B7, V1, O1 |
 | `SP06-credential-sharing.md` | Key pairs, seal and signature format, scope, holders, assign | S0, K1–K10 |
 | `SP07-host-deployment.md` | Container, compose, env, setup-code command, backup and restore | H1, H9 |
 

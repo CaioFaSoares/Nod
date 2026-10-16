@@ -80,7 +80,7 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
 - **Personal tools** live in the snapshot plus the outbox overlay. In local mode they are `tool`
   rows with `scope = 'personal'`.
 - The local `person` row for a connected account is created at activation with the host person id
-  as its id. Keychain keys `bond.cred.<person>.<tool>` therefore stay stable across machines and
+  as its id. Keychain keys `nod.cred.<person>.<tool>` therefore stay stable across machines and
   sync (`docs/canonico.md` §11).
 
 ## 3. RPC additions (`ApiContract`)
@@ -125,7 +125,7 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
 
 ## 5. Acceptance (block 1 smoke, B11)
 
-On two machines, or two app ids on one machine (`BOND_APP_ID`, as `test/smoke/run.ts` already does):
+On two machines, or two app ids on one machine (`NOD_APP_ID`, as `test/smoke/run.ts` already does):
 
 1. Without a host, the existing smoke passes unchanged.
 2. Admin: Add host with the setup code; publish local tools (B8a); create person P with role

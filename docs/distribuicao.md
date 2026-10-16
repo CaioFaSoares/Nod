@@ -109,10 +109,10 @@ dados falsos.
 
    | Target | Runner | Output |
    | --- | --- | --- |
-   | macOS | `macos-15` | `bond-<v>-macos-arm64.zip` and `bond-<v>-macos-x86_64.zip` (`publish --arch` twice) |
-   | Linux x86_64 | `ubuntu-24.04` | `bond-<v>-linux-x86_64.tar.gz` |
-   | Linux arm64 | `ubuntu-24.04-arm` | `bond-<v>-linux-arm64.tar.gz` |
-   | Windows | `windows-2025` | `bond-<v>-win.zip` |
+   | macOS | `macos-15` | `nod-<v>-macos-arm64.zip` and `nod-<v>-macos-x86_64.zip` (`publish --arch` twice) |
+   | Linux x86_64 | `ubuntu-24.04` | `nod-<v>-linux-x86_64.tar.gz` |
+   | Linux arm64 | `ubuntu-24.04-arm` | `nod-<v>-linux-arm64.tar.gz` |
+   | Windows | `windows-2025` | `nod-<v>-win.zip` |
 
 3. **Release**: merges the per-OS `manifest.json` files into one, then creates release
    `release-<version>` — the `prepare` job prints the tag, the prefix included (`docs/canonico.md`
@@ -120,11 +120,11 @@ dados falsos.
 
 **One-time setup:**
 
-- Secret `BOND_PRIVATE_RESOURCES`: the private files of `resources/` (§1, §7) as base64 of a
+- Secret `NOD_PRIVATE_RESOURCES`: the private files of `resources/` (§1, §7) as base64 of a
   tar.gz, with paths relative to `resources/`. With `seed.json` plus any icons it references:
 
   ```
-  tar -czf - -C resources seed.json icons | base64 | gh secret set BOND_PRIVATE_RESOURCES
+  tar -czf - -C resources seed.json icons | base64 | gh secret set NOD_PRIVATE_RESOURCES
   ```
 
   GitHub caps a secret at 48 KB. If the icons don't fit, put them in the seed as data URIs.
@@ -141,7 +141,7 @@ dados falsos.
 - **Public repository: auto-update works.** The repository is public, so release files download
   without authentication and an installed Nod fetches its manifest and its archives straight from
   GitHub Releases. The release repository is this one — `RELEASE_REPO` already defaults to
-  `github.repository`. `BOND_RELEASE_REPO` plus a `BOND_RELEASE_TOKEN` with `contents: write` are
+  `github.repository`. `NOD_RELEASE_REPO` plus a `NOD_RELEASE_TOKEN` with `contents: write` are
   only for putting the release in *another* repository, which then has to be public too.
 - **Public repository: the seed becomes public.** Every archive carries the seed (§1): addresses,
   roles, grants and invite hashes. With a public repository anyone who downloads a release reads

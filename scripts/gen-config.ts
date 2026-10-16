@@ -5,10 +5,10 @@
 // `generateConfig` is pure: it neither reads nor writes a file and never exits the process. The I/O
 // lives in the `import.meta.main` block, run with `bun scripts/gen-config.ts <dev|build>`.
 //
-// The `BOND_APP_ID` env replaces the app `id` — it lets the smoke run with a data directory of its
+// The `NOD_APP_ID` env replaces the app `id` — it lets the smoke run with a data directory of its
 // own, without touching the real installation.
 //
-// The `BOND_DEV_PORT` env moves the dev server port (and, with it, the dev origin of the gate and
+// The `NOD_DEV_PORT` env moves the dev server port (and, with it, the dev origin of the gate and
 // `frontend.devUrl`) — it lets the smoke hold its own `tinyjs dev` next to a developer's
 // `bun run app:dev`. Absent, it stays 5173.
 
@@ -83,7 +83,7 @@ function toolOrigins(seed: Seed): string[] {
  * `build` requires the seed (RF-26); `dev` runs without it, releasing only the app's own pages. The
  * origin gate never gives `"all"` to a tool and never opens a key with `*` beyond `file://*`.
  *
- * `devPort` is the port the vite dev server takes (`BOND_DEV_PORT` in the entry block): in `dev`
+ * `devPort` is the port the vite dev server takes (`NOD_DEV_PORT` in the entry block): in `dev`
  * both the page gate and `frontend.devUrl` name `http://127.0.0.1:<devPort>` — the smoke runs its
  * own server next to a developer's `app:dev` — and in `build` it changes nothing.
  */
@@ -142,14 +142,14 @@ if (import.meta.main) {
     process.exit(1);
   }
 
-  const rawDevPort = process.env.BOND_DEV_PORT;
+  const rawDevPort = process.env.NOD_DEV_PORT;
   let devPort = DEFAULT_DEV_PORT;
   if (rawDevPort !== undefined) {
     // Digits only, 1024–65535 (`Number('')` is 0, `Number('5199x')` is NaN): anything else is a
     // mistake to report, not a value to fall back from.
     const parsed = Number(rawDevPort);
     if (!/^[0-9]+$/.test(rawDevPort) || parsed < 1024 || parsed > 65535) {
-      console.error(`invalid BOND_DEV_PORT: ${rawDevPort}`);
+      console.error(`invalid NOD_DEV_PORT: ${rawDevPort}`);
       process.exit(1);
     }
     devPort = parsed;
@@ -179,7 +179,7 @@ if (import.meta.main) {
 
   let config: Record<string, unknown>;
   try {
-    config = generateConfig(base, seed, mode, process.env.BOND_APP_ID, devPort);
+    config = generateConfig(base, seed, mode, process.env.NOD_APP_ID, devPort);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

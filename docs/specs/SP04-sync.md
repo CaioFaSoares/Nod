@@ -4,7 +4,7 @@ Why: `docs/epics/E01-connected-mode.md` §8. Types in `shared/host-api.ts`.
 
 ## 1. Discovery and key pinning
 
-`GET /.well-known/bond`:
+`GET /.well-known/nod`:
 
 ```ts
 interface Discovery {
@@ -25,7 +25,7 @@ interface Discovery {
 1. Normalize the address: `https://` only, except `http://127.0.0.1` and `http://localhost` for
    dev; no path, no user info.
 2. Fetch discovery and show the guild name and fingerprint.
-3. If the person arrived through `bond://join?host=…&fp=…[&code=…]`, compare `fp`; a mismatch aborts
+3. If the person arrived through `nod://join?host=…&fp=…[&code=…]`, compare `fp`; a mismatch aborts
    with `host key does not match the invite` and stores nothing.
 4. Otherwise the person confirms the fingerprint on screen.
 5. Pin `{ address, kid, ed25519Public }` in the host record (SP05 §2).
@@ -39,7 +39,7 @@ changed — remove and add the host again`. Nothing is replaced silently.
 
 ```text
 ETag: "<version>"
-Bond-Signature: kid=<kid>; sig=<base64url Ed25519 signature over the exact response body bytes>
+Nod-Signature: kid=<kid>; sig=<base64url Ed25519 signature over the exact response body bytes>
 ```
 
 - The Nod verifies the signature over the bytes as received, before parsing. No canonical JSON:

@@ -1,8 +1,8 @@
 {
-  "name": "bond",
-  "title": "Bond",
+  "name": "nod",
+  "title": "Nod",
   "size": "1100x720",
-  "id": "studio.copland.bond",
+  "id": "copland.nod",
   "version": "0.2.0",
   "minTinyjsVersion": "0.57.2",
   "backend": "backend/main.ts",
@@ -12,12 +12,12 @@
     "dev": "bun run dev",
     "devUrl": "http://127.0.0.1:5173"
   },
-  "urlScheme": "bond",
+  "urlScheme": "nod",
   "popups": "window",
   "downloads": "auto",
   "contextMenu": true,
   "permissions": {
-    "camera": "Tools you open in Bond, like video calls, can use the camera.",
-    "microphone": "Tools you open in Bond, like video calls, can use the microphone."
+    "camera": "Tools you open in Nod, like video calls, can use the camera.",
+    "microphone": "Tools you open in Nod, like video calls, can use the microphone."
   }
 }

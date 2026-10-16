@@ -57,7 +57,7 @@ async function start(): Promise<void> {
   // same pass on demand (§3).
   const timer = startBackupTimer({ db: host.db, dataDir: config.dataDir }, backups);
   console.info(
-    `bond host listening on :${config.port} (schema ${migrations.length}); ` +
+    `nod host listening on :${config.port} (schema ${migrations.length}); ` +
       `backups every ${backups.everyHours} h, keeping ${backups.keep}`,
   );
 

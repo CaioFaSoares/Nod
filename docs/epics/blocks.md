@@ -62,7 +62,7 @@ Why this cut:
 | S0 | #7 | E02 | Spike: X25519 + HKDF + AES-GCM seal and Ed25519 sign/verify, same bytes in txiki.js and Bun, cost measured | 3 | med | high | H3 |
 | H4 | #8 | E01 | Setup code, access-code activation, salt + login, argon2id(authKey), fake salt, single error, rate limit, revocable sessions | 5 | med | med | H2,H3 |
 | H5 | #9 | E01 | Admin API: people (create, reissue code, revoke), roles, grants, org tools and views; Elysia schemas from shared types | 5 | med | med | H4 |
-| H6 | #10 | E01 | Signing key on first boot, /.well-known/bond with fingerprint, signed per-person /v1/state with ETag | 3 | med | low | H5 |
+| H6 | #10 | E01 | Signing key on first boot, /.well-known/nod with fingerprint, signed per-person /v1/state with ETag | 3 | med | low | H5 |
 | H8 | #11 | E01 | Events ingest: batches, client ids, idempotent, ack | 2 | low | low | H4 |
 | H9 | #12 | E01 | Backup (VACUUM INTO on a schedule) + restore check + first deploy on Coolify | 3 | low | med | H6 |
 | B1 | #13 | E01 | Nod host client: backend fetch, token in keychain, pinned key, Ed25519 snapshot verification in txiki.js | 3 | med | med | H6 |

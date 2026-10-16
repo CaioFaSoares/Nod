@@ -1,5 +1,5 @@
 {
-  "name": "bond-host",
+  "name": "nod-host",
   "private": true,
   "type": "module",
   "scripts": {

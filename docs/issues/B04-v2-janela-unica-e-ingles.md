@@ -1,6 +1,6 @@
 ---
 id: B04
-frente: bond
+frente: nod
 titulo: v2 — janela única de gerenciar/usar, app em inglês, achados das revisões
 status: fechada
 tipo: cobertura
@@ -10,7 +10,7 @@ destino: —
 aberta_em: 2026-10-15
 ---
 
-Autoriza reescrever o app do Bond conforme `docs/arquitetura.md` (v2): janela principal única
+Autoriza reescrever o app do Nod conforme `docs/arquitetura.md` (v2): janela principal única
 (sidebar, Home, paleta, Settings), ferramentas em janelas próprias, todo o app em inglês, e as
 correções das revisões de requisitos e de segurança (achados A1–A24 e D1–D7, P1–P9 citados no
 contrato). Requisitos: `docs/canonico.md` §7, §8, §11, §14, §15. Evidência por fatia em

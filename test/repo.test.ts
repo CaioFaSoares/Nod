@@ -138,7 +138,7 @@ describe('schema versioning', () => {
         'alpha',
         'Alpha',
         'ana',
-        `bond.cred.${person.id}.alpha`,
+        `nod.cred.${person.id}.alpha`,
         '2026-10-15T10:00:00.000Z',
         '2026-10-15T10:00:00.000Z',
       ],
@@ -385,7 +385,7 @@ describe('catalog', () => {
       toolId: 'zebra',
       label: 'Zebra',
       username: 'ana',
-      keychainKey: `bond.cred.${person.id}.zebra`,
+      keychainKey: `nod.cred.${person.id}.zebra`,
       origin: 'https://zebra.example.test',
     });
 
@@ -523,7 +523,7 @@ describe('vault', () => {
       toolId: 'alpha',
       label: 'Alpha',
       username: 'ana',
-      keychainKey: `bond.cred.${person.id}.alpha`,
+      keychainKey: `nod.cred.${person.id}.alpha`,
       origin: 'https://alpha.example.test',
     });
     const second = repo.saveVaultItem({
@@ -531,7 +531,7 @@ describe('vault', () => {
       toolId: 'alpha',
       label: 'Alpha (new)',
       username: 'bia',
-      keychainKey: `bond.cred.${person.id}.alpha`,
+      keychainKey: `nod.cred.${person.id}.alpha`,
       origin: 'https://alpha.example.test',
     });
 
@@ -547,7 +547,7 @@ describe('vault', () => {
       toolId: 'alpha',
       label: 'Alpha',
       username: 'ana',
-      keychainKey: `bond.cred.${other.id}.alpha`,
+      keychainKey: `nod.cred.${other.id}.alpha`,
       origin: 'https://alpha.example.test',
     });
     repo.saveVaultItem({
@@ -555,7 +555,7 @@ describe('vault', () => {
       toolId: 'beta',
       label: 'Beta',
       username: 'ana',
-      keychainKey: `bond.cred.${person.id}.beta`,
+      keychainKey: `nod.cred.${person.id}.beta`,
       origin: 'https://beta.example.test',
     });
 
@@ -582,7 +582,7 @@ describe('vault', () => {
       toolId: 'alpha',
       label: 'Alpha',
       username: 'ana',
-      keychainKey: `bond.cred.${person.id}.alpha`,
+      keychainKey: `nod.cred.${person.id}.alpha`,
       origin: 'https://alpha.example.test',
     });
     expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
@@ -597,7 +597,7 @@ describe('vault', () => {
       toolId: 'alpha',
       label: 'Alpha',
       username: 'ana',
-      keychainKey: `bond.cred.${person.id}.alpha`,
+      keychainKey: `nod.cred.${person.id}.alpha`,
       origin: 'https://moved.example.test',
     });
     expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://moved.example.test');
@@ -615,7 +615,7 @@ describe('vault', () => {
         toolId,
         label: toolId,
         username: 'ana',
-        keychainKey: `bond.cred.${person.id}.${toolId}`,
+        keychainKey: `nod.cred.${person.id}.${toolId}`,
         origin: `https://${toolId}.example.test`,
       });
     }
@@ -624,8 +624,8 @@ describe('vault', () => {
 
     expect(removed.map((i) => i.toolId).sort()).toEqual(['alpha', 'beta']);
     expect(removed.map((i) => i.keychainKey).sort()).toEqual([
-      `bond.cred.${person.id}.alpha`,
-      `bond.cred.${person.id}.beta`,
+      `nod.cred.${person.id}.alpha`,
+      `nod.cred.${person.id}.beta`,
     ]);
     expect(repo.listVault(person.id)).toEqual([]);
     expect(repo.removeVaultOf(person.id)).toEqual([]);
@@ -928,7 +928,7 @@ describe('schema version 3 — connected mode (SP05 §2)', () => {
       toolId: 'alpha',
       label: 'Alpha',
       username: 'ana',
-      keychainKey: `bond.cred.${person.id}.alpha`,
+      keychainKey: `nod.cred.${person.id}.alpha`,
       origin: 'https://alpha.example.test',
     });
     v2.addEvent({
@@ -1039,7 +1039,7 @@ CREATE TABLE vault_item (
       toolId: 'alpha',
       label: 'Alpha',
       username: 'ana',
-      keychainKey: `bond.cred.${person.id}.alpha`,
+      keychainKey: `nod.cred.${person.id}.alpha`,
       origin: 'https://alpha.example.test',
     });
     writeLegacyVaultItemTable(db);
@@ -1058,7 +1058,7 @@ CREATE TABLE vault_item (
         toolId,
         toolId,
         'ana',
-        `bond.cred.${personId}.${toolId}`,
+        `nod.cred.${personId}.${toolId}`,
         '2026-10-15T10:00:00.000Z',
         '2026-10-15T10:00:00.000Z',
         `https://${toolId}.example.test`,
@@ -1141,7 +1141,7 @@ CREATE TABLE vault_item (
       toolId: 'alpha',
       label: 'Alpha',
       username: 'ana',
-      keychainKey: `bond.cred.${person.id}.alpha`,
+      keychainKey: `nod.cred.${person.id}.alpha`,
       origin: 'https://alpha.example.test',
     });
 
@@ -1154,7 +1154,7 @@ CREATE TABLE vault_item (
 
 describe('host and outbox (SP05 §2)', () => {
   const PIN = {
-    address: 'https://bond.example.test',
+    address: 'https://nod.example.test',
     guild: 'Example Guild',
     kid: 'kid-a',
     publicKey: 'cHVibGljLWtleQ',
@@ -1444,7 +1444,7 @@ describe('the local account an adoption takes over (F1)', () => {
         toolId,
         label: toolId,
         username: 'ana',
-        keychainKey: `bond.cred.${local.id}.${toolId}`,
+        keychainKey: `nod.cred.${local.id}.${toolId}`,
         origin: `https://${toolId}.example.test`,
       });
     }
@@ -1454,14 +1454,14 @@ describe('the local account an adoption takes over (F1)', () => {
     const moved = repo.adoptPersonId({
       fromId: local.id,
       toId: 'guild-1',
-      keychainKeyOf: (item) => `bond.cred.guild-1.${item.toolId}`,
+      keychainKeyOf: (item) => `nod.cred.guild-1.${item.toolId}`,
     });
 
     // The answer carries the items as they were read: their old key is what the caller has to move
     // in the keychain.
     expect(moved.map((i) => i.keychainKey).sort()).toEqual([
-      `bond.cred.${local.id}.alpha`,
-      `bond.cred.${local.id}.beta`,
+      `nod.cred.${local.id}.alpha`,
+      `nod.cred.${local.id}.beta`,
     ]);
     expect(repo.personById(local.id)).toBeNull();
     expect(repo.personById('guild-1')).toMatchObject({
@@ -1472,8 +1472,8 @@ describe('the local account an adoption takes over (F1)', () => {
     });
     expect(repo.listVault(local.id)).toEqual([]);
     expect(repo.listVault('guild-1').map((i) => i.keychainKey).sort()).toEqual([
-      'bond.cred.guild-1.alpha',
-      'bond.cred.guild-1.beta',
+      'nod.cred.guild-1.alpha',
+      'nod.cred.guild-1.beta',
     ]);
     expect(repo.vaultOrigin('guild-1', 'alpha')).toBe('https://alpha.example.test');
     expect(repo.listEvents({ personId: 'guild-1' }).map((event) => event.type)).toEqual(['tool_opened']);
@@ -1482,7 +1482,7 @@ describe('the local account an adoption takes over (F1)', () => {
     expect(repo.countPeople()).toBe(1);
   });
 
-  test('adoptPersonId refuses a target this Bond already holds, and moves nothing', () => {
+  test('adoptPersonId refuses a target this Nod already holds, and moves nothing', () => {
     const repo = newRepo();
     const local = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: ['admin'] });
     const other = repo.createPerson({ email: 'bia@example.test', name: 'Bia', password: PASSWORD, roles: [] });
@@ -1492,18 +1492,18 @@ describe('the local account an adoption takes over (F1)', () => {
       toolId: 'alpha',
       label: 'alpha',
       username: 'ana',
-      keychainKey: `bond.cred.${local.id}.alpha`,
+      keychainKey: `nod.cred.${local.id}.alpha`,
       origin: 'https://alpha.example.test',
     });
 
     expect(() =>
-      repo.adoptPersonId({ fromId: local.id, toId: other.id, keychainKeyOf: (item) => `bond.cred.${other.id}.${item.toolId}` }),
-    ).toThrow('this Bond already holds an account of that guild person');
+      repo.adoptPersonId({ fromId: local.id, toId: other.id, keychainKeyOf: (item) => `nod.cred.${other.id}.${item.toolId}` }),
+    ).toThrow('this Nod already holds an account of that guild person');
 
     // Both rows as they were: no id moved, no role, no vault row, no event.
     expect(repo.personById(local.id)?.email).toBe('ana@example.test');
     expect(repo.personById(other.id)?.email).toBe('bia@example.test');
-    expect(repo.listVault(local.id).map((i) => i.keychainKey)).toEqual([`bond.cred.${local.id}.alpha`]);
+    expect(repo.listVault(local.id).map((i) => i.keychainKey)).toEqual([`nod.cred.${local.id}.alpha`]);
     expect(repo.listVault(other.id)).toEqual([]);
   });
 

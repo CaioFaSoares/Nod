@@ -23,7 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# Bond: privado ou gerado
+# Nod: privado ou gerado
 resources/seed.json
 tinyjs.json
 .build

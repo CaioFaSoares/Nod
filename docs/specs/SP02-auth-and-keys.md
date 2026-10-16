@@ -73,7 +73,7 @@ the host verifies against a fixed dummy hash, so timing doesn't tell who exists 
   - the person, for any of their sessions;
   - the admin, for anyone's;
   - disabling the person, which revokes all of theirs.
-- **Nod side**: the token lives in the keychain under `bond.host.<hostKid>.<personId>`, never in
+- **Nod side**: the token lives in the keychain under `nod.host.<hostKid>.<personId>`, never in
   SQLite or `store.json`. It is read only after the local unlock (§6).
 - Errors: every sign-in failure answers `401 { "error": "invalid credentials" }`; every code failure
   answers `401 { "error": "invalid code" }`.
@@ -109,7 +109,7 @@ format, `PasswordHashV2`:
 - **Reset** (new access code): activation stores a new salt. The Nod detects a salt change at
   sign-in (cached salt ≠ host salt). It then:
   - tells the person their saved logins on this machine will be removed;
-  - deletes every `bond.cred.<person>.*` item and its index;
+  - deletes every `nod.cred.<person>.*` item and its index;
   - regenerates the E02 key pairs (SP06 §2).
 
 ## 8. Vault encryption (story V1)
@@ -131,7 +131,7 @@ Keychain value of each credential, replacing today's plaintext:
 
 ## 9. Biometrics
 
-Today `bond.bio.<person>` holds the person id as a marker (`backend/session.ts`). With V1 it holds
+Today `nod.bio.<person>` holds the person id as a marker (`backend/session.ts`). With V1 it holds
 `base64url(vaultKey)` instead. That is the trade-off the owner accepted (E01 §7).
 
 - Biometric unlock: `app.authenticate`, then read `vaultKey` from that item; `authKey` isn't needed

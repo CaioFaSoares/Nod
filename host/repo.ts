@@ -18,7 +18,7 @@
 // test move it, and the lexicographic order of those strings is chronological
 // (`docs/specs/README.md`). Row types are host-local — `shared/host-api.ts` carries the wire shapes
 // — and keep the field names of `Entry`/`View` in `shared/types.ts` so a snapshot can hand a row
-// over without a rename. The Bond-side shapes that are already stable (`Person`, `Role`,
+// over without a rename. The Nod-side shapes that are already stable (`Person`, `Role`,
 // `AuthOverride`, `View.mode`) are imported instead of restated.
 //
 // Error messages are static English (SP03 §1): none of them echoes a value from the request.
@@ -129,7 +129,7 @@ export interface HostTool extends HostEntry {
   views: HostView[];
 }
 
-/** A view a `PUT` carries: `View` plus the id the Bond generates (SP04 §2). */
+/** A view a `PUT` carries: `View` plus the id the Nod generates (SP04 §2). */
 export interface ViewInput extends View {
   id: string;
 }
@@ -155,7 +155,7 @@ export interface ToolInput extends EntryInput {
   views: ViewInput[];
 }
 
-/** One event of a `POST /v1/events` batch; `id` is the Bond's stable client id (SP04 §5). */
+/** One event of a `POST /v1/events` batch; `id` is the Nod's stable client id (SP04 §5). */
 export interface EventInput {
   id: string;
   at: string;

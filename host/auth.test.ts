@@ -35,9 +35,9 @@ import { bootHost, type Host } from './main';
 import { createRepo, type Repo } from './repo';
 import { authRoutes } from './routes/auth';
 
-const DEVICE: Device = { name: 'bond-test', os: 'macos', appVersion: '0.3.0' };
-const ADMIN_EMAIL = 'ada@bond.test';
-const MEMBER_EMAIL = 'bob@bond.test';
+const DEVICE: Device = { name: 'nod-test', os: 'macos', appVersion: '0.3.0' };
+const ADMIN_EMAIL = 'ada@nod.test';
+const MEMBER_EMAIL = 'bob@nod.test';
 const DAY_MS = 24 * 3_600_000;
 
 /** What a test needs from an app: Elysia's answer to one `Request`. */
@@ -63,11 +63,11 @@ const hosts: TestHost[] = [];
 const dirs: string[] = [];
 
 async function startHost(dataDir?: string): Promise<TestHost> {
-  const dir = dataDir ?? mkdtempSync(join(tmpdir(), 'bond-auth-'));
+  const dir = dataDir ?? mkdtempSync(join(tmpdir(), 'nod-auth-'));
   if (dataDir === undefined) dirs.push(dir);
   const config: HostConfig = {
     dataDir: dir,
-    publicUrl: 'https://bond.example',
+    publicUrl: 'https://nod.example',
     port: DEFAULT_PORT,
     dev: false,
   };
@@ -107,7 +107,7 @@ afterEach(() => {
 });
 
 function url(path: string): string {
-  return `http://bond.test${path}`;
+  return `http://nod.test${path}`;
 }
 
 function post(
@@ -201,7 +201,7 @@ function countSessions(host: TestHost): number {
 function runCommand(dataDir: string) {
   return Bun.spawnSync([process.execPath, 'cli/setup-code.ts'], {
     cwd: import.meta.dir,
-    env: { ...process.env, BOND_DATA: dataDir, BOND_PUBLIC_URL: 'https://bond.example' },
+    env: { ...process.env, NOD_DATA: dataDir, NOD_PUBLIC_URL: 'https://nod.example' },
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -256,7 +256,7 @@ function countHashes(auth: AuthService): { auth: AuthService; hashes(): number }
 
 describe('setup code', () => {
   test('the command prints one code, keeps only its hash, and reissues on a second run', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bond-auth-'));
+    const dir = mkdtempSync(join(tmpdir(), 'nod-auth-'));
     dirs.push(dir);
     const first = runCommand(dir);
     expect(first.exitCode).toBe(0);
@@ -298,7 +298,7 @@ describe('setup code', () => {
   });
 
   test('redeeming the code of the command creates the first admin, and the command then refuses', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bond-auth-'));
+    const dir = mkdtempSync(join(tmpdir(), 'nod-auth-'));
     dirs.push(dir);
     const command = runCommand(dir);
     const code = command.stdout.toString().trim();
@@ -326,7 +326,7 @@ describe('setup code', () => {
 
     // RF-32: the code worked once.
     const again = await post(host.app, HOST_ROUTES.authSetup, {
-      email: 'second@bond.test',
+      email: 'second@nod.test',
       name: 'Second',
       code,
       salt: randomSalt(),
@@ -378,17 +378,17 @@ describe('POST /v1/auth/setup', () => {
     const record = host.repo.personAuthByEmail(ADMIN_EMAIL);
     expect(record?.salt).toBe(admin.salt);
     expect(record?.authHash?.startsWith('$argon2id$')).toBe(true);
-    // RF-42: what was hashed is the `authKey` the Bond derived, and the password never travelled.
+    // RF-42: what was hashed is the `authKey` the Nod derived, and the password never travelled.
     expect(await Bun.password.verify(admin.authKey, record?.authHash as string)).toBe(true);
   });
 
   test('answers 409 on a taken email and leaves the setup code unspent', async () => {
     const host = await startHost();
-    seedMember(host, 'taken@bond.test');
+    seedMember(host, 'taken@nod.test');
     const { code } = await seedCode(host, 'setup', null);
 
     const conflict = await post(host.app, HOST_ROUTES.authSetup, {
-      email: 'taken@bond.test',
+      email: 'taken@nod.test',
       name: 'Nobody',
       code,
       salt: randomSalt(),
@@ -397,7 +397,7 @@ describe('POST /v1/auth/setup', () => {
     });
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toEqual({ error: 'email taken' });
-    expect(host.repo.personByEmail('taken@bond.test')?.name).toBe('Bob');
+    expect(host.repo.personByEmail('taken@nod.test')?.name).toBe('Bob');
 
     // The transaction rolled back with the code: the same code still creates the admin.
     const admin = await post(host.app, HOST_ROUTES.authSetup, {
@@ -484,19 +484,19 @@ describe('POST /v1/auth/activate', () => {
 
   test('a code of another email, and an email nobody holds, are the same single failure', async () => {
     const host = await startHost();
-    const first = seedMember(host, 'first@bond.test');
-    seedMember(host, 'second@bond.test');
+    const first = seedMember(host, 'first@nod.test');
+    seedMember(host, 'second@nod.test');
     const { code } = await seedCode(host, 'activate', first.id);
 
     const wrongEmail = await post(host.app, HOST_ROUTES.authActivate, {
-      email: 'second@bond.test',
+      email: 'second@nod.test',
       code,
       salt: randomSalt(),
       authKey: randomAuthKey(),
       device: DEVICE,
     });
     const unknownEmail = await post(host.app, HOST_ROUTES.authActivate, {
-      email: 'ghost@bond.test',
+      email: 'ghost@nod.test',
       code,
       salt: randomSalt(),
       authKey: randomAuthKey(),
@@ -509,9 +509,9 @@ describe('POST /v1/auth/activate', () => {
 
     // Neither attempt touched a row, and the code still activates the person it belongs to.
     expect(host.repo.personById(first.id)?.activatedAt).toBeNull();
-    expect(host.repo.personAuthByEmail('second@bond.test')?.authHash).toBeNull();
+    expect(host.repo.personAuthByEmail('second@nod.test')?.authHash).toBeNull();
     const right = await post(host.app, HOST_ROUTES.authActivate, {
-      email: 'first@bond.test',
+      email: 'first@nod.test',
       code,
       salt: randomSalt(),
       authKey: randomAuthKey(),
@@ -604,13 +604,13 @@ describe('POST /v1/auth/activate', () => {
     expect(host.repo.personById(person.id)?.activatedAt).not.toBeNull();
 
     // An email nobody holds, with a code of the right shape the host never issued.
-    const unknown = await attempt('ghost@bond.test', generateCode('access'));
+    const unknown = await attempt('ghost@nod.test', generateCode('access'));
     // A malformed code on an email that does exist: the normalizer refuses before any lookup.
     const malformed = await attempt(MEMBER_EMAIL, 'nope');
     // A well-formed code of another person: `redeemCode` finds no live row with that hash.
-    const other = seedMember(host, 'other@bond.test');
+    const other = seedMember(host, 'other@nod.test');
     await seedCode(host, 'activate', other.id);
-    const wrongCode = await attempt('other@bond.test', generateCode('access'));
+    const wrongCode = await attempt('other@nod.test', generateCode('access'));
 
     // One status, one body, one argon2id hash: nothing separates the three failures.
     expect([unknown.status, malformed.status, wrongCode.status]).toEqual([401, 401, 401]);
@@ -620,7 +620,7 @@ describe('POST /v1/auth/activate', () => {
     expect([unknown.cost, malformed.cost, wrongCode.cost]).toEqual([1, 1, 1]);
 
     // Neither failure wrote anything: no person was invented, no code was spent.
-    expect(host.repo.personAuthByEmail('ghost@bond.test')).toBeNull();
+    expect(host.repo.personAuthByEmail('ghost@nod.test')).toBeNull();
     expect(host.repo.personById(other.id)?.activatedAt).toBeNull();
   });
 });
@@ -637,7 +637,7 @@ describe('POST /v1/auth/salt', () => {
     expect(known.status).toBe(200);
     expect(await known.json()).toEqual({ salt: activated.salt, iterations: 600_000 });
 
-    const unknown = await post(host.app, HOST_ROUTES.authSalt, { email: 'ghost@bond.test' });
+    const unknown = await post(host.app, HOST_ROUTES.authSalt, { email: 'ghost@nod.test' });
     expect(unknown.status).toBe(200);
     const unknownBody = (await unknown.json()) as { salt: string; iterations: number };
     expect(unknownBody.iterations).toBe(600_000);
@@ -647,9 +647,9 @@ describe('POST /v1/auth/salt', () => {
 
   test('answers a stable fake salt for an unknown email, derived from host-secret', async () => {
     const host = await startHost();
-    const first = await post(host.app, HOST_ROUTES.authSalt, { email: ' Ghost@Bond.test ' });
-    const second = await post(host.app, HOST_ROUTES.authSalt, { email: 'ghost@bond.test' });
-    const other = await post(host.app, HOST_ROUTES.authSalt, { email: 'other@bond.test' });
+    const first = await post(host.app, HOST_ROUTES.authSalt, { email: ' Ghost@Nod.test ' });
+    const second = await post(host.app, HOST_ROUTES.authSalt, { email: 'ghost@nod.test' });
+    const other = await post(host.app, HOST_ROUTES.authSalt, { email: 'other@nod.test' });
 
     const firstBody = (await first.json()) as { salt: string };
     const secondBody = (await second.json()) as { salt: string };
@@ -669,12 +669,12 @@ describe('POST /v1/auth/salt', () => {
       ['sign'],
     );
     const mac = new Uint8Array(
-      await crypto.subtle.sign('HMAC', key, new TextEncoder().encode('fake-salt/ghost@bond.test')),
+      await crypto.subtle.sign('HMAC', key, new TextEncoder().encode('fake-salt/ghost@nod.test')),
     );
     expect(salt).toBe(toBase64url(mac.subarray(0, 16)));
 
     // The lookup never creates anybody.
-    expect(host.repo.personByEmail('ghost@bond.test')).toBeNull();
+    expect(host.repo.personByEmail('ghost@nod.test')).toBeNull();
   });
 });
 
@@ -687,7 +687,7 @@ describe('POST /v1/auth/login', () => {
     expect(activated.response.status).toBe(200);
 
     const wrongKey = await signIn(host, MEMBER_EMAIL, randomAuthKey());
-    const unknownEmail = await signIn(host, 'ghost@bond.test', randomAuthKey());
+    const unknownEmail = await signIn(host, 'ghost@nod.test', randomAuthKey());
     expect(wrongKey.status).toBe(401);
     expect(unknownEmail.status).toBe(401);
     expect(wrongKey.headers.get('content-type')).toBe(unknownEmail.headers.get('content-type'));
@@ -899,7 +899,7 @@ describe('rate limits', () => {
       const response = await post(
         host.app,
         HOST_ROUTES.authSalt,
-        { email: `person${request}@bond.test` },
+        { email: `person${request}@nod.test` },
         address,
       );
       expect(response.status).toBe(200);
@@ -907,7 +907,7 @@ describe('rate limits', () => {
     const limited = await post(
       host.app,
       HOST_ROUTES.authSalt,
-      { email: 'person31@bond.test' },
+      { email: 'person31@nod.test' },
       address,
     );
     expect(limited.status).toBe(429);
@@ -917,7 +917,7 @@ describe('rate limits', () => {
     const other = await post(
       host.app,
       HOST_ROUTES.authSalt,
-      { email: 'person@bond.test' },
+      { email: 'person@nod.test' },
       { 'x-forwarded-for': '203.0.113.8' },
     );
     expect(other.status).toBe(200);
@@ -936,7 +936,7 @@ describe('rate limits', () => {
     expect(await limited.json()).toEqual({ error: TOO_MANY_ATTEMPTS });
 
     // Another email is not punished for it.
-    expect((await signIn(host, 'ghost@bond.test', randomAuthKey())).status).toBe(401);
+    expect((await signIn(host, 'ghost@nod.test', randomAuthKey())).status).toBe(401);
   });
 
   test('the budget and the guard of the auth plugin stay inside it', async () => {
@@ -951,7 +951,7 @@ describe('rate limits', () => {
       const response = await post(
         after,
         HOST_ROUTES.authSalt,
-        { email: `person${request}@bond.test` },
+        { email: `person${request}@nod.test` },
         { 'x-forwarded-for': '192.0.2.5' },
       );
       expect(response.status).toBe(200);
@@ -959,7 +959,7 @@ describe('rate limits', () => {
     const limited = await post(
       after,
       HOST_ROUTES.authSalt,
-      { email: 'person31@bond.test' },
+      { email: 'person31@nod.test' },
       { 'x-forwarded-for': '192.0.2.5' },
     );
     expect(limited.status).toBe(429);
@@ -981,11 +981,11 @@ describe('rate limits', () => {
     // A different address never shared the budget.
     expect(limiter.allowAddress('b')).toBe(true);
 
-    for (let attempt = 1; attempt <= 10; attempt++) limiter.failEmail(' Person@Bond.test ');
-    expect(limiter.allowEmail('person@bond.test')).toBe(false);
-    expect(limiter.allowEmail('other@bond.test')).toBe(true);
+    for (let attempt = 1; attempt <= 10; attempt++) limiter.failEmail(' Person@Nod.test ');
+    expect(limiter.allowEmail('person@nod.test')).toBe(false);
+    expect(limiter.allowEmail('other@nod.test')).toBe(true);
     clock += 15 * 60_000;
-    expect(limiter.allowEmail('person@bond.test')).toBe(true);
+    expect(limiter.allowEmail('person@nod.test')).toBe(true);
   });
 });
 
@@ -1031,7 +1031,7 @@ describe('errors, sizes and logs', () => {
 
   test('a body over 256 KB is refused, and a tool body may reach 512 KB', async () => {
     const host = await startHost();
-    const big = JSON.stringify({ email: `${'x'.repeat(300_000)}@bond.test` });
+    const big = JSON.stringify({ email: `${'x'.repeat(300_000)}@nod.test` });
     const tooBig = await post(host.app, HOST_ROUTES.authSalt, big);
     expect(tooBig.status).toBe(413);
     expect(await tooBig.json()).toEqual({ error: 'body too large' });
@@ -1058,7 +1058,7 @@ describe('errors, sizes and logs', () => {
       const login = await signIn(host, MEMBER_EMAIL, member.authKey);
       const { token } = (await login.json()) as { token: string };
       await signIn(host, MEMBER_EMAIL, randomAuthKey());
-      await signIn(host, 'ghost@bond.test', randomAuthKey());
+      await signIn(host, 'ghost@nod.test', randomAuthKey());
       await post(host.app, HOST_ROUTES.authSalt, { email: MEMBER_EMAIL });
       await post(host.app, HOST_ROUTES.authLogout, undefined, withToken(token));
       await post(host.app, HOST_ROUTES.authLogin, { email: MEMBER_EMAIL });

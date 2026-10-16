@@ -39,7 +39,7 @@ is never imported at runtime and never ships in the image. One process, one SQLi
 | `auth.ts` | The auth service: argon2id over `authKey`, real or fake salt, session tokens, the rate limits, and the `personAuth`/`adminAuth` guards | SP02, SP03 §1 |
 | `routes/auth.ts` | The auth routes: `salt`, `activate`, `setup`, `login` (public) and `logout`, `password` (person) | SP02, SP03 §2 |
 | `routes/admin.ts` | The admin group: people, their access codes and sessions, roles, grants, org tools, the one-time bootstrap and the event list; every route behind `adminAuth` (mounts `personAuth` first) | SP01 §2, SP02 §3, SP03 §2 |
-| `routes/state.ts` | `GET /.well-known/bond` (public) and `GET /v1/state` (person), the signed snapshot and its `If-None-Match` | SP04 §1–§2 |
+| `routes/state.ts` | `GET /.well-known/nod` (public) and `GET /v1/state` (person), the signed snapshot and its `If-None-Match` | SP04 §1–§2 |
 | `routes/events.ts` | `POST /v1/events`: the event batch, client-id idempotency, the ack | SP04 §5, SP03 §2 |
 | `snapshot.ts` | The discovery document, the fingerprint; per-person snapshot, version, Ed25519 signature | SP04 §1–§2 |
 | `keys.ts` | Signing key and host secret files | SP01 §1 |

@@ -9,6 +9,7 @@ export const PBKDF2_ITERATIONS = 600_000;
 
 /** SP02 §6: the algorithm of the new local verifier, `PasswordHashV2`; `PasswordHash` stays v1. */
 export const PASSWORD_V2_ALGORITHM = 'BOND-KDF-V1' as const;
+// frozen protocol label (kept 'bond' on purpose: changing it changes every derived key)
 
 const ALGORITHM = 'PBKDF2-SHA256' as const;
 const SALT_LENGTH = 16;
@@ -89,6 +90,7 @@ export interface DerivedKeys {
 }
 
 /** SP02 §1: one HMAC-SHA256 label per key. Changing a label changes every key derived from it. */
+// frozen protocol label (kept 'bond' on purpose: changing it changes every derived key)
 const KEY_LABELS = {
   authKey: 'bond/auth/v1',
   vaultKey: 'bond/vault/v1',
@@ -113,8 +115,8 @@ async function hmac(key: Uint8Array<ArrayBuffer>, data: string): Promise<Uint8Ar
  *
  * One PBKDF2 per unlock or sign-in, then three cheap HMACs over `master`. The password is Unicode
  * NFC before it becomes UTF-8 bytes, so an NFD input derives the same keys as its NFC form. Only
- * `crypto.subtle`, so the bytes are the same in the host (Bun) and in the Bond backend (txiki.js):
- * the pinned vectors of `test/auth.test.ts` are derived again in the Bond runtime by the smoke
+ * `crypto.subtle`, so the bytes are the same in the host (Bun) and in the Nod backend (txiki.js):
+ * the pinned vectors of `test/auth.test.ts` are derived again in the Nod runtime by the smoke
  * (`test/smoke/run.ts`).
  */
 export async function deriveKeys(

@@ -29,7 +29,7 @@ and (from block 1) the host client and sync. Module by module, with signatures:
 Block 2 still to come: the `personal.*` and `favorites.*` methods (B7), `bv1.` vault encryption (V1),
 the E02 key pairs and the share flows (K1–K10).
 
-Contracts: `docs/specs/SP02-auth-and-keys.md`, `SP04-sync.md`, `SP05-bond-connected.md`,
+Contracts: `docs/specs/SP02-auth-and-keys.md`, `SP04-sync.md`, `SP05-nod-connected.md`,
 `SP06-credential-sharing.md`.
 
 ## Rules
