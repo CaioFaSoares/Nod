@@ -15,8 +15,12 @@
       //
       // The page drives the API through the real path (tiny.api.call), phase by phase:
       //
-      //   admin-publish      SP05 §5.2  setup code, publish the local tools, create P with role
-      //                                 `team`, grant Tool A to `team`, sync; hand P's code over
+      //   admin-publish      SP05 §5.2  a local account with the guild email first, and a credential
+      //                                 saved for it; then the setup code, which collides with that
+      //                                 account and answers F1's choice — adopted, the same code
+      //                                 redeems and the saved credential comes along; publish the
+      //                                 local tools, create P with role `team`, grant Tool A to
+      //                                 `team`, sync; hand P's code over
       //   person-join        SP05 §5.3  P activates, the granted tool appears (it is the host's
       //                     SP05 §5.5  entry: P's own seed has no row for it), the vault fills on
       //                                 its origin; host stopped: lock/unlock, tools from the cache,
@@ -35,6 +39,10 @@
          *  app data dirs under the smoke's own ids, and it never leaves this page. */
         const ACCOUNT_PASSWORD = 'smoke-connected-1';
 
+        /** F1: the credential the admin Bond saves before the join. Not a secret either: it is a
+         *  throwaway value of a throwaway keychain, and it is compared, never printed. */
+        const LOCAL_SECRET = 'smoke-local-secret';
+
         const TINY_WAIT_MS = 30000;
         const STATE_TIMEOUT_MS = 20000;
         const POLL_INTERVAL_MS = 200;
@@ -51,6 +59,11 @@
           personCode: null,
           toolId: null,
           personId: null,
+          /** F1: the local account of the admin Bond before the join, and the credential it saved. */
+          localPersonId: null,
+          localToolId: null,
+          /** The guild person id the local account became. */
+          guildPersonId: null,
         };
 
         function sleep(ms) {
@@ -195,6 +208,39 @@
           return 'no account and locked';
         }
 
+        /**
+         * F1: the admin's Bond is not a blank machine — it already has a local account with the very
+         * email the setup code will claim. Creating it here is what makes the join answer the choice
+         * instead of adopting without asking.
+         */
+        async function stepLocalAccount() {
+          const state = await call('session.createAccount', {
+            email: CONFIG.adminEmail,
+            name: 'Smoke Admin',
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(state.hasAccount === true, 'hasAccount = ' + JSON.stringify(state.hasAccount));
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          expect(!!state.person, 'no person came back: ' + summarize(state.person));
+          shared.localPersonId = state.person.id;
+          return 'a local account with the guild email exists and is unlocked (' + state.person.id + ')';
+        }
+
+        /** F1: a credential saved before the join, which the adoption has to bring along. */
+        async function stepLocalVault() {
+          const list = await call('catalog.list');
+          const entry = entryOfOrigin(list, CONFIG.originA);
+          expect(entry !== null, 'Tool A is not in the local catalog (' + list.length + ' entries)');
+          await call('vault.save', { toolId: entry.id, username: 'smoke', secret: LOCAL_SECRET });
+          const items = await call('vault.list');
+          expect(
+            items.some((item) => item.toolId === entry.id),
+            'the credential is not in the vault index',
+          );
+          shared.localToolId = entry.id;
+          return 'credential saved for ' + entry.id + ' before the join (value only in the keychain)';
+        }
+
         async function stepSetupCode() {
           const from = await desk('/desk/admin');
           expect(from.guild === CONFIG.guild, 'the desk guild = ' + JSON.stringify(from.guild));
@@ -215,8 +261,13 @@
           return 'guild ' + found.guild + ', fingerprint ' + found.fingerprint.length + ' chars';
         }
 
-        async function stepActivateAdmin() {
-          const state = await call('host.activate', {
+        /**
+         * F1: the setup code against a Bond that already holds that email. The join answers the
+         * choice — `local-account` — **before any host call**, so the single-use setup code is not
+         * spent deciding; the next step is the one that redeems it.
+         */
+        async function stepActivateChoice() {
+          const answer = await call('host.activate', {
             address: CONFIG.address,
             fingerprint: shared.fingerprint,
             email: CONFIG.adminEmail,
@@ -224,12 +275,63 @@
             password: ACCOUNT_PASSWORD,
             name: 'Smoke Admin',
           });
+          expect(answer && answer.kind === 'local-account', 'host.activate answered ' + summarize(answer));
+          expect(answer.email === CONFIG.adminEmail, 'the choice names ' + JSON.stringify(answer.email));
+          expect(
+            answer.personId === shared.localPersonId,
+            'the choice names another account: ' + summarize(answer.personId),
+          );
+          return 'the join asked which account wins (the local one), and nothing was sent';
+        }
+
+        async function stepActivateAdmin() {
+          const answer = await call('host.activate', {
+            address: CONFIG.address,
+            fingerprint: shared.fingerprint,
+            email: CONFIG.adminEmail,
+            code: shared.setupCode,
+            password: ACCOUNT_PASSWORD,
+            name: 'Smoke Admin',
+            adoptLocal: true,
+          });
+          shared.setupCode = null;
+          expect(answer && answer.kind === 'session', 'host.activate answered ' + summarize(answer));
+          const state = answer.session;
           expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
           expect(
             !!state.person && state.person.admin === true,
             'person.admin = ' + JSON.stringify(state.person && state.person.admin),
           );
-          return 'activated with the setup code; the session is unlocked and the person is admin';
+          expect(
+            state.person.id !== shared.localPersonId,
+            'the account kept its local id: the adoption did not happen',
+          );
+          shared.guildPersonId = state.person.id;
+          return 'activated with the setup code, adopting the local account; the session is unlocked and the person is admin';
+        }
+
+        /**
+         * F1 on the real surface: the credential saved before the join is still there, under the
+         * guild's person id — the keychain key was renamed with the account, and the vault opens it.
+         */
+        async function stepCredentialCameAlong() {
+          const items = await call('vault.list');
+          const item = items.find((entry) => entry.toolId === shared.localToolId) || null;
+          expect(item !== null, 'the credential left the vault (' + summarize(items.map((i) => i.toolId)) + ')');
+          expect(
+            item.personId === shared.guildPersonId,
+            'the item belongs to ' + summarize(item.personId) + ', not to the guild person',
+          );
+          expect(
+            item.keychainKey === 'bond.cred.' + shared.guildPersonId + '.' + shared.localToolId,
+            'the keychain key is ' + summarize(item.keychainKey),
+          );
+          const revealed = await call('vault.reveal', { toolId: shared.localToolId });
+          expect(
+            !!revealed && revealed.secret === LOCAL_SECRET,
+            'revealing the credential came back as ' + summarize(revealed && revealed.username),
+          );
+          return 'the credential saved before the join reads back under the guild person id';
         }
 
         async function stepSyncConnected() {
@@ -381,7 +483,7 @@
         }
 
         async function stepActivatePerson() {
-          const state = await call('host.activate', {
+          const answer = await call('host.activate', {
             address: CONFIG.address,
             fingerprint: shared.fingerprint,
             email: CONFIG.personEmail,
@@ -389,6 +491,10 @@
             password: ACCOUNT_PASSWORD,
           });
           shared.personCode = null;
+          // This Bond has no account at all (F3's first run), so the join answers the session
+          // outright — the choice only comes up when the email is already an account of this Bond.
+          expect(answer && answer.kind === 'session', 'host.activate answered ' + summarize(answer));
+          const state = answer.session;
           expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
           expect(state.person !== null, 'person = ' + summarize(state.person));
           expect(state.person.admin !== true, 'P came out as an admin');
@@ -593,9 +699,13 @@
         const PHASES = {
           'admin-publish': [
             ['2.1 session.state (no account yet)', stepStateFresh],
+            ['2.1b session.createAccount (the guild email, F1)', stepLocalAccount],
+            ['2.1c vault.save (before the join, F1)', stepLocalVault],
             ['2.2 desk: setup code', stepSetupCode],
             ['2.3 host.discover', stepDiscover],
-            ['2.4 host.activate (setup code)', stepActivateAdmin],
+            ['2.4 host.activate (the choice, F1)', stepActivateChoice],
+            ['2.4b host.activate (adoptLocal, F1)', stepActivateAdmin],
+            ['2.4c vault.list/reveal (the credential came along, F1)', stepCredentialCameAlong],
             ['2.5 host.syncNow', stepSyncConnected],
             ['2.6 publish the local tools', stepPublish],
             ['2.7 catalog.list (published)', stepCatalogPublished],

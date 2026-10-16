@@ -328,3 +328,239 @@ $ bun test test/host-admin.test.ts     # the other unit test that builds a sync:
   flight (one extra run per overlap, coalesced). The smoke drives `host.syncNow` sequentially, so its
   call counts do not change; the smokes were not run here.
 
+
+---
+
+## FixJoinFlow — F1, F2, F3, F7 (the join, the adoption, the snapshot's admin flag)
+
+Contracts of this slice: `docs/specs/SP05-bond-connected.md` §2–§4, `docs/specs/SP02-auth-and-keys.md`
+§1–§7, `docs/specs/SP04-sync.md` §1–§3. Rules: `AGENTS.md`, `backend/context.md`, `src/context.md`.
+Nothing here carries a secret: no code, password, `authKey`, token or credential value enters a file,
+a log, an event or `store.json`.
+
+### F1 (HIGH) — the join that collides with a local account spent the code and left nothing
+
+**Cause.** `host.activate` redeemed the code on the host **first** and only then called
+`adoptConnectedAccount`, which refused the email a local person already held
+(`email already registered`). The single-use code — the setup code included — was spent, and no
+retry could fix it. A *revoked* local row with that email was worse: `personByEmail` hides it, so the
+refusal never fired and the host person's insert died on the unique email column
+(`UNIQUE constraint failed: person.email`). `host.signIn` had the same shape.
+
+**Fix.** The decision moved before the first host call, and adopting became a real operation:
+
+- `backend/session.ts`, `joinGate()` (new): the local half of a join, in the one order the rules
+  need. It reads the email with `Repo.personByEmailAnyState` (revoked included, new read), decides,
+  and runs the caller's host call only after that. An email a live local account of *another* person
+  holds is refused (`this email belongs to another account of this Bond — unlock it, then join`); with
+  the session unlocked as that person and `adoptLocal` absent it answers the choice
+  (`{ kind: 'choose', person }`) — **no request, the code is whole**; with `adoptLocal: true` it goes
+  out and marks the account to adopt. A revoked row can never be unlocked, so any unlocked session
+  adopts it (its data is otherwise unreachable).
+- `backend/repo.ts`, `adoptPersonId()` (new): one transaction. The `person` row's id, its
+  `person_role` rows, its `vault_item` rows (and their `keychain_key`, built by the caller's
+  `keychainKeyOf`) and every `event` that named it move to the host person id. The children move
+  before the parent's key and the transaction defers the foreign keys to the commit: with them on
+  (the runtime's `openSqlite`) SQLite refuses the intermediate state — observed below. A target id
+  another `person` row already holds is refused here, with a sentence, before anything moves.
+- `backend/session.ts`, `adoptConnectedAccount({ …, adoptLocalId })`: after the re-key it moves the
+  keychain items (`bond.cred.<old>.<tool>` → `bond.cred.<new>.<tool>`: read, write, delete; a
+  keychain that refuses reports the credential and leaves the old item) and the biometric marker
+  (`bond.bio.<person>`, whose value is the person id today), then writes the V2 verifier over the host
+  salt — the existing path. The **roles of the adopted account survive**; the host's `admin` flag is
+  reconciled on top of them.
+- `shared/types.ts`: `JoinResult` (`{ kind: 'session'; session }` | `{ kind: 'local-account';
+  personId; email; name }`), and `host.activate`/`host.signIn` take `adoptLocal?: boolean` and answer
+  it. Chosen over a `host.checkJoin` RPC: one round trip, and the check cannot disagree with the join
+  it decides.
+- `backend/main.ts`: both handlers run `s.joinGate` **before** the discovery, map `choose` to
+  `local-account`, and pass `adoptLocalId`. An adopted account keeps its own name until the snapshot's
+  `me.name` lands (F2).
+- `src/settings.ts`: the join flow asks the choice — a `<select>` in the account card ("Use the guild
+  account" / "Keep using the local account", with the owner's wording) and the explanation; the next
+  submit carries `adoptLocal: true`. Keeping the local account cancels the join (nothing is sent). The
+  email field drops the choice again, since another email is another question.
+
+### F2 (HIGH) — `me.admin`/`me.name` never reached the local person
+
+**Cause.** `person.admin` was set once, at the join (`admin: setup`, or the local row's flag at
+sign-in), and the snapshot's `me` was only ever read for the catalog. An admin created by an access
+code never got the admin screens; a demoted admin kept them.
+
+**Fix.** `Repo.saveConnectedIdentity(personId, { name, admin })` (new): the local row's name (a blank
+one ignored) and its local admin role follow the snapshot, keeping every other local role.
+`Session.reconcileConnectedIdentity(me)` applies it to the unlocked person and reloads it
+(`refresh()`). `backend/main.ts` runs it on **every** state the sync publishes (`onState`) and pushes
+the session to the page when something moved.
+
+### F3 (MEDIUM) — the join from the lock screen, and the sign-in without the backoff
+
+**Cause.** `host.activate`/`host.signIn` are in `WITHOUT_SESSION`, so anyone at the lock screen could
+connect a Bond that already had an account to a host of their choice; `signIn` also skipped the unlock
+backoff, and nothing tied it to the pinned host beyond the key check.
+
+**Fix.** `joinGate` refuses both handlers when this Bond already has an account and no `host` row is
+pinned (`unlock this Bond first, then join the guild`), the host untouched. With a host row a locked
+sign-in stays allowed (that is the signed-out case) but only against the pinned host — `host.signIn`
+refuses another address (`this Bond is connected to another host — remove it first`) and discovers at
+`row.address` with the pinned key — and it pays RF-23's backoff: `joinGate({ signIn: true })` reads
+`waitMs()` before and counts a `401` as a failed attempt, the same `meta` counter `session.unlock`
+uses. The first run (no account at all) joins with no session, unchanged.
+
+### F7 (LOW-MEDIUM) — a wrong code read as "signed out"
+
+**Cause.** SP02 §5 answers `401` for a wrong code or password, and `backend/host-client.ts` maps every
+`401` to `HostError('signed-out')` — a sentence about a revoked session, shown by the join screen.
+
+**Fix.** `joinGate` turns a `401` from the join's own auth calls into one Bond sentence,
+`invalid code or password`, and passes everything else through whole (key mismatch, offline, 5xx).
+
+### Regression tests (`execucao`)
+
+`test/session.test.ts` (15 new: the gate's five decisions, the backoff, the adoption with its roles,
+vault, keychain, biometric, revoked row, taken target, keychain refusal, and the reconcile),
+`test/repo.test.ts` (4 new: `personByEmailAnyState`, `adoptPersonId` twice, `saveConnectedIdentity`),
+`test/host-admin.test.ts` (6 new, against the **real** host: the choice with the code still
+redeemable, the adoption with the credential, the locked refusals, the first run, the wrong code, and
+F2 through a real sync).
+
+```
+$ bun test test/session.test.ts test/repo.test.ts test/host-admin.test.ts
+ 127 pass
+ 0 fail
+ 795 expect() calls
+Ran 127 tests across 3 files. [2.52s]
+```
+
+Before the fix, with each hunk neutralised by hand and restored after the run:
+
+```
+$ bun test test/session.test.ts -t 'nothing adopts is still refused'      # holder read: personByEmail
+Expected: "email already registered"
+Received: "UNIQUE constraint failed: person.email"                        # F1's raw SQLite failure
+
+$ bun test test/session.test.ts -t 'answers the choice'                   # the choice branch removed
+Expected: { "kind": "choose", "person": … }
+Received: { "kind": "join", "local": { "admin": true, … } }               # the host was asked
+
+$ bun test test/host-admin.test.ts -t 'the choice is answered before any host call'
+  + "requests": 3                                                         # F1: the code was spent
+
+$ bun test test/session.test.ts -t 'refuses a locked join'                # F3's guard removed
+Expected: "unlock this Bond first, then join the guild"
+Received: "did not throw"
+
+$ bun test test/host-admin.test.ts -t 'refuses the join, and no request leaves'
+Expected: "unlock this Bond first, then join the guild"
+Received: "did not throw"
+
+$ bun test test/session.test.ts -t 'a 401 of the host is one sentence'    # the 401 mapping removed
+Expected: "invalid code or password"   Received: "signed out"
+
+$ bun test test/host-admin.test.ts -t 'wrong code is the join'            # the same, real host
+Expected: "invalid code or password"   Received: "signed out"
+
+$ bun test test/session.test.ts -t 'follow the snapshot'                  # reconcile made a no-op
+Expected: true   Received: false
+
+$ bun test test/host-admin.test.ts -t 'promotes the person'               # the same, real sync
+(- "admin": true  + "admin": false)                                       # the flag never followed
+
+$ bun test test/repo.test.ts -t 'adoptPersonId moves'                     # defer_foreign_keys removed
+SQLiteError: FOREIGN KEY constraint failed
+(fail) … adoptPersonId moves the row, its roles, its vault rows and its events in one go
+```
+
+After each restore, the same commands pass. The `defer_foreign_keys` run is what says the pragma is
+load-bearing: `test/helpers/sqlite-bun.ts` turns `PRAGMA foreign_keys = ON`, exactly like the runtime.
+
+### Connected smoke (`execucao`)
+
+`test/smoke/connected.html` gained three steps in `admin-publish` and `test/smoke/connected.ts` the
+row check: the admin Bond creates the local account with the guild's email and saves a credential
+**before** the join; the setup-code join then answers the choice (`nothing sent`), the same code
+redeems with `adoptLocal: true`, and the saved credential reads back under the guild person id with
+its keychain key renamed.
+
+```
+$ bun test/smoke/connected.ts --force
+ok 2.1b session.createAccount (the guild email, F1)     local account … exists and is unlocked
+ok 2.1c vault.save (before the join, F1)                credential saved for tool-a before the join
+ok 2.4 host.activate (the choice, F1)                   the join asked which account wins, nothing sent
+ok 2.4b host.activate (adoptLocal, F1)                  activated …, adopting the local account; … admin
+ok 2.4c vault.list/reveal (the credential came along)   the credential reads back under the guild person id
+…
+the admin Bond's vault row after the adopt (F1):
+  people: 1 (expected 1: the adopted account)
+  vault row of tool-a: person 4969232c-…, key bond.cred.4969232c-….tool-a
+connected smoke ok: 4 phases, 44 steps, admin-publish:17 person-join:16 admin-revoke:7 person-signed-out:4
+```
+
+The runner compares that row against the host's own `people` row for the admin email, so the rename is
+the host's identity and this machine's row agreeing. The smoke also proves the pragma on the real
+surface: the adopt runs inside `tjs:sqlite` (`tinyjs dev`), not only under `bun:sqlite`.
+
+### Commands run
+
+1. The three test files of the slice and the two smokes, above. `bun test test/smoke/connected.ts
+   --force` only (never `run.ts`).
+2. Scratch compiles of the files this slice changed — not the project gate:
+
+```
+$ ./node_modules/.bin/tsc --ignoreConfig --noEmit --strict --target es2022 --module esnext \
+    --moduleResolution bundler --lib es2022,dom --skipLibCheck \
+    shared/types.ts backend/repo.ts backend/session.ts                                    # exit=0
+$ ./node_modules/.bin/tsc --ignoreConfig --noEmit --strict --target es2022 --module esnext \
+    --moduleResolution bundler --lib es2022,dom --skipLibCheck \
+    backend/tjs.d.ts backend/tiny.d.ts backend/main.ts                                    # exit=0
+$ ./node_modules/.bin/tsc --ignoreConfig --noEmit --strict --noUnusedLocals \
+    --noUnusedParameters --verbatimModuleSyntax --erasableSyntaxOnly --target es2022 \
+    --module esnext --moduleResolution bundler --lib ES2023,DOM --skipLibCheck \
+    src/tiny.d.ts src/api.ts src/app.ts src/settings.ts                                   # exit=0
+```
+
+3. Not run: the project gates (`bun run typecheck`, `bun test test/`, `bun run app:build`), the formatter
+   and `test/smoke/run.ts`. Nothing here is called verified on the real surface beyond what the smoke
+   above observed.
+
+### Files touched
+
+- `backend/session.ts` — `joinGate`, `JoinGate`, `reconcileConnectedIdentity`, `adoptConnectedAccount`'s
+  `adoptLocalId` (re-key, keychain items, biometric marker, roles), the `isNew` fix for an adopted row.
+- `backend/repo.ts` — `personByEmailAnyState`, `adoptPersonId`, `saveConnectedIdentity` and their
+  interface entries.
+- `backend/main.ts` — both join handlers through the gate, `localAccountChoice`, the sync's `onState`
+  reconcile.
+- `shared/types.ts` — `JoinResult`; the two method signatures.
+- `src/settings.ts` — the join choice (the select, the cancel, `adoptLocal` in the next submit).
+- `test/session.test.ts`, `test/repo.test.ts`, `test/host-admin.test.ts` — the tests above.
+- `test/smoke/connected.html`, `test/smoke/connected.ts` — the adopt steps and the row check.
+- `docs/handovers/review-fixes.md` — this section.
+
+`src/app.ts` and `src/style.css` were **not** touched: the choice lives inside `mountJoinFlow`, which
+both entry points already mount, and the select reuses `.input`.
+
+### Decisions, and what another owner must do
+
+1. **`defer_foreign_keys` in the re-key.** The alternative orders all end in an intermediate state
+   SQLite refuses with the foreign keys on; the pragma is scoped to the one transaction and
+   `openSqlite`'s setting is untouched. Proven on the runtime by the smoke (above).
+2. **The host decides the admin flag of an adopted account.** The local roles survive, and the `admin`
+   role follows the host's answer — the snapshot is the last word anyway (F2). If the intended reading
+   is "the local admin role is never dropped by a join", that is one line in `withHostAdmin`.
+3. **A revoked local row of the join email is adoptable with any unlocked session** (it can never be
+   unlocked itself). The alternative — refuse — would leave that email permanently unjoinable, since
+   nothing in the app removes a revoked row.
+4. **F7's sentence lives in `joinGate`**, not in the two handlers: it is the join's own refusal, and
+   `backend/session.ts` is where the whole local half of a join is testable. It imports `HostError`
+   from `backend/host-client.ts` for it.
+5. **`docs/arquitetura.md` §4–§5** is behind: `Session` has `joinGate`/`reconcileConnectedIdentity` and
+   `adoptConnectedAccount` takes `adoptLocalId`; `Repo` has three more methods; `ApiContract`'s two
+   joins answer `JoinResult` instead of `SessionState`. Not a file of this slice.
+6. **`docs/specs/SP05-bond-connected.md` §3–§4**: the table still declares `SessionState` as the answer
+   of `host.activate`/`host.signIn`, and §4 does not describe the choice. The spec is the coordinator's.
+7. **The unlock screen's "Join a guild" button** now mostly refuses: with an account, the join belongs
+   to the unlocked Bond (Settings → Hosts, where the same component asks the choice). The button is
+   still right for a signed-out Bond with a host row, which is exactly the case the lock screen cannot
+   tell apart from the rest (`host.state` needs a session). Hiding it for the other cases needs that
+   fact on the session state — a contract decision, not this slice's.

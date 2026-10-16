@@ -1408,3 +1408,129 @@ describe('local verifier: v1 and V2 (SP02 §6)', () => {
     expect(repo.countPeople()).toBe(1);
   });
 });
+
+describe('the local account an adoption takes over (F1)', () => {
+  test('personByEmailAnyState sees the row every live read hides', () => {
+    const repo = newRepo();
+    const alive = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: [] });
+    const gone = repo.createPerson({ email: 'rev@example.test', name: 'Rev', password: PASSWORD, roles: [] });
+    repo.revokePerson(gone.id);
+
+    expect(repo.personByEmailAnyState(' ana@EXAMPLE.test ')).toEqual({ person: alive, revoked: false });
+    expect(repo.personByEmailAnyState('rev@example.test')?.person.id).toBe(gone.id);
+    expect(repo.personByEmailAnyState('rev@example.test')?.revoked).toBe(true);
+    expect(repo.personByEmailAnyState('nobody@example.test')).toBeNull();
+    // The live read is unchanged: the revoked row stays invisible to it.
+    expect(repo.personByEmail('rev@example.test')).toBeNull();
+  });
+
+  test('adoptPersonId moves the row, its roles, its vault rows and its events in one go', () => {
+    // The foreign keys are on, exactly like the runtime (`backend/sqlite.ts`): the re-key below is
+    // the ordering that survives them — the children first and the parent's key last.
+    const db = memorySqlite();
+    const repo = createRepo(db);
+    repo.migrate();
+    repo.ensureAdminRole();
+    expect(foreignKeysOn(db)).toBe(true);
+
+    const local = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: ['admin'] });
+    repo.saveRole({ id: 'team', name: 'Team', admin: false });
+    repo.setRoles(local.id, ['admin', 'team']);
+    repo.saveEntry(entry('alpha'));
+    repo.saveEntry(entry('beta'));
+    for (const toolId of ['alpha', 'beta']) {
+      repo.saveVaultItem({
+        personId: local.id,
+        toolId,
+        label: toolId,
+        username: 'ana',
+        keychainKey: `bond.cred.${local.id}.${toolId}`,
+        origin: `https://${toolId}.example.test`,
+      });
+    }
+    repo.addEvent({ personId: local.id, toolId: 'alpha', type: 'tool_opened', url: null, result: null, detail: null });
+    repo.addEvent({ personId: 'somebody-else', toolId: 'alpha', type: 'tool_opened', url: null, result: null, detail: null });
+
+    const moved = repo.adoptPersonId({
+      fromId: local.id,
+      toId: 'guild-1',
+      keychainKeyOf: (item) => `bond.cred.guild-1.${item.toolId}`,
+    });
+
+    // The answer carries the items as they were read: their old key is what the caller has to move
+    // in the keychain.
+    expect(moved.map((i) => i.keychainKey).sort()).toEqual([
+      `bond.cred.${local.id}.alpha`,
+      `bond.cred.${local.id}.beta`,
+    ]);
+    expect(repo.personById(local.id)).toBeNull();
+    expect(repo.personById('guild-1')).toMatchObject({
+      email: 'ana@example.test',
+      name: 'Ana',
+      roles: ['admin', 'team'],
+      admin: true,
+    });
+    expect(repo.listVault(local.id)).toEqual([]);
+    expect(repo.listVault('guild-1').map((i) => i.keychainKey).sort()).toEqual([
+      'bond.cred.guild-1.alpha',
+      'bond.cred.guild-1.beta',
+    ]);
+    expect(repo.vaultOrigin('guild-1', 'alpha')).toBe('https://alpha.example.test');
+    expect(repo.listEvents({ personId: 'guild-1' }).map((event) => event.type)).toEqual(['tool_opened']);
+    // Somebody else's history is not this person's to move.
+    expect(repo.listEvents({ personId: 'somebody-else' })).toHaveLength(1);
+    expect(repo.countPeople()).toBe(1);
+  });
+
+  test('adoptPersonId refuses a target this Bond already holds, and moves nothing', () => {
+    const repo = newRepo();
+    const local = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: ['admin'] });
+    const other = repo.createPerson({ email: 'bia@example.test', name: 'Bia', password: PASSWORD, roles: [] });
+    repo.saveEntry(entry('alpha'));
+    repo.saveVaultItem({
+      personId: local.id,
+      toolId: 'alpha',
+      label: 'alpha',
+      username: 'ana',
+      keychainKey: `bond.cred.${local.id}.alpha`,
+      origin: 'https://alpha.example.test',
+    });
+
+    expect(() =>
+      repo.adoptPersonId({ fromId: local.id, toId: other.id, keychainKeyOf: (item) => `bond.cred.${other.id}.${item.toolId}` }),
+    ).toThrow('this Bond already holds an account of that guild person');
+
+    // Both rows as they were: no id moved, no role, no vault row, no event.
+    expect(repo.personById(local.id)?.email).toBe('ana@example.test');
+    expect(repo.personById(other.id)?.email).toBe('bia@example.test');
+    expect(repo.listVault(local.id).map((i) => i.keychainKey)).toEqual([`bond.cred.${local.id}.alpha`]);
+    expect(repo.listVault(other.id)).toEqual([]);
+  });
+
+  test('saveConnectedIdentity follows the snapshot on the name and the admin flag (F2)', () => {
+    const repo = newRepo();
+    const person = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: [] });
+    expect(person.admin).toBe(false);
+
+    expect(repo.saveConnectedIdentity(person.id, { name: 'Ana Silva', admin: true })).toBe(true);
+    expect(repo.personById(person.id)).toMatchObject({ name: 'Ana Silva', admin: true, roles: ['admin'] });
+    // Nothing would move: the same snapshot again is not a change.
+    expect(repo.saveConnectedIdentity(person.id, { name: 'Ana Silva', admin: true })).toBe(false);
+
+    // The flag goes both ways, and the other local roles stay where they are.
+    repo.saveRole({ id: 'team', name: 'Team', admin: false });
+    repo.setRoles(person.id, ['admin', 'team']);
+    expect(repo.saveConnectedIdentity(person.id, { name: 'Ana Silva', admin: false })).toBe(true);
+    expect(repo.personById(person.id)).toMatchObject({ admin: false, roles: ['team'] });
+
+    // A blank name is not a name to write: the local row keeps the one it has.
+    expect(repo.saveConnectedIdentity(person.id, { name: '  ', admin: false })).toBe(false);
+    expect(repo.personById(person.id)?.name).toBe('Ana Silva');
+
+    // A revoked or unknown person is a no-op, not an insert.
+    repo.revokePerson(person.id);
+    expect(repo.saveConnectedIdentity(person.id, { name: 'Other', admin: true })).toBe(false);
+    expect(repo.saveConnectedIdentity('nobody-at-all', { name: 'Other', admin: true })).toBe(false);
+    expect(repo.countPeople()).toBe(1);
+  });
+});

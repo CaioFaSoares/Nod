@@ -975,14 +975,15 @@ CREATE TABLE vault_item_rebuilt (
     // a name to write, and the local row keeps what it has.
     const name = identity.name.trim();
     const wanted = name === '' || name === row.name ? null : name;
-    const adminRole = ensureAdminRole().id;
     // `me.admin` is derived from the guild's roles; the local row carries it as the local admin role
-    // (SP05 §2), which is what `Person.admin` reads.
-    const admins = rolesOf(personId).includes(adminRole);
-    if (wanted === null && admins === identity.admin) return false;
+    // (SP05 §2), which is what `Person.admin` reads. Read first, write after: this runs on every
+    // state the sync publishes, and the push that changes nothing must not touch a row.
+    const isAdminNow = isAdmin(personId);
+    if (wanted === null && isAdminNow === identity.admin) return false;
     transaction(() => {
       if (wanted !== null) db.run('UPDATE person SET name = ? WHERE id = ?', [wanted, personId]);
-      if (admins !== identity.admin) {
+      if (isAdminNow !== identity.admin) {
+        const adminRole = ensureAdminRole().id;
         const kept = rolesOf(personId).filter((id) => id !== adminRole);
         replaceRoles(personId, identity.admin ? [...kept, adminRole] : kept);
       }
