@@ -209,7 +209,7 @@ describe('state', () => {
       person: null,
       biometric: false,
       waitMs: 0,
-      // 0.4.5 (RF-60): no session, so no entry mode either — the entry screen is what is drawn.
+      // 0.5.0 (RF-60): no session, so no entry mode either — the entry screen is what is drawn.
       mode: null,
     });
   });
@@ -491,7 +491,7 @@ describe('unlock', () => {
   });
 });
 
-describe('the tile an unlock enters by (0.4.5, RF-60)', () => {
+describe('the tile an unlock enters by (0.5.0, RF-60)', () => {
   /** The `host` row of a guild whose account is `host-person-1` — not the local account of a test. */
   function pinGuild(s: SessionScene, address = 'https://guild.example.test'): void {
     s.repo.saveHost({

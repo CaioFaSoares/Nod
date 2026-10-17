@@ -105,7 +105,7 @@ export interface CodeRecord {
 }
 
 /**
- * One guild invite (0.4.5, RF-59; SP01 §2): the roles it grants, how many redemptions it allows
+ * One guild invite (0.5.0, RF-59; SP01 §2): the roles it grants, how many redemptions it allows
  * (`maxUses` null = no limit), how many it has had, and until when it works (`expiresAt` null =
  * never). The code is not a field by construction — only its hash is stored, and no read hands a
  * hash back (`shared/host-api.ts`'s `GuildInvite` is this row on the wire).
@@ -418,7 +418,7 @@ export interface Repo {
     now: string,
   ): CodeRecord | null;
 
-  // guild invites (0.4.5, RF-59)
+  // guild invites (0.5.0, RF-59)
   /**
    * Stores one invite. `roles` must all exist (`404` when one does not, SP03 §1) and
    * `expiresInMinutes` — null for never — becomes `expires_at` off the caller's clock. `now` is
@@ -1276,7 +1276,7 @@ export function createRepo(db: Database): Repo {
     });
   }
 
-  // ---------------------------------------------------------------- guild invites (0.4.5, RF-59)
+  // ---------------------------------------------------------------- guild invites (0.5.0, RF-59)
 
   function toInvite(row: InviteRow): GuildInviteRecord {
     return {

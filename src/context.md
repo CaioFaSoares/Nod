@@ -12,14 +12,14 @@ module: `docs/arquitetura.md` §5; window model: `docs/canonico.md` §7.
   during its countdown (E02 §5). The page clears both right after.
 - **English everywhere**: text, identifiers, messages (`docs/canonico.md` RNF-08).
 - **Keyboard first**: every action reachable from the palette (`docs/canonico.md` RNF-07).
-- **0.4.5, RF-60 — the entry screen**: while locked, `app.ts` mounts the rail of tiles in
+- **0.5.0, RF-60 — the entry screen**: while locked, `app.ts` mounts the rail of tiles in
   `entry.ts` (`session.profiles` answers the tiles; nothing there is a secret). Offline is this
   machine's own profile, a guild tile is a guild this Nod joined, and `+` is the join flow of
   `join.ts` — the same dialog Settings → Hosts mounts, which is why `mountJoinFlow` left
   `settings.ts`. Every unlock carries its `target`, and the backend keeps the mode for the session:
   an **offline session** (`session.mode === 'offline'`, `host.offlineSession`) reads nothing of the
   guild, exactly as O2 disconnects it, and the window says so in a banner.
-- **0.4.5, RF-61 — the seed is an optional import**: the Offline tile of a machine with no account
+- **0.5.0, RF-61 — the seed is an optional import**: the Offline tile of a machine with no account
   offers "Import a seed file" (`session.importSeed`); a release without `resources/seed.json` starts
   empty, and gate origins stay those of the embedded seed.
 - **O2 (owner decision 2026-10-17)**: while this Nod is older than the guild's `minAppVersion` the
@@ -33,7 +33,7 @@ module: `docs/arquitetura.md` §5; window model: `docs/canonico.md` §7.
 
 | Screen | Change | Story | Spec |
 | --- | --- | --- | --- |
-| Entry screen (0.4.5) | The locked screen is the rail of tiles in `entry.ts`: Offline (this machine, "import a seed file" while no account exists — RF-61), the guild (icon or initials, a status dot, its account and password, "Sign in again" when signed out), and `+`, the join dialog of `join.ts` (invite link → card → create account; sign in, access code and "create a guild" beside it). The `nod://join` push opens `+` with the invite already looked up; a lock re-reads the tiles | RF-59, RF-60, RF-61 | SP05 §4 |
+| Entry screen (0.5.0) | The locked screen is the rail of tiles in `entry.ts`: Offline (this machine, "import a seed file" while no account exists — RF-61), the guild (icon or initials, a status dot, its account and password, "Sign in again" when signed out), and `+`, the join dialog of `join.ts` (invite link → card → create account; sign in, access code and "create a guild" beside it). The `nod://join` push opens `+` with the invite already looked up; a lock re-reads the tiles | RF-59, RF-60, RF-61 | SP05 §4 |
 | Settings → Hosts | Add (address → guild + fingerprint → email + code), activate, sign in, status, sync now, remove; the signed-out notice; a "Keep your local tools" step listing the join's leftovers, all checked, "Keep as personal tools" (B8b). The dialog is `join.ts`, the same one the entry screen mounts | B2, B8a, B8b, RF-59 | SP05 §4 |
 | People/Tools/Roles/Activity | Same screens; data from the host when connected; People (connected): the Invites card — roles, max uses, expiry, "Create invite" answering the link and the code once, the list with status and Revoke (RF-59) — and per person "New access code"; Activity's sent vs pending; People: one person's devices with Revoke (O1) | B6, B10, O1, RF-59 | SP05 §4 |
 | Sidebar | Order favorites → org → personal; the org half grouped by category with a divider per group (RF-62's `shared/catalog.ts` `groupByCategory`, through `sidebarOrder`), the digits ⌘1…⌘9 following that visual order; "offline" badge; the count of shares waiting in the inbox on the Settings action; the top mark is the guild's icon (or its initials) while a guild is the session's, and the Offline glyph in an offline session (RF-60) | B4, K4, RF-60, RF-62 | SP05 §4 |

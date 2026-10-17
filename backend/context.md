@@ -113,7 +113,7 @@ the verified snapshot; `main.ts` wires the handler and resolves each credential'
 vault, the incoming shares and the missing-copy rows (a credential it cannot name is listed under
 its own id).
 
-**0.4.5 (RF-59/60/61) — the entry screen, the guild invites and the optional seed.** The locked
+**0.5.0 (RF-59/60/61) — the entry screen, the guild invites and the optional seed.** The locked
 window draws `session.profiles`: the Offline tile (this machine's account or the offer of one) and
 each guild tile from the single `host` row, whose icon is the verified `guild-icon.png` read from
 disk (`backend/guild-icon.ts`'s `dataUri`) — no call leaves the machine, so a locked Nod still shows
@@ -144,7 +144,7 @@ in boot mode through `backend/seed.ts`'s `applySeedFile` — the same core `appl
 recording `catalog_imported` with `result: 'seed'`; the runtime origin gate stays the embedded
 seed's (it is built, never read at runtime), so an imported seed fills the catalog and never widens
 what a tool may call. `scripts/gen-config.ts` no longer requires `resources/seed.json` in `build`,
-and a release without one ships no `seed.json` at all. `POST /v1/admin/people` is gone with 0.4.5
+and a release without one ships no `seed.json` at all. `POST /v1/admin/people` is gone with 0.5.0
 (its client, `backend/host-admin.ts`'s `createPerson`, with it): a person who does not exist yet
 joins through a guild invite, and `invites.issue`'s connected path is only the reissue for an
 existing person.

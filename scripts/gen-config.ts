@@ -1,4 +1,4 @@
-// Builds `tinyjs.json` from `tinyjs.base.json` + `resources/seed.json` (0.4.5, RF-61: the seed is
+// Builds `tinyjs.json` from `tinyjs.base.json` + `resources/seed.json` (0.5.0, RF-61: the seed is
 // optional — a build without one releases the app's own pages and no tool origin, and the release
 // starts empty).
 // Contract: docs/arquitetura.md §2 (origin gate) and §6 (build and dev); requirements:
@@ -121,7 +121,7 @@ const BUNDLED = ['tray.png'];
 // `BUILD_MODE_STAMP` (`shared/build-mode.ts`, SP02 §9) must never join this list: the stamp is the
 // only thing that tells a dev run from a release at runtime, and a release that shipped it would be
 // shipping a claim about how it was built.
-// 0.4.5 (RF-61): neither does `seed.json` — the seed is an optional import now, so a release without
+// 0.5.0 (RF-61): neither does `seed.json` — the seed is an optional import now, so a release without
 // one ships no seed at all and starts empty. `buildResources` adds it back when the build had one.
 
 /**
@@ -136,7 +136,7 @@ function relativeIconPath(icon: string | null): string | null {
 }
 
 /**
- * `resources` list of the release: the seed it was built with (0.4.5, RF-61 — absent for a release
+ * `resources` list of the release: the seed it was built with (0.5.0, RF-61 — absent for a release
  * that had none), the tray icon and the relative icons, without repeats.
  */
 function buildResources(seed: Seed | null): string[] {
@@ -169,7 +169,7 @@ function toolOrigins(seed: Seed): string[] {
 /**
  * Builds `tinyjs.json`. Pure and deterministic: the same inputs return the same config.
  *
- * 0.4.5 (RF-61): the seed is optional in both modes. `dev` has always run without it; a `build`
+ * 0.5.0 (RF-61): the seed is optional in both modes. `dev` has always run without it; a `build`
  * without one releases the app's own pages and no tool origin, and the seed it did not have is not in
  * `resources` — the release starts empty and the person may import one at setup
  * (`session.importSeed`). The origin gate never gives `"all"` to a tool and never opens a key with

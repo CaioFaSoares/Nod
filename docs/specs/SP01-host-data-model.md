@@ -14,7 +14,7 @@ SQLite through `bun:sqlite`, one file `/data/host.db`, opened with `PRAGMA journ
 
 `kid` = first 16 bytes of SHA-256 of the raw 32-byte public key, base64url.
 
-## 2. Tables (block 1, and the guild invites of 0.4.5)
+## 2. Tables (block 1, and the guild invites of 0.5.0)
 
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -137,7 +137,7 @@ Rules the repo enforces (not expressible in SQL above):
 - At least one non-disabled person with an admin role must exist once the first admin is activated;
   the repo refuses the change that would leave none.
 
-### `guild_invites` (0.4.5, RF-59; migration 5)
+### `guild_invites` (0.5.0, RF-59; migration 5)
 
 ```sql
 CREATE TABLE guild_invites (

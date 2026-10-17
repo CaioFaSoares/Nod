@@ -22,7 +22,7 @@ Os ícones referenciados pelas entradas ficam em `resources/` (caminho relativo,
 `tray.png`, o ícone da bandeja no Linux. O **ícone do app** (o do Dock/taskbar, outro assunto) tem
 a sua própria seção: §9.
 
-**From 0.4.5 o seed é opcional** (RF-61, `docs/canonico.md` §22 "Seed as optional import"): uma
+**From 0.5.0 o seed é opcional** (RF-61, `docs/canonico.md` §22 "Seed as optional import"): uma
 release pode sair sem `resources/seed.json`, e o app sai vazio; o tile Offline do primeiro uso
 oferece "Import a seed file" (`session.importSeed`) enquanto não houver conta. O gate de origins,
 camera/mic e a URL de atualização continuam vindo só de um seed embutido — uma release sem seed não
@@ -36,7 +36,7 @@ bun run app:build
 ```
 
 `app:build` roda `scripts/gen-config.ts build` (grava `tinyjs.json` com o gate de origin das
-entradas e a lista `resources`) e em seguida `tinyjs build`. Desde 0.4.5 o build **não exige** mais
+entradas e a lista `resources`) e em seguida `tinyjs build`. Desde 0.5.0 o build **não exige** mais
 `resources/seed.json` (RF-61): sem ele o `tinyjs.json` sai válido, sem `seed.json` na lista
 `resources`, e o app instalado abre vazio; com um seed que não valida, falha com
 `invalid seed: <motivo>`. O `tinyjs.json` é gerado e **gitignored**: o gate de origins sai do seed e
@@ -114,6 +114,17 @@ dados falsos (e o ícone versionado é o `assets/icon.png`).
 
 `.github/workflows/release.yml` builds and publishes on every push to a branch named `release-*`
 (and on demand with "Run workflow").
+
+**From 0.5.0 the branch is created for you.** `.github/workflows/release-branch.yml` runs when a
+pull request from `dev` is merged into `main`: it reads `version` from `tinyjs.base.json`, pushes
+`release-<version>` at the merge commit and dispatches `release.yml` on it (a branch pushed with
+`GITHUB_TOKEN` does not start the `push` trigger by itself, GitHub's rule against loops). If
+`release-<version>` already exists the job fails on purpose: the version was not bumped, and
+republishing the same version is a decision for a person (push the branch by hand).
+
+The release text is the body of the `Release <version>:` commit (found by `git log --grep`, with
+GitHub's `Merge pull request #…` header removed); it is what an installed Nod shows in the update
+notice. Write it as patch notes for the people using Nod.
 
 1. **Check**: reads `version` from `tinyjs.base.json`. A branch named `release-X.Y.Z` must match
    it; other `release-*` names skip this check. Then `bun run typecheck` and `bun test test/`.
@@ -210,4 +221,4 @@ serves every OS: sips turns it into the macOS `.icns` (16…1024), Linux copies 
   otherwise.
 
 Everything else of a custom build is the normal step (§2): the seed is still the private one, and from
-0.4.5 a build without it is valid — it just starts empty (RF-61, §1).
+0.5.0 a build without it is valid — it just starts empty (RF-61, §1).

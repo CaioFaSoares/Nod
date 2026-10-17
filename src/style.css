@@ -9,7 +9,7 @@
 :root {
   --font: ui-monospace, 'JetBrains Mono', 'IBM Plex Mono', Menlo, monospace;
   --sidebar-width: 68px;
-  /* 0.4.5: one geometry for every round item of a rail — the entry screen's tiles, the sidebar's
+  /* 0.5.0: one geometry for every round item of a rail — the entry screen's tiles, the sidebar's
      mark, tools and actions — so the two rails read as the same column. */
   --rail-item: 44px;
   --rail-glyph: 28px;
@@ -800,7 +800,7 @@ button {
   display: none;
 }
 
-/* ----------------------------------------------------- entry screen (0.4.5) */
+/* ----------------------------------------------------- entry screen (0.5.0) */
 
 /* RF-60: a Discord-like rail of tiles on the left, the pane of the selected one beside it. */
 .entry {
@@ -859,6 +859,26 @@ button {
   min-height: 0;
   padding: 32px 24px;
   overflow: auto;
+}
+
+/* 0.5.0: the banner above the selected tile's card, both centred in one column. */
+.entry-column {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  width: min(460px, 100%);
+}
+
+.entry-banner {
+  margin: 8px 0 0;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.15;
+  white-space: pre;
+  user-select: none;
 }
 
 .entry-card,

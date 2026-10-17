@@ -6,7 +6,7 @@ host works exactly as before (`docs/epics/E01-connected-mode.md` §5).
 
 Status: **block 1 complete** (milestone "Block 1 — One guild, synced", 2026-10-16; commit
 `6af9e64`); **block 2 complete** (mine and shared: H7, O1 and O2, and the host side of E02 —
-K1/K3, K7, K8 and K9 — with migrations 2, 3 and 4); **0.4.5, RF-59**: the guild invites (migration 5)
+K1/K3, K7, K8 and K9 — with migrations 2, 3 and 4); **0.5.0, RF-59**: the guild invites (migration 5)
 and the two public auth routes that carry them. `main.ts` boots on env
 data (`config.ts`), creates the data dir and both key files
 (`keys.ts`), opens `bun:sqlite`, applies the ordered migrations (`migrations.ts` — migration 1 holds
@@ -125,7 +125,7 @@ is never imported at runtime and never ships in the image. One process, one SQLi
   writes of SP03 §2 carry Nod's `updatedAt`, which is what last-write-wins compares (SP04 §4).
   A code the admin issues is returned once, stored as the hex SHA-256 of its normalized form and
   never listed again (SP02 §3).
-- **A guild invite is the only way a person is created now (RF-59, 0.4.5).** `POST /v1/admin/invites`
+- **A guild invite is the only way a person is created now (RF-59, 0.5.0).** `POST /v1/admin/invites`
   generates the 24-char invite code (SP02 §3), stores its hash together with the roles, the
   `max_uses` and the expiry in `guild_invites` (migration 5), and records an `invite_issued` event
   whose `detail` never carries the code. The public `POST /v1/auth/invite` previews a **live** invite

@@ -1,6 +1,6 @@
 // SP04 §1.3's join link, `nod://join?host=<address>&fp=<fingerprint>[&code=<code>]`, built and read
 // in one place: the backend reads the link the OS forwards (`onOpenUrl`), the page reads a link the
-// person pastes into the join dialog, and the admin's invite card builds one (0.4.5, RF-59).
+// person pastes into the join dialog, and the admin's invite card builds one (0.5.0, RF-59).
 //
 // Pure (`shared/context.md`): only `URL` and `URLSearchParams`, which every runtime of this repo has.
 // Nothing here is a secret by itself; a code inside a link is the person's own and is never logged.

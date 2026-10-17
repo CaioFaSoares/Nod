@@ -887,7 +887,7 @@ const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['person', 'password_algorithm'],
   ['tool', 'scope'],
   ['tool', 'owner_id'],
-  // RF-62 (0.4.5): the display category of a local org tool.
+  // RF-62 (0.5.0): the display category of a local org tool.
   ['tool', 'category'],
   ['event', 'client_id'],
   ['event', 'sent_at'],

@@ -1,6 +1,6 @@
 // RF-58's presence route on the real Elysia app over a temp data dir: who is online, who was seen
 // earlier, who never appears (disabled, revoked, clients), and what an answer may carry. The fixture
-// goes through the real setup and activation routes; a person is seeded through the repo (0.4.5,
+// goes through the real setup and activation routes; a person is seeded through the repo (0.5.0,
 // RF-59: the admin route that created one with an email-bound code is gone), and only the clock of a
 // session and a person's `kind` (no route writes them yet — E04) are moved directly in the database.
 // Run with `bun test host/presence.test.ts`.
@@ -91,7 +91,7 @@ async function setupAdmin(host: TestHost): Promise<SignedIn> {
   return (await response.json()) as SignedIn;
 }
 
-// 0.4.5, RF-59: the admin route that created a person with an email-bound code is gone — a guild
+// 0.5.0, RF-59: the admin route that created a person with an email-bound code is gone — a guild
 // invite creates a person now — so the person and the code SP02 §3 would issue are seeded here (the
 // way setupAdmin seeds the setup code).
 async function addPerson(host: TestHost, email: string, name: string): Promise<SignedIn> {

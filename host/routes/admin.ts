@@ -283,7 +283,7 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
     return repo.sessionsOfPerson(id, auth.now()).map(toDeviceSession);
   })
 
-  // -------------------------------------------------------------- guild invites (0.4.5, RF-59)
+  // -------------------------------------------------------------- guild invites (0.5.0, RF-59)
 
   /** SP03 §2: every invite the guild has, newest first — revoked ones included, never their codes. */
   .get(HOST_ROUTES.adminInvites, (ctx): GuildInvite[] => hostOf(ctx).repo.listInvites())

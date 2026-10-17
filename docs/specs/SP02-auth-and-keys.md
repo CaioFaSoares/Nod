@@ -54,7 +54,7 @@ stored in clear (`people.salt`).
 - The kind is read from the length alone (`shared/host-api.ts`: `CODE_LENGTH`, `codeKindOf`), so
   `POST /v1/auth/join` refuses an access or setup code with the same `invalid invite` an unknown
   invite answers, and pays the argon2id hash before that branch (the F4 rule of §5; the invite kind
-  was added in 0.4.5, RF-59).
+  was added in 0.5.0, RF-59).
 - An invite is not a row of `access_codes`: `host/repo.ts` keeps it in `guild_invites` (SP01 §2,
   migration 5) with its roles, `max_uses`, `uses`, `expires_at` and `revoked_at`. `uses` grows only
   when the join created the person — a taken email (`409`) or a rolled-back join spends nothing.
@@ -186,7 +186,7 @@ page, and a release's `"resources"` list never carries the stamp — so a releas
 `false` and never takes a password on a machine that has `authenticate` — until its system prompt
 fails.
 
-**Fallback when the system prompt fails (0.4.5, Proposto in `docs/canonico.md` §22).** The
+**Fallback when the system prompt fails (0.5.0, Proposto in `docs/canonico.md` §22).** The
 runtime reports `authenticate` per OS, not per enrollment: Windows without Hello enrolled reports
 it and then answers `false` to every prompt (`~/.tinyjs/skill/references/platforms.md`, "false
 where not enrolled"), which left such a person unable to accept a share, reveal, copy or send. Now a

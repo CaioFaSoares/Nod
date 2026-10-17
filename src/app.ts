@@ -3,7 +3,7 @@
 // The page talks to the backend only through `./api`, and only with methods of `ApiContract`.
 // No password or invite code ever leaves this module except as the parameter of `call(...)`:
 // nothing is written to storage, the console, the page title or an error message.
-// 0.4.5 (RF-60): the locked screen is the rail of tiles in `./entry`; the join flow it and
+// 0.5.0 (RF-60): the locked screen is the rail of tiles in `./entry`; the join flow it and
 // Settings → Hosts share is `./join`.
 import { call, errorMessage, on } from './api';
 import { mountEntry, resetEntry, showEntryInvite } from './entry';
@@ -87,7 +87,7 @@ let host: HostState | null = null;
  */
 let presence: PresenceEntry[] = [];
 /**
- * 0.4.5 (RF-60): the tiles of the entry screen, from `session.profiles`. Read while locked (the
+ * 0.5.0 (RF-60): the tiles of the entry screen, from `session.profiles`. Read while locked (the
  * entry screen draws nothing before it) and again after a lock or a join; the sidebar's top mark
  * takes the guild's icon from here too.
  */
@@ -133,7 +133,7 @@ function stateText(tool: ToolStatus | null): string {
 // -------------------------------------------------------------- entry screen
 
 /**
- * 0.4.5 (RF-60): the locked screen is the entry rail in `./entry` — the Offline tile, the guild
+ * 0.5.0 (RF-60): the locked screen is the entry rail in `./entry` — the Offline tile, the guild
  * tile and the `+` tile, with the pane of the selected one beside it. This module owns the session
  * it enters by, so the screen hands every answer back here.
  */
@@ -202,7 +202,7 @@ function renderSidebar(): void {
   const footer = el(
     'div',
     { class: 'sidebar-footer' },
-    // 0.4.5: the same separator the entry screen's rail draws between its tiles.
+    // 0.5.0: the same separator the entry screen's rail draws between its tiles.
     el('span', { class: 'rail-separator', aria: { hidden: 'true' } }),
     // SP05 §4: `stale` is the last sync having failed — the cached guild still shows, and the
     // sidebar says so instead of pretending everything is current.
@@ -223,7 +223,7 @@ function renderSidebar(): void {
       void lockSession();
     }),
   );
-  // 0.4.5 (RF-60): the top mark says where this session is — the guild's icon (or its initials)
+  // 0.5.0 (RF-60): the top mark says where this session is — the guild's icon (or its initials)
   // while the guild is the one being synced, the Offline glyph of the tile that was entered.
   const guild = profiles !== null && profiles.guilds.length > 0 ? profiles.guilds[0] : null;
   const where = session.mode === 'offline' || guild === null ? 'Offline' : guild.guild;
@@ -473,7 +473,7 @@ function seenAgo(iso: string): string {
 
 /**
  * RF-58: the guild has a host this Nod reaches (or reached); local mode has no guild to show.
- * 0.4.5 (RF-60): a session entered through the Offline tile is that same disconnect — the guild is
+ * 0.5.0 (RF-60): a session entered through the Offline tile is that same disconnect — the guild is
  * there, and nothing of it is read or written this session.
  */
 function guildConnected(): boolean {
@@ -884,7 +884,7 @@ function renderUpdateNotice(slot: HTMLElement): void {
 }
 
 /**
- * 0.4.5 (RF-60): the person entered through the Offline tile, so the guild is disconnected for this
+ * 0.5.0 (RF-60): the person entered through the Offline tile, so the guild is disconnected for this
  * session — the local catalog, no sync, no host call, exactly as O2 disconnects it. The guild is
  * still on this machine and one click away, so the banner says which one it is and offers to lock.
  */
@@ -982,7 +982,7 @@ async function lockSession(): Promise<void> {
   joinInvite = null;
   view = 'home';
   render();
-  // 0.4.5 (RF-60): the entry screen picks its tile from the profiles again — the unlock that just
+  // 0.5.0 (RF-60): the entry screen picks its tile from the profiles again — the unlock that just
   // ended stored its target as `last`.
   profiles = null;
   await loadProfiles();
@@ -997,7 +997,7 @@ async function loadUnlocked(): Promise<void> {
       call('host.state'),
       // B7: the favorites the toggle draws from.
       call('favorites.list'),
-      // 0.4.5 (RF-60): the tiles of the entry screen, read while locked and kept: the sidebar's top
+      // 0.5.0 (RF-60): the tiles of the entry screen, read while locked and kept: the sidebar's top
       // mark is the guild's icon, and the next lock re-reads them anyway.
       call('session.profiles'),
     ]);
@@ -1115,7 +1115,7 @@ on('session', (next) => {
     inboxCount = 0;
     joinInvite = null;
     view = 'home';
-    // 0.4.5 (RF-60): the entry screen is built again — its tile comes from the profiles, which the
+    // 0.5.0 (RF-60): the entry screen is built again — its tile comes from the profiles, which the
     // unlock that just ended changed (`last`).
     resetEntry();
     render();

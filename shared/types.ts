@@ -57,7 +57,7 @@ export interface Entry {
   ownerId?: Id | null;
   title: string;
   /**
-   * RF-62 (0.4.5): the display category the guild gave this org tool — a name of 1 to 40 characters,
+   * RF-62 (0.5.0): the display category the guild gave this org tool — a name of 1 to 40 characters,
    * trimmed, or `null` while the guild filed it nowhere. Optional so data written before the field
    * reads as uncategorized. Only an org entry carries a name: a personal tool is always `null` (it
    * has its own group in the display) and the host ignores a category on a personal write.
@@ -397,20 +397,20 @@ export interface SessionState {
   /** ms until the next unlock attempt is accepted (0 = free) */
   waitMs: number;
   /**
-   * 0.4.5 (RF-60): how the unlocked session entered — `guild` (synced with the guild's host) or
+   * 0.5.0 (RF-60): how the unlocked session entered — `guild` (synced with the guild's host) or
    * `offline` (local catalog, no host call, as the O2 gate disconnects a guild). `null` while locked.
    */
   mode: 'offline' | 'guild' | null;
 }
 
 /**
- * 0.4.5 (RF-60): one tile of the entry screen. `offline` is this machine's own profile; `guild` is a
+ * 0.5.0 (RF-60): one tile of the entry screen. `offline` is this machine's own profile; `guild` is a
  * guild this Nod joined, named by its `id` — today the pinned host's address, the one guild of
  * canonico §22 "Guilds per install"; an id per guild is what lets several guilds live here later.
  */
 export type EntryTarget = { kind: 'offline' } | { kind: 'guild'; id: string };
 
-/** 0.4.5 (RF-60): a guild tile of the entry screen. Nothing here is a secret. */
+/** 0.5.0 (RF-60): a guild tile of the entry screen. Nothing here is a secret. */
 export interface GuildProfile {
   id: string;
   guild: string;
@@ -424,7 +424,7 @@ export interface GuildProfile {
   updateRequired: boolean;
 }
 
-/** 0.4.5 (RF-60): what `session.profiles` answers — the tiles of the entry screen. */
+/** 0.5.0 (RF-60): what `session.profiles` answers — the tiles of the entry screen. */
 export interface EntryProfiles {
   offline: {
     /** an account to unlock offline exists (any local person, the guild's own included) */
@@ -444,7 +444,7 @@ export interface EntryProfiles {
   biometric: boolean;
 }
 
-/** 0.4.5 (RF-59): `host.invitePreview`'s answer — the invite card shown before the account form. */
+/** 0.5.0 (RF-59): `host.invitePreview`'s answer — the invite card shown before the account form. */
 export interface InviteView {
   guild: string;
   address: string;
@@ -510,7 +510,7 @@ export interface HostState {
   /** The oldest version the host serves (SP04 §1, SP03 §3); null before one tells this Nod. */
   minAppVersion: string | null;
   /**
-   * 0.4.5 (RF-60): the person entered through the Offline tile, so the guild is disconnected for this
+   * 0.5.0 (RF-60): the person entered through the Offline tile, so the guild is disconnected for this
    * session exactly as `updateRequired` disconnects it — local catalog, no sync, no host call. False
    * without a host and in a `guild` session.
    */
@@ -657,7 +657,7 @@ export interface SecretStore {
 export interface ApiContract {
   'session.state': [void, SessionState];
   /**
-   * 0.4.5 (RF-60): what the entry screen draws before any password — the offline profile and the
+   * 0.5.0 (RF-60): what the entry screen draws before any password — the offline profile and the
    * guild(s) of this Nod, each a tile. Works locked; carries no secret (canonico §22 "Entry screen").
    */
   'session.profiles': [void, EntryProfiles];
@@ -666,7 +666,7 @@ export interface ApiContract {
   'session.unlock': [{ email: string; password: string; target?: EntryTarget }, SessionState];
   'session.unlockBiometric': [{ target?: EntryTarget }, SessionState];
   /**
-   * 0.4.5 (RF-61): the optional seed import of the first run — only while this Nod has no account.
+   * 0.5.0 (RF-61): the optional seed import of the first run — only while this Nod has no account.
    * `path` is the file the page picked with `tiny.dialog`; the seed's catalog, roles and invites
    * become the local tables exactly as an embedded seed would on the first boot.
    */
@@ -707,15 +707,15 @@ export interface ApiContract {
     JoinResult,
   ];
   /**
-   * 0.4.5 (RF-59): what a guild invite opens — discovery of `address` (with `fingerprint` checked
+   * 0.5.0 (RF-59): what a guild invite opens — discovery of `address` (with `fingerprint` checked
    * as in SP04 §1.3) plus `POST /v1/auth/invite`. Works locked; sends only the code.
    */
   'host.invitePreview': [{ address: string; fingerprint: string; code: string }, InviteView];
-  /** 0.4.5 (RF-59), admin of a connected guild: the guild's invites, revoked ones included. */
+  /** 0.5.0 (RF-59), admin of a connected guild: the guild's invites, revoked ones included. */
   'guildInvites.list': [void, GuildInvite[]];
-  /** 0.4.5 (RF-59), admin: creates an invite; `code` and `link` are shown once. */
+  /** 0.5.0 (RF-59), admin: creates an invite; `code` and `link` are shown once. */
   'guildInvites.create': [CreateInviteRequest, { invite: GuildInvite; code: string; link: string }];
-  /** 0.4.5 (RF-59), admin: revokes an invite; a person who already joined keeps their account. */
+  /** 0.5.0 (RF-59), admin: revokes an invite; a person who already joined keeps their account. */
   'guildInvites.revoke': [{ id: Id }, true];
   'host.syncNow': [void, HostState];
   /** `keepPersonal` is SP05 §3's choice about the local personal tools (block 2). */
@@ -851,7 +851,7 @@ export interface ApiContract {
    * Connected (SP05 §3): the same question — "a code to hand over" — is answered by `personId`,
    * which reissues the access code of an existing person (`POST /v1/admin/people/:id/code`,
    * SP02 §3, revoking the previous one). A person who does not exist yet joins through a guild
-   * invite (`guildInvites.create`, RF-59) — that route is gone (0.4.5). `days` is local-only:
+   * invite (`guildInvites.create`, RF-59) — that route is gone (0.5.0). `days` is local-only:
    * SP02 §3 fixes 72 h on the host.
    */
   'invites.issue': [{ roles: Id[]; days?: number; personId?: Id }, { code: string; expiresAt: string }];

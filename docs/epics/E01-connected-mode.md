@@ -497,9 +497,9 @@ New terms wait for the owner before entering `CONTEXT.md`: **local mode**, **con
 **sync**, **outbox**, **device session**, **guild** (the organization one host serves). "Servidor
 central" is the existing term **host**.
 
-## 17. 0.4.5 — entry screen and guild invites (2026-10-17)
+## 17. 0.5.0 — entry screen and guild invites (2026-10-17)
 
-Following the connected mode of blocks 1–2, 0.4.5 makes entering a guild look like joining a Discord
+Following the connected mode of blocks 1–2, 0.5.0 makes entering a guild look like joining a Discord
 server: a locked screen of Offline/guild/`+` tiles, guild invites with roles, uses and expiry,
 redeemed by whoever opens the link with the account they choose, and the seed turned into an optional
 import at setup. Decisions and their owner quotes live in `docs/canonico.md` §22 ("Guild invites",
@@ -507,4 +507,4 @@ import at setup. Decisions and their owner quotes live in `docs/canonico.md` §2
 to RF-61 in `docs/canonico.md` §14; the interfaces are `shared/host-api.ts` (`authInvite`,
 `authJoin`, `adminInvites`, `adminInvite`), `shared/types.ts` (`EntryTarget`, `EntryProfiles`,
 `InviteView`, `SessionState.mode`, `HostState.offlineSession`) and `shared/join-link.ts`. This epic
-keeps §8 (sync) and §13 (milestones) as their home; 0.4.5 does not repeat them.
+keeps §8 (sync) and §13 (milestones) as their home; 0.5.0 does not repeat them.

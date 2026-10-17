@@ -774,7 +774,7 @@ export function createRepo(db: SqlDb): Repo {
     // `4` database holds is unshared and `role`, which is the default of the new column.
     addColumn('vault_item', 'credential_id', 'TEXT');
     addColumn('vault_item', 'scope', "TEXT NOT NULL DEFAULT 'role'");
-    // RF-62 (0.4.5): the display category the guild gave a local org tool. Every row a `5` database
+    // RF-62 (0.5.0): the display category the guild gave a local org tool. Every row a `5` database
     // holds is uncategorized, which is what `NULL` means; a personal row stays `NULL`.
     addColumn('tool', 'category', 'TEXT');
   }

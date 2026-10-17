@@ -97,7 +97,7 @@ const KIND_LABEL: Record<ShareKind, string> = {
 };
 
 /**
- * 0.4.5 (RF-59): the use budget an admin picks for an invite — `''` is the host's `null`, no limit
+ * 0.5.0 (RF-59): the use budget an admin picks for an invite — `''` is the host's `null`, no limit
  * at all. The host takes 1..1000, so these are the ones the screen offers.
  */
 const INVITE_MAX_USES: ReadonlyArray<{ value: string; label: string }> = [
@@ -110,7 +110,7 @@ const INVITE_MAX_USES: ReadonlyArray<{ value: string; label: string }> = [
   { value: '', label: 'No limit' },
 ];
 
-/** 0.4.5 (RF-59): how long an invite works, in minutes; `''` is the host's `null`, never expiring. */
+/** 0.5.0 (RF-59): how long an invite works, in minutes; `''` is the host's `null`, never expiring. */
 const INVITE_EXPIRY: ReadonlyArray<{ value: string; label: string }> = [
   { value: '30', label: '30 minutes' },
   { value: '60', label: '1 hour' },
@@ -136,7 +136,7 @@ function selectField(
 }
 
 /**
- * 0.4.5 (RF-59): what one invite of the guild is doing — the four states the host's own row and its
+ * 0.5.0 (RF-59): what one invite of the guild is doing — the four states the host's own row and its
  * clock answer. Revoked first: a revoked invite stays revoked, whatever else it says.
  */
 function inviteStatus(invite: GuildInvite): 'active' | 'expired' | 'used up' | 'revoked' {
@@ -306,7 +306,7 @@ export function mountSettings(
     inviteRoles: [] as Id[],
     inviteDays: '7',
     /**
-     * 0.4.5 (RF-59), connected People tab: the picks of the Invites card (the host's `null` is the
+     * 0.5.0 (RF-59), connected People tab: the picks of the Invites card (the host's `null` is the
      * empty string of the select), the link and code of the invite created in this session — shown
      * once — and the guild's invites as `guildInvites.list` read them.
      */
@@ -599,7 +599,7 @@ export function mountSettings(
     state.tab = tab;
     state.status = null;
     // The invite code lives only while the People tab is on screen (canonico §9), and a PNG picked
-    // for a guild only while its own tab is (SP05 §6). 0.4.5 (RF-59): the link of the invite created
+    // for a guild only while its own tab is (SP05 §6). 0.5.0 (RF-59): the link of the invite created
     // here is shown once, so leaving the tab takes it too.
     state.invite = null;
     state.inviteFor = null;
@@ -674,7 +674,7 @@ export function mountSettings(
         case 'people':
           state.people = await call('people.list');
           state.roles = await call('roles.list');
-          // 0.4.5 (RF-59): the guild's invites are the host's; a local Nod has none to list and
+          // 0.5.0 (RF-59): the guild's invites are the host's; a local Nod has none to list and
           // nothing to create them with.
           state.guildInvites = hasHost() ? await call('guildInvites.list') : [];
           break;
@@ -804,7 +804,7 @@ export function mountSettings(
       const host = state.host;
       const box = el('div');
       mountJoinFlow(box, {
-        // 0.4.5 (RF-59): the free pane is the invite link; the sign-in mode opens on the account
+        // 0.5.0 (RF-59): the free pane is the invite link; the sign-in mode opens on the account
         // form of the host already on record (its address and its key are pinned).
         step: mode,
         // A pinned host is what the sign-in mode has: its address and key are already on record.
@@ -1697,7 +1697,7 @@ export function mountSettings(
   function sharing(): boolean {
     const host = state.host;
     if (host === null || host.status === 'none' || host.status === 'signed-out') return false;
-    // 0.4.5 (RF-60): an offline session reads nothing of the guild either — same screens as O2's
+    // 0.5.0 (RF-60): an offline session reads nothing of the guild either — same screens as O2's
     // disconnected guild (`hasHost`).
     return !host.updateRequired && !host.offlineSession;
   }
@@ -3444,14 +3444,19 @@ export function mountSettings(
             { class: 'row' },
             el('strong', {}, status),
             el('span', { class: 'chip' }, roleNames(invite.roles)),
-            el('span', { class: 'muted' }, `${invite.uses}/${invite.maxUses ?? 'no limit'} used`),
+            el(
+              'span',
+              { class: 'muted' },
+              invite.maxUses === null ? `${invite.uses} used, no limit` : `${invite.uses}/${invite.maxUses} used`,
+            ),
             el(
               'span',
               { class: 'muted' },
               invite.expiresAt === null ? 'never expires' : `expires ${isoDay(invite.expiresAt)}`,
             ),
           ),
-          invite.revokedAt === null
+          // An invite the host would refuse anyway (used up, expired, revoked) has nothing to revoke.
+          status === 'active'
             ? el('div', { class: 'row' }, button('Revoke', () => void revokeGuildInvite(invite), { kind: 'danger' }))
             : null,
         ),
@@ -3702,7 +3707,7 @@ export function mountSettings(
    * devices, the colleagues, the leftovers and the sharing screens are the local ones. Settings →
    * Hosts does not come through here: it shows the guild and its reason on the host's own card.
    *
-   * 0.4.5 (RF-60): a session entered through the Offline tile is the same disconnect — the guild is
+   * 0.5.0 (RF-60): a session entered through the Offline tile is the same disconnect — the guild is
    * on this machine and this session reads nothing of it.
    */
   function hasHost(): boolean {
