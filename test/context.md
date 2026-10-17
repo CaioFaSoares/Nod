@@ -7,6 +7,7 @@ Two kinds of proof, matching `AGENTS.md`'s rule that nothing is "verified" witho
 | Unit | `test/*.test.ts`, `host/**/*.test.ts` (block 1 on) | `bun test` | Pure logic in `shared/` and the host against a real temp SQLite |
 | Smoke, local | `test/smoke/` (`run.ts`, `smoke.html`, `tools.ts`) | `bun test/smoke/run.ts` | The real Nod app under tinyjs, with local fake tools, a throwaway app id (`NOD_APP_ID`), a free dev port and a page file named after the launch's nonce (so a `tinyjs dev` a previous smoke left behind can neither serve nor reload this launch's page), and its own data dir |
 | Smoke, connected | `test/smoke/` (`connected.ts`, `connected.html`, `tools.ts`) | `bun test/smoke/connected.ts [--force]` | The real Nod under four app ids beside a real host process: SP05 §5 steps 2–5 and block 2's sharing (SP06 §4–§6, B7, K1–K9), no external network, no container |
+| Smoke, real page | `test/smoke/` (`ui.ts`, `ui-driver.ts`, `tools.ts`) | `bun test/smoke/ui.ts [--force]` | The real `index.html` entry (`src/app.ts` + `src/settings.ts`) inside tinyjs, driven through its own DOM: block 2's screens (#24, #25, #27–#35), beside a real host process, no external network, no container. The generated page points `frontend.devUrl` at the dev server's copy of itself (`test/smoke/.gerado/ui/`), so the window is the real `http://` page with the runtime bridge — not a re-written test page |
 
 `test/helpers/sqlite-bun.ts` adapts `bun:sqlite` to the backend's `SqlDb`, so `backend/repo.ts` runs
 under Bun.
@@ -83,3 +84,34 @@ prints the counts of tables, columns and hits, and never a value. It also reads 
 accepted item's origin, credential and scope) and the second machine's (which must hold no local
 `tool` row for the personal tool). Nothing printed is ever a code, a token, a password, a secret or
 a sealed blob — step names, statuses, counts and public digests only.
+
+## The real-page UI smoke (`test/smoke/ui.ts`)
+
+The two smokes above drive the API from a purpose-written page. This one renders the product: the
+generated page imports `/src/app.ts` exactly as `index.html` does and then `test/smoke/ui-driver.ts`;
+the runner points `frontend.devUrl` at that file, so `tinyjs dev` loads the real `http://` page (the
+real entry, the real stylesheet, the injected `tiny` bridge) instead of a test page. The driver sets
+the world up over `src/api.ts` and then asserts what the screens show, clicking and typing on the
+real DOM of `src/app.ts` and `src/settings.ts`.
+
+`ui.ts` refuses while `resources/seed.json` exists and moves it to `test/smoke/.gerado/seed.json.bak`
+with `--force`, like the others. One host process and four app ids — the admin (three launches), the
+person P (two), the second member Q and P's second machine. The desk carries the setup code and each
+access code; the O2 step restarts the host with `NOD_MIN_APP_VERSION` above the app version. No
+password, code or credential value ever reaches a file, a log or `store.json`.
+
+| Step | Story | What the DOM shows |
+| --- | --- | --- |
+| `#24` add personal tool, sidebar order, favorite, warning | B7/SP05 §3–§4 | the dialog creates the tool, the sidebar lists it after the org tools and first once favorited, and its card carries the canonico §22 warning |
+| `#25` keep local tools | B8b/RF-40 | the Hosts tab lists the join's leftovers, all checked; `Keep as personal tools` turns them into personal tools, which Home shows with the warning |
+| `#27` devices | O1 | Account lists this machine's devices with Revoke; the admin's People tab opens one person's devices |
+| `#28` update-required banner | O2/SP04 §1 | after the host raises its minimum, `Sync now` shows the persistent notice naming the version |
+| `#29` key fingerprint | K1 | Account shows `XXXX-XXXX-XXXX-XXXX` and the status of this machine's pair |
+| `#30` changed colleague key | K2/RF-45 | a second machine re-keys P; the Colleagues list shows `key changed — confirm`, and Confirm clears it |
+| `#32`/`#33` inbox, reveal, copy | K4/K5 | Accept moves the share into the vault behind the dev-run password prompt; Reveal shows the value with its countdown and the DOM is clean at zero; Copy never renders it |
+| `#34` blocked and role send | K6/SP06 §5 | a Blocked credential has no Send; a Role one opens the dialog listing the recipients |
+| `#35` holders | K7/RF-54 | both accepting people appear in the credential's holders with date and scope, and in the admin's Credential holders card |
+
+The driver's only RPC use is setup (account, host join, publish, people and codes, credentials,
+scope, send, Q's accept, the second machine, P's new code); every acceptance above reads the DOM.
+`docs/handovers/ui-smoke.md` carries the last run's step lines.

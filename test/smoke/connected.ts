@@ -85,13 +85,21 @@
 // never lost: it is moved aside exactly like `run.ts --force` does and restored in `finally`.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { GUILD_ICON_FILE } from '../../backend/guild-icon';
 import { sha256Hex, toBase64url } from '../../shared/encoding';
-import type { Tools } from './tools';
-import { freePort, startTools } from './tools';
+import {
+  appDataDir as dataDir,
+  freePort,
+  generateDevConfig,
+  issueSetupCode,
+  killProcessTree as killTree,
+  startHostControl as hostControl,
+  startTools,
+  waitForStoredResult,
+} from './tools';
+import type { HostControl, Tools } from './tools';
 
 /** The two app ids of the smoke: the real installation is never touched. */
 const ADMIN_APP_ID = 'copland.nod.smoke-admin';
@@ -153,8 +161,6 @@ const HOST_DATA = join(CONNECTED_DIR, 'host-data');
 const MARKER = '__CONFIG__';
 
 const FINISH_TIMEOUT_MS = 180_000;
-const HOST_BOOT_TIMEOUT_MS = 20_000;
-const HOST_STOP_TIMEOUT_MS = 5_000;
 const OUTPUT_LIMIT = 4000;
 
 interface Step {
@@ -162,15 +168,6 @@ interface Step {
   ok: boolean;
   detail: string;
   ms: number;
-}
-
-interface SmokeResult {
-  done: boolean;
-  /** The phase and the launch nonce: what keeps a result from a previous launch out of this wait. */
-  phase?: string;
-  nonce?: string;
-  steps: Step[];
-  error?: string | null;
 }
 
 /**
@@ -226,12 +223,7 @@ const PHASES: Phase[] = [
   { name: 'person-signed-out', appId: PERSON_APP_ID },
 ];
 
-/** Data directory per app id, the way the runtime computes it on each system. */
-function dataDir(appId: string): string {
-  if (platform() === 'darwin') return join(homedir(), 'Library', 'Application Support', appId);
-  if (platform() === 'win32') return join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), appId);
-  return join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), appId);
-}
+/** Data directory per app id comes from `./tools` (`appDataDir`), the launches' one home. */
 
 /**
  * Entry ids of the temporary seeds. `TOOL_A_ID` is the admin's (and so the host's, the admin
@@ -349,25 +341,6 @@ function resolveMethods(): Methods {
 
 // ------------------------------------------------------------- the app launches
 
-/** `bun scripts/gen-config.ts dev`, with the smoke id and dev port; the last call drops both. */
-function runGenConfig(appId: string | null, devPort: number | null): { code: number; output: string } {
-  const env: Record<string, string | undefined> = { ...process.env };
-  if (appId !== null) env.NOD_APP_ID = appId;
-  else delete env.NOD_APP_ID;
-  if (devPort !== null) env.NOD_DEV_PORT = String(devPort);
-  else delete env.NOD_DEV_PORT;
-  const result = Bun.spawnSync(['bun', 'scripts/gen-config.ts', 'dev'], {
-    cwd: ROOT,
-    env,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  return {
-    code: result.exitCode ?? -1,
-    output: (result.stdout?.toString() ?? '') + (result.stderr?.toString() ?? ''),
-  };
-}
-
 /** Writes the page of one phase, with the JSON of that launch in the template's one marker. */
 function generatePage(
   phase: Phase,
@@ -416,81 +389,6 @@ function generatePage(
   return page;
 }
 
-/** `true` while the process (or the group) still exists. */
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Kills the app and its children (the process group catches the frontend server). */
-async function killTree(app: ChildProcess): Promise<void> {
-  const pid = app.pid;
-  if (pid === undefined) return;
-  if (alive(pid)) {
-    try {
-      process.kill(-pid, 'SIGTERM');
-    } catch {
-      /* already dead */
-    }
-    const limit = Date.now() + 3000;
-    while (Date.now() < limit && alive(pid)) await Bun.sleep(100);
-  }
-  if (alive(pid)) {
-    Bun.spawnSync(['pkill', '-P', String(pid)], { stdout: 'ignore', stderr: 'ignore' });
-    try {
-      process.kill(-pid, 'SIGKILL');
-    } catch {
-      /* already dead */
-    }
-  }
-}
-
-/**
- * Waits for `smoke_result.done` of **this** launch in the app's store.json: the nonce the runner
- * put in the page is what tells a fresh result from the one the previous launch of the same app id
- * left there.
- */
-async function waitForResult(
-  app: ChildProcess,
-  box: { error: string | null },
-  appId: string,
-  nonce: string,
-): Promise<{ ok: boolean; error: string | null; steps: Step[] }> {
-  const path = join(dataDir(appId), 'store.json');
-  const start = Date.now();
-  let last: SmokeResult | null = null;
-  while (Date.now() - start < FINISH_TIMEOUT_MS) {
-    if (box.error !== null) return { ok: false, error: box.error, steps: last?.steps ?? [] };
-    if (app.exitCode !== null || app.signalCode !== null) {
-      return {
-        ok: false,
-        error: `the app exited before writing the result (code ${app.exitCode}, signal ${app.signalCode})`,
-        steps: last?.steps ?? [],
-      };
-    }
-    await Bun.sleep(200);
-    if (!existsSync(path)) continue;
-    try {
-      const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-      const result = raw['smoke_result'] as SmokeResult | undefined;
-      if (!result || result.nonce !== nonce) continue;
-      last = result;
-      if (result.done === true) return { ok: true, error: null, steps: result.steps ?? [] };
-    } catch {
-      /* store.json may be mid-write; try again next cycle */
-    }
-  }
-  return {
-    ok: false,
-    error: `timeout (${FINISH_TIMEOUT_MS} ms) waiting for smoke_result.done`,
-    steps: last?.steps ?? [],
-  };
-}
-
 /** One launch of the app for one phase; returns the phase's steps. */
 async function runPhase(
   phase: Phase,
@@ -505,7 +403,7 @@ async function runPhase(
   // The seed of this app id: `gen-config` reads it here (the runtime gate of `login.report`) and the
   // app reads it at boot (its local catalog, applied on the first one). Two machines, two seeds.
   writeFileSync(SEED, temporarySeed(tools, phase.appId));
-  const gen = runGenConfig(phase.appId, devPort);
+  const gen = generateDevConfig(ROOT, phase.appId, devPort);
   if (gen.code !== 0) {
     return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
   }
@@ -535,7 +433,14 @@ async function runPhase(
   });
 
   try {
-    const result = await waitForResult(app, box, phase.appId, nonce);
+    const result = await waitForStoredResult(
+      app,
+      box,
+      join(dataDir(phase.appId), 'store.json'),
+      nonce,
+      'smoke_result',
+      FINISH_TIMEOUT_MS,
+    );
     if (!result.ok && output.trim().length > 0) {
       return { ...result, error: `${result.error}\n--- app output ---\n${output.trim()}` };
     }
@@ -547,112 +452,8 @@ async function runPhase(
 
 // ------------------------------------------------------------- the host process
 
-interface HostControl {
-  port: number;
-  env: Record<string, string | undefined>;
-  start(): Promise<string>;
-  stop(): Promise<string>;
-  running(): boolean;
-  kill(): void;
-}
-
-async function answersHealth(port: number): Promise<boolean> {
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/health`);
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The one host of the smoke: `bun host/main.ts` on a temp data dir. `start` and `stop` are what the
- * desk exposes to the person page — SP05 §5.5's network switch is this process.
- */
-function hostControl(dataDirPath: string): HostControl {
-  const port = freePort();
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    NOD_DATA: dataDirPath,
-    NOD_DEV: '1',
-    NOD_PUBLIC_URL: `http://127.0.0.1:${port}`,
-    NOD_GUILD_NAME: GUILD_NAME,
-    PORT: String(port),
-  };
-  let child: ChildProcess | null = null;
-  let output = '';
-  const append = (chunk: Buffer | string): void => {
-    output = (output + chunk.toString()).slice(-OUTPUT_LIMIT);
-  };
-
-  return {
-    port,
-    env,
-    running: () => child !== null,
-    async start(): Promise<string> {
-      if (child !== null) return 'host already up';
-      const spawned = spawn('bun', ['host/main.ts'], {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env,
-      });
-      child = spawned;
-      output = '';
-      spawned.stdout?.on('data', append);
-      spawned.stderr?.on('data', append);
-      const limit = Date.now() + HOST_BOOT_TIMEOUT_MS;
-      while (Date.now() < limit) {
-        if (await answersHealth(port)) return `host up on 127.0.0.1:${port}`;
-        if (spawned.exitCode !== null) throw new Error(`the host exited ${spawned.exitCode}: ${output.trim().slice(-300)}`);
-        await Bun.sleep(150);
-      }
-      throw new Error(`the host did not answer /health in ${HOST_BOOT_TIMEOUT_MS} ms: ${output.trim().slice(-300)}`);
-    },
-    async stop(): Promise<string> {
-      const spawned = child;
-      if (spawned === null) return 'host already down';
-      const exited = new Promise<void>((resolve) => spawned.once('exit', () => resolve()));
-      spawned.kill('SIGTERM');
-      const timedOut = await Promise.race([
-        exited.then(() => false),
-        Bun.sleep(HOST_STOP_TIMEOUT_MS).then(() => true),
-      ]);
-      if (timedOut) {
-        spawned.kill('SIGKILL');
-        await exited;
-      }
-      child = null;
-      return `host stopped on 127.0.0.1:${port} (exit ${spawned.exitCode ?? 'signal'})`;
-    },
-    kill(): void {
-      child?.kill('SIGKILL');
-      child = null;
-    },
-  };
-}
-
-/**
- * SP07 §3's one-time setup code, through the real command, over the same environment the host booted
- * with. The code is returned to the caller and never printed: it goes to the desk, which is how the
- * admin's page receives it (SP02 §3's "printed to the terminal that ran it" — here, to the process
- * that started the host, which hands it over the way the admin would).
- */
-function issueSetupCode(env: Record<string, string | undefined>): string {
-  const result = Bun.spawnSync(['bun', 'host/cli/setup-code.ts'], {
-    cwd: ROOT,
-    env,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  if (result.exitCode !== 0) {
-    throw new Error(
-      `setup-code exited ${result.exitCode}: ${(result.stderr?.toString() ?? '').trim().slice(-300)}`,
-    );
-  }
-  const code = (result.stdout?.toString() ?? '').trim();
-  if (code.length === 0) throw new Error('setup-code printed nothing');
-  return code;
-}
+// The host launch, its setup code and the store-file waiter come from `./tools`, the one home of
+// the smoke's process plumbing.
 
 // ------------------------------------------------------------- the desk
 
@@ -1085,7 +886,7 @@ async function main(): Promise<number> {
       renameSync(SEED_BACKUP, SEED);
       console.log('private seed restored');
     }
-    const finalGen = runGenConfig(null, null);
+    const finalGen = generateDevConfig(ROOT, null, null);
     if (finalGen.code !== 0) {
       console.error(`final gen-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
       if (previousTinyjsJson !== null) {
@@ -1133,9 +934,9 @@ async function main(): Promise<number> {
     rmSync(HOST_DATA, { recursive: true, force: true });
     console.log(`smoke app data wiped before the run (${APP_IDS.length} app ids)`);
 
-    host = hostControl(HOST_DATA);
+    host = hostControl(ROOT, HOST_DATA, GUILD_NAME);
     console.log(await host.start());
-    const setupCode = issueSetupCode(host.env);
+    const setupCode = issueSetupCode(ROOT, host.env);
     console.log(`setup code issued by host/cli/setup-code.ts (${setupCode.length} chars, not printed)`);
 
     const methods = resolveMethods();

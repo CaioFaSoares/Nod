@@ -41,7 +41,14 @@ import { homedir, platform } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import type { SealPayload } from '../../shared/seal';
 import type { Tools } from './tools';
-import { freePort, startTools } from './tools';
+import {
+  appDataDir as dataDir,
+  freePort,
+  generateDevConfig,
+  killProcessTree as killTree,
+  startTools,
+  waitForStoredResult,
+} from './tools';
 
 /** Smoke id: the real app runs under it so it never touches the owner's data. */
 const APP_ID = 'copland.nod.smoke';
@@ -72,27 +79,7 @@ const OUTPUT_LIMIT = 4000;
 /** A credential or a wrong secret never reaches the audit — the runner checks both. */
 const FORBIDDEN_IN_EXPORT = ['secret-a', 'wrong'];
 
-interface Step {
-  step: string;
-  ok: boolean;
-  detail: string;
-  ms: number;
-}
-
-interface SmokeResult {
-  done: boolean;
-  /** The launch nonce: what keeps a result from a previous launch out of this wait. */
-  nonce?: string;
-  steps: Step[];
-  error?: string | null;
-}
-
-/** Data directory per app id, the way the runtime computes it on each system. */
-function dataDir(): string {
-  if (platform() === 'darwin') return join(homedir(), 'Library', 'Application Support', APP_ID);
-  if (platform() === 'win32') return join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), APP_ID);
-  return join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), APP_ID);
-}
+/** Data directory per app id comes from `./tools` (`appDataDir`), the launches' one home. */
 
 /**
  * Temporary seed. It exists only so `gen-config` builds the origin gate: every entry origin gets
@@ -156,105 +143,9 @@ function generatePage(tools: Tools, nonce: string): string {
 }
 
 /**
- * `bun scripts/gen-config.ts dev`. With `devPort`, the child gets `NOD_APP_ID` and `NOD_DEV_PORT`
- * and `tinyjs.json` comes out with the smoke id and the smoke dev origin; with `null`, the
- * environment goes without both keys — which is how the final regeneration puts back the id from
- * `tinyjs.base.json` and the default dev port.
+ * The `gen-config` regeneration, the store-file wait and the process tree kill come from `./tools`,
+ * the one home of the smoke's process plumbing.
  */
-function runGenConfig(devPort: number | null): { code: number; output: string } {
-  const env: Record<string, string | undefined> = { ...process.env };
-  if (devPort !== null) {
-    env.NOD_APP_ID = APP_ID;
-    env.NOD_DEV_PORT = String(devPort);
-  } else {
-    delete env.NOD_APP_ID;
-    delete env.NOD_DEV_PORT;
-  }
-  const result = Bun.spawnSync(['bun', 'scripts/gen-config.ts', 'dev'], {
-    cwd: ROOT,
-    env,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  return {
-    code: result.exitCode ?? -1,
-    output: (result.stdout?.toString() ?? '') + (result.stderr?.toString() ?? ''),
-  };
-}
-
-/** `true` while the process (or the group) still exists. */
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Kills the app and its children (the process group catches the frontend server). */
-async function killTree(app: ChildProcess): Promise<void> {
-  const pid = app.pid;
-  if (pid === undefined) return;
-  if (alive(pid)) {
-    try {
-      process.kill(-pid, 'SIGTERM');
-    } catch {
-      /* already dead */
-    }
-    const limit = Date.now() + 3000;
-    while (Date.now() < limit && alive(pid)) await Bun.sleep(100);
-  }
-  if (alive(pid)) {
-    Bun.spawnSync(['pkill', '-P', String(pid)], { stdout: 'ignore', stderr: 'ignore' });
-    try {
-      process.kill(-pid, 'SIGKILL');
-    } catch {
-      /* already dead */
-    }
-  }
-}
-
-/**
- * Waits for `smoke_result.done` of **this** launch in the app's store.json: the nonce the runner put
- * in the page is what tells a fresh result from the one a previous launch of the same app id left
- * there.
- */
-async function waitForResult(
-  app: ChildProcess,
-  box: { error: string | null },
-  nonce: string,
-): Promise<{ ok: boolean; error: string | null; steps: Step[] }> {
-  const path = join(dataDir(), 'store.json');
-  const start = Date.now();
-  let last: SmokeResult | null = null;
-  while (Date.now() - start < FINISH_TIMEOUT_MS) {
-    if (box.error !== null) return { ok: false, error: box.error, steps: last?.steps ?? [] };
-    if (app.exitCode !== null || app.signalCode !== null) {
-      return {
-        ok: false,
-        error: `the app exited before writing the result (code ${app.exitCode}, signal ${app.signalCode})`,
-        steps: last?.steps ?? [],
-      };
-    }
-    await Bun.sleep(200);
-    if (!existsSync(path)) continue;
-    try {
-      const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-      const result = raw['smoke_result'] as SmokeResult | undefined;
-      if (!result || result.nonce !== nonce) continue;
-      last = result;
-      if (result.done === true) return { ok: true, error: null, steps: result.steps ?? [] };
-    } catch {
-      /* store.json may be mid-write; try again next cycle */
-    }
-  }
-  return {
-    ok: false,
-    error: `timeout (${FINISH_TIMEOUT_MS} ms) waiting for smoke_result.done`,
-    steps: last?.steps ?? [],
-  };
-}
 
 /** The audit export must exist, be valid JSONL line by line and never carry a credential. */
 function checkExport(): { ok: boolean; detail: string } {
@@ -817,7 +708,7 @@ async function main(): Promise<number> {
       renameSync(SEED_BACKUP, SEED);
       console.log('private seed restored');
     }
-    const finalGen = runGenConfig(null);
+    const finalGen = generateDevConfig(ROOT, null, null);
     if (finalGen.code !== 0) {
       console.error(`final gen-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
       if (previousTinyjsJson !== null) {
@@ -854,15 +745,15 @@ async function main(): Promise<number> {
 
     const devPort = freePort();
     const nonce = crypto.randomUUID();
-    const gen = runGenConfig(devPort);
+    const gen = generateDevConfig(ROOT, APP_ID, devPort);
     if (gen.code !== 0) {
       console.error(`gen-config failed (code ${gen.code}):\n${gen.output.trim()}`);
       return 3;
     }
     console.log('tinyjs.json generated in dev with the temporary seed');
 
-    rmSync(dataDir(), { recursive: true, force: true });
-    console.log(`smoke app data wiped: ${dataDir()}`);
+    rmSync(dataDir(APP_ID), { recursive: true, force: true });
+    console.log(`smoke app data wiped: ${dataDir(APP_ID)}`);
 
     page = generatePage(tools, nonce);
     console.log(`smoke page: ${page}`);
@@ -888,7 +779,14 @@ async function main(): Promise<number> {
       `app: tinyjs dev (TINYJS_HTML=${page}, NOD_APP_ID=${APP_ID}, NOD_DEV_PORT=${devPort})`,
     );
 
-    const result = await waitForResult(app, box, nonce);
+    const result = await waitForStoredResult(
+      app,
+      box,
+      join(dataDir(APP_ID), 'store.json'),
+      nonce,
+      'smoke_result',
+      FINISH_TIMEOUT_MS,
+    );
     for (const step of result.steps) {
       console.log(`${step.ok ? 'ok    ' : 'FAILED'} ${step.step} (${step.ms} ms) ${step.detail}`);
     }

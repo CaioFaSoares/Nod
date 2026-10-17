@@ -1646,6 +1646,19 @@ export function mountSettings(
     if (keys.fingerprint !== null) {
       card.append(el('span', { class: 'mono fingerprint' }, keys.fingerprint));
     }
+    // K1/SP06 §2: the status of the pair this machine reads out — `ok` when the host holds it,
+    // `pending` until the next publish, `unavailable` when the stored value cannot be opened.
+    card.append(
+      el(
+        'span',
+        { class: 'chip key-status' },
+        keys.status === 'ok'
+          ? 'on this guild'
+          : keys.status === 'pending'
+            ? 'not on this guild yet'
+            : 'unavailable',
+      ),
+    );
     if (keys.status === 'pending') {
       // K1: this machine holds a pair the host has not taken yet — it goes out at the next `ensure`.
       card.append(
