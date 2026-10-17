@@ -14,7 +14,7 @@ SQLite through `bun:sqlite`, one file `/data/host.db`, opened with `PRAGMA journ
 
 `kid` = first 16 bytes of SHA-256 of the raw 32-byte public key, base64url.
 
-## 2. Tables (block 1)
+## 2. Tables (block 1, and the guild invites of 0.4.5)
 
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -75,6 +75,7 @@ CREATE TABLE entries (
   scope       TEXT NOT NULL,                      -- 'org' | 'personal'
   owner_id    TEXT REFERENCES people(id) ON DELETE CASCADE,  -- set iff scope = 'personal'
   title       TEXT NOT NULL,
+  category    TEXT,                               -- RF-62: display category of an org tool, or null
   url         TEXT NOT NULL,
   icon        TEXT,                               -- data URI or null
   ord         INTEGER NOT NULL,
@@ -135,6 +136,31 @@ Rules the repo enforces (not expressible in SQL above):
 - Removing a role from a person deletes their favorites of entries they no longer see.
 - At least one non-disabled person with an admin role must exist once the first admin is activated;
   the repo refuses the change that would leave none.
+
+### `guild_invites` (0.4.5, RF-59; migration 5)
+
+```sql
+CREATE TABLE guild_invites (
+  id          TEXT PRIMARY KEY,                   -- uuid
+  code_hash   TEXT NOT NULL UNIQUE,               -- hex sha256 of the normalized code (SP02 §3)
+  roles       TEXT NOT NULL,                      -- JSON array of role ids the invite grants
+  max_uses    INTEGER,                            -- null: no limit
+  uses        INTEGER NOT NULL DEFAULT 0,         -- redemptions that created an account
+  created_by  TEXT NOT NULL,                      -- the admin person id, for display
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT,                               -- null: never expires
+  revoked_at  TEXT
+);
+```
+
+- The code itself is stored nowhere, exactly like an access code (SP02 §3): only its hash is, and no
+  read hands a hash back — `GET /v1/admin/invites` answers `GuildInvite`, which has no such field.
+- `uses` counts only the redemptions that created a person: a join is one transaction, so the
+  email-taken `409` of RF-59, or any later failure, rolls the spend back with the row.
+- `roles` may name `admin`: the invite's creator decides what it grants (`host/routes/admin.ts`
+  passes the ids straight through, and the repo checks that each one exists).
+- `created_by` carries no foreign key: `people` rows are disabled, never deleted, and the column is
+  what the admin list shows as the invite's author.
 
 ## 3. Tables (block 2)
 
@@ -197,12 +223,14 @@ applied. On boot the repo applies the missing ones inside one transaction each. 
 edits an earlier one. The block 1 schema is migration 1; block 2 tables are migration 2;
 `person_keys.private_sealed` (one key pair per person across machines, `docs/canonico.md` §22) is
 migration 3; `credential_holders.rotated_at` (the owner's explicit rotation signal, RF-48) is
-migration 4.
+migration 4; `guild_invites` (the guild invites of RF-59, read by the preview and the join) is
+migration 5.
 
 ## 5. Acceptance
 
 - A fresh `/data` boots, creates both key files with mode 0600, applies migrations, and reports
-  `schema_version = 4` (block 1's migration 1, block 2's migration 2, `person_keys.private_sealed`
-  as migration 3, and `credential_holders.rotated_at` as migration 4).
+  `schema_version = 5` (block 1's migration 1, block 2's migration 2, `person_keys.private_sealed`
+  as migration 3, `credential_holders.rotated_at` as migration 4, and `guild_invites` as migration
+  5).
 - Restarting the container keeps every row (volume at `/data`).
 - Inserting a personal entry without `owner_id`, or a grant on a personal entry, fails.

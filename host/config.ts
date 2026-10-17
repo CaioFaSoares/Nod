@@ -58,10 +58,21 @@ export function loadConfig(env: Record<string, string | undefined>): HostConfig 
   };
 }
 
+// ---------------------------------------------------------------- guild name (SP04 §1, RF-59)
+
+/**
+ * SP07 §2: the deployment's guild name. Two documents carry it — the discovery a Nod pins
+ * (SP04 §1) and the invite preview a stranger reads before typing an account (RF-59) — so the
+ * environment name lives here, beside the other deployment values, and each of those two routes
+ * reads it as the trimmed value of its own request.
+ */
+export const GUILD_NAME_ENV = 'NOD_GUILD_NAME';
+
 // ---------------------------------------------------------------- app metadata (SP03 §3, O2)
 
 /** SP07 §2: the semver the discovery and `/v1/meta/app` serve. */
 export const MIN_APP_VERSION_ENV = 'NOD_MIN_APP_VERSION';
+
 /** SP03 §3: the `https` address of the tinyjs update manifest; unset means the host offers none. */
 export const UPDATE_URL_ENV = 'NOD_UPDATE_URL';
 

@@ -56,7 +56,7 @@ P is last because a revoked person cannot push later:
 
 | Phase | Spec | What it drives |
 | --- | --- | --- |
-| `admin-publish` | SP05 §5.2, §6, B7, K1 | the setup code, `host.bootstrap`, role `team`, an access code for each member, both grants, the admin joining `team` (a `role` share needs a role in common), a personal tool and its favorite, the guild PNG |
+| `admin-publish` | SP05 §5.2, §6, B7, K1 | the setup code, `host.bootstrap`, role `team`, a guild invite for each member (`guildInvites.create`), both grants, the admin joining `team` (a `role` share needs a role in common), a personal tool and its favorite, the guild PNG |
 | `person-join` | SP05 §5.3, §5.5, §6, B7, K1 | P activates, the granted tool appears, no personal half of another person arrives, the vault fills on its origin; host stopped and started again; the guild icon shows |
 | `person2-join` | SP05 §5.3 | Q, the second member of `team`, activates the same way |
 | `admin-clear` | SP05 §6 | the admin removes the guild icon |
@@ -71,7 +71,7 @@ P is last because a revoked person cannot push later:
 | `admin-revoke` | SP05 §5.4 | `people.revoke` on P |
 | `person-signed-out` | SP05 §5.4 | P's next sync is `signed-out` and the org tools are gone |
 
-No code goes through a file: the pages fetch the setup code and each member's access code from a
+No code goes through a file: the pages fetch the setup code and each member's invite code from a
 loopback endpoint the runner serves ("the desk"), and the admin page hands the codes back the same
 way. The desk is also what stops and starts the host process, and what carries one machine's own key
 fingerprint (a public digest) to another. Every gated call carries the password: on a machine with
@@ -95,10 +95,16 @@ the world up over `src/api.ts` and then asserts what the screens show, clicking 
 real DOM of `src/app.ts` and `src/settings.ts`.
 
 `ui.ts` refuses while `resources/seed.json` exists and moves it to `test/smoke/.gerado/seed.json.bak`
-with `--force`, like the others. One host process and four app ids — the admin (three launches), the
-person P (two), the second member Q and P's second machine. The desk carries the setup code and each
-access code; the O2 step restarts the host with `NOD_MIN_APP_VERSION` above the app version. No
-password, code or credential value ever reaches a file, a log or `store.json`.
+with `--force`, like the others. One host process and four app ids: the admin (three launches), the
+person P (two), a third person who joins through the entry screen's invite link (#37), and a fresh
+machine that imports a seed at first run (#38). The second member Q and P's second machine have no
+screen under test, so they are
+headless (`test/smoke/headless.ts`): Bun calls to the host with the shared routes, key derivation and
+key generation. Q joins with the admin's invite beside P's launch and accepts the share beside P's
+inbox launch, and P's re-key by a reissued access code runs alone before the admin's last launch. The
+desk carries the setup code and each code the admin hands over; the O2 step restarts the host with
+`NOD_MIN_APP_VERSION` above the app version. No password, code or credential value ever reaches a
+file, a log or `store.json`.
 
 | Step | Story | What the DOM shows |
 | --- | --- | --- |

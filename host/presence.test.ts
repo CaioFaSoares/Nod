@@ -1,7 +1,8 @@
 // RF-58's presence route on the real Elysia app over a temp data dir: who is online, who was seen
 // earlier, who never appears (disabled, revoked, clients), and what an answer may carry. The fixture
-// goes through the real setup, admin and activation routes; only the clock of a session and a
-// person's `kind` (no route writes them yet — E04) are moved directly in the database the app wrote.
+// goes through the real setup and activation routes; a person is seeded through the repo (0.4.5,
+// RF-59: the admin route that created one with an email-bound code is gone), and only the clock of a
+// session and a person's `kind` (no route writes them yet — E04) are moved directly in the database.
 // Run with `bun test host/presence.test.ts`.
 
 import { afterEach, expect, test } from 'bun:test';
@@ -90,10 +91,18 @@ async function setupAdmin(host: TestHost): Promise<SignedIn> {
   return (await response.json()) as SignedIn;
 }
 
-async function addPerson(host: TestHost, admin: SignedIn, email: string, name: string): Promise<SignedIn> {
-  const created = await call(host, 'POST', HOST_ROUTES.adminPeople, { email, name, roles: [] }, admin.token);
-  expect(created.status).toBe(200);
-  const { code } = (await created.json()) as { code: string };
+// 0.4.5, RF-59: the admin route that created a person with an email-bound code is gone — a guild
+// invite creates a person now — so the person and the code SP02 §3 would issue are seeded here (the
+// way setupAdmin seeds the setup code).
+async function addPerson(host: TestHost, email: string, name: string): Promise<SignedIn> {
+  const person = host.repo.createPerson({ id: crypto.randomUUID(), email, name, roles: [] }, new Date().toISOString());
+  const code = generateCode('access');
+  const normalized = normalizeCode(code);
+  if (normalized === null) throw new Error('the generated code is not Crockford base32');
+  host.repo.issueCode(
+    { id: crypto.randomUUID(), purpose: 'activate', personId: person.id, codeHash: await sha256Hex(normalized) },
+    new Date().toISOString(),
+  );
   const activated = await call(host, 'POST', HOST_ROUTES.authActivate, {
     email,
     code,
@@ -121,8 +130,8 @@ function lastSeen(host: TestHost, personId: string, msAgo: number): string {
 test('a fresh session is online, one past the window is listed with its last seen', async () => {
   const host = await startHost();
   const admin = await setupAdmin(host);
-  const bob = await addPerson(host, admin, 'bob@nod.test', 'Bob');
-  const cara = await addPerson(host, admin, 'cara@nod.test', 'Cara');
+  const bob = await addPerson(host, 'bob@nod.test', 'Bob');
+  const cara = await addPerson(host, 'cara@nod.test', 'Cara');
   const caraSeen = lastSeen(host, cara.personId, PRESENCE_WINDOW_MS + 60_000);
 
   const list = await presence(host, bob.token);
@@ -138,7 +147,7 @@ test('a fresh session is online, one past the window is listed with its last see
 test('just inside the window is still online', async () => {
   const host = await startHost();
   const admin = await setupAdmin(host);
-  const bob = await addPerson(host, admin, 'bob@nod.test', 'Bob');
+  const bob = await addPerson(host, 'bob@nod.test', 'Bob');
   lastSeen(host, bob.personId, PRESENCE_WINDOW_MS - 30_000);
   const entry = (await presence(host, admin.token)).find((e) => e.personId === bob.personId);
   expect(entry?.online).toBe(true);
@@ -147,8 +156,8 @@ test('just inside the window is still online', async () => {
 test('a disabled person and a revoked session never appear', async () => {
   const host = await startHost();
   const admin = await setupAdmin(host);
-  const bob = await addPerson(host, admin, 'bob@nod.test', 'Bob');
-  const cara = await addPerson(host, admin, 'cara@nod.test', 'Cara');
+  const bob = await addPerson(host, 'bob@nod.test', 'Bob');
+  const cara = await addPerson(host, 'cara@nod.test', 'Cara');
 
   const disabled = await call(
     host,
@@ -168,7 +177,7 @@ test('a disabled person and a revoked session never appear', async () => {
 test('a client is never listed and cannot ask', async () => {
   const host = await startHost();
   const admin = await setupAdmin(host);
-  const client = await addPerson(host, admin, 'guest@nod.test', 'Guest');
+  const client = await addPerson(host, 'guest@nod.test', 'Guest');
   host.db.query("UPDATE people SET kind = 'client' WHERE id = ?").run(client.personId);
 
   const refused = await call(host, 'GET', HOST_ROUTES.presence, undefined, client.token);

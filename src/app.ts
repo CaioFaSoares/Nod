@@ -1,16 +1,20 @@
-// The Nod main window: boot, locked screen, sidebar, Home and Settings routing
+// The Nod main window: boot, the entry screen, the sidebar, Home and Settings routing
 // (docs/arquitetura.md §5, canonico §7).
 // The page talks to the backend only through `./api`, and only with methods of `ApiContract`.
 // No password or invite code ever leaves this module except as the parameter of `call(...)`:
 // nothing is written to storage, the console, the page title or an error message.
+// 0.4.5 (RF-60): the locked screen is the rail of tiles in `./entry`; the join flow it and
+// Settings → Hosts share is `./join`.
 import { call, errorMessage, on } from './api';
+import { mountEntry, resetEntry, showEntryInvite } from './entry';
 import { openPalette } from './palette';
-import { mountJoinFlow, mountSettings } from './settings';
-import { button, clear, el, field, input, message } from './ui';
+import { mountSettings } from './settings';
+import { button, clear, el, field, initials, input, message } from './ui';
 import type { SettingsTab } from './settings';
 import type {
   AppInfo,
   Entry,
+  EntryProfiles,
   HostState,
   Id,
   JoinInvite,
@@ -20,6 +24,7 @@ import type {
   ToolsState,
   UpdateInfo,
 } from '../shared/types';
+import { categoryOf, groupByCategory } from '../shared/catalog';
 import type { PresenceEntry } from '../shared/host-api';
 
 /** What the right side shows: Home or one Settings tab. */
@@ -81,20 +86,18 @@ let host: HostState | null = null;
  * publishes the host state and when Home opens — the sync's own cadence, so no page timer.
  */
 let presence: PresenceEntry[] = [];
-/** SP05 §4: the first-run screen is on "Join a guild" instead of create/invite. */
-let joiningGuild = false;
+/**
+ * 0.4.5 (RF-60): the tiles of the entry screen, from `session.profiles`. Read while locked (the
+ * entry screen draws nothing before it) and again after a lock or a join; the sidebar's top mark
+ * takes the guild's icon from here too.
+ */
+let profiles: EntryProfiles | null = null;
 /** SP04 §1.3: the invite a `nod://join` link carried, until the join flow spends it. */
 let joinInvite: JoinInvite | null = null;
-/** Handle of the join flow on the locked screen, so a second link re-aims it. */
-let lockedJoin: { setPrefill(invite: JoinInvite | null): void } | null = null;
 let view: View = 'home';
-/** The person chose to create an account with an invite code instead of signing in. */
-let creatingAccount = false;
 let shell: Shell | null = null;
 let settings: SettingsHandle | null = null;
 let settingsTab: SettingsTab | null = null;
-/** Handle of `window.setInterval` for the backoff countdown of the locked screen. */
-let waitTimer: number | null = null;
 
 // ------------------------------------------------------------------ helpers
 
@@ -127,264 +130,49 @@ function stateText(tool: ToolStatus | null): string {
   return tool.openWindows > 0 ? 'Open' : 'Not open';
 }
 
-// ------------------------------------------------------------- locked screen
+// -------------------------------------------------------------- entry screen
 
+/**
+ * 0.4.5 (RF-60): the locked screen is the entry rail in `./entry` — the Offline tile, the guild
+ * tile and the `+` tile, with the pane of the selected one beside it. This module owns the session
+ * it enters by, so the screen hands every answer back here.
+ */
 function renderLocked(): void {
   if (session === null) return;
-  const state = session;
-  const card = el('div', { class: 'card auth-card' });
-  if (joiningGuild) renderJoin(card);
-  else if (!state.hasAccount || creatingAccount) renderCreateAccount(card, state);
-  else renderUnlock(card, state);
-  root.replaceChildren(el('div', { class: 'auth' }, card));
+  mountEntry(
+    root,
+    { state: session, profiles, invite: joinInvite },
+    {
+      info,
+      onSession: (next) => {
+        session = next;
+        if (next.unlocked) {
+          void startUnlocked();
+          return;
+        }
+        render();
+      },
+      onProfiles: (next) => {
+        profiles = next;
+        render();
+      },
+    },
+  );
 }
 
 /**
- * SP05 §4's third path of the first-run screen: "Join a guild". The host flow of `host.activate`
- * and `host.signIn` needs no local session, so this screen replaces the create/invite pair before
- * a person exists; a deep link (`nod://join`) lands here with the invite already filled in.
+ * The tiles of the entry screen (`session.profiles`), which work locked. Read after a boot, after a
+ * lock and after a join; the sidebar's top mark takes the guild's icon from the same answer.
  */
-function renderJoin(card: HTMLElement): void {
-  authHeader(card, 'Join a guild', 'The address and the fingerprint your admin gave you.');
-  const form = el('div');
-  card.append(form);
-  lockedJoin = mountJoinFlow(form, {
-    prefill: joinInvite,
-    email: null,
-    onJoined: () => {
-      // The backend pushed the session already; the `session` handler builds the shell. This only
-      // closes the screen.
-      joiningGuild = false;
-      joinInvite = null;
-      lockedJoin = null;
-    },
-  });
-  card.append(
-    button('Back', () => {
-      joiningGuild = false;
-      joinInvite = null;
-      lockedJoin = null;
-      render();
-    }, { kind: 'ghost' }),
-  );
-}
-
-function authHeader(card: HTMLElement, title: string, subtitle: string | null): void {
-  card.append(el('p', { class: 'auth-mark', aria: { hidden: 'true' } }, 'B'));
-  card.append(el('h1', { class: 'auth-title' }, title));
-  if (subtitle !== null) card.append(el('p', { class: 'muted' }, subtitle));
-}
-
-function renderUnlock(card: HTMLElement, state: SessionState): void {
-  authHeader(card, 'Unlock', 'Enter your password.');
-
-  const email = input('email', { type: 'email', autocomplete: 'username', required: true });
-  const password = input('password', { type: 'password', autocomplete: 'current-password', required: true });
-  const wait = el('div', { class: 'auth-wait' });
-  const error = el('div', { class: 'auth-error' });
-  const submit = el('button', { class: 'button button-primary', attrs: { type: 'submit' } }, 'Unlock');
-
-  const form = el(
-    'form',
-    { class: 'stack', attrs: { novalidate: '' } },
-    field('Email', email),
-    field('Password', password),
-    wait,
-    submit,
-    error,
-  );
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    if (submit.disabled) return;
-    void submitUnlock(email.value, password.value, { submit, error, wait });
-  });
-  card.append(form);
-
-  if (state.biometric) {
-    const biometric = info !== null && info.os === 'macos' ? 'Unlock with Touch ID' : 'Unlock with biometrics';
-    card.append(button(biometric, () => submitBiometric({ submit, error }), { kind: 'ghost' }));
-  }
-  if (state.hasAccount) {
-    card.append(
-      button('I have an invite', () => {
-        creatingAccount = true;
-        render();
-      }, { kind: 'ghost', title: 'Create an account with an invite code' }),
-    );
-  }
-  card.append(
-    button('Join a guild', () => {
-      joiningGuild = true;
-      render();
-    }, { kind: 'ghost', title: 'Connect this Nod to a guild host' }),
-  );
-
-  if (state.waitMs > 0) armWait(state.waitMs, submit, wait);
-}
-
-function renderCreateAccount(card: HTMLElement, state: SessionState): void {
-  const first = !state.requiresInvite;
-  authHeader(
-    card,
-    first ? 'Create the admin account' : 'Create your account',
-    first ? 'This machine has no account yet.' : 'Use the invite code an admin gave you.',
-  );
-
-  const name = input('name', { autocomplete: 'name', required: true });
-  const email = input('email', { type: 'email', autocomplete: 'username', required: true });
-  const password = input('password', { type: 'password', autocomplete: 'new-password', required: true });
-  const confirm = input('confirm', { type: 'password', autocomplete: 'new-password', required: true });
-  const code = state.requiresInvite ? input('code', { autocomplete: 'off', required: true }) : null;
-  const error = el('div', { class: 'auth-error' });
-  const submit = el('button', { class: 'button button-primary', attrs: { type: 'submit' } }, 'Create account');
-
-  const fields: HTMLElement[] = [
-    field('Name', name),
-    field('Email', email),
-    field('Password', password),
-    field('Confirm password', confirm),
-  ];
-  if (code !== null) fields.push(field('Invite code', code));
-
-  const form = el('form', { class: 'stack', attrs: { novalidate: '' } }, ...fields, submit, error);
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    if (submit.disabled) return;
-    const values = {
-      name: name.value.trim(),
-      email: email.value.trim(),
-      password: password.value,
-      confirm: confirm.value,
-      code: code === null ? null : code.value.trim(),
-    };
-    if (values.name === '' || values.email === '' || values.password === '' || values.code === '') {
-      message(error, 'error', 'fill in every field');
-      return;
-    }
-    if (values.password !== values.confirm) {
-      message(error, 'error', 'passwords do not match');
-      return;
-    }
-    void submitCreate(values, submit, error);
-  });
-  card.append(form);
-
-  if (state.hasAccount) {
-    card.append(
-      button('Back to sign in', () => {
-        creatingAccount = false;
-        render();
-      }, { kind: 'ghost' }),
-    );
-  }
-  card.append(
-    button('Join a guild', () => {
-      joiningGuild = true;
-      render();
-    }, { kind: 'ghost', title: 'Connect this Nod to a guild host' }),
-  );
-}
-
-function stopWait(): void {
-  if (waitTimer !== null) {
-    window.clearInterval(waitTimer);
-    waitTimer = null;
-  }
-}
-
-/** Counts `ms` down in seconds with the submit disabled, then frees the form again. */
-function armWait(ms: number, submit: HTMLButtonElement, wait: HTMLElement): void {
-  stopWait();
-  let remaining = Math.max(1, Math.ceil(ms / 1000));
-  const tick = (): void => {
-    if (remaining <= 0) {
-      stopWait();
-      clear(wait);
-      submit.disabled = false;
-      return;
-    }
-    message(wait, 'info', `wait ${remaining} s`);
-    submit.disabled = true;
-    remaining -= 1;
-  };
-  tick();
-  waitTimer = window.setInterval(tick, 1000);
-}
-
-async function submitUnlock(
-  email: string,
-  password: string,
-  controls: { submit: HTMLButtonElement; error: HTMLElement; wait: HTMLElement },
-): Promise<void> {
-  clear(controls.error);
-  controls.submit.disabled = true;
-  let next: SessionState;
+async function loadProfiles(): Promise<void> {
   try {
-    next = await call('session.unlock', { email, password });
-  } catch (e) {
-    message(controls.error, 'error', errorMessage(e));
-    const waitMs = await waitFromState();
-    if (waitMs > 0) {
-      armWait(waitMs, controls.submit, controls.wait);
-      return;
-    }
-    controls.submit.disabled = false;
-    return;
-  }
-  session = next;
-  await startUnlocked();
-}
-
-async function submitBiometric(controls: { submit: HTMLButtonElement; error: HTMLElement }): Promise<void> {
-  clear(controls.error);
-  controls.submit.disabled = true;
-  let next: SessionState;
-  try {
-    next = await call('session.unlockBiometric');
-  } catch (e) {
-    message(controls.error, 'error', errorMessage(e));
-    controls.submit.disabled = waitTimer !== null;
-    return;
-  }
-  session = next;
-  await startUnlocked();
-}
-
-async function submitCreate(
-  values: { name: string; email: string; password: string; confirm: string; code: string | null },
-  submit: HTMLButtonElement,
-  error: HTMLElement,
-): Promise<void> {
-  const params: { email: string; name: string; password: string; code?: string } = {
-    email: values.email,
-    name: values.name,
-    password: values.password,
-  };
-  if (values.code !== null) params.code = values.code;
-
-  clear(error);
-  submit.disabled = true;
-  let next: SessionState;
-  try {
-    next = await call('session.createAccount', params);
-  } catch (e) {
-    message(error, 'error', errorMessage(e));
-    submit.disabled = false;
-    return;
-  }
-  session = next;
-  await startUnlocked();
-}
-
-/** Backoff the backend keeps after a failed attempt: the locked screen has to run it down too. */
-async function waitFromState(): Promise<number> {
-  try {
-    const state = await call('session.state');
-    session = state;
-    return state.waitMs;
+    profiles = await call('session.profiles');
   } catch {
-    return 0;
+    // Without the tiles the entry screen says so and the sidebar keeps its own mark; the next
+    // render (a push, a lock) reads them again.
+    return;
   }
+  render();
 }
 
 // ------------------------------------------------------------ unlocked shell
@@ -402,7 +190,6 @@ function buildShell(): void {
 
 function teardownShell(): void {
   destroySettings();
-  stopWait();
   // B7: the dialog is an overlay of the main window, so it goes with the shell (a lock).
   document.getElementById(PERSONAL_DIALOG_ID)?.remove();
   shell = null;
@@ -411,10 +198,12 @@ function teardownShell(): void {
 function renderSidebar(): void {
   if (shell === null || session === null) return;
   const list = el('nav', { class: 'sidebar-tools', aria: { label: 'Tools' } });
-  for (const tool of tools) list.append(sidebarTool(tool));
+  for (const node of sidebarRows()) list.append(node);
   const footer = el(
     'div',
     { class: 'sidebar-footer' },
+    // 0.4.5: the same separator the entry screen's rail draws between its tiles.
+    el('span', { class: 'rail-separator', aria: { hidden: 'true' } }),
     // SP05 §4: `stale` is the last sync having failed — the cached guild still shows, and the
     // sidebar says so instead of pretending everything is current.
     host !== null && host.status === 'stale'
@@ -434,15 +223,81 @@ function renderSidebar(): void {
       void lockSession();
     }),
   );
+  // 0.4.5 (RF-60): the top mark says where this session is — the guild's icon (or its initials)
+  // while the guild is the one being synced, the Offline glyph of the tile that was entered.
+  const guild = profiles !== null && profiles.guilds.length > 0 ? profiles.guilds[0] : null;
+  const where = session.mode === 'offline' || guild === null ? 'Offline' : guild.guild;
   const mark = el(
     'button',
-    { class: 'mark', title: 'Home', aria: { label: 'Home' }, attrs: { type: 'button' } },
-    'B',
+    {
+      class: 'mark',
+      // The name the entry screen's tile carries, as a server name on hover.
+      title: `${where} — Home`,
+      aria: { label: 'Home' },
+      attrs: { type: 'button' },
+    },
+    session.mode === 'offline' || guild === null
+      ? '⌂'
+      : guild.icon !== null
+        ? el('img', { class: 'mark-img', attrs: { src: guild.icon, alt: '' } })
+        : el('span', { class: 'chip' }, initials(guild.guild)),
   );
   mark.addEventListener('click', () => {
     go('home');
   });
-  shell.sidebar.replaceChildren(mark, list, footer);
+  shell.sidebar.replaceChildren(mark, el('span', { class: 'rail-separator', aria: { hidden: 'true' } }), list, footer);
+}
+
+/**
+ * RF-62: the sidebar's rows, in the visual order the digits follow — the favorites as one block,
+ * then a divider per category group, then the personal tools, which are their own group. `tools`
+ * arrives grouped (`backend/tool-windows.ts` over `shared/host-merge.ts`'s `sidebarOrder`), so a
+ * category is a run of the same name; the favorites are never split.
+ */
+function sidebarRows(): HTMLElement[] {
+  const entryOf = new Map<Id, Entry>();
+  for (const entry of catalog) entryOf.set(entry.id, entry);
+  /** RF-62: the name a tool is filed under, `null` for a tool the catalog does not resolve. */
+  const categoryName = (id: Id): string | null => {
+    const entry = entryOf.get(id);
+    return entry === undefined ? null : categoryOf(entry);
+  };
+  const favorite = new Set(favorites);
+  const rows: HTMLElement[] = [];
+  let index = 0;
+  while (index < tools.length && favorite.has(tools[index].id)) {
+    rows.push(sidebarTool(tools[index]));
+    index += 1;
+  }
+  const rest = tools.slice(index);
+  const org = rest.filter((tool) => entryOf.get(tool.id)?.scope !== 'personal');
+  const personal = rest.filter((tool) => entryOf.get(tool.id)?.scope === 'personal');
+  // A bare divider marks the uncategorized group, and only while there is a named group to part it
+  // from: a guild that files nothing keeps the plain column of icons.
+  const named = org.some((tool) => categoryName(tool.id) !== null);
+  let current: string | null | undefined;
+  for (const tool of org) {
+    const category = categoryName(tool.id);
+    if (category !== current) {
+      if (category !== null || named) rows.push(sidebarDivider(category));
+      current = category;
+    }
+    rows.push(sidebarTool(tool));
+  }
+  for (const tool of personal) rows.push(sidebarTool(tool));
+  return rows;
+}
+
+/**
+ * RF-62: the thin rule that opens a category group in the sidebar, with the category name in small
+ * caps. The `title` carries the whole name — the column is narrow and the label may be truncated.
+ */
+function sidebarDivider(category: string | null): HTMLElement {
+  const label =
+    category === null
+      ? null
+      : el('span', { class: 'sidebar-divider-label', title: category, aria: { hidden: 'true' } }, category);
+  return el('div', { class: 'sidebar-divider', aria: { hidden: 'true' } }, label, el('span', { class: 'sidebar-divider-rule' }));
 }
 
 function sidebarTool(tool: ToolStatus): HTMLButtonElement {
@@ -548,9 +403,7 @@ function renderHome(content: HTMLElement): void {
       ),
     );
   } else {
-    const grid = el('div', { class: 'grid' });
-    for (const entry of catalog) grid.append(toolCard(entry));
-    body.append(grid);
+    appendCatalog(body);
   }
   content.replaceChildren(
     el(
@@ -568,6 +421,46 @@ function renderHome(content: HTMLElement): void {
   );
 }
 
+/**
+ * RF-62: Home's cards in the sidebar's order — the favorites as one block, one section per category,
+ * "Other tools" for the org tools the guild filed nowhere, then the personal tools. A guild that
+ * files nothing keeps the single grid this screen always had.
+ */
+function appendCatalog(body: HTMLElement): void {
+  const favorite = new Set(favorites);
+  const org = catalog.filter((entry) => !isForeign(entry));
+  if (!org.some((entry) => categoryOf(entry) !== null)) {
+    body.append(toolGrid(catalog));
+    return;
+  }
+  const starred = catalog.filter((entry) => favorite.has(entry.id));
+  if (starred.length > 0) body.append(toolGrid(starred));
+  const rest = catalog.filter((entry) => !favorite.has(entry.id));
+  // `groupByCategory` puts the uncategorized group last, which is where "Other tools" reads.
+  for (const group of groupByCategory(rest.filter((entry) => !isForeign(entry)))) {
+    body.append(toolSection(group.category ?? 'Other tools', group.entries));
+  }
+  const personal = rest.filter((entry) => isForeign(entry));
+  if (personal.length > 0) body.append(toolGrid(personal));
+}
+
+/** One grid of cards, the shape both Home's blocks and its sections use. */
+function toolGrid(entries: Entry[]): HTMLElement {
+  const grid = el('div', { class: 'grid' });
+  for (const entry of entries) grid.append(toolCard(entry));
+  return grid;
+}
+
+/** RF-62: one category of Home — the name the guild gave it, and the tools it files. */
+function toolSection(title: string, entries: Entry[]): HTMLElement {
+  return el(
+    'section',
+    { class: 'home-section', aria: { label: title } },
+    el('h2', { class: 'home-section-title' }, title),
+    toolGrid(entries),
+  );
+}
+
 /** RF-58: how long ago, in words a person reads at a glance. */
 function seenAgo(iso: string): string {
   const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000));
@@ -578,9 +471,13 @@ function seenAgo(iso: string): string {
   return `${Math.round(hours / 24)} d ago`;
 }
 
-/** RF-58: the guild has a host this Nod reaches (or reached); local mode has no guild to show. */
+/**
+ * RF-58: the guild has a host this Nod reaches (or reached); local mode has no guild to show.
+ * 0.4.5 (RF-60): a session entered through the Offline tile is that same disconnect — the guild is
+ * there, and nothing of it is read or written this session.
+ */
 function guildConnected(): boolean {
-  return host !== null && (host.status === 'connected' || host.status === 'stale');
+  return host !== null && host.offlineSession !== true && (host.status === 'connected' || host.status === 'stale');
 }
 
 /**
@@ -856,10 +753,14 @@ function toolCard(entry: Entry): HTMLElement {
   return card;
 }
 
+/** Everything around the content that reads the session and the host: sidebar, Home, notices. */
 function refreshChrome(): void {
   if (shell === null) return;
   renderSidebar();
   if (view === 'home') renderHome(shell.content);
+  // The offline-session and O2 banners read `host`, which a fresh unlock has just answered — the
+  // boot's own render ran before it (`renderNotices` is idempotent).
+  renderNotices();
 }
 
 function showBanner(e: unknown): void {
@@ -982,12 +883,38 @@ function renderUpdateNotice(slot: HTMLElement): void {
   );
 }
 
+/**
+ * 0.4.5 (RF-60): the person entered through the Offline tile, so the guild is disconnected for this
+ * session — the local catalog, no sync, no host call, exactly as O2 disconnects it. The guild is
+ * still on this machine and one click away, so the banner says which one it is and offers to lock.
+ */
+function renderOfflineSessionNotice(slot: HTMLElement): void {
+  const state = host;
+  const guild =
+    (state !== null && state.guild !== null && state.guild !== '' ? state.guild : null) ??
+    (profiles !== null && profiles.guilds.length > 0 ? profiles.guilds[0].guild : null);
+  if (session === null || session.mode !== 'offline' || guild === null) return;
+  slot.append(
+    el(
+      'div',
+      { class: 'notice', role: 'status' },
+      el('p', { class: 'notice-text' }, `Offline — ${guild} is not syncing. Lock and choose ${guild} to connect.`),
+      el(
+        'div',
+        { class: 'notice-actions' },
+        button(`Switch to ${guild}`, () => void lockSession(), { kind: 'primary' }),
+      ),
+    ),
+  );
+}
+
 function renderNotices(): void {
   const target = shell;
   if (target === null) return;
   clear(target.notice);
   // O2 first: an out-of-date Nod is the reason nothing else it does reaches the guild.
   renderUpdateRequiredNotice(target.notice);
+  renderOfflineSessionNotice(target.notice);
   renderHostNotice(target.notice);
   renderUpdateNotice(target.notice);
 }
@@ -1055,22 +982,30 @@ async function lockSession(): Promise<void> {
   joinInvite = null;
   view = 'home';
   render();
+  // 0.4.5 (RF-60): the entry screen picks its tile from the profiles again — the unlock that just
+  // ended stored its target as `last`.
+  profiles = null;
+  await loadProfiles();
 }
 
 async function loadUnlocked(): Promise<void> {
   try {
-    const [state, entries, hostState, ids] = await Promise.all([
+    const [state, entries, hostState, ids, tiles] = await Promise.all([
       call('tools.state'),
       call('catalog.list'),
       // SP05 §3: locked windows cannot read it, and the sidebar needs it right after the unlock.
       call('host.state'),
       // B7: the favorites the toggle draws from.
       call('favorites.list'),
+      // 0.4.5 (RF-60): the tiles of the entry screen, read while locked and kept: the sidebar's top
+      // mark is the guild's icon, and the next lock re-reads them anyway.
+      call('session.profiles'),
     ]);
     tools = state.tools;
     catalog = entries;
     host = hostState;
     favorites = ids;
+    profiles = tiles;
   } catch (e) {
     showBanner(e);
     return;
@@ -1082,7 +1017,6 @@ async function loadUnlocked(): Promise<void> {
 }
 
 async function startUnlocked(): Promise<void> {
-  stopWait();
   render();
   await loadUnlocked();
 }
@@ -1166,6 +1100,7 @@ async function boot(): Promise<void> {
   }
   render();
   if (session.unlocked) await loadUnlocked();
+  else await loadProfiles();
 }
 
 on('session', (next) => {
@@ -1179,14 +1114,14 @@ on('session', (next) => {
     host = null;
     inboxCount = 0;
     joinInvite = null;
-    joiningGuild = false;
-    lockedJoin = null;
     view = 'home';
-    creatingAccount = false;
+    // 0.4.5 (RF-60): the entry screen is built again — its tile comes from the profiles, which the
+    // unlock that just ended changed (`last`).
+    resetEntry();
     render();
+    void loadProfiles();
     return;
   }
-  creatingAccount = false;
   // A join always unlocks: the invite is spent, whether it came from a link or from typing.
   joinInvite = null;
   // A join (`host.activate` / `host.signIn`) unlocks the session from the page's own call: the
@@ -1230,7 +1165,8 @@ on('host', (next) => {
 
 /**
  * SP04 §1.3: a `nod://join` link. Unlocked, it opens Settings → Hosts with the invite prefilled;
- * locked, it opens the join screen — a Nod with no account at all is the usual case.
+ * locked, it opens the `+` tile of the entry screen with the invite already looked up (RF-60) — a
+ * Nod with no account at all is the usual case.
  */
 on('join', (invite) => {
   if (invite === null) return;
@@ -1241,9 +1177,7 @@ on('join', (invite) => {
     go('hosts');
     return;
   }
-  joiningGuild = true;
-  if (lockedJoin !== null) lockedJoin.setPrefill(invite);
-  else render();
+  showEntryInvite(invite);
 });
 
 async function loadCatalog(): Promise<void> {

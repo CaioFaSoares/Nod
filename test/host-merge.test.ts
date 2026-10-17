@@ -11,6 +11,7 @@ import {
   sidebarOrder,
   SnapshotShapeError,
 } from '../shared/host-merge';
+import { digits } from '../shared/shortcuts';
 import type { Snapshot } from '../shared/host-api';
 import type { Entry } from '../shared/types';
 
@@ -79,6 +80,28 @@ describe('parseSnapshot', () => {
     expect(rows.personalViews[0]?.updatedAt).toBe('2026-10-15T09:00:00.000Z');
   });
 
+  test('reads the category of an entry, and none at all as uncategorized (RF-62)', () => {
+    const rows = parseSnapshot(
+      snapshot({
+        orgTools: [
+          entry('jitsi', { roles: ['team'], scope: 'org', ownerId: null, category: 'Support' }),
+          entry('docs', { roles: ['team'], scope: 'org', ownerId: null }),
+        ],
+      }),
+    );
+    expect(rows.orgTools.map((tool) => tool.category)).toEqual(['Support', null]);
+  });
+
+  test('refuses a category that is not a string, and never one on a personal tool', () => {
+    expect(() =>
+      parseSnapshot(snapshot({ orgTools: [entry('jitsi', { category: 7 } as unknown as Partial<Entry>)] })),
+    ).toThrow(SnapshotShapeError);
+    // A personal tool of a snapshot that carries a name reads it — the row itself is the host's
+    // answer, and the display is what files it under "personal" (`isForeign`).
+    const rows = parseSnapshot(snapshot({ personalTools: [entry('mine', { scope: 'personal', ownerId: 'p1' })] }));
+    expect(rows.personalTools[0]?.category).toBeNull();
+  });
+
   test('refuses a body that is not the document of SP04 §2', () => {
     expect(() => parseSnapshot(null)).toThrow(SnapshotShapeError);
     expect(() => parseSnapshot('a snapshot')).toThrow(SnapshotShapeError);
@@ -130,6 +153,62 @@ describe('sidebarOrder', () => {
     const same = [entry('b', { order: 1, title: 'Tool b' }), entry('a', { order: 1, title: 'Tool a' })];
     const ordered = sidebarOrder({ orgTools: same, personalTools: [], favorites: ['b', 'b'] });
     expect(ordered.map((tool) => tool.id)).toEqual(['b', 'a']);
+  });
+
+  // RF-62: the org half reads grouped by category, and the digits follow that same order.
+  test('groups the org tools by category, uncategorized last', () => {
+    const ordered = sidebarOrder({
+      orgTools: [
+        entry('support-b', { order: 3, category: 'Support' }),
+        entry('eng', { order: 2, category: 'Engineering' }),
+        entry('unfiled', { order: 1 }),
+        entry('support-a', { order: 5, category: 'Support' }),
+      ],
+      personalTools: [],
+      favorites: [],
+    });
+    // A group stands where its smallest `order` puts it — Engineering (2) before Support (3) — the
+    // tools inside a group keep their catalog order, and the uncategorized group reads last whatever
+    // its `order` is (here 1).
+    expect(ordered.map((tool) => tool.id)).toEqual(['eng', 'support-b', 'support-a', 'unfiled']);
+  });
+
+  test('the favorites stay one block on top, never split by category', () => {
+    const ordered = sidebarOrder({
+      orgTools: [
+        entry('support', { order: 1, category: 'Support' }),
+        entry('eng', { order: 2, category: 'Engineering' }),
+      ],
+      personalTools: [],
+      favorites: ['eng', 'support'],
+    });
+    expect(ordered.map((tool) => tool.id)).toEqual(['eng', 'support']);
+  });
+
+  test('a catalog with no category keeps the order it always had', () => {
+    const ordered = sidebarOrder({
+      orgTools: [entry('b', { order: 2 }), entry('a', { order: 1 })],
+      personalTools: [entry('mine', { scope: 'personal', ownerId: 'p1', order: 1 })],
+      favorites: [],
+    });
+    expect(ordered.map((tool) => tool.id)).toEqual(['a', 'b', 'mine']);
+  });
+
+  test('the digits follow the grouped order', () => {
+    const ordered = sidebarOrder({
+      orgTools: [
+        entry('eng', { order: 2, category: 'Engineering' }),
+        entry('support', { order: 1, category: 'Support' }),
+        entry('unfiled', { order: 3 }),
+      ],
+      personalTools: [],
+      favorites: [],
+    });
+    expect([...digits(ordered.map((tool) => tool.id))]).toEqual([
+      [1, 'support'],
+      [2, 'eng'],
+      [3, 'unfiled'],
+    ]);
   });
 });
 

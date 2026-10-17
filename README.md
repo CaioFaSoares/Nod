@@ -35,7 +35,8 @@ every derived key. The rename decision and plan are in `docs/canonico.md` §22 a
   visible manual fallback.
 - Vault in the system keychain, bound to the origin each credential was saved for.
 - Roles, grants and a local, exportable audit log.
-- Private releases with an embedded seed (catalog, roles, grants) kept out of git.
+- Private releases with a seed (catalog, roles, grants) kept out of git; from 0.4.5 the seed is an
+  optional import at setup, so a release can start empty.
 - Optional host (`host/`, Bun + Elysia): one guild per container; people, roles, grants and tools
   sync to every connected Nod. Without a host, Nod works fully offline.
 
@@ -64,7 +65,7 @@ bun install
 bun run app:dev         # development (runs without the private seed)
 bun test                # unit tests
 bun run typecheck       # tsc for frontend and backend
-bun run app:build       # release (requires resources/seed.json)
+bun run app:build       # release (the private seed is optional since 0.4.5)
 bun test/smoke/run.ts   # smoke test on the real app (opens it)
 ```
 

@@ -40,6 +40,15 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+/**
+ * The 2-letter mark of a name that has no icon: a tool's glyph, a guild's tile in the entry rail
+ * and the icon of a guild in the join card all fall back to it. `?` for a name with no letters.
+ */
+export function initials(name: string): string {
+  const mark = name.trim().slice(0, 2).toUpperCase();
+  return mark === '' ? '?' : mark;
+}
+
 /** A button that disables itself while its async handler runs. */
 export function button(
   label: string,

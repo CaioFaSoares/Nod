@@ -3,8 +3,10 @@
 // `migrations[i]` is version `i + 1`; `meta.schema_version` holds the count already applied. A
 // released migration is never edited — block 2 tables (SP01 §3) arrived as entry 2, and the
 // `person_keys.private_sealed` column of the one-pair-per-person rule (`docs/canonico.md` §22) as
-// entry 3, and the `credential_holders.rotated_at` column of the explicit rotation signal (RF-48)
-// as entry 4. H2 appends the block 1 tables (`people`, `sessions`, `access_codes`,
+// entry 3, the `credential_holders.rotated_at` column of the explicit rotation signal (RF-48) as
+// entry 4, the `guild_invites` table of RF-59 as entry 5, and the `entries.category` column of
+// RF-62's tool categories as entry 6. H2 appends the block 1 tables
+// (`people`, `sessions`, `access_codes`,
 // `roles`, `person_roles`, `entries`, `views`, `grants`, `favorites`, `events`) to migration 1 while
 // block 1 is unreleased, so a fresh `/data` still reports `schema_version = 1` (SP01 §5).
 
@@ -193,6 +195,35 @@ ALTER TABLE person_keys ADD COLUMN private_sealed TEXT;
   // and the column is opaque bookkeeping — no value of a body is stored here.
   `
 ALTER TABLE credential_holders ADD COLUMN rotated_at TEXT;
+`,
+
+  // 5 — guild invites (0.4.5, RF-59; SP01 §2). One row per invite an admin created: the roles it
+  // grants (JSON array of their ids), how many times it may be redeemed (`max_uses` null = no
+  // limit) and until when (`expires_at` null = never). `code_hash` is the hex SHA-256 of the
+  // normalized code, exactly like `access_codes.code_hash` (SP02 §3) — the code itself is shown
+  // once and stored nowhere. `uses` counts the redemptions that succeeded; a failed one (a taken
+  // email, a revoked or expired invite) leaves it alone. `created_by` is the admin person, kept
+  // without a foreign key: the invite outlives a person row the host never deletes.
+  `
+CREATE TABLE guild_invites (
+  id          TEXT PRIMARY KEY,                   -- uuid
+  code_hash   TEXT NOT NULL UNIQUE,               -- hex sha256 of the normalized code (SP02 §3)
+  roles       TEXT NOT NULL,                      -- JSON array of role ids
+  max_uses    INTEGER,                            -- null: no limit
+  uses        INTEGER NOT NULL DEFAULT 0,
+  created_by  TEXT NOT NULL,                      -- the admin person id
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT,                               -- null: never expires
+  revoked_at  TEXT
+);
+`,
+
+  // 6 — the display category of an org tool (0.4.5, RF-62). `NULL` is "the guild filed it nowhere",
+  // which is what every row written before this column is, and what a personal entry always stays:
+  // the personal routes do not declare the field, so their writes leave it alone (`host/repo.ts`).
+  // The name itself is bounded by the admin route's schema and by `shared/catalog.ts`'s validator.
+  `
+ALTER TABLE entries ADD COLUMN category TEXT;
 `,
 ];
 

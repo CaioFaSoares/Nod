@@ -13,28 +13,40 @@ describe('the factor of the K5 gate (SP02 §9)', () => {
 
     // `docs/canonico.md` §22, "gate where biometrics exist": where the runtime reports the
     // capability the operating system's prompt is the factor, and a release build (`devRun` false)
-    // never takes a typed password there — whatever the page sends.
-    expect(gateFactor('smoke-connected-1', true, false)).toBe('biometrics');
-    expect(gateFactor('', true, false)).toBe('biometrics');
-    expect(gateFactor(undefined, true, false)).toBe('biometrics');
+    // never takes a typed password there — whatever the page sends — until a prompt failed.
+    expect(gateFactor('smoke-connected-1', true, false, false)).toBe('biometrics');
+    expect(gateFactor('', true, false, false)).toBe('biometrics');
+    expect(gateFactor(undefined, true, false, false)).toBe('biometrics');
 
     // The Proposto exception of `docs/canonico.md` §22, "gate in a dev run": a non-release
     // (`tinyjs dev`) run also takes the typed password, which is what the unattended smoke passes.
     // Without one the prompt is still what runs.
-    expect(gateFactor('smoke-connected-1', true, true)).toBe('password');
-    expect(gateFactor('', true, true)).toBe('biometrics');
-    expect(gateFactor(undefined, true, true)).toBe('biometrics');
+    expect(gateFactor('smoke-connected-1', true, true, false)).toBe('password');
+    expect(gateFactor('', true, true, false)).toBe('biometrics');
+    expect(gateFactor(undefined, true, true, false)).toBe('biometrics');
 
     // No capability (Linux): the typed password is the only factor there, and the run's mode has
     // nothing to say about it.
-    expect(gateFactor('smoke-connected-1', false, false)).toBe('password');
-    expect(gateFactor('smoke-connected-1', false, true)).toBe('password');
+    expect(gateFactor('smoke-connected-1', false, false, false)).toBe('password');
+    expect(gateFactor('smoke-connected-1', false, true, false)).toBe('password');
 
     // Neither factor: `authentication required`, before anything is read — in either mode.
-    expect(gateFactor(undefined, false, false)).toBe('unavailable');
-    expect(gateFactor('', false, false)).toBe('unavailable');
-    expect(gateFactor(undefined, false, true)).toBe('unavailable');
-    expect(gateFactor('', false, true)).toBe('unavailable');
+    expect(gateFactor(undefined, false, false, false)).toBe('unavailable');
+    expect(gateFactor('', false, false, false)).toBe('unavailable');
+    expect(gateFactor(undefined, false, true, false)).toBe('unavailable');
+    expect(gateFactor('', false, true, false)).toBe('unavailable');
+  });
+
+  test('after the system prompt failed in the session, a release takes the typed password', async () => {
+    mock.module('tjs:sqlite', () => ({ Database: class {} }));
+    const { gateFactor } = await import('../backend/main');
+
+    // canonico §22, "Gate fallback when the system prompt fails": Windows without Hello reports
+    // `authenticate` and then answers `false` to every prompt. Once that happened, the password the
+    // page sends is the factor; a call without one still goes to the prompt.
+    expect(gateFactor('hunter22', true, false, true)).toBe('password');
+    expect(gateFactor(undefined, true, false, true)).toBe('biometrics');
+    expect(gateFactor('', true, false, true)).toBe('biometrics');
   });
 });
 

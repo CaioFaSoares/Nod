@@ -4,11 +4,12 @@
 // only through src/api.ts; the only other runtime surface it touches is `tiny.dialog`, to choose
 // the file of an export or import (docs/arquitetura.md §2).
 import { call, errorMessage, on } from './api';
+import { mountJoinFlow } from './join';
 import { button, clear, el, field, input, message } from './ui';
-import { originOf, slug } from '../shared/catalog';
+import { categoryOf, originOf, slug } from '../shared/catalog';
 import { toBase64url } from '../shared/encoding';
-import { CODE_LENGTH, normalizeCode } from '../shared/host-api';
-import type { DeviceSession, ShareKind, ShareScope } from '../shared/host-api';
+import type { DeviceSession, GuildInvite, ShareKind, ShareScope } from '../shared/host-api';
+import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED } from '../shared/types';
 import type {
   AppIconChoice,
   AppIconState,
@@ -95,6 +96,56 @@ const KIND_LABEL: Record<ShareKind, string> = {
   update: 'update',
 };
 
+/**
+ * 0.4.5 (RF-59): the use budget an admin picks for an invite — `''` is the host's `null`, no limit
+ * at all. The host takes 1..1000, so these are the ones the screen offers.
+ */
+const INVITE_MAX_USES: ReadonlyArray<{ value: string; label: string }> = [
+  { value: '1', label: '1 use' },
+  { value: '5', label: '5 uses' },
+  { value: '10', label: '10 uses' },
+  { value: '25', label: '25 uses' },
+  { value: '50', label: '50 uses' },
+  { value: '100', label: '100 uses' },
+  { value: '', label: 'No limit' },
+];
+
+/** 0.4.5 (RF-59): how long an invite works, in minutes; `''` is the host's `null`, never expiring. */
+const INVITE_EXPIRY: ReadonlyArray<{ value: string; label: string }> = [
+  { value: '30', label: '30 minutes' },
+  { value: '60', label: '1 hour' },
+  { value: '360', label: '6 hours' },
+  { value: '720', label: '12 hours' },
+  { value: '1440', label: '1 day' },
+  { value: '10080', label: '7 days' },
+  { value: '', label: 'Never' },
+];
+
+/** A select of `{value,label}` options, built with the same `.input` a text field uses. */
+function selectField(
+  name: string,
+  value: string,
+  options: ReadonlyArray<{ value: string; label: string }>,
+  onChange: (value: string) => void,
+): HTMLSelectElement {
+  const node = el('select', { class: 'input', attrs: { name } });
+  for (const option of options) node.append(el('option', { attrs: { value: option.value } }, option.label));
+  node.value = value;
+  node.addEventListener('change', () => onChange(node.value));
+  return node;
+}
+
+/**
+ * 0.4.5 (RF-59): what one invite of the guild is doing — the four states the host's own row and its
+ * clock answer. Revoked first: a revoked invite stays revoked, whatever else it says.
+ */
+function inviteStatus(invite: GuildInvite): 'active' | 'expired' | 'used up' | 'revoked' {
+  if (invite.revokedAt !== null) return 'revoked';
+  if (invite.expiresAt !== null && Date.parse(invite.expiresAt) <= Date.now()) return 'expired';
+  if (invite.maxUses !== null && invite.uses >= invite.maxUses) return 'used up';
+  return 'active';
+}
+
 /** The date part of an ISO timestamp: what a holder row and an expiry show. */
 function isoDay(iso: string): string {
   return iso.slice(0, 10);
@@ -127,6 +178,9 @@ function bytesToBase64(bytes: Uint8Array): string {
  * `backend/main.ts` (`docs/handovers/i2b-guild-icon-app.md`).
  */
 const GUILD_ICON_MAX_ENCODED = 512 * 1024;
+
+/** RF-62: the id the tool editor's category input points at, and the datalist beside it carries. */
+const CATEGORY_LIST_ID = 'tool-category-options';
 
 /** Text of the probe result (canonico §8). */
 function describeProbe(probe: Probe): string {
@@ -168,390 +222,6 @@ function checkbox(
 
 function checkboxField(label: string, control: HTMLInputElement): HTMLLabelElement {
   return el('label', { class: 'row' }, control, el('span', {}, label));
-}
-
-// ---------------------------------------------------------------- join a guild (SP05 §4)
-
-/** What the join form holds between renders. The password is cleared on every submit. */
-interface JoinDraft {
-  address: string;
-  /** the fingerprint an invite (or an added host) fixed, or null when the person typed the address */
-  expected: string | null;
-  guild: string;
-  fingerprint: string;
-  email: string;
-  code: string;
-  name: string;
-  password: string;
-  confirm: string;
-  /** the account is already activated: sign in with the password instead of redeeming a code */
-  usePassword: boolean;
-  /** the address was found and the account fields are on screen */
-  discovered: boolean;
-  /**
-   * F1: the local account of this Nod that holds the join's email, as the backend answered it —
-   * `null` while the flow has not collided with one. It is what puts the choice of which account
-   * wins on screen, and the next submit carries the decision (`adoptLocal`).
-   */
-  collision: { personId: Id; email: string; name: string } | null;
-  /** F1: which account the person picked while a collision is on screen. */
-  choice: 'guild' | 'local';
-}
-
-/** Case, spaces and grouping are presentation (SP04 §1.1): one key typed two ways is one string. */
-function sameFingerprint(left: string, right: string): boolean {
-  const plain = (value: string): string => value.toUpperCase().replaceAll('-', '').replaceAll(' ', '');
-  return plain(left) === plain(right);
-}
-
-/** SP02 §3: a setup code is 16 Crockford characters, an access code 8 — the length says which. */
-function isSetupCode(code: string): boolean {
-  const normalized = normalizeCode(code);
-  return normalized !== null && normalized.length === CODE_LENGTH.setup;
-}
-
-/** What the join screen starts with, per SP05 §4. */
-export interface JoinFlowOptions {
-  /** a prefilled address and fingerprint: a `nod://join` invite, or what an added host knows */
-  prefill?: JoinInvite | null;
-  /** the prefill is the host this machine already pinned, so another key is SP04 §1.4's refusal */
-  pinned?: boolean;
-  /** an account exists on this machine: the email starts filled, in the password mode */
-  email?: string | null;
-  /** the join went through: the backend has already pushed the new session (`vaultWiped`: the
-   *  reset removed this machine's saved logins, SP02 §7) */
-  onJoined: (result: { vaultWiped: boolean }) => void;
-}
-
-/**
- * SP05 §4's join flow, shared by the first-run screen ("Join a guild") and Settings → Hosts:
- * address → discovery (guild and fingerprint) → email + access code (or password) → set password.
- * `host.discover`, `host.activate` and `host.signIn` take no session, so this works while locked.
- *
- * The fingerprint is on screen before anything is typed, and the same one travels with the call:
- * the backend compares it against the key the host answers (SP04 §1.3–§1.4). The password never
- * leaves this module except as the parameter of that one call (RF-42).
- */
-export function mountJoinFlow(
-  root: HTMLElement,
-  ctx: JoinFlowOptions,
-): { setPrefill(invite: JoinInvite | null): void } {
-  const refusal =
-    ctx.pinned === true
-      ? 'host key changed — remove and add the host again'
-      : 'host key does not match the invite';
-  const draft: JoinDraft = {
-    address: ctx.prefill?.address ?? '',
-    expected: ctx.prefill?.fingerprint ?? null,
-    guild: '',
-    fingerprint: '',
-    email: ctx.email ?? '',
-    code: ctx.prefill?.code ?? '',
-    name: '',
-    password: '',
-    confirm: '',
-    usePassword: ctx.pinned === true || (ctx.email ?? '') !== '',
-    discovered: false,
-    collision: null,
-    choice: 'guild',
-  };
-  let status: { kind: 'info' | 'ok' | 'error'; text: string } | null = null;
-
-  function render(): void {
-    clear(root);
-    const box = el('section', { class: 'stack' });
-    box.append(addressCard());
-    if (draft.discovered) box.append(accountCard());
-    if (status !== null) {
-      const line = el('div');
-      message(line, status.kind, status.text);
-      box.append(line);
-    }
-    root.append(box);
-  }
-
-  function addressCard(): HTMLElement {
-    const address = input('address', { value: draft.address, placeholder: 'nod.example.com' });
-    address.addEventListener('input', () => {
-      draft.address = address.value;
-    });
-    const card = el(
-      'section',
-      { class: 'card stack' },
-      el('h2', {}, 'Guild host'),
-      el('p', { class: 'muted' }, 'The address of the host, and the fingerprint your admin gave you.'),
-      el(
-        'div',
-        { class: 'row' },
-        field('Address', address),
-        button(
-          draft.discovered ? 'Find again' : 'Find guild',
-          () => void findGuild(address.value),
-          { kind: 'primary' },
-        ),
-      ),
-    );
-    if (draft.discovered) {
-      card.append(
-        el(
-          'div',
-          { class: 'row' },
-          el('span', { class: 'chip' }, draft.guild),
-          el('span', { class: 'mono fingerprint' }, draft.fingerprint),
-        ),
-        el('p', { class: 'muted' }, 'Check this fingerprint with your admin before you continue.'),
-      );
-    }
-    return card;
-  }
-
-  /**
-   * F1: the choice SP05 §4's join asks for when a local account of this Nod already holds the
-   * email the join is about. The backend answered it before any host call, so the code is whole; the
-   * select decides what the next submit does — the guild account (the local one becomes it) or the
-   * local one (the join is cancelled and nothing is sent).
-   */
-  function collisionCard(): HTMLElement {
-    const select = el(
-      'select',
-      { class: 'input', attrs: { name: 'join-choice' } },
-      el('option', { attrs: { value: 'guild' } }, 'Use the guild account'),
-      el('option', { attrs: { value: 'local' } }, 'Keep using the local account'),
-    );
-    select.value = draft.choice;
-    select.addEventListener('change', () => {
-      draft.choice = select.value === 'local' ? 'local' : 'guild';
-    });
-    const block = el(
-      'section',
-      { class: 'stack' },
-      el(
-        'p',
-        {},
-        `This Nod already has the account ${draft.collision === null ? '' : draft.collision.email} ` +
-          `${draft.collision === null || draft.collision.name === '' ? '' : `(${draft.collision.name}) `}` +
-          'saved on this machine. Which account should Nod use?',
-      ),
-      field('Account', select),
-      el(
-        'p',
-        { class: 'muted' },
-        'Use the guild account: your local account becomes the guild account, saved logins and ' +
-          'roles come with you, and your password becomes the guild password. Keep using the local ' +
-          'account: the join is cancelled and nothing is sent.',
-      ),
-    );
-    block.hidden = draft.collision === null;
-    return block;
-  }
-
-  function accountCard(): HTMLElement {
-    // F1: the choice sits above the fields it decides for; the email field hides it again, because
-    // another email is another question.
-    const collision = collisionCard();
-    const email = input('email', { type: 'email', autocomplete: 'username', value: draft.email });
-    email.addEventListener('input', () => {
-      draft.email = email.value;
-      if (draft.collision !== null) {
-        draft.collision = null;
-        draft.choice = 'guild';
-        collision.hidden = true;
-      }
-    });
-    const password = input('password', {
-      type: 'password',
-      autocomplete: draft.usePassword ? 'current-password' : 'new-password',
-    });
-    password.addEventListener('input', () => {
-      draft.password = password.value;
-    });
-    const modes = el(
-      'div',
-      { class: 'row' },
-      button('Access code', () => setMode(false), { kind: draft.usePassword ? 'ghost' : 'primary' }),
-      button('Password', () => setMode(true), { kind: draft.usePassword ? 'primary' : 'ghost' }),
-    );
-    // F1: with a collision on screen the button is the one that carries the decision of the select.
-    const joinLabel = draft.collision === null ? 'Join the guild' : 'Continue';
-    const signInLabel = draft.collision === null ? 'Sign in' : 'Continue';
-
-    const card = el('section', { class: 'card stack' }, el('h2', {}, 'Your account'), modes, collision);
-    if (draft.usePassword) {
-      card.append(
-        el('div', { class: 'row' }, field('Email', email), field('Password', password)),
-        el('p', { class: 'muted' }, 'The password you already set for this guild.'),
-        el('div', { class: 'row' }, button(signInLabel, () => void submit(), { kind: 'primary' })),
-      );
-      return card;
-    }
-
-    const code = input('code', { value: draft.code, placeholder: 'XXXX-XXXX' });
-    const nameControl = input('name', { value: draft.name, autocomplete: 'name' });
-    nameControl.addEventListener('input', () => {
-      draft.name = nameControl.value;
-    });
-    // SP02 §3: only the 16-character setup code creates a person, and it needs a name for them.
-    const nameField = field('Name', nameControl, 'The setup code creates the guild, so it needs your name.');
-    nameField.hidden = !isSetupCode(draft.code);
-    code.addEventListener('input', () => {
-      draft.code = code.value;
-      nameField.hidden = !isSetupCode(code.value);
-    });
-    const confirm = input('confirm', { type: 'password', autocomplete: 'new-password' });
-    confirm.addEventListener('input', () => {
-      draft.confirm = confirm.value;
-    });
-    card.append(
-      el('div', { class: 'row' }, field('Email', email), field('Access code', code)),
-      nameField,
-      el('div', { class: 'row' }, field('Password', password), field('Confirm password', confirm)),
-      el(
-        'p',
-        { class: 'muted' },
-        'Nod derives the keys on this machine; the password itself never reaches the host.',
-      ),
-      el('div', { class: 'row' }, button(joinLabel, () => void submit(), { kind: 'primary' })),
-    );
-    return card;
-  }
-
-  function setMode(usePassword: boolean): void {
-    draft.usePassword = usePassword;
-    // The fields are rebuilt by the render below and a password is never written back into the
-    // DOM: leaving the draft behind would submit a password the person can no longer see.
-    draft.password = '';
-    draft.confirm = '';
-    status = null;
-    render();
-  }
-
-  async function findGuild(raw: string): Promise<void> {
-    const address = raw.trim();
-    status = null;
-    if (address === '') {
-      status = { kind: 'error', text: 'enter the address of the host' };
-      render();
-      return;
-    }
-    try {
-      const found = await call('host.discover', { address });
-      draft.address = address;
-      draft.guild = found.guild;
-      draft.fingerprint = found.fingerprint;
-      // SP04 §1.3: the fingerprint the invite fixed is compared here, before a password is typed.
-      // The backend compares it again — over the same discovery — when the join goes out.
-      draft.discovered = draft.expected === null || sameFingerprint(draft.expected, found.fingerprint);
-      if (!draft.discovered) {
-        draft.guild = '';
-        draft.fingerprint = '';
-        status = { kind: 'error', text: refusal };
-      }
-    } catch (e) {
-      draft.discovered = false;
-      draft.guild = '';
-      draft.fingerprint = '';
-      status = { kind: 'error', text: errorMessage(e) };
-    }
-    render();
-  }
-
-  async function submit(): Promise<void> {
-    status = null;
-    // F1: the decision the select carries. Keeping the local account cancels the join here — nothing
-    // is sent, and the code the person was given is untouched.
-    if (draft.collision !== null && draft.choice === 'local') {
-      draft.collision = null;
-      draft.choice = 'guild';
-      draft.password = '';
-      draft.confirm = '';
-      status = { kind: 'info', text: 'the join was cancelled — nothing was sent to the guild' };
-      render();
-      return;
-    }
-    const email = draft.email.trim();
-    if (email === '') {
-      status = { kind: 'error', text: 'enter your email' };
-      render();
-      return;
-    }
-    if (draft.password === '') {
-      status = { kind: 'error', text: 'enter your password' };
-      render();
-      return;
-    }
-    if (!draft.usePassword && draft.password !== draft.confirm) {
-      status = { kind: 'error', text: 'the two passwords are not the same' };
-      render();
-      return;
-    }
-    const setup = !draft.usePassword && isSetupCode(draft.code);
-    if (setup && draft.name.trim() === '') {
-      status = { kind: 'error', text: 'the setup code needs your name' };
-      render();
-      return;
-    }
-    // The fingerprint the host answered is what the backend re-checks; the invite's own one wins
-    // when there was an invite (it is the same string, or the flow already refused above).
-    const fingerprint = draft.expected ?? draft.fingerprint;
-    const password = draft.password;
-    // F1: with the choice on screen this submit is the person's decision, and it is what the backend
-    // reads as `adoptLocal`.
-    const adoptLocal = draft.collision === null ? {} : { adoptLocal: true };
-    let vaultWiped = false;
-    try {
-      const answer = draft.usePassword
-        ? await call('host.signIn', { address: draft.address, fingerprint, email, password, ...adoptLocal })
-        : await call('host.activate', {
-            address: draft.address,
-            fingerprint,
-            email,
-            code: draft.code,
-            password,
-            ...(setup ? { name: draft.name.trim() } : {}),
-            ...adoptLocal,
-          });
-      if (answer.kind !== 'session') {
-        // F1: the backend answered the choice — a local account of this Nod holds the email and
-        // nothing was sent, so the code is whole. The password goes (the fields are rebuilt), the
-        // code and the address stay.
-        draft.collision = answer;
-        draft.choice = 'guild';
-        draft.password = '';
-        draft.confirm = '';
-        status = { kind: 'info', text: 'nothing was sent to the guild yet' };
-        render();
-        return;
-      }
-      // SP02 §7/RF-43: the reset (or the activation over a local account with another `vaultKey`)
-      // removed this machine's saved logins; the screen that replaces this one tells the person.
-      vaultWiped = answer.wipedVault === true;
-    } catch (e) {
-      // A failed join keeps neither the password nor a half-written host.
-      draft.password = '';
-      draft.confirm = '';
-      status = { kind: 'error', text: errorMessage(e) };
-      render();
-      return;
-    }
-    draft.password = '';
-    draft.confirm = '';
-    ctx.onJoined({ vaultWiped });
-  }
-
-  render();
-  if (ctx.prefill !== null && ctx.prefill !== undefined) void findGuild(ctx.prefill.address);
-
-  return {
-    setPrefill(invite: JoinInvite | null): void {
-      if (invite === null) return;
-      draft.address = invite.address;
-      draft.expected = invite.fingerprint;
-      draft.code = invite.code ?? '';
-      status = null;
-      render();
-      void findGuild(invite.address);
-    },
-  };
 }
 
 export function mountSettings(
@@ -599,6 +269,8 @@ export function mountSettings(
     id: string;
     title: string;
     order: string;
+    /** RF-62: the display category of the org tool; '' means none (the validator answers `null`). */
+    category: string;
     roles: Id[];
     active: boolean;
     views: View[];
@@ -629,13 +301,19 @@ export function mountSettings(
     results: [] as string[],
     editor: null as ToolEditor | null,
     invite: null as { code: string; expiresAt: string } | null,
-    /** which card the code block belongs to: the new-person card ('new') or one person's id */
-    inviteFor: null as 'new' | Id | null,
+    /** which card the code block belongs to: one person's id (the reissue of `invites.issue`) */
+    inviteFor: null as Id | null,
     inviteRoles: [] as Id[],
     inviteDays: '7',
-    /** connected People tab: the half-typed new person, cleared once the host created them */
-    personEmail: '',
-    personName: '',
+    /**
+     * 0.4.5 (RF-59), connected People tab: the picks of the Invites card (the host's `null` is the
+     * empty string of the select), the link and code of the invite created in this session — shown
+     * once — and the guild's invites as `guildInvites.list` read them.
+     */
+    inviteMaxUses: '1' as string,
+    inviteExpiresIn: '1440' as string,
+    createdInvite: null as { code: string; link: string } | null,
+    guildInvites: [] as GuildInvite[],
     /** B8a: set once the publish offer was answered — it is offered at most one time */
     publishClosed: false,
     /**
@@ -656,6 +334,12 @@ export function mountSettings(
      * biometrics for the backend to ask itself. Nothing of that action runs until it is typed.
      */
     gate: null as GateWait | null,
+    /**
+     * K5/SP02 §9 fallback: the system prompt did not confirm in this session (`GATE_PROMPT_FAILED`
+     * — cancelled, or no biometrics enrolled), so every gated action now asks for the password,
+     * which the backend accepts until the next lock (canonico §22, "Gate fallback").
+     */
+    gateFallback: false,
     /**
      * K4/SP06 §4: the shares addressed to this Nod, as `shares.inbox` read them; empty without a
      * guild. Read again on every `host` push, which is what a new share arrives as.
@@ -836,9 +520,10 @@ export function mountSettings(
     nameOf: (role: Role) => string,
     isOn: (role: Role) => boolean,
     onToggle: (role: Role, on: boolean) => void,
+    roles: Role[] = state.roles,
   ): HTMLElement {
     const row = el('div', { class: 'row' });
-    for (const role of state.roles) {
+    for (const role of roles) {
       row.append(
         checkboxField(
           role.name,
@@ -914,9 +599,11 @@ export function mountSettings(
     state.tab = tab;
     state.status = null;
     // The invite code lives only while the People tab is on screen (canonico §9), and a PNG picked
-    // for a guild only while its own tab is (SP05 §6).
+    // for a guild only while its own tab is (SP05 §6). 0.4.5 (RF-59): the link of the invite created
+    // here is shown once, so leaving the tab takes it too.
     state.invite = null;
     state.inviteFor = null;
+    state.createdInvite = null;
     state.editor = null;
     state.guildIcon = null;
     // K5: leaving the tab takes the secret, the half-typed password and the open dialog with it.
@@ -987,6 +674,9 @@ export function mountSettings(
         case 'people':
           state.people = await call('people.list');
           state.roles = await call('roles.list');
+          // 0.4.5 (RF-59): the guild's invites are the host's; a local Nod has none to list and
+          // nothing to create them with.
+          state.guildInvites = hasHost() ? await call('guildInvites.list') : [];
           break;
         case 'activity':
           state.entries = await call('catalog.list');
@@ -1114,6 +804,9 @@ export function mountSettings(
       const host = state.host;
       const box = el('div');
       mountJoinFlow(box, {
+        // 0.4.5 (RF-59): the free pane is the invite link; the sign-in mode opens on the account
+        // form of the host already on record (its address and its key are pinned).
+        step: mode,
         // A pinned host is what the sign-in mode has: its address and key are already on record.
         prefill:
           mode === 'signin' && host !== null
@@ -2004,7 +1697,9 @@ export function mountSettings(
   function sharing(): boolean {
     const host = state.host;
     if (host === null || host.status === 'none' || host.status === 'signed-out') return false;
-    return !host.updateRequired;
+    // 0.4.5 (RF-60): an offline session reads nothing of the guild either — same screens as O2's
+    // disconnected guild (`hasHost`).
+    return !host.updateRequired && !host.offlineSession;
   }
 
   /** True while this action is the one on screen waiting for the password. */
@@ -2024,21 +1719,45 @@ export function mountSettings(
    * prompt, and so does anybody on a machine that reports `authenticate` — there the backend runs
    * the prompt itself and the page sends no password at all (`docs/canonico.md` §22, "gate where
    * biometrics exist"). The typed password is what the page offers where the capability is absent
-   * (Linux) and, in a non-release dev run, where it exists too: `nod.info.devRun` is the backend
-   * saying a password is accepted, and a release build never says it. A cancel, an empty field or a
-   * wrong password leaves the action undone.
+   * (Linux), in a non-release dev run (`nod.info.devRun`, which a release build never says), and
+   * once the system prompt did not confirm in this session (`GATE_PROMPT_FAILED`): the capability
+   * is per OS, so a Windows machine without Hello reports it and then fails every prompt. That
+   * failure re-opens the same action on the password prompt. A cancel, an empty field or a wrong
+   * password leaves the action undone.
    */
   function gate(wait: GateWait, run: (password?: string) => Promise<void>): void {
-    if (state.session.biometric) {
-      void run(undefined);
+    const systemPrompt =
+      !state.gateFallback && (state.session.biometric || (state.info.biometricAvailable && !state.info.devRun));
+    if (systemPrompt) {
+      attempt(wait, run);
       return;
     }
-    if (state.info.biometricAvailable && !state.info.devRun) {
-      void run(undefined);
-      return;
-    }
+    askPassword(wait, null);
+  }
+
+  /**
+   * Runs the action with no password and lets the backend decide: an action it needs no gate for
+   * just goes through. A system prompt that did not confirm switches this session to the password
+   * (`gateFallback`); a call that needed a factor and had none (`GATE_PASSWORD_REQUIRED`) asks for
+   * it. Either way the same action comes back on the password prompt.
+   */
+  function attempt(wait: GateWait, run: (password?: string) => Promise<void>): void {
+    void run(undefined).then(() => {
+      const failed = state.status;
+      if (failed === null || failed.kind !== 'error') return;
+      if (failed.text === GATE_PROMPT_FAILED) {
+        state.gateFallback = true;
+        askPassword(wait, { kind: 'info', text: 'The system prompt did not confirm — use your Nod password instead' });
+      } else if (failed.text === GATE_PASSWORD_REQUIRED) {
+        askPassword(wait, { kind: 'info', text: 'This needs your password' });
+      }
+    });
+  }
+
+  /** Puts the password prompt of `wait` on screen and gives it the keyboard. */
+  function askPassword(wait: GateWait, status: { kind: 'info'; text: string } | null): void {
     state.gate = wait;
-    state.status = null;
+    state.status = status;
     render();
     // Keyboard first (RNF-07): the typing goes to the prompt that just appeared.
     root.querySelector<HTMLInputElement>('input.gate-password')?.focus();
@@ -2072,12 +1791,14 @@ export function mountSettings(
       field(
         'Password',
         password,
-        state.info.biometricAvailable
-          ? // SP02 §9/canonico §22: reachable only in a dev run — the backend said a typed
-            // password is accepted here, so the card says which run this is instead of claiming
-            // the machine has no biometrics.
-            'This is a development run: the action takes your password.'
-          : 'This machine has no biometrics: the action asks for your password.',
+        state.gateFallback
+          ? 'The system prompt did not confirm: until you lock Nod, actions take your password.'
+          : state.info.biometricAvailable
+            ? // SP02 §9/canonico §22: reachable only in a dev run — the backend said a typed
+              // password is accepted here, so the card says which run this is instead of claiming
+              // the machine has no biometrics.
+              'This is a development run: the action takes your password.'
+            : 'This machine has no biometrics: the action asks for your password.',
       ),
       confirm,
       button(
@@ -2559,16 +2280,17 @@ export function mountSettings(
       );
     } else {
       actions.append(
-        // K4/SP06 §4: an update lands on a credential already held and shows nothing, so the
-        // backend asks for no gate there either.
+        // K4/SP06 §4: an update of a credential already held, from its owner, shows nothing and the
+        // backend asks for no gate. Any other update is gated there (H1), so the attempt falls back
+        // to the password prompt when the backend asks for a factor.
         button(
           'Accept',
-          share.kind === 'update'
-            ? () => acceptShare(share, undefined)
-            : () =>
-                gate({ kind: 'accept', shareId: share.id }, (password) =>
-                  acceptShare(share, password),
-                ),
+          () => {
+            const wait: GateWait = { kind: 'accept', shareId: share.id };
+            const run = (password?: string): Promise<void> => acceptShare(share, password);
+            if (share.kind === 'update') attempt(wait, run);
+            else gate(wait, run);
+          },
           { kind: 'primary' },
         ),
       );
@@ -2993,6 +2715,7 @@ export function mountSettings(
       id: '',
       title: '',
       order: '0',
+      category: '',
       roles: [],
       active: true,
       views: [],
@@ -3015,6 +2738,7 @@ export function mountSettings(
       id: entry.id,
       title: entry.title,
       order: String(entry.order),
+      category: categoryOf(entry) ?? '',
       roles: [...entry.roles],
       active: entry.active,
       views: entry.views.map((view) => ({ ...view })),
@@ -3066,6 +2790,22 @@ export function mountSettings(
       editor.order = (event.target as HTMLInputElement).value;
     });
     card.append(el('div', { class: 'row' }, field('Id', id), field('Title', title), field('Order', order)));
+
+    // RF-62: the category is a free name — the guild's own, up to 40 characters — and the datalist
+    // offers the ones already in use, so a second tool of the same category is one keystroke away.
+    const category = input('category', { value: editor.category, placeholder: 'e.g. Support' });
+    category.setAttribute('list', CATEGORY_LIST_ID);
+    category.addEventListener('input', (event) => {
+      editor.category = (event.target as HTMLInputElement).value;
+    });
+    card.append(
+      el(
+        'div',
+        { class: 'row' },
+        field('Category', category, 'Empty: the tool is not filed under a category'),
+      ),
+      categoryDatalist(),
+    );
 
     const preview = editor.icon !== null ? iconDataUri(editor.icon) : editor.savedIcon;
     const file = el('input', {
@@ -3216,8 +2956,28 @@ export function mountSettings(
     return card;
   }
 
+  /**
+   * RF-62: the categories the catalog already uses, as the suggestions of the editor's input. The
+   * list is the guild's, read from the entries the Tools tab shows; a name nobody uses yet is typed.
+   */
+  function categoryDatalist(): HTMLElement {
+    const names: string[] = [];
+    for (const entry of guildEntries()) {
+      const name = categoryOf(entry);
+      if (name !== null && !names.includes(name)) names.push(name);
+    }
+    names.sort((a, b) => a.localeCompare(b, 'en'));
+    return el(
+      'datalist',
+      { id: CATEGORY_LIST_ID },
+      ...names.map((name) => el('option', { attrs: { value: name } })),
+    );
+  }
+
   function toolItem(entry: Entry): HTMLElement {
     const noFill = entry.auth?.noFill === true;
+    // RF-62: the chip names the category the tool is filed under; an unfiled tool shows none.
+    const category = categoryOf(entry);
     return el(
       'div',
       { class: 'card stack' },
@@ -3226,6 +2986,7 @@ export function mountSettings(
         { class: 'row' },
         el('strong', {}, entry.title),
         el('span', { class: 'muted' }, entry.id),
+        category === null ? null : el('span', { class: 'chip' }, category),
         el('span', { class: 'chip' }, entry.active ? 'active' : 'inactive'),
       ),
       el('p', { class: 'muted' }, entry.url),
@@ -3339,6 +3100,8 @@ export function mountSettings(
     const entry: Entry = {
       id: editor.id.trim() !== '' ? editor.id.trim() : slug(editor.title),
       title: editor.title.trim(),
+      // RF-62: whitespace is no category; the validator trims the name it receives.
+      category: editor.category.trim() === '' ? null : editor.category,
       url: editor.url.trim(),
       // The saved icon only changes when the admin picked another one; then it goes explicit.
       icon: editor.iconChanged ? null : editor.savedIcon,
@@ -3545,14 +3308,24 @@ export function mountSettings(
 
   // ---------------------------------------------------------------- tab: people
 
+  /** A value shown for a copy: read-only, selected on focus, never editable. */
+  function readonlyValue(name: string, value: string): HTMLInputElement {
+    const node = input(name, { value });
+    node.readOnly = true;
+    node.addEventListener('focus', () => node.select());
+    return node;
+  }
+
   function inviteCodeBlock(invite: { code: string; expiresAt: string }): HTMLElement {
-    const code = input('invite-code', { value: invite.code });
-    code.readOnly = true;
-    code.addEventListener('focus', () => code.select());
     return el(
       'div',
       { class: 'stack' },
-      el('div', { class: 'row' }, code, button('Copy', () => void copy(invite.code), { kind: 'primary' })),
+      el(
+        'div',
+        { class: 'row' },
+        readonlyValue('invite-code', invite.code),
+        button('Copy', () => void copy(invite.code, 'Code'), { kind: 'primary' }),
+      ),
       el('p', { class: 'muted' }, 'Save it now: this code will not be shown again.'),
       el('p', { class: 'muted' }, `Expires at ${invite.expiresAt}`),
     );
@@ -3584,46 +3357,107 @@ export function mountSettings(
   }
 
   /**
-   * SP05 §4, connected: the guild's people are the host's, so "a code to hand over" is the host
-   * asking for a person (`invites.issue` → `POST /v1/admin/people`). The email and the name are what
-   * creates them; the roles are the ones they start with.
+   * RF-59, connected: the guild's invites are the host's, and this is where the admin hands them
+   * out. An invite is a link that carries roles, a use budget and an expiry; whoever opens it
+   * creates the account they choose, and the host gives it those roles and spends one use. The card
+   * lists what is still open, with the status the host's own clock answers.
    */
-  function newPersonCard(): HTMLElement {
-    const email = input('person-email', {
-      type: 'email',
-      value: state.personEmail,
-      placeholder: 'person@example.com',
-    });
-    email.addEventListener('input', (event) => {
-      state.personEmail = (event.target as HTMLInputElement).value;
-    });
-    const name = input('person-name', { value: state.personName, placeholder: 'Name' });
-    name.addEventListener('input', (event) => {
-      state.personName = (event.target as HTMLInputElement).value;
-    });
+  function invitesCard(): HTMLElement {
     const card = el(
       'section',
       { class: 'card stack' },
-      el('h2', {}, 'New person'),
+      el('h2', {}, 'Invites'),
       el(
         'p',
         { class: 'muted' },
-        'Nod creates the person on the host and answers one access code. Hand it over now: the host will not show it again.',
+        'Hand the link to whoever should join. They create their own account — name, email, ' +
+          'password — and the host gives it the roles you pick here.',
       ),
-      el('div', { class: 'row' }, field('Email', email), field('Name', name)),
+      // RF-59: an invite never grants an admin role — the host refuses one (`400 an invite cannot
+      // grant an admin role`) and re-checks it at the join — so the card does not offer one.
+      // Promoting somebody stays People → their roles.
       roleCheckboxes(
         (role) => `invite-role-${role.id}`,
         (role) => state.inviteRoles.includes(role.id),
         (role, on) => toggleIn(state.inviteRoles, role.id, on),
+        state.roles.filter((role) => !role.admin),
       ),
       el(
         'div',
         { class: 'row' },
-        button('New access code', () => void createPerson(), { kind: 'primary' }),
+        field(
+          'Max uses',
+          selectField('invite-max-uses', state.inviteMaxUses, INVITE_MAX_USES, (value) => {
+            state.inviteMaxUses = value;
+          }),
+        ),
+        field(
+          'Expires after',
+          selectField('invite-expires', state.inviteExpiresIn, INVITE_EXPIRY, (value) => {
+            state.inviteExpiresIn = value;
+          }),
+        ),
+        button('Create invite', () => void createGuildInvite(), { kind: 'primary' }),
       ),
     );
-    if (state.invite !== null && state.inviteFor === 'new') card.append(inviteCodeBlock(state.invite));
+    if (state.createdInvite !== null) card.append(createdInviteBlock(state.createdInvite));
+    card.append(el('h3', {}, 'Open invites'), inviteList());
     return card;
+  }
+
+  /** The link and the code of the invite just created: the host shows each of them exactly once. */
+  function createdInviteBlock(created: { code: string; link: string }): HTMLElement {
+    return el(
+      'div',
+      { class: 'stack invite-created' },
+      el(
+        'div',
+        { class: 'row' },
+        readonlyValue('invite-link', created.link),
+        button('Copy link', () => void copy(created.link, 'Link'), { kind: 'primary' }),
+      ),
+      el(
+        'div',
+        { class: 'row' },
+        el('span', { class: 'chip' }, created.code),
+        button('Copy code', () => void copy(created.code, 'Code')),
+      ),
+      el('p', { class: 'muted' }, 'Shown once: the host keeps only the hash of the code.'),
+    );
+  }
+
+  /** Every invite the host knows, newest first, with its status and its Revoke (RF-59). */
+  function inviteList(): HTMLElement {
+    const box = el('div', { class: 'stack' });
+    if (state.guildInvites.length === 0) {
+      box.append(el('p', { class: 'empty' }, 'No invites.'));
+      return box;
+    }
+    for (const invite of state.guildInvites) {
+      const status = inviteStatus(invite);
+      box.append(
+        el(
+          'div',
+          { class: 'card stack invite-row' },
+          el(
+            'div',
+            { class: 'row' },
+            el('strong', {}, status),
+            el('span', { class: 'chip' }, roleNames(invite.roles)),
+            el('span', { class: 'muted' }, `${invite.uses}/${invite.maxUses ?? 'no limit'} used`),
+            el(
+              'span',
+              { class: 'muted' },
+              invite.expiresAt === null ? 'never expires' : `expires ${isoDay(invite.expiresAt)}`,
+            ),
+          ),
+          invite.revokedAt === null
+            ? el('div', { class: 'row' }, button('Revoke', () => void revokeGuildInvite(invite), { kind: 'danger' }))
+            : null,
+        ),
+      );
+    }
+    return box;
   }
 
   function personItem(target: Person, owner: Person): HTMLElement {
@@ -3696,9 +3530,9 @@ export function mountSettings(
 
   function viewPeople(owner: Person): HTMLElement {
     const box = el('section', { class: 'stack' });
-    // SP05 §4: connected, the People tab belongs to the host — a person and their code come from
-    // `POST /v1/admin/people`, not from a local invite.
-    box.append(hasHost() ? newPersonCard() : inviteCard());
+    // SP05 §4: connected, the People tab belongs to the host — a code to hand over is an invite of
+    // the guild (RF-59), not a local invite.
+    box.append(hasHost() ? invitesCard() : inviteCard());
     if (state.people.length === 0) {
       box.append(el('p', { class: 'empty' }, 'No people.'));
       return box;
@@ -3723,20 +3557,39 @@ export function mountSettings(
     render();
   }
 
-  /** Connected only: the person and their one code, in a single call to the host (RF-33). */
-  async function createPerson(): Promise<void> {
+  /**
+   * RF-59: one invite of the guild, with the picks of the card. The host answers the code and the
+   * link exactly once — `guildInvites.list` carries neither afterwards — so both stay on screen
+   * until the tab is left.
+   */
+  async function createGuildInvite(): Promise<void> {
+    state.status = null;
+    const maxUses = state.inviteMaxUses === '' ? null : Number.parseInt(state.inviteMaxUses, 10);
+    const expiresInMinutes = state.inviteExpiresIn === '' ? null : Number.parseInt(state.inviteExpiresIn, 10);
+    try {
+      const answer = await call('guildInvites.create', {
+        roles: [...state.inviteRoles],
+        maxUses: maxUses !== null && Number.isFinite(maxUses) ? maxUses : null,
+        expiresInMinutes:
+          expiresInMinutes !== null && Number.isFinite(expiresInMinutes) ? expiresInMinutes : null,
+      });
+      state.createdInvite = { code: answer.code, link: answer.link };
+      state.guildInvites = await call('guildInvites.list');
+      state.status = { kind: 'ok', text: 'Invite created — hand over the link' };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** RF-59: revoking stops the link working; a person who already joined keeps their account. */
+  async function revokeGuildInvite(invite: GuildInvite): Promise<void> {
+    if (!confirm('Revoke this invite? Whoever holds the link can no longer use it.')) return;
     state.status = null;
     try {
-      state.invite = await call('invites.issue', {
-        email: state.personEmail.trim(),
-        name: state.personName.trim(),
-        roles: [...state.inviteRoles],
-      });
-      state.inviteFor = 'new';
-      state.personEmail = '';
-      state.personName = '';
-      state.status = { kind: 'ok', text: 'Person created — hand over the code' };
-      state.people = await call('people.list');
+      await call('guildInvites.revoke', { id: invite.id });
+      state.guildInvites = await call('guildInvites.list');
+      state.status = { kind: 'ok', text: 'Invite revoked' };
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
     }
@@ -3788,11 +3641,11 @@ export function mountSettings(
     render();
   }
 
-  async function copy(text: string): Promise<void> {
+  async function copy(text: string, what: string): Promise<void> {
     state.status = null;
     try {
       await navigator.clipboard.writeText(text);
-      state.status = { kind: 'ok', text: 'Code copied' };
+      state.status = { kind: 'ok', text: `${what} copied` };
     } catch {
       state.status = { kind: 'error', text: 'Could not copy; select the code and copy it by hand' };
     }
@@ -3848,9 +3701,12 @@ export function mountSettings(
    * same place as far as every screen is concerned — the guild is disconnected, so the org tools, the
    * devices, the colleagues, the leftovers and the sharing screens are the local ones. Settings →
    * Hosts does not come through here: it shows the guild and its reason on the host's own card.
+   *
+   * 0.4.5 (RF-60): a session entered through the Offline tile is the same disconnect — the guild is
+   * on this machine and this session reads nothing of it.
    */
   function hasHost(): boolean {
-    return state.host !== null && state.host.status !== 'none' && !state.host.updateRequired;
+    return state.host !== null && state.host.status !== 'none' && !state.host.updateRequired && !state.host.offlineSession;
   }
 
   /**
@@ -4066,7 +3922,9 @@ export function mountSettings(
       closeSend();
       closeAssign();
       state.invite = null;
+      state.inviteFor = null;
       state.inviteRoles = [];
+      state.createdInvite = null;
       state.editor = null;
       state.status = null;
       render();

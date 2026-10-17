@@ -4,11 +4,12 @@
 // goes to the database the app wrote: nothing here mocks the repo, the guards or the app. Run with
 // `bun test host/person.test.ts`.
 //
-// The flow of the fixture is the real one: `POST /v1/auth/setup` makes the first admin, the admin
-// group creates the people, and each person redeems the code through `POST /v1/auth/activate` (and
-// signs in again through `POST /v1/auth/login` for a second device) — so a test only ever passes
-// through a route that exists. Only the org catalog this group does not write is seeded through the
-// repo, and each seeding says so.
+// The flow of the fixture is the real one: `POST /v1/auth/setup` makes the first admin, each person
+// is seeded through the repo with the code SP02 §3 would issue them, and every code is redeemed
+// through `POST /v1/auth/activate` (and signed in again through `POST /v1/auth/login` for a second
+// device) — so a test only ever passes through a route that exists. What this group does not write
+// itself — the people (0.4.5, RF-59) and the org catalog — is seeded through the repo, and each
+// seeding says so.
 //
 // What the file proves, beyond the statuses: no answer of this group carries a session token hash,
 // and no answer anywhere carries another person's personal data — the admin's snapshot is empty of
@@ -195,17 +196,28 @@ async function setupAdmin(host: TestHost): Promise<SignedIn> {
   return { token, personId, email, salt, authKey };
 }
 
-/** One person created by the admin route, and the code that came with them (SP02 §3). */
-async function createPerson(
-  host: TestHost,
-  adminToken: string,
-  email: string,
-  name: string,
-): Promise<string> {
-  const response = await post(host, HOST_ROUTES.adminPeople, { email, name, roles: [] }, adminToken);
-  expect(response.status).toBe(200);
-  const created = await body<{ person: { id: string }; code: string }>(response);
-  return created.code;
+/** One person seeded through the repo, and the code SP02 §3 would have issued them. */
+async function createPerson(host: TestHost, email: string, name: string): Promise<string> {
+  // 0.4.5, RF-59: the admin route that created a person with an email-bound code is gone — a guild
+  // invite creates a person now — so the person and the code SP02 §3 would issue are seeded here
+  // (the way this file's seedCode does).
+  const person = host.repo.createPerson(
+    { id: crypto.randomUUID(), email, name, roles: [] },
+    instant(),
+  );
+  const code = generateCode('access');
+  const normalized = normalizeCode(code);
+  if (normalized === null) throw new Error('the generated code is not Crockford base32');
+  host.repo.issueCode(
+    {
+      id: crypto.randomUUID(),
+      purpose: 'activate',
+      personId: person.id,
+      codeHash: await sha256Hex(normalized),
+    },
+    instant(),
+  );
+  return code;
 }
 
 /** Redeems a code through the real activation route, and signs in a second device (SP02 §5). */
@@ -255,7 +267,7 @@ describe('device sessions', () => {
   test('lists the caller’s own live sessions and never their token hashes', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    const code = await createPerson(host, admin.token, MEMBER_EMAIL, 'Bob');
+    const code = await createPerson(host, MEMBER_EMAIL, 'Bob');
     const bob = await signIn(host, MEMBER_EMAIL, code);
 
     const response = await get(host, HOST_ROUTES.sessions, bob.token);
@@ -285,8 +297,7 @@ describe('device sessions', () => {
 
   test('revokes the caller’s own session, and that device answers 401 at its next request', async () => {
     const host = await startHost();
-    const admin = await setupAdmin(host);
-    const code = await createPerson(host, admin.token, MEMBER_EMAIL, 'Bob');
+    const code = await createPerson(host, MEMBER_EMAIL, 'Bob');
     const bob = await signIn(host, MEMBER_EMAIL, code);
     const doomed = await firstDeviceToken(host, bob);
 
@@ -309,9 +320,9 @@ describe('device sessions', () => {
   test('refuses another person’s session with 403 and an unknown one with 404', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    const bobCode = await createPerson(host, admin.token, MEMBER_EMAIL, 'Bob');
+    const bobCode = await createPerson(host, MEMBER_EMAIL, 'Bob');
     const bob = await signIn(host, MEMBER_EMAIL, bobCode);
-    const caraCode = await createPerson(host, admin.token, OTHER_EMAIL, 'Cara');
+    const caraCode = await createPerson(host, OTHER_EMAIL, 'Cara');
     await signIn(host, OTHER_EMAIL, caraCode);
 
     const caraId = (await body<Array<{ id: string; email: string }>>(
@@ -343,8 +354,7 @@ describe('device sessions', () => {
 describe('personal tools', () => {
   test('upserts one the caller owns, keeps the newest write and refuses a stale one', async () => {
     const host = await startHost();
-    const admin = await setupAdmin(host);
-    const code = await createPerson(host, admin.token, MEMBER_EMAIL, 'Bob');
+    const code = await createPerson(host, MEMBER_EMAIL, 'Bob');
     const bob = await signIn(host, MEMBER_EMAIL, code);
 
     const created = await put(host, toolPath(BOB_TOOL), tool(BOB_TOOL, { title: 'Notes' }), bob.token);
@@ -389,7 +399,7 @@ describe('personal tools', () => {
 
   test('answers 400 for an id the Nod cannot generate', async () => {
     const host = await startHost();
-    const code = await createPerson(host, (await setupAdmin(host)).token, MEMBER_EMAIL, 'Bob');
+    const code = await createPerson(host, MEMBER_EMAIL, 'Bob');
     const bob = await signIn(host, MEMBER_EMAIL, code);
 
     for (const bad of ['p-short', 'p-ABC1234567', 'notes', 'p-bobnotes01x']) {
@@ -408,10 +418,9 @@ describe('personal tools', () => {
 
   test('refuses the id of another person with 403, and removes the owner’s own with 204', async () => {
     const host = await startHost();
-    const admin = await setupAdmin(host);
-    const bobCode = await createPerson(host, admin.token, MEMBER_EMAIL, 'Bob');
+    const bobCode = await createPerson(host, MEMBER_EMAIL, 'Bob');
     const bob = await signIn(host, MEMBER_EMAIL, bobCode);
-    const caraCode = await createPerson(host, admin.token, OTHER_EMAIL, 'Cara');
+    const caraCode = await createPerson(host, OTHER_EMAIL, 'Cara');
     const cara = await signIn(host, OTHER_EMAIL, caraCode);
 
     // Cara's tool exists because Cara wrote it: the owner is the caller, never a body field.
@@ -465,10 +474,9 @@ describe('personal tools', () => {
 describe('personal views and favorites', () => {
   test('hangs a view under an entry the owner can see, and refuses one they cannot', async () => {
     const host = await startHost();
-    const admin = await setupAdmin(host);
-    const bobCode = await createPerson(host, admin.token, MEMBER_EMAIL, 'Bob');
+    const bobCode = await createPerson(host, MEMBER_EMAIL, 'Bob');
     const bob = await signIn(host, MEMBER_EMAIL, bobCode);
-    const caraCode = await createPerson(host, admin.token, OTHER_EMAIL, 'Cara');
+    const caraCode = await createPerson(host, OTHER_EMAIL, 'Cara');
     const cara = await signIn(host, OTHER_EMAIL, caraCode);
     await put(host, toolPath(CARA_TOOL), tool(CARA_TOOL), cara.token);
     await put(host, toolPath(BOB_TOOL), tool(BOB_TOOL), bob.token);
@@ -523,10 +531,9 @@ describe('personal views and favorites', () => {
 
   test('replaces the ordered list whole, with the 409 and the 403 of SP04 §4 and SP01 §2', async () => {
     const host = await startHost();
-    const admin = await setupAdmin(host);
-    const bobCode = await createPerson(host, admin.token, MEMBER_EMAIL, 'Bob');
+    const bobCode = await createPerson(host, MEMBER_EMAIL, 'Bob');
     const bob = await signIn(host, MEMBER_EMAIL, bobCode);
-    const caraCode = await createPerson(host, admin.token, OTHER_EMAIL, 'Cara');
+    const caraCode = await createPerson(host, OTHER_EMAIL, 'Cara');
     const cara = await signIn(host, OTHER_EMAIL, caraCode);
     await put(host, toolPath(CARA_TOOL), tool(CARA_TOOL), cara.token);
     // A second personal tool of Bob's, so the order is a list and not one element.
@@ -579,7 +586,7 @@ describe('personal data stays with its owner', () => {
   test('an admin’s snapshot and people list carry no other person’s personal data', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    const bobCode = await createPerson(host, admin.token, MEMBER_EMAIL, 'Bob');
+    const bobCode = await createPerson(host, MEMBER_EMAIL, 'Bob');
     const bob = await signIn(host, MEMBER_EMAIL, bobCode);
 
     const viewId = crypto.randomUUID();

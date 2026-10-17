@@ -6,14 +6,16 @@ host works exactly as before (`docs/epics/E01-connected-mode.md` §5).
 
 Status: **block 1 complete** (milestone "Block 1 — One guild, synced", 2026-10-16; commit
 `6af9e64`); **block 2 complete** (mine and shared: H7, O1 and O2, and the host side of E02 —
-K1/K3, K7, K8 and K9 — with migrations 2, 3 and 4). `main.ts` boots on env
+K1/K3, K7, K8 and K9 — with migrations 2, 3 and 4); **0.4.5, RF-59**: the guild invites (migration 5)
+and the two public auth routes that carry them. `main.ts` boots on env
 data (`config.ts`), creates the data dir and both key files
 (`keys.ts`), opens `bun:sqlite`, applies the ordered migrations (`migrations.ts` — migration 1 holds
 every block 1 table of SP01 §2), builds the Elysia app (`app.ts`), serves it and runs the backup
 timer; `Dockerfile` and `compose.yaml` deploy it with the volume at `/data`. `repo.ts` holds every
 block 1 query and the rules SP01 §2 keeps out of SQL. `app.ts` builds the repo and the auth service
 once, decorates the request context with them and mounts one plugin per route group: `routes/auth.ts`
-(`POST /v1/auth/{salt,activate,setup,login}`, `/logout`, `/password` — H4), `routes/admin.ts` (the
+(`POST /v1/auth/{salt,activate,setup,invite,join,login}`, `/logout`, `/password` — H4, RF-59),
+`routes/admin.ts` (the
 admin group of SP03 §2 — H5), `routes/state.ts` (discovery + the signed state — H6),
 `routes/events.ts` (`POST /v1/events` — H8), `routes/guild.ts` (`GET /v1/guild/icon` — I2h),
 `routes/person.ts` (`/v1/sessions`, the personal tools and views, favorites — H7, O1) and
@@ -44,12 +46,12 @@ is never imported at runtime and never ships in the image. One process, one SQLi
 | --- | --- | --- |
 | `main.ts` | Boot: env, data dir, key files, migrations, Elysia app, backup timer | SP07 |
 | `app.ts` | Elysia routes; the repo and the auth service of the process; auth levels; error mapping; body limit | SP03 |
-| `config.ts` | Environment → `HostConfig` (data dir, public URL, port, dev) and to `AppMeta` (minimum app version, update manifest URL — the one value discovery and `/v1/meta/app` share) | SP07 §1–§2, SP03 §3 |
-| `repo.ts` | The **only** module touching `bun:sqlite` (besides the connection in `migrations.ts`): every block 1 and block 2 query, every rule SP01 §2 keeps out of SQL, the share rules of SP06 §4–§5, and every read of personal data filtered by owner | SP01, SP03 §2–§3 |
-| `migrations.ts` | Ordered SQL migrations — 1 holds every block 1 table of SP01 §2, **2 every block 2 table of SP01 §3**, **3 `person_keys.private_sealed` (canonico §22)**, **4 `credential_holders.rotated_at` (the owner's rotation signal, RF-48)**; opens the connection at boot and applies them (queries belong to `repo.ts`) | SP01 §1, §3–§4 |
-| `auth.ts` | The auth service: argon2id over `authKey`, real or fake salt, session tokens, the rate limits, and the `personAuth`/`adminAuth` guards | SP02, SP03 §1 |
-| `routes/auth.ts` | The auth routes: `salt`, `activate`, `setup`, `login` (public) and `logout`, `password` (person) | SP02, SP03 §2 |
-| `routes/admin.ts` | The admin group: people, their access codes and sessions, roles, grants, org tools, the one-time bootstrap and the event list; every route behind `adminAuth` (mounts `personAuth` first) | SP01 §2, SP02 §3, SP03 §2 |
+| `config.ts` | Environment → `HostConfig` (data dir, public URL, port, dev) and to `AppMeta` (minimum app version, update manifest URL — the one value discovery and `/v1/meta/app` share), plus `GUILD_NAME_ENV` (`NOD_GUILD_NAME`, the guild name the discovery and the invite preview serve) | SP07 §1–§2, SP03 §3 |
+| `repo.ts` | The **only** module touching `bun:sqlite` (besides the connection in `migrations.ts`): every block 1 and block 2 query, the guild invites of RF-59 (`createInvite`, `listInvites`, `inviteByCodeHash`, `revokeInvite`, `spendInviteUse`, and the read-side `inviteRedeemable`), every rule SP01 §2 keeps out of SQL, the share rules of SP06 §4–§5, and every read of personal data filtered by owner | SP01, SP03 §2–§3 |
+| `migrations.ts` | Ordered SQL migrations — 1 holds every block 1 table of SP01 §2, **2 every block 2 table of SP01 §3**, **3 `person_keys.private_sealed` (canonico §22)**, **4 `credential_holders.rotated_at` (the owner's rotation signal, RF-48)**, **5 `guild_invites` (RF-59)**, **6 `entries.category` (RF-62's tool categories)**; opens the connection at boot and applies them (queries belong to `repo.ts`) | SP01 §1, §3–§4 |
+| `auth.ts` | The auth service: argon2id over `authKey`, real or fake salt, session tokens, the rate limits, the one message per failure (`invalid credentials`, `invalid code`, `invalid invite`, the join's `409` sentence), and the `personAuth`/`adminAuth` guards | SP02, SP03 §1 |
+| `routes/auth.ts` | The auth routes: `salt`, `activate`, `setup`, `invite`, `join`, `login` (public) and `logout`, `password` (person). `invite` is the public preview of a guild invite and `join` redeems it, creating the account the caller chooses with the invite's roles (RF-59) | SP02, SP03 §2 |
+| `routes/admin.ts` | The admin group: people, their access codes and sessions, the guild invites (create/list/revoke, RF-59), roles, grants, org tools, the one-time bootstrap and the event list; every route behind `adminAuth` (mounts `personAuth` first). Person creation is an invite: `POST /v1/admin/people` is gone, `POST /v1/admin/people/:id/code` stays as the reissue | SP01 §2, SP02 §3, SP03 §2 |
 | `routes/state.ts` | `GET /.well-known/nod` (public) and `GET /v1/state` (person), the signed snapshot and its `If-None-Match` | SP04 §1–§2 |
 | `routes/events.ts` | `POST /v1/events`: the event batch, client-id idempotency, the ack | SP04 §5, SP03 §2 |
 | `routes/presence.ts` | `GET /v1/presence` (person, members only): who is online — a live session seen within `PRESENCE_WINDOW_MS`; derived from `sessions.last_seen_at`, outside the signed snapshot | RF-58, SP03 §2 |
@@ -68,6 +70,7 @@ is never imported at runtime and never ships in the image. One process, one SQLi
 | `repo.test.ts` | The schema of both migrations and every repo rule, on a temp migrated data dir (no mock), including migration 2 applied over an existing block 1 file | SP01 §2–§5 |
 | `auth.test.ts` | The auth surface, the guards and the rate limits, on the real app over a temp data dir | SP02 §2–§5, SP03 §1–§2, SP07 §3 |
 | `admin.test.ts` | The admin surface, on the real app over a temp data dir: every route, the code shown once, the reissue, the revocation, the last admin, the bootstrap window, the filters | SP01 §2, SP02 §3, SP03 §1–§2 |
+| `invites.test.ts` | The guild invites on the real app over a temp data dir: create/list/revoke, the public preview with and without a guild icon, the join with the invite's roles, the exhausted max-use count, the expired and the revoked invite, the email-taken `409` that spends no use, and the email budget's `429` | RF-59, SP02 §3, SP03 §1–§2 |
 | `state.test.ts` | The discovery and the signed snapshot on the real app, with the Nod client end to end | SP04 §1–§2 |
 | `events.test.ts` | The event batch on the real app: client ids, idempotency, the ack, the 500 cap | SP04 §5, SP03 §1–§2 |
 | `person.test.ts` | The person surface on the real app over a temp data dir: the own-session list and revoke (the revoked device's 401), the personal tools, views and favorites with their 400/403/404/409, and that no admin answer carries another person's personal data | SP01 §2, SP03 §1–§2, SP04 §4 |
@@ -84,8 +87,11 @@ is never imported at runtime and never ships in the image. One process, one SQLi
   keys. Only hashes, salts and sealed blobs.
 - **No secret in a log.** The setup code goes only to the terminal that asked for it. No request body
   is ever logged.
-- **One error message per auth failure** (`invalid credentials`, `invalid code`), and the same
-  timing for unknown and known emails: an unknown email is verified against a fixed dummy hash.
+- **One error message per auth failure** (`invalid credentials`, `invalid code`, `invalid invite`),
+  and the same timing for unknown and known emails: an unknown email is verified against a fixed
+  dummy hash. The parts of `activate`, `setup` and `join` that answer a code failure pay the
+  argon2id hash **before** the branch that decides, so no answer is told apart by the clock (F4 of
+  the block 1 review, `routes/auth.ts`).
 - **The auth level is a guard, not a check inside a handler.** `personAuth` and `adminAuth`
   (`auth.ts`) are mounted **before** the routes they protect, in the file that owns them:
   `new Elysia().use(personAuth).get(...)`. A route reads the caller with `callerOf(ctx)` and the
@@ -119,6 +125,17 @@ is never imported at runtime and never ships in the image. One process, one SQLi
   writes of SP03 §2 carry Nod's `updatedAt`, which is what last-write-wins compares (SP04 §4).
   A code the admin issues is returned once, stored as the hex SHA-256 of its normalized form and
   never listed again (SP02 §3).
+- **A guild invite is the only way a person is created now (RF-59, 0.4.5).** `POST /v1/admin/invites`
+  generates the 24-char invite code (SP02 §3), stores its hash together with the roles, the
+  `max_uses` and the expiry in `guild_invites` (migration 5), and records an `invite_issued` event
+  whose `detail` never carries the code. The public `POST /v1/auth/invite` previews a **live** invite
+  (unknown, revoked, expired and used-up are the same `404 invalid invite`), and `POST /v1/auth/join`
+  redeems it: the caller chooses the account, the host creates the person with the invite's roles and
+  spends one use. The email-taken `409` spends none, and a join is one transaction, so any later
+  failure rolls the spend back — `spendInviteUse` carries "not revoked, not expired, a use left" in
+  its SQL predicate and `inviteRedeemable` is the same rule on the read side. Both joins and the
+  preview sit inside the address budget, the join inside the email budget too, and the argon2id hash
+  is paid before the branch that answers `401 invalid invite` (the F4 rule below).
 - **A refusal the query can decide is a typed error, and a route that had to read a row first throws
   the same type**: `new NotFoundError('unknown person')` for an id no query ever sees, never a
   hand-built `{ error }` body.

@@ -15,6 +15,17 @@ export interface SeedCounts {
   invites: number;
 }
 
+/** One seed that was applied: the version recorded and what it moved. */
+export interface SeedApplied {
+  version: number;
+  counts: SeedCounts;
+}
+
+/** The `detail` of a seed event and of the import's report: what a plan moved. */
+export function seedCountsDetail(counts: SeedCounts): string {
+  return `entries: ${counts.entries}, roles: ${counts.roles}, invites: ${counts.invites}`;
+}
+
 /** The plan `planSeed` hands back: inserts, and the updates that only `overwrite` produces. */
 interface SeedPlan {
   insertEntries: Entry[];
@@ -44,28 +55,54 @@ export async function applyBundledSeed(
   readFile: ReadFile = (path) => tjs.readFile(path),
 ): Promise<number | null> {
   if (resourcesDir === null) return null;
+  const applied = await applySeedFile(
+    repo,
+    `${resourcesDir}/${SEED_FILE}`,
+    resourcesDir,
+    icons,
+    readFile,
+  );
+  if (applied === null) return null;
 
-  let raw: string;
-  try {
-    raw = new TextDecoder().decode(await readFile(`${resourcesDir}/${SEED_FILE}`));
-  } catch {
-    return null; // no `seed.json` in the bundle: the catalog already in the database stands
-  }
-
-  const seed = validateSeed(parseJson(raw));
-  const plan = planSeed(currentSeedState(repo), seed, 'boot');
-  if (plan === null) return null; // the database already carries this version or newer
-
-  const counts = await applyPlan(repo, plan, icons, resourcesDir, readFile);
   repo.addEvent({
     personId: null,
     toolId: null,
     type: 'seed_applied',
     url: null,
-    result: String(seed.version),
-    detail: `entries: ${counts.entries}, roles: ${counts.roles}, invites: ${counts.invites}`,
+    result: String(applied.version),
+    detail: seedCountsDetail(applied.counts),
   });
-  return seed.version;
+  return applied.version;
+}
+
+/**
+ * Applies one `seed.json` file in boot mode — the same core the release's own seed runs through at
+ * boot (RF-26) and the optional import of the first run (RF-61). `resourcesDir` is where a relative
+ * icon of the seed is read from (`null` ignores them, like every import from a picked file); the
+ * plan only carries what the database is missing (`planSeed`, RF-27), and `null` answers "there was
+ * nothing to apply": no file, an unreadable one, or a version that does not advance.
+ *
+ * Nothing is recorded here: what the seed means to the log is the caller's (`seed_applied` at boot,
+ * `catalog_imported` for `session.importSeed`).
+ */
+export async function applySeedFile(
+  repo: Repo,
+  path: string,
+  resourcesDir: string | null,
+  icons: Icons,
+  readFile: ReadFile,
+): Promise<SeedApplied | null> {
+  let raw: string;
+  try {
+    raw = new TextDecoder().decode(await readFile(path));
+  } catch {
+    return null; // no `seed.json` there: the catalog already in the database stands
+  }
+
+  const seed = validateSeed(parseJson(raw));
+  const plan = planSeed(currentSeedState(repo), seed, 'boot');
+  if (plan === null) return null; // the database already carries this version or newer
+  return { version: seed.version, counts: await applyPlan(repo, plan, icons, resourcesDir, readFile) };
 }
 
 /**

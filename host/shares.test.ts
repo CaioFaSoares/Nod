@@ -225,24 +225,25 @@ async function setupAdmin(host: TestHost): Promise<Member> {
   return { personId, token, keys };
 }
 
-/** The admin creates the person; the code it answers is redeemed through the activation route. */
+// 0.4.5, RF-59: the admin route that created a person with an email-bound code is gone — a guild
+// invite creates a person now — so the person and the code SP02 §3 would issue are seeded here (the
+// way this file's seedCode does).
 async function createPerson(
   host: TestHost,
-  adminToken: string,
   input: { email: string; name: string; roles: string[] },
 ): Promise<{ personId: string; code: string }> {
-  const response = await post(host, HOST_ROUTES.adminPeople, input, adminToken);
-  expect(response.status).toBe(200);
-  const created = await json<{ person: { id: string }; code: string }>(response);
-  return { personId: created.person.id, code: created.code };
+  const person = host.repo.createPerson(
+    { id: crypto.randomUUID(), email: input.email, name: input.name, roles: input.roles },
+    instant(),
+  );
+  return { personId: person.id, code: await seedCode(host, 'activate', person.id) };
 }
 
 async function joinGuild(
   host: TestHost,
-  adminToken: string,
   input: { email: string; name: string; roles: string[] },
 ): Promise<Member> {
-  const created = await createPerson(host, adminToken, input);
+  const created = await createPerson(host, input);
   return await activate(host, input.email, created.code);
 }
 
@@ -305,10 +306,10 @@ async function guild(): Promise<Guild> {
   await putRole(host, admin.token, OTHER_ROLE);
   await putTool(host, admin.token, TOOL, [TEAM, OTHER_ROLE]);
   await putTool(host, admin.token, OTHER_TOOL, [OTHER_ROLE]);
-  const alice = await joinGuild(host, admin.token, { email: ALICE_EMAIL, name: 'Alice', roles: [TEAM] });
-  const bob = await joinGuild(host, admin.token, { email: BOB_EMAIL, name: 'Bob', roles: [TEAM] });
-  const dana = await joinGuild(host, admin.token, { email: DANA_EMAIL, name: 'Dana', roles: [TEAM] });
-  const cara = await joinGuild(host, admin.token, { email: CARA_EMAIL, name: 'Cara', roles: [OTHER_ROLE] });
+  const alice = await joinGuild(host, { email: ALICE_EMAIL, name: 'Alice', roles: [TEAM] });
+  const bob = await joinGuild(host, { email: BOB_EMAIL, name: 'Bob', roles: [TEAM] });
+  const dana = await joinGuild(host, { email: DANA_EMAIL, name: 'Dana', roles: [TEAM] });
+  const cara = await joinGuild(host, { email: CARA_EMAIL, name: 'Cara', roles: [OTHER_ROLE] });
   const client = await joinClient(host, [OTHER_ROLE]);
   return { host, admin, alice, bob, dana, cara, client };
 }
@@ -553,7 +554,7 @@ describe('PUT /v1/keys', () => {
 
 describe('GET /v1/keys/private', () => {
   test('answers the caller’s own pair and nobody else’s, and 404 without one', async () => {
-    const { host, admin, alice, bob } = await guild();
+    const { host, alice, bob } = await guild();
 
     expect((await get(host, HOST_ROUTES.keysPrivate)).status).toBe(401);
 
@@ -569,7 +570,7 @@ describe('GET /v1/keys/private', () => {
     expect(theirs.x25519Public).not.toBe(alice.keys.x25519Public);
 
     // And a person who published no pair at all gets a 404 rather than somebody else's row.
-    const created = await createPerson(host, admin.token, {
+    const created = await createPerson(host, {
       email: 'new@nod.test',
       name: 'New',
       roles: [],
@@ -972,7 +973,7 @@ describe('POST /v1/shares', () => {
     expect(await failure(unknown)).toBe('unknown person');
 
     // Created but never activated: no keys, so there is nothing to seal a copy to (SP06 §2).
-    const eve = await createPerson(host, admin.token, {
+    const eve = await createPerson(host, {
       email: EVE_EMAIL,
       name: 'Eve',
       roles: [TEAM],
@@ -1362,7 +1363,7 @@ describe('assignments', () => {
     expect((await post(host, acceptPath(ids[0]), undefined, bob.token)).status).toBe(204);
 
     // A new member of `team` appears once they have keys on the host, and leaves when disabled.
-    const eve = await createPerson(host, admin.token, {
+    const eve = await createPerson(host, {
       email: EVE_EMAIL,
       name: 'Eve',
       roles: [TEAM],

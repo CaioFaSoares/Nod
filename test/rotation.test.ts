@@ -793,6 +793,32 @@ async function adminOf(running: Running): Promise<HostAdmin> {
   return createHostAdmin(connection);
 }
 
+/**
+ * A person of the guild with an access code for them (0.4.5, RF-59): they join through a guild
+ * invite — the People tab's create route is an invite now — and the code is the reissue for a person
+ * who already exists (`POST /v1/admin/people/:id/code`, SP02 §3).
+ */
+async function memberWithCode(
+  running: Running,
+  admin: HostAdmin,
+  input: { email: string; name: string; roles: Id[] },
+): Promise<{ id: string; code: string; expiresAt: string }> {
+  const invited = await admin.createInvite({ roles: input.roles, maxUses: 1, expiresInMinutes: 60 });
+  const authKey = randomAuthKey();
+  const joined = await running.call('POST', HOST_ROUTES.authJoin, {
+    email: input.email,
+    name: input.name,
+    code: invited.code,
+    salt: randomSalt(),
+    authKey,
+    device: DEVICE,
+  });
+  if (joined.status !== 200) throw new Error(`the join answered ${joined.status}`);
+  const opened = (await joined.json()) as TokenResponse;
+  const issued = await admin.issueCode(opened.personId);
+  return { id: opened.personId, code: issued.code, expiresAt: issued.expiresAt };
+}
+
 async function joinNod(
   running: Running,
   nod: Nod,
@@ -875,9 +901,9 @@ describe('the rotation acceptance against the real host (K9)', () => {
     await admin.grant('team', 'figma', true);
     await admin.grant('finance', 'figma', true);
 
-    const aliceCreated = await admin.createPerson({ email: 'alice@nod.test', name: 'Alice', roles: ['team'] });
-    const bobCreated = await admin.createPerson({ email: 'bob@nod.test', name: 'Bob', roles: ['team'] });
-    const carolCreated = await admin.createPerson({ email: 'carol@nod.test', name: 'Carol', roles: ['finance'] });
+    const aliceCreated = await memberWithCode(running, admin, { email: 'alice@nod.test', name: 'Alice', roles: ['team'] });
+    const bobCreated = await memberWithCode(running, admin, { email: 'bob@nod.test', name: 'Bob', roles: ['team'] });
+    const carolCreated = await memberWithCode(running, admin, { email: 'carol@nod.test', name: 'Carol', roles: ['finance'] });
 
     const aliceNod = newNod();
     const bobNod = newNod();
@@ -972,8 +998,8 @@ describe('the rotation acceptance against the real host (K9)', () => {
     await admin.saveTool(tool('figma', { title: 'Figma', url: `${TOOL_ORIGIN}/app`, roles: ['team'] }));
     await admin.grant('team', 'figma', true);
 
-    const aliceCreated = await admin.createPerson({ email: 'alice@nod.test', name: 'Alice', roles: ['team'] });
-    const bobCreated = await admin.createPerson({ email: 'bob@nod.test', name: 'Bob', roles: ['team'] });
+    const aliceCreated = await memberWithCode(running, admin, { email: 'alice@nod.test', name: 'Alice', roles: ['team'] });
+    const bobCreated = await memberWithCode(running, admin, { email: 'bob@nod.test', name: 'Bob', roles: ['team'] });
 
     const aliceNod = newNod();
     const bobNod = newNod();

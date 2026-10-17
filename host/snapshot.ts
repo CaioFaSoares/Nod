@@ -137,6 +137,9 @@ function entryOf(row: HostTool): Entry {
     scope: row.scope,
     ownerId: row.ownerId,
     title: row.title,
+    // RF-62: the guild's category travels with the tool, `null` while it filed it nowhere. A
+    // personal entry's is always `null` (the personal routes never write one).
+    category: row.category,
     url: row.url,
     icon: row.icon,
     order: row.order,

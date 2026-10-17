@@ -31,6 +31,10 @@ export const HOST_ROUTES = {
   authSalt: '/v1/auth/salt',
   authActivate: '/v1/auth/activate',
   authSetup: '/v1/auth/setup',
+  /** `InvitePreview`, public: what a guild invite opens, `404 invalid invite` otherwise (RF-59). */
+  authInvite: '/v1/auth/invite',
+  /** `TokenResponse`, public: redeem a guild invite with the account the person chooses (RF-59). */
+  authJoin: '/v1/auth/join',
   authLogin: '/v1/auth/login',
   authLogout: '/v1/auth/logout',
   authPassword: '/v1/auth/password',
@@ -52,6 +56,10 @@ export const HOST_ROUTES = {
   adminPersonCode: '/v1/admin/people/:id/code',
   adminPersonSessions: '/v1/admin/people/:id/sessions',
   adminSession: '/v1/admin/sessions/:id',
+  /** `GET` lists `GuildInvite[]`, `POST` creates one and answers its code once (RF-59). */
+  adminInvites: '/v1/admin/invites',
+  /** `DELETE` revokes the invite, `204` (RF-59). */
+  adminInvite: '/v1/admin/invites/:id',
   adminRole: '/v1/admin/roles/:id',
   adminGrants: '/v1/admin/grants',
   adminTool: '/v1/admin/tools/:id',
@@ -186,6 +194,63 @@ export interface SetupRequest extends ActivateRequest {
   name: string;
 }
 
+/**
+ * `POST /v1/auth/join` (0.4.5, RF-59): redeem a guild invite. The person chooses the account — name,
+ * email, password — and the host creates it with the invite's roles, spending one use.
+ */
+export interface JoinRequest extends ActivateRequest {
+  name: string;
+}
+
+/** `POST /v1/auth/invite` (0.4.5, RF-59): what an invite opens, shown before any account is typed. */
+export interface InvitePreviewRequest {
+  code: string;
+}
+
+/**
+ * The answer of `POST /v1/auth/invite`: the guild, the names of the roles the invite grants, and how
+ * long and how often it still works. `icon` is the guild icon as base64url PNG (the repo's rule for
+ * binary on the wire, `docs/specs/README.md`; the bytes of `GET /v1/guild/icon`), or `null` while the
+ * guild has none — a valid invite is what shows it to someone outside the guild. An invalid,
+ * used-up, expired or revoked code is `404 invalid invite`; a join whose invite names a role the
+ * guild has since deleted is `404 unknown role`, and that one does not spend a use.
+ */
+export interface InvitePreview {
+  guild: string;
+  roles: { id: Id; name: string }[];
+  expiresAt: string | null;
+  /** Uses left, or `null` for an invite with no limit. */
+  usesLeft: number | null;
+  icon: string | null;
+}
+
+/** One guild invite as the admin sees it (`GET /v1/admin/invites`). The code is never stored. */
+export interface GuildInvite {
+  id: Id;
+  roles: Id[];
+  /** `null`: no limit. */
+  maxUses: number | null;
+  uses: number;
+  createdBy: Id;
+  createdAt: string;
+  /** `null`: never expires. */
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+
+/** `POST /v1/admin/invites`. `expiresInMinutes: null` never expires; `maxUses: null` has no limit. */
+export interface CreateInviteRequest {
+  roles: Id[];
+  maxUses: number | null;
+  expiresInMinutes: number | null;
+}
+
+/** The answer of `POST /v1/admin/invites`: the invite and its code, shown once. */
+export interface CreateInviteResponse {
+  invite: GuildInvite;
+  code: string;
+}
+
 /** `POST /v1/auth/login` (SP03 §2). The salt came from `/v1/auth/salt` (SP02 §4). */
 export interface LoginRequest {
   email: string;
@@ -217,20 +282,6 @@ export interface AdminPerson extends Person {
   activatedAt: string | null;
   /** Set when the host disabled the person: no sign-in, no snapshot (SP01 §2). */
   disabledAt: string | null;
-}
-
-/** `POST /v1/admin/people` (SP03 §2). */
-export interface PersonCreateRequest {
-  email: string;
-  name: string;
-  roles: Id[];
-}
-
-/** The new person and the access code, which is shown once and never returned again (SP02 §3). */
-export interface PersonCreateResponse {
-  person: AdminPerson;
-  code: string;
-  expiresAt: string;
 }
 
 /** `PATCH /v1/admin/people/:id`: only what the caller sends changes (SP03 §2). */
@@ -266,6 +317,7 @@ export interface GrantRequest {
  * `OrgTool` = `Entry` + views (SP03 §2): the body and the answer of the admin tool routes. `roles`
  * is the entry's grants; `views` is the whole view list in display order. A view the host created
  * carries its `id` (SP04 §2); a write may leave it out for one the host has not created yet.
+ * RF-62's `Entry.category` travels here and in the snapshot; a personal tool's is always `null`.
  */
 export type OrgTool = Entry;
 
@@ -454,7 +506,8 @@ export interface Snapshot {
   me: { id: Id; email: string; name: string; roles: Id[]; admin: boolean; kind: PersonKind };
   /** Every role of the guild: names are not secret inside it (SP04 §2). */
   roles: Role[];
-  /** Org entries granted to me — all of them, if I am admin — with org views and `roles` filled. */
+  /** Org entries granted to me — all of them, if I am admin — with org views, `roles` and RF-62's
+   *  `category` filled. */
   orgTools: Entry[];
   /** Mine, `scope: 'personal'` (SP04 §2). */
   personalTools: Entry[];
@@ -506,20 +559,34 @@ export interface SnapshotEnvelope {
 // ---------------------------------------------------------------- access and setup codes (SP02 §3)
 
 /**
- * The two codes of SP02 §3. `access` is the one the host stores as purpose `activate` — SP01 §2's
- * `access_codes.purpose` and `host/repo.ts`'s `CodePurpose` — and `setup` is the one that creates
- * the first admin.
+ * The three codes of SP02 §3. `access` is the one the host stores as purpose `activate` — SP01 §2's
+ * `access_codes.purpose` and `host/repo.ts`'s `CodePurpose` — `setup` is the one that creates the
+ * first admin, and `invite` (0.4.5, RF-59) is a guild invite: roles, a use budget and an expiry,
+ * redeemed by whoever holds it with the account they choose (`POST /v1/auth/join`).
  */
-export type CodeKind = 'access' | 'setup';
+export type CodeKind = 'access' | 'setup' | 'invite';
 
 /** Crockford base32 (SP02 §3): `U` is not part of it, and neither are `I`, `L` or `O`. */
 export const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
-/** Random bytes per kind (SP02 §3): 5 for an access code, 10 for a setup code. */
-export const CODE_BYTES: Readonly<Record<CodeKind, number>> = { access: 5, setup: 10 };
+/**
+ * Random bytes per kind (SP02 §3): 5 for an access code, 10 for a setup code, 15 for an invite —
+ * an invite opens an account for anyone holding it, several times, so it carries the most entropy.
+ */
+export const CODE_BYTES: Readonly<Record<CodeKind, number>> = { access: 5, setup: 10, invite: 15 };
 
-/** Characters per kind (SP02 §3), which is `CODE_BYTES × 8 / 5`. */
-export const CODE_LENGTH: Readonly<Record<CodeKind, number>> = { access: 8, setup: 16 };
+/** Characters per kind (SP02 §3), which is `CODE_BYTES × 8 / 5`: the length alone says the kind. */
+export const CODE_LENGTH: Readonly<Record<CodeKind, number>> = { access: 8, setup: 16, invite: 24 };
+
+/** The kind a typed code is, by its normalized length; `null` when it is no code at all. */
+export function codeKindOf(code: string): CodeKind | null {
+  const normalized = normalizeCode(code);
+  if (normalized === null) return null;
+  for (const kind of ['access', 'setup', 'invite'] as const) {
+    if (normalized.length === CODE_LENGTH[kind]) return kind;
+  }
+  return null;
+}
 
 /** Codes are grouped in fours: `XXXX-XXXX` and `XXXX-XXXX-XXXX-XXXX` (SP02 §3). */
 export const CODE_GROUP = 4;

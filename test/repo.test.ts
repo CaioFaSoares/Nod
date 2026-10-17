@@ -190,9 +190,9 @@ describe('schema versioning', () => {
   });
 
   test('a version this build does not know is refused by name', () => {
-    // The versioning started at 2, so `1` was never written by any build; `6` is a build from the
+    // The versioning started at 2, so `1` was never written by any build; `7` is a build from the
     // future. Neither is completed — the database is refused whole.
-    for (const version of [1, 6]) {
+    for (const version of [1, 7]) {
       const db = memorySqlite();
       db.exec(`PRAGMA user_version = ${version}`);
       expect(() => createRepo(db).migrate()).toThrow(`unsupported database version: ${version}`);
@@ -887,17 +887,19 @@ const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['person', 'password_algorithm'],
   ['tool', 'scope'],
   ['tool', 'owner_id'],
+  // RF-62 (0.4.5): the display category of a local org tool.
+  ['tool', 'category'],
   ['event', 'client_id'],
   ['event', 'sent_at'],
 ];
 
-describe('schema version 5 — connected mode, the pin table and shared credentials (SP05 §2, SP06)', () => {
-  test('a fresh database is v5, with the two host tables, `peer_keys` and every column of SP05 §2 and K4', () => {
+describe('schema version 6 — tool categories (RF-62) over the connected and shared schema (SP05 §2, SP06)', () => {
+  test('a fresh database is v6, with the two host tables, `peer_keys` and every column of SP05 §2 and K4', () => {
     const db = memorySqlite();
     createRepo(db).migrate();
 
-    expect(SCHEMA_VERSION).toBe(5);
-    expect(userVersion(db)).toBe(5);
+    expect(SCHEMA_VERSION).toBe(6);
+    expect(userVersion(db)).toBe(6);
     expect(tableNames(db)).toEqual([
       'event',
       'host',
@@ -957,7 +959,7 @@ describe('schema version 5 — connected mode, the pin table and shared credenti
     repo.migrate();
 
     // Stamped, completed, and every row of local mode still there, value for value.
-    expect(userVersion(db)).toBe(5);
+    expect(userVersion(db)).toBe(6);
     expect(tableNames(db)).toContain('host');
     expect(tableNames(db)).toContain('host_outbox');
     expect(repo.listPeople().map((p) => p.email)).toEqual(['ana@example.test']);
@@ -984,7 +986,7 @@ describe('schema version 5 — connected mode, the pin table and shared credenti
 
     // And migrate stays idempotent on the migrated database.
     repo.migrate();
-    expect(userVersion(db)).toBe(5);
+    expect(userVersion(db)).toBe(6);
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
   });
 
@@ -995,11 +997,11 @@ describe('schema version 5 — connected mode, the pin table and shared credenti
 
     createRepo(db).migrate();
 
-    expect(userVersion(db)).toBe(5);
+    expect(userVersion(db)).toBe(6);
     expect(tableNames(db)).toContain('host_outbox');
   });
 
-  test('a v3 database gains `peer_keys` and is stamped 5, keeping its rows (SP06 §2, K1–K2)', () => {
+  test('a v3 database gains `peer_keys` and is stamped 6, keeping its rows (SP06 §2, K1–K2)', () => {
     const db = memorySqlite();
     const v3 = createRepo(db);
     v3.migrate();
@@ -1012,7 +1014,7 @@ describe('schema version 5 — connected mode, the pin table and shared credenti
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(5);
+    expect(userVersion(db)).toBe(6);
     expect(tableNames(db)).toContain('peer_keys');
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
     expect(repo.meta('seed_version')).toBe('2');
@@ -1047,7 +1049,7 @@ describe('schema version 5 — connected mode, the pin table and shared credenti
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(5);
+    expect(userVersion(db)).toBe(6);
     const item = repo.vaultItem(person.id, 'alpha');
     expect(item).not.toBeNull();
     // SP06 §3–§5: an item that never travelled has no credential group and the default scope.
@@ -1063,6 +1065,61 @@ describe('schema version 5 — connected mode, the pin table and shared credenti
       scope: 'org',
       username: 'ana',
     });
+  });
+
+  test('a v5 database gains `tool.category` and reads its tools as uncategorized (RF-62)', () => {
+    const db = memorySqlite();
+    const v5 = createRepo(db);
+    v5.migrate();
+    v5.ensureAdminRole();
+    v5.saveRole({ id: 'team', name: 'Team', admin: false });
+    v5.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app', roles: ['team'] }));
+    v5.saveEntry(
+      entry('p-mine00000', {
+        url: 'https://mine.example.test/app',
+        scope: 'personal',
+        ownerId: 'p-ana',
+      }),
+    );
+
+    // What a v5 build left behind: the column absent (and never dropped by a write), `user_version = 5`.
+    db.exec('ALTER TABLE tool DROP COLUMN category');
+    db.exec('PRAGMA user_version = 5');
+
+    const repo = createRepo(db);
+    repo.migrate();
+
+    expect(userVersion(db)).toBe(6);
+    // Every row written before the column is uncategorized, and both scopes survive.
+    expect(repo.listEntries().map((e) => [e.id, e.category])).toEqual([
+      ['alpha', null],
+      ['p-mine00000', null],
+    ]);
+    // And the column is live: an org row takes a name, a personal one stays `null` whatever it is sent.
+    repo.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app', roles: ['team'], category: 'Support' }));
+    repo.saveEntry(
+      entry('p-mine00000', {
+        url: 'https://mine.example.test/app',
+        scope: 'personal',
+        ownerId: 'p-ana',
+        category: 'Support',
+      }),
+    );
+    expect(repo.entry('alpha')?.category).toBe('Support');
+    expect(repo.entry('p-mine00000')?.category).toBeNull();
+  });
+
+  test('`saveEntry` writes and clears the category of an org row (RF-62)', () => {
+    const repo = newRepo();
+    repo.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app', category: 'Support' }));
+    expect(repo.entry('alpha')?.category).toBe('Support');
+
+    // An entry that carries no `category` at all keeps what the row has, like the scope and the icon.
+    repo.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app', title: 'Alpha' }));
+    expect(repo.entry('alpha')?.category).toBe('Support');
+    // `null` is a value, not an absence: it is how the admin takes the tool out of its category.
+    repo.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app', category: null }));
+    expect(repo.entry('alpha')?.category).toBeNull();
   });
 });
 

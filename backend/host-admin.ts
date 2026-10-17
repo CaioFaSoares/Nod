@@ -20,11 +20,12 @@ import {
   type BootstrapRequest,
   type BootstrapResponse,
   type CodeResponse,
+  type CreateInviteRequest,
+  type CreateInviteResponse,
   type DeviceSession,
+  type GuildInvite,
   type HostEvent,
   type OrgTool,
-  type PersonCreateRequest,
-  type PersonCreateResponse,
   type PersonUpdateRequest,
   type RoleRequest,
 } from '../shared/host-api';
@@ -37,10 +38,7 @@ import { HostError, type HostConnection } from './host-client';
  */
 export const BOOTSTRAP_CLOSED = 'the guild already has org tools';
 
-/** SP03 §2's `409` on `POST /v1/admin/people`: one person per email in the guild. */
-const EMAIL_TAKEN = 'email taken';
-
-/** SP03 §2's `404` on `POST /v1/admin/people`: a role the guild does not have. */
+/** SP03 §2's `404` on `POST /v1/admin/invites`: a role the guild does not have. */
 const UNKNOWN_ROLE = 'the guild has no such role';
 
 /** SP03 §1's `404` everywhere else. */
@@ -64,10 +62,14 @@ export interface HostAdmin {
   setRoles(personId: Id, roles: Id[]): Promise<Person>;
   /** `PATCH /v1/admin/people/:id { disabled: true }` → the person, `disabledAt` filled. */
   disable(personId: Id): Promise<Person>;
-  /** `POST /v1/admin/people` → the person and the one access code that creates their account. */
-  createPerson(input: PersonCreateRequest): Promise<PersonCreateResponse>;
   /** `POST /v1/admin/people/:id/code` → a fresh code, the previous one revoked (SP02 §3). */
   issueCode(personId: Id): Promise<CodeResponse>;
+  /** `GET /v1/admin/invites` → the guild's invites, newest first (0.4.5, RF-59). */
+  listInvites(): Promise<GuildInvite[]>;
+  /** `POST /v1/admin/invites` → the invite and the one code of it, which is never returned again. */
+  createInvite(input: CreateInviteRequest): Promise<CreateInviteResponse>;
+  /** `DELETE /v1/admin/invites/:id` → `204`. A person who already joined keeps their account. */
+  revokeInvite(id: Id): Promise<true>;
   /** O1/`GET /v1/admin/people/:id/sessions` → that person's devices and their instants (SP03 §2). */
   sessions(personId: Id): Promise<DeviceSession[]>;
   /** O1/`DELETE /v1/admin/sessions/:id` → `204`; the person signs out at their next sync (SP03 §2). */
@@ -206,16 +208,6 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
       }
     },
 
-    async createPerson(input) {
-      try {
-        return await connection.request<PersonCreateResponse>('POST', HOST_ROUTES.adminPeople, input);
-      } catch (error) {
-        if (error instanceof HostError && error.status === 409) throw new Error(EMAIL_TAKEN);
-        if (error instanceof HostError && error.status === 404) throw new Error(UNKNOWN_ROLE);
-        throw error;
-      }
-    },
-
     async issueCode(personId) {
       try {
         return await connection.request<CodeResponse>('POST', path(HOST_ROUTES.adminPersonCode, personId));
@@ -223,6 +215,36 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
         if (error instanceof HostError && error.status === 404) throw new Error(NOT_ON_HOST);
         throw error;
       }
+    },
+
+    /**
+     * 0.4.5 (RF-59): the guild's invites. `GET` answers revoked ones too (the admin list shows their
+     * state); `POST` answers the code exactly once — the host stores its hash and nothing else; and
+     * `DELETE` sets `revoked_at` on the host, which is idempotent there.
+     */
+    async listInvites() {
+      return await connection.request<GuildInvite[]>('GET', HOST_ROUTES.adminInvites);
+    },
+
+    async createInvite(input) {
+      try {
+        return await connection.request<CreateInviteResponse>('POST', HOST_ROUTES.adminInvites, input);
+      } catch (error) {
+        // SP03 §1: the roles of the body must exist on the host; a `400` (an out-of-range `maxUses`
+        // or `expiresInMinutes`) is not something this Nod sends, so it stays the host's own refusal.
+        if (error instanceof HostError && error.status === 404) throw new Error(UNKNOWN_ROLE);
+        throw error;
+      }
+    },
+
+    async revokeInvite(id) {
+      try {
+        await connection.request<void>('DELETE', path(HOST_ROUTES.adminInvite, id));
+      } catch (error) {
+        if (error instanceof HostError && error.status === 404) throw new Error(NOT_ON_HOST);
+        throw error;
+      }
+      return true;
     },
 
     /**

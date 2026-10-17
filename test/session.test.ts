@@ -209,6 +209,8 @@ describe('state', () => {
       person: null,
       biometric: false,
       waitMs: 0,
+      // 0.4.5 (RF-60): no session, so no entry mode either — the entry screen is what is drawn.
+      mode: null,
     });
   });
 });
@@ -486,6 +488,130 @@ describe('unlock', () => {
     // A hit resets the counter: the wait goes back to zero without the clock moving.
     expect(s.repo.meta('unlock_failures')).toBe('0');
     expect((await s.session.state()).waitMs).toBe(0);
+  });
+});
+
+describe('the tile an unlock enters by (0.4.5, RF-60)', () => {
+  /** The `host` row of a guild whose account is `host-person-1` — not the local account of a test. */
+  function pinGuild(s: SessionScene, address = 'https://guild.example.test'): void {
+    s.repo.saveHost({
+      address,
+      guild: 'Guild',
+      kid: 'kid-1',
+      publicKey: 'A'.repeat(43),
+      personId: HOST_PERSON_ID,
+      salt: HOST_SALT,
+      addedAt: NOW,
+    });
+  }
+
+  test('a guild tile refuses a person who is not the guild account, and remembers the offline one', async () => {
+    const s = scene();
+    await firstAccount(s);
+    pinGuild(s);
+    s.session.lock();
+
+    // The password is right; the tile is not this person's — the same sentence a wrong password
+    // gets, so the screen is no oracle for who the guild's account is.
+    expect(
+      await messageOf(() =>
+        s.session.unlock({
+          email: EMAIL,
+          password: PASSWORD,
+          target: { kind: 'guild', id: 'https://guild.example.test' },
+        }),
+      ),
+    ).toBe('invalid credentials');
+    expect(s.session.mode()).toBeNull();
+
+    // The same credentials by the Offline tile: the local way in, and the tile is remembered.
+    const state = await s.session.unlock({ email: EMAIL, password: PASSWORD, target: { kind: 'offline' } });
+    expect(state.mode).toBe('offline');
+    expect(s.session.mode()).toBe('offline');
+    expect(await s.session.lastEntry()).toEqual({ kind: 'offline' });
+    expect((await s.session.lastPerson())?.email).toBe(EMAIL);
+
+    // A tile whose guild this Nod does not hold is refused the same way.
+    s.session.lock();
+    expect(
+      await messageOf(() =>
+        s.session.unlock({
+          email: EMAIL,
+          password: PASSWORD,
+          target: { kind: 'guild', id: 'https://other.example.test' },
+        }),
+      ),
+    ).toBe('invalid credentials');
+  });
+
+  test('the guild tile opens its own person, in guild mode', async () => {
+    const s = scene();
+    await adoptConnected(s);
+    pinGuild(s);
+    s.session.lock();
+    expect(s.session.mode()).toBeNull();
+
+    const state = await s.session.unlock({
+      email: GUILD_EMAIL,
+      password: GUILD_PASSWORD,
+      target: { kind: 'guild', id: 'https://guild.example.test' },
+    });
+
+    expect(state.mode).toBe('guild');
+    // The tile is remembered for the next entry screen.
+    expect(await s.session.lastEntry()).toEqual({
+      kind: 'guild',
+      id: 'https://guild.example.test',
+    });
+    // Locking forgets the mode; the remembered tile stays in `store`.
+    s.session.lock();
+    expect((await s.session.state()).mode).toBeNull();
+    expect(await s.session.lastEntry()).not.toBeNull();
+  });
+
+  test('an unlock with no target is the Offline tile', async () => {
+    const s = scene();
+    await firstAccount(s);
+
+    const state = await s.session.unlock({ email: EMAIL, password: PASSWORD });
+
+    expect(state.mode).toBe('offline');
+    expect(await s.session.lastEntry()).toEqual({ kind: 'offline' });
+  });
+
+  test('the biometric item refuses a guild tile that is not its person', async () => {
+    const s = scene({ biometricAvailable: true });
+    await firstAccount(s);
+    await s.session.enableBiometric(PASSWORD);
+    pinGuild(s);
+    s.session.lock();
+
+    // The item belongs to the local person, who is not the guild's account.
+    expect(
+      await messageOf(() =>
+        s.session.unlockBiometric({ target: { kind: 'guild', id: 'https://guild.example.test' } }),
+      ),
+    ).toBe('invalid credentials');
+    expect(s.session.mode()).toBeNull();
+  });
+
+  test('the biometric item opens the guild tile of its own person, in guild mode', async () => {
+    const s = scene({ biometricAvailable: true });
+    await adoptConnected(s);
+    pinGuild(s);
+    await s.session.enableBiometric(GUILD_PASSWORD);
+    s.session.lock();
+
+    const state = await s.session.unlockBiometric({
+      target: { kind: 'guild', id: 'https://guild.example.test' },
+    });
+
+    expect(state.mode).toBe('guild');
+    expect(s.session.mode()).toBe('guild');
+    expect(await s.session.lastEntry()).toEqual({
+      kind: 'guild',
+      id: 'https://guild.example.test',
+    });
   });
 });
 

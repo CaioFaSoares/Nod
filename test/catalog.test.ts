@@ -4,8 +4,10 @@
 import { describe, expect, test } from 'bun:test';
 import {
   auditUrl,
+  categoryOf,
   catalogMode,
   exportSeed,
+  groupByCategory,
   originOf,
   planSeed,
   slug,
@@ -136,6 +138,7 @@ describe('validateEntry', () => {
     expect(validated).toEqual({
       id: 'kanban',
       title: 'Kanban',
+      category: null,
       url: 'https://kanban.example.com',
       icon: null,
       order: 0,
@@ -270,6 +273,26 @@ describe('validateEntry', () => {
     expect(() => validateEntry(null)).toThrow('invalid entry');
     expect(() => validateEntry([])).toThrow('invalid entry');
   });
+
+  // RF-62: the category the guild gives a tool.
+  test('trims the category and reads an empty one as none', () => {
+    const base = { id: 'kanban', title: 'Kanban', url: 'https://k.example.com' };
+    expect(validateEntry({ ...base, category: '  Support  ' }).category).toBe('Support');
+    expect(validateEntry({ ...base, category: '' }).category).toBeNull();
+    expect(validateEntry({ ...base, category: '   ' }).category).toBeNull();
+    expect(validateEntry({ ...base, category: null }).category).toBeNull();
+    expect(validateEntry(base).category).toBeNull();
+    // 40 characters are the limit, and they are counted after the trim.
+    expect(validateEntry({ ...base, category: ` ${'c'.repeat(40)} ` }).category).toBe('c'.repeat(40));
+  });
+
+  test('rejects a category longer than 40 characters, a control character or another type', () => {
+    const base = { id: 'kanban', title: 'Kanban', url: 'https://k.example.com' };
+    expect(() => validateEntry({ ...base, category: 'c'.repeat(41) })).toThrow('invalid category');
+    expect(() => validateEntry({ ...base, category: 'Sup\u0000port' })).toThrow('invalid category');
+    expect(() => validateEntry({ ...base, category: 7 })).toThrow('invalid category');
+    expect(() => validateEntry({ ...base, category: { name: 'Support' } })).toThrow('invalid category');
+  });
 });
 
 describe('validateSeed', () => {
@@ -360,6 +383,18 @@ describe('validateSeed', () => {
     expect(seed.entries[0].views).toEqual([]);
   });
 
+  test('carries the optional category of an entry (RF-62)', () => {
+    const seed = validateSeed({
+      ...seedBase(),
+      entries: [
+        { ...entry(), category: '  Support ' },
+        { ...entry({ id: 'docs', title: 'Docs' }) },
+      ],
+    });
+    expect(seed.entries[0].category).toBe('Support');
+    expect(seed.entries[1].category).toBeNull();
+  });
+
   test('accepts the content of resources/seed.example.json', async () => {
     const sample: unknown = await Bun.file('resources/seed.example.json').json();
     const seed = validateSeed(sample);
@@ -410,6 +445,67 @@ describe('visibleEntries', () => {
     const copy = [...all];
     visibleEntries(all, { roles: ['team'], admin: false });
     expect(all).toEqual(copy);
+  });
+});
+
+describe('groupByCategory (RF-62)', () => {
+  test('reads an absent, empty or whitespace name as no category', () => {
+    expect(categoryOf(entry())).toBeNull();
+    expect(categoryOf(entry({ category: null }))).toBeNull();
+    expect(categoryOf(entry({ category: '' }))).toBeNull();
+    expect(categoryOf(entry({ category: '   ' }))).toBeNull();
+    expect(categoryOf(entry({ category: '  Support ' }))).toBe('Support');
+  });
+
+  test('a catalog with no category at all is one uncategorized group, unchanged', () => {
+    const entries = [entry({ id: 'kanban', order: 10 }), entry({ id: 'docs', order: 20 })];
+    const groups = groupByCategory(entries);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.category).toBeNull();
+    expect(groups[0]?.entries.map((e) => e.id)).toEqual(['kanban', 'docs']);
+  });
+
+  test('groups by the smallest order of their tools, and the uncategorized group comes last', () => {
+    const groups = groupByCategory([
+      entry({ id: 'a', order: 1, category: 'Support' }),
+      entry({ id: 'b', order: 2, category: 'Engineering' }),
+      entry({ id: 'c', order: 3, category: 'Support' }),
+      entry({ id: 'd', order: 4 }),
+    ]);
+    expect(groups.map((group) => group.category)).toEqual(['Support', 'Engineering', null]);
+    expect(groups[0]?.entries.map((e) => e.id)).toEqual(['a', 'c']);
+    expect(groups[1]?.entries.map((e) => e.id)).toEqual(['b']);
+    expect(groups[2]?.entries.map((e) => e.id)).toEqual(['d']);
+  });
+
+  test('a tie on the smallest order is decided by the category name', () => {
+    const groups = groupByCategory([
+      entry({ id: 'b', order: 1, category: 'Beta' }),
+      entry({ id: 'a', order: 1, category: 'Alpha' }),
+      entry({ id: 'z', order: 1, category: 'Zeta' }),
+    ]);
+    expect(groups.map((group) => group.category)).toEqual(['Alpha', 'Beta', 'Zeta']);
+  });
+
+  test('the tools inside a group keep the order they arrived in', () => {
+    const groups = groupByCategory([
+      entry({ id: 'first', order: 1, category: 'Support' }),
+      entry({ id: 'second', order: 5, category: 'Support' }),
+      entry({ id: 'third', order: 2, category: 'Support' }),
+    ]);
+    expect(groups[0]?.entries.map((e) => e.id)).toEqual(['first', 'second', 'third']);
+  });
+
+  test('an empty list answers no group', () => {
+    expect(groupByCategory([])).toEqual([]);
+  });
+
+  test('a group of tools only would still read last, whatever their order', () => {
+    const groups = groupByCategory([
+      entry({ id: 'unfiled', order: 1 }),
+      entry({ id: 'filed', order: 9, category: 'Support' }),
+    ]);
+    expect(groups.map((group) => group.category)).toEqual(['Support', null]);
   });
 });
 
@@ -528,6 +624,15 @@ describe('exportSeed', () => {
     expect(seed.entries[0].icon).toBeNull();
     expect(seed.update).toEqual({ url: 'https://updates.example.com/manifest.json' });
     expect(validateSeed(seed)).toEqual(seed);
+  });
+
+  test('carries the category of an entry out and back (RF-62)', () => {
+    const seed = exportSeed(
+      { entries: [entry({ category: ' Support ' }), entry({ id: 'docs', title: 'Docs' })], roles: ROLES, invites: [], update: null, version: 2 },
+      new Date(0),
+    );
+    expect(seed.entries.map((e) => e.category)).toEqual(['Support', null]);
+    expect(validateSeed(seed).entries.map((e) => e.category)).toEqual(['Support', null]);
   });
 
   test('does not mutate the received entries', () => {

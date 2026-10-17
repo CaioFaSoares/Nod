@@ -256,6 +256,40 @@ async function adminOf(running: Running): Promise<HostAdmin> {
   return createHostAdmin(connection);
 }
 
+/**
+ * A person of the guild with an access code for them (0.4.5, RF-59): they join through a guild
+ * invite — the People tab's create route is an invite now — and the code is the reissue for a person
+ * who already exists (`POST /v1/admin/people/:id/code`, SP02 §3).
+ */
+async function memberWithCode(
+  running: Running,
+  admin: HostAdmin,
+  input: { email: string; name: string; roles: Id[] },
+): Promise<{ id: string; code: string; expiresAt: string }> {
+  const adminRoles = input.roles.filter((role) => role === 'admin');
+  const invited = await admin.createInvite({
+    roles: input.roles.filter((role) => role !== 'admin'),
+    maxUses: 1,
+    expiresInMinutes: 60,
+  });
+  const authKey = randomAuthKey();
+  const joined = await running.call('POST', HOST_ROUTES.authJoin, {
+    email: input.email,
+    name: input.name,
+    code: invited.code,
+    salt: randomSalt(),
+    authKey,
+    device: DEVICE,
+  });
+  if (joined.status !== 200) throw new Error(`the join answered ${joined.status}`);
+  const opened = (await joined.json()) as TokenResponse;
+  // RF-59: an invite never grants an admin role, so an admin joins with the member roles and is
+  // promoted afterwards — the documented path (`PATCH /v1/admin/people/:id`).
+  if (adminRoles.length > 0) await admin.setRoles(opened.personId, input.roles);
+  const issued = await admin.issueCode(opened.personId);
+  return { id: opened.personId, code: issued.code, expiresAt: issued.expiresAt };
+}
+
 /** One person activated on the host and adopted into a Nod, with their key pair published. */
 async function joinNod(
   running: Running,
@@ -367,17 +401,17 @@ async function guild(onGate: (reason: string) => void = () => {}): Promise<Guild
   );
   await admin.grant('team', 'figma', true);
 
-  const rootCreated = await admin.createPerson({
+  const rootCreated = await memberWithCode(running, admin, {
     email: 'root@nod.test',
     name: 'Root',
     roles: ['admin'],
   });
-  const aliceCreated = await admin.createPerson({
+  const aliceCreated = await memberWithCode(running, admin, {
     email: 'alice@nod.test',
     name: 'Alice',
     roles: ['team'],
   });
-  const bobCreated = await admin.createPerson({
+  const bobCreated = await memberWithCode(running, admin, {
     email: 'bob@nod.test',
     name: 'Bob',
     roles: ['team'],
@@ -503,7 +537,7 @@ describe('assignment to a role (K8, SP06 §4)', () => {
     expect(root.nod.shares.missing()).toEqual([]);
 
     // The new member: created in `team`, activated and publishing a pair on the host.
-    const daveCreated = await admin.createPerson({
+    const daveCreated = await memberWithCode(running, admin, {
       email: 'dave@nod.test',
       name: 'Dave',
       roles: ['team'],
@@ -611,7 +645,7 @@ describe('assignment to a role (K8, SP06 §4)', () => {
     await saveCredential(root, 'figma', CREDENTIAL_USER, CREDENTIAL_SECRET);
 
     // A `team` member who never activated a Nod: he is in the roster but has published no keys.
-    const nobodyCreated = await admin.createPerson({
+    const nobodyCreated = await memberWithCode(running, admin, {
       email: 'nobody@nod.test',
       name: 'Nobody',
       roles: ['team'],
@@ -622,7 +656,7 @@ describe('assignment to a role (K8, SP06 §4)', () => {
       root.nod.shares.assign({
         toolId: 'figma',
         roleId: null,
-        personId: nobodyCreated.person.id,
+        personId: nobodyCreated.id,
         assigned: true,
       }),
     ).rejects.toThrow('recipient has no pinned key');
