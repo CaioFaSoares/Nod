@@ -74,6 +74,7 @@ function body(patch: Partial<Omit<Snapshot, 'api'>> = {}): string {
     personalTools: [],
     personalViews: [],
     favorites: [],
+    guildIcon: null,
     ...patch,
   });
 }

@@ -57,6 +57,8 @@ interface TestCall {
   path: string;
   authorization: string | null;
   ifNoneMatch: string | null;
+  /** What the client asked for: JSON everywhere but the guild icon's bytes (SP03 §2). */
+  accept: string | null;
 }
 
 /** What `/v1/state` answers next: the bytes served, the bytes signed and who signs them. */
@@ -84,6 +86,8 @@ interface TestHost {
   discovery(patch: { kid?: string; rawPublicKey?: Uint8Array<ArrayBuffer> }): void;
   /** Where `/v1/redirect` sends the caller, or `null` for a `404` (F9). */
   redirect(url: string | null): void;
+  /** What `GET /v1/guild/icon` answers, or `null` for the `404` of a guild with no icon (SP03 §2). */
+  guildIcon(bytes: Uint8Array | null): void;
   /** Back to the key it started with and a fresh `v1` body. */
   reset(): void;
   /** Closes the loopback server. */
@@ -105,6 +109,8 @@ async function startHost(): Promise<TestHost> {
 
   let advertises = { kid, rawPublicKey: pair.publicKey };
   let redirectsTo: string | null = null;
+  /** The PNG `GET /v1/guild/icon` answers, or `null` for a guild with no icon (SP03 §2). */
+  let icon: Uint8Array | null = null;
   const fresh = (): Answer => ({
     body: snapshotBody('v1'),
     signed: snapshotBody('v1'),
@@ -126,6 +132,7 @@ async function startHost(): Promise<TestHost> {
         path: url.pathname,
         authorization: request.headers.get('authorization'),
         ifNoneMatch: request.headers.get('if-none-match'),
+        accept: request.headers.get('accept'),
       });
 
       if (url.pathname === HOST_ROUTES.discovery) {
@@ -154,6 +161,11 @@ async function startHost(): Promise<TestHost> {
             'Nod-Signature': `kid=${answer.kid}; sig=${signature}`,
           },
         });
+      }
+
+      if (url.pathname === HOST_ROUTES.guildIcon) {
+        if (icon === null) return new Response('not found', { status: 404 });
+        return new Response(icon, { status: 200, headers: { 'content-type': 'image/png' } });
       }
 
       if (url.pathname === '/v1/redirect') {
@@ -191,6 +203,9 @@ async function startHost(): Promise<TestHost> {
     },
     redirect: (url) => {
       redirectsTo = url;
+    },
+    guildIcon: (bytes) => {
+      icon = bytes;
     },
     reset: () => {
       advertises = { kid, rawPublicKey: pair.publicKey };
@@ -553,6 +568,37 @@ describe('a redirect is refused, not followed (F9)', () => {
       host.redirect(null);
       elsewhere.stop(true);
     }
+  });
+});
+
+describe("the guild icon's bytes (SP05 §6, SP03 §2)", () => {
+  /** A PNG signature plus a few bytes: `getBytes` must not touch what the host answered. */
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0x10]);
+
+  test('they come back verbatim, with the bearer and an image accept', async () => {
+    const store = memoryKeychain();
+    const connection = createHostClient({ fetch, keychain: store }).connect(pinned);
+    await connection.saveToken('a-bearer-of-this-test');
+    host.guildIcon(png);
+
+    const answered = await connection.getBytes(HOST_ROUTES.guildIcon);
+
+    expect(answered).toEqual(png);
+    const call = host.calls.at(-1);
+    expect(call?.method).toBe('GET');
+    expect(call?.path).toBe(HOST_ROUTES.guildIcon);
+    // SP02 §5: the same keychain bearer as every other call; SP03 §2: bytes, not a JSON document.
+    expect(call?.authorization).toBe('Bearer a-bearer-of-this-test');
+    expect(call?.accept).toBe('image/png');
+  });
+
+  test('a guild with no icon is the refused failure, and the host body is not echoed', async () => {
+    const connection = createHostClient({ fetch, keychain }).connect(pinned);
+    host.guildIcon(null);
+
+    const refused = await failureOfCall(connection.getBytes(HOST_ROUTES.guildIcon));
+    expect(refused.failure).toBe('refused');
+    expect(refused.message).not.toContain('not found');
   });
 });
 

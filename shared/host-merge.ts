@@ -50,6 +50,10 @@ export class SnapshotShapeError extends Error {
  * The rows one verified snapshot holds: the org half (the guild's roles and the org tools granted to
  * me, `Entry.roles` carrying the grants), the personal half, and the favorites in the person's order
  * (SP04 §2). This is what SP05 §2 calls the cache "parsed once per change and kept in memory".
+ *
+ * `guildIcon` is the guild's own icon as the snapshot carries it (the host-side digest of the guild
+ * PNG, or `null` when the guild has none); it is kept beside the rows so a cache rewrite preserves
+ * it exactly as it was signed.
  */
 export interface SnapshotRows {
   me: Snapshot['me'];
@@ -58,6 +62,7 @@ export interface SnapshotRows {
   personalTools: Entry[];
   personalViews: PersonalView[];
   favorites: Id[];
+  guildIcon: string | null;
 }
 
 /** The rows plus the two fields the `host` row stores beside the body (SP04 §2). */
@@ -142,6 +147,8 @@ function readBody(value: unknown): SnapshotBody {
       personalTools: list(body.personalTools, 'personalTools').map(readEntry),
       personalViews: list(body.personalViews, 'personalViews').map(readPersonalView),
       favorites: list(body.favorites, 'favorites').map((id) => text(id, 'favorites')),
+      // Cosmetic, so read permissively: a missing or non-string icon is `null`, not a shape refusal.
+      guildIcon: typeof body.guildIcon === 'string' ? body.guildIcon : null,
     },
   };
 }
@@ -189,6 +196,7 @@ export function clearOrgData(raw: string): string | null {
     personalTools: body.rows.personalTools,
     personalViews: body.rows.personalViews,
     favorites: body.rows.favorites,
+    guildIcon: body.rows.guildIcon,
   };
   return JSON.stringify(cleared);
 }

@@ -114,9 +114,25 @@ jobs:
           fi
           printf '%s' "$NOD_PRIVATE_RESOURCES" | base64 -d | tar -xzf - -C resources
           test -f resources/seed.json || { echo "::error::NOD_PRIVATE_RESOURCES has no seed.json"; exit 1; }
+          # RF-56: an `icon.png` in the same tarball is the custom app icon; without one the release
+          # wears the tracked assets/icon.png (docs/distribuicao.md §9).
+          if [ -f resources/icon.png ]; then
+            echo "app icon: resources/icon.png (custom, from NOD_PRIVATE_RESOURCES)"
+          else
+            echo "app icon: assets/icon.png (tracked default)"
+          fi
 
       - name: generate tinyjs.json
-        run: bun scripts/gen-config.ts build
+        run: |
+          bun scripts/gen-config.ts build
+          # RF-56: gen-config picks the private icon on its own; a release wearing the wrong icon is
+          # worse than a failed build, so say which one and refuse the mismatch.
+          icon=$(bun -e 'console.log(JSON.parse(await Bun.file("tinyjs.json").text()).icon ?? "none")')
+          echo "tinyjs.json icon: $icon"
+          if [ -f resources/icon.png ] && [ "$icon" != "resources/icon.png" ]; then
+            echo "::error::NOD_PRIVATE_RESOURCES carries icon.png but the build would use $icon"
+            exit 1
+          fi
 
       # Outside .build: `tinyjs build` (inside `publish`) wipes .build before packing.
       - name: release notes

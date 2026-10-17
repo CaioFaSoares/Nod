@@ -50,6 +50,7 @@ const BODY: Snapshot = {
   personalTools: [entry('mine', { scope: 'personal', ownerId: 'p1' })],
   personalViews: [],
   favorites: ['jitsi'],
+  guildIcon: null,
 };
 const BODY_RAW = JSON.stringify(BODY);
 

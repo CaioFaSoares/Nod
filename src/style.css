@@ -791,6 +791,16 @@ button {
   letter-spacing: 0.08em;
 }
 
+/* SP05 §6: the guild's icon is shown at its own size, next to the file the admin picked. */
+.guild-icon-preview {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
 /* The join flow draws its own sections; inside the auth card they are sections, not cards. */
 .auth-card .card {
   padding: 0;

@@ -179,6 +179,14 @@ export interface HostConnection {
   forgetToken(): Promise<void>;
   /** One call with the bearer, its answer typed by the caller (SP03 §2). */
   request<T>(method: HttpMethod, path: string, body?: unknown): Promise<T>;
+  /**
+   * One `GET` whose answer is raw bytes rather than a JSON document: today that is only
+   * `GET /v1/guild/icon` (SP03 §2), whose body is a PNG and whose digest is what the snapshot
+   * signed. Everything else about the call is `request`'s — the bearer read from the keychain, the
+   * deadline, `redirect: 'error'` and the same failures (`backend/guild-icon.ts` decides what to do
+   * with them). A `404` — the guild has no icon — is the `refused` failure.
+   */
+  getBytes(path: string): Promise<Uint8Array<ArrayBuffer>>;
   /** The signed snapshot; `version` is the last accepted one (the `ETag` of SP04 §2). */
   snapshot(options?: { version?: string | null; notOlderThan?: string | null }): Promise<SnapshotResult>;
 }
@@ -451,6 +459,15 @@ export function createHostClient(deps: HostClientDeps): HostClient {
       return (await readJson(response)) as T;
     }
 
+    async function getBytes(path: string): Promise<Uint8Array<ArrayBuffer>> {
+      // The body is an image, not a document: `accept` says so, and nothing here parses or echoes
+      // what came back — `backend/guild-icon.ts` hashes the bytes before it trusts them.
+      const response = await send('GET', `${address}${path}`, undefined, await deps.keychain.get(key), {
+        accept: 'image/png',
+      });
+      return await readBody(response);
+    }
+
     async function snapshot(
       options: { version?: string | null; notOlderThan?: string | null } = {},
     ): Promise<SnapshotResult> {
@@ -499,6 +516,7 @@ export function createHostClient(deps: HostClientDeps): HostClient {
         await deps.keychain.delete(key);
       },
       request,
+      getBytes,
       snapshot,
     };
   }

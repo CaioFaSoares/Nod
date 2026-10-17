@@ -44,6 +44,12 @@ export interface SnapshotSource {
   personalTools: HostTool[];
   personalViews: HostView[];
   favorites: Id[];
+  /**
+   * The guild icon's digest, or null (SP04 §2's `guildIcon`). The guild serves one icon, so this row
+   * is the same for every person — and it is the digest alone, never the bytes: the Nod downloads
+   * those from `GET /v1/guild/icon` (SP03 §2).
+   */
+  guildIcon: string | null;
 }
 
 /** The reads of SP04 §2, in one place: the admin's catalog or the entries my roles are granted. */
@@ -55,6 +61,7 @@ export function snapshotSource(repo: Repo, me: HostPerson): SnapshotSource {
     personalTools: repo.listPersonalTools(me.id),
     personalViews: repo.listPersonalViews(me.id),
     favorites: repo.favorites(me.id),
+    guildIcon: repo.guildIconHash(),
   };
 }
 
@@ -120,6 +127,9 @@ export function snapshotDocument(
     personalTools: source.personalTools.map(entryOf),
     personalViews: source.personalViews.map(personalViewOf),
     favorites: source.favorites,
+    // SP04 §2: the digest is inside the signed bytes, so an icon swapped on the host moves the
+    // version and a Nod that holds the old signature refuses the new one.
+    guildIcon: source.guildIcon,
   };
 }
 

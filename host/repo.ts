@@ -26,6 +26,7 @@
 import type { Database } from 'bun:sqlite';
 
 import { auditUrl } from '../shared/catalog';
+import { fromBase64url, toBase64url } from '../shared/encoding';
 import type { AuthOverride, Person, Role, View } from '../shared/types';
 import { SCHEMA_VERSION_KEY } from './migrations';
 
@@ -46,6 +47,15 @@ export const CODE_TTL_MS: Readonly<Record<CodePurpose, number>> = {
 export const SESSION_TTL_MS = 14 * 24 * 3_600_000;
 /** `GET /v1/admin/events` without a `limit` (SP03 §2). */
 export const EVENTS_DEFAULT_LIMIT = 500;
+
+/**
+ * The two `meta` rows the guild icon lives in (SP03 §2). `meta` is SP01 §2's key/value table and
+ * SP01 §5 pins a fresh `/data` to `schema_version = 1` while block 1 is unreleased: the icon is one
+ * value with one digest, so it adds keys instead of a migration. The bytes travel base64url, the rule
+ * `docs/specs/README.md` fixes for binary.
+ */
+export const GUILD_ICON_HASH_KEY = 'guild_icon_sha256';
+export const GUILD_ICON_BYTES_KEY = 'guild_icon_bytes';
 
 /** A person row plus the columns the host adds to `Person`. */
 export interface HostPerson extends Person {
@@ -188,6 +198,17 @@ export interface HostEventFilter {
   to?: string;
   /** Defaults to `EVENTS_DEFAULT_LIMIT`. */
   limit?: number;
+}
+
+/**
+ * The guild icon of SP03 §2: the PNG bytes the admin uploaded and the lowercase hex SHA-256 of those
+ * exact bytes. The digest is what the snapshot signs; the bytes are what `GET /v1/guild/icon`
+ * answers, and the two are always read from the same two `meta` rows.
+ */
+export interface GuildIcon {
+  sha256: string;
+  /** Backed by a plain `ArrayBuffer`, the way `shared/encoding.ts` hands bytes over (WebCrypto and `Response` take those). */
+  bytes: Uint8Array<ArrayBuffer>;
 }
 
 // ---------------------------------------------------------------- errors
@@ -353,6 +374,19 @@ export interface Repo {
   addEvents(personId: string, sessionId: string, events: EventInput[], now: string): string[];
   /** Newest first, filtered by person, tool and client-time range. */
   listEvents(filter?: HostEventFilter): HostEvent[];
+
+  // guild icon (SP03 §2)
+  /**
+   * The digest the snapshot signs, or null while the guild has no icon. This is the read of every
+   * `GET /v1/state`, so it never touches the bytes.
+   */
+  guildIconHash(): string | null;
+  /** The stored bytes and their digest, or null: the answer of `GET /v1/guild/icon` (SP03 §2). */
+  guildIcon(): GuildIcon | null;
+  /** Stores one icon — the bytes and the digest of those exact bytes — replacing what was there. */
+  setGuildIcon(icon: GuildIcon): void;
+  /** Removes the icon and its digest; false when there was none. */
+  clearGuildIcon(): boolean;
 }
 
 // ---------------------------------------------------------------- rows
@@ -1340,23 +1374,57 @@ export function createRepo(db: Database): Repo {
       .map(toEvent);
   }
 
+  /**
+   * SP03 §2: the guild icon is two `meta` rows, written and cleared together. `readMeta`/`writeMeta`
+   * are the pair the public `meta`/`setMeta` of the interface also use, so the one query shape lives
+   * once; the guards around them (the `schema_version` refusal) stay with the interface.
+   */
+  function readMeta(key: string): string | null {
+    return (
+      db.query<{ value: string }, [string]>('SELECT value FROM meta WHERE key = ?').get(key)?.value ??
+      null
+    );
+  }
+
+  function writeMeta(key: string, value: string): void {
+    db.query(
+      `INSERT INTO meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run(key, value);
+  }
+
+  function guildIcon(): GuildIcon | null {
+    const sha256 = readMeta(GUILD_ICON_HASH_KEY);
+    const encoded = readMeta(GUILD_ICON_BYTES_KEY);
+    // Both rows or none: the digest without bytes would be a snapshot the route cannot serve.
+    if (sha256 === null || encoded === null) return null;
+    return { sha256, bytes: fromBase64url(encoded) };
+  }
+
+  function setGuildIcon(icon: GuildIcon): void {
+    runInTransaction(() => {
+      writeMeta(GUILD_ICON_HASH_KEY, icon.sha256);
+      writeMeta(GUILD_ICON_BYTES_KEY, toBase64url(icon.bytes));
+    });
+  }
+
+  function clearGuildIcon(): boolean {
+    return runInTransaction(
+      () =>
+        db.query('DELETE FROM meta WHERE key IN (?, ?)').run(GUILD_ICON_HASH_KEY, GUILD_ICON_BYTES_KEY)
+          .changes > 0,
+    );
+  }
+
   return {
     transaction: runInTransaction,
 
-    meta(key) {
-      return (
-        db.query<{ value: string }, [string]>('SELECT value FROM meta WHERE key = ?').get(key)?.value ??
-        null
-      );
-    },
+    meta: readMeta,
 
     setMeta(key, value) {
       // The version is the migrations' to write; a route setting it would break the next boot.
       if (key === SCHEMA_VERSION_KEY) throw new ConflictError('schema_version belongs to the migrations');
-      db.query(
-        `INSERT INTO meta (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      ).run(key, value);
+      writeMeta(key, value);
     },
 
     createPerson,
@@ -1408,5 +1476,10 @@ export function createRepo(db: Database): Repo {
 
     addEvents,
     listEvents,
+
+    guildIconHash: () => readMeta(GUILD_ICON_HASH_KEY),
+    guildIcon,
+    setGuildIcon,
+    clearGuildIcon,
   };
 }

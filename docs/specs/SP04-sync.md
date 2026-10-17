@@ -64,6 +64,7 @@ interface Snapshot {
   personalTools: Entry[];        // mine, scope 'personal'
   personalViews: PersonalView[]; // mine, under any entry I see
   favorites: Id[];               // ordered
+  guildIcon: string | null;      // lowercase hex SHA-256 of the guild's PNG, or null
   // block 2
   people?: { id: Id; name: string; roles: Id[]; kind: string; x25519Public?: string; ed25519Public?: string }[];
   incomingShares?: IncomingShare[];
@@ -75,6 +76,12 @@ interface Snapshot {
 `Entry` gains `scope: 'org' | 'personal'` and `ownerId: Id | null`; `View` gains `id`, `scope`,
 `ownerId`. Both changes land in `shared/types.ts`. Local mode fills `scope: 'org'`, `ownerId:
 null`, so today's code keeps working.
+
+`guildIcon` is the guild's app icon: the lowercase hex SHA-256 of the PNG the admin uploaded
+(`PUT /v1/admin/guild/icon`, SP03 §2), or `null` while the guild has none, and it is inside the
+signed bytes — changing the icon changes the `version`. After a snapshot is applied, a Nod whose
+cached icon hash differs fetches `GET /v1/guild/icon` and keeps the bytes only when their SHA-256 is
+exactly that value; a `null` deletes the cached file and the icon falls back to the bundle.
 
 ## 3. When the Nod syncs
 
@@ -121,6 +128,8 @@ person's writes: personal tools, personal views, favorites.
 ## 6. Acceptance
 
 - A snapshot with one byte changed fails verification and the previous cache stays.
+- An icon whose bytes do not hash to `Snapshot.guildIcon` is refused, and `null` removes the cached
+  icon.
 - A discovery answering another key after pinning is refused.
 - Two runs of the same event batch leave one row per event on the host.
 - Offline: unlock shows cached tools; adding a personal tool queues one outbox row; reconnecting

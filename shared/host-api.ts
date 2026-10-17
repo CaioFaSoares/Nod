@@ -42,6 +42,8 @@ export const HOST_ROUTES = {
   personalView: '/v1/personal/views/:id',
   favorites: '/v1/favorites',
   events: '/v1/events',
+  /** `200 image/png` raw bytes with `ETag: "<sha256>"`, no `Content-Type` negotiation (SP03 §2). */
+  guildIcon: '/v1/guild/icon',
   adminPeople: '/v1/admin/people',
   adminPerson: '/v1/admin/people/:id',
   adminPersonCode: '/v1/admin/people/:id/code',
@@ -52,6 +54,8 @@ export const HOST_ROUTES = {
   adminTool: '/v1/admin/tools/:id',
   adminToolPromote: '/v1/admin/tools/:id/promote',
   adminBootstrap: '/v1/admin/bootstrap',
+  /** `PUT` stores a PNG and answers its digest; `DELETE` clears it with `204` (SP03 §2). */
+  adminGuildIcon: '/v1/admin/guild/icon',
   adminEvents: '/v1/admin/events',
 } as const;
 
@@ -319,6 +323,39 @@ export interface AdminEventsQuery {
   limit?: number;
 }
 
+// ---------------------------------------------------------------- guild icon
+
+/**
+ * SP03 §2: the guild icon is the PNG the admin uploads in the Nod. It travels base64url (the rule of
+ * `docs/specs/README.md` for binary) and the host stores the bytes; only the digest is signed, so a
+ * tampered icon is refused by the Nod without the bytes ever entering the snapshot.
+ */
+export interface GuildIconRequest {
+  /** base64url of the PNG bytes, without padding; must start with the PNG signature. */
+  png: string;
+}
+
+/** SP03 §2: the lowercase hex SHA-256 of the stored bytes — the value `Snapshot.guildIcon` carries. */
+export interface GuildIconResponse {
+  sha256: string;
+}
+
+/** The first eight bytes of every PNG file (ISO/IEC 15948 §5.2): the only check that needs no decoder. */
+export const PNG_SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * Whether these bytes are the start of a PNG (SP03 §2: the icon route refuses anything else with a
+ * 400). Eight bytes of signature are what the host can decide without decoding an image, and an
+ * image decoder is not this contract's.
+ */
+export function isPng(bytes: Uint8Array): boolean {
+  if (bytes.length < PNG_SIGNATURE.length) return false;
+  for (let index = 0; index < PNG_SIGNATURE.length; index++) {
+    if (bytes[index] !== PNG_SIGNATURE[index]) return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------- discovery and snapshot
 
 /** Sign-in methods a host offers (SP04 §1); `email` arrives with the deferred email sign-in. */
@@ -360,6 +397,12 @@ export interface Snapshot {
   personalViews: PersonalView[];
   /** Entry ids, in my order (SP04 §2). */
   favorites: Id[];
+  /**
+   * Lowercase hex SHA-256 of the guild icon the admin uploaded, or null while the guild has none
+   * (SP04 §2). It is the icon's `ETag` (`GET /v1/guild/icon`) and what the Nod compares the bytes it
+   * downloaded against; the bytes themselves never travel in the snapshot.
+   */
+  guildIcon: string | null;
 }
 
 /** SP04 §2: the name of the `ETag` header of `GET /v1/state`. */

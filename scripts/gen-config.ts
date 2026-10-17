@@ -1,6 +1,6 @@
 // Builds `tinyjs.json` from `tinyjs.base.json` + `resources/seed.json`.
 // Contract: docs/arquitetura.md §2 (origin gate) and §6 (build and dev); requirements:
-// docs/canonico.md §19, RF-26, RF-27.
+// docs/canonico.md §19, RF-26, RF-27, RF-56.
 //
 // `generateConfig` is pure: it neither reads nor writes a file and never exits the process. The I/O
 // lives in the `import.meta.main` block, run with `bun scripts/gen-config.ts <dev|build>`.
@@ -11,6 +11,11 @@
 // The `NOD_DEV_PORT` env moves the dev server port (and, with it, the dev origin of the gate and
 // `frontend.devUrl`) — it lets the smoke hold its own `tinyjs dev` next to a developer's
 // `bun run app:dev`. Absent, it stays 5173.
+//
+// The app icon (RF-56) comes from `NOD_ICON`, else from the private `resources/icon.png`, else from
+// the tracked `assets/icon.png`; `iconSource` resolves it, `assertIconPng` refuses a file the build
+// could not use and `iconForConfig` (the I/O half) stages the env file inside the project. Nothing
+// tracked is ever written: `docs/distribuicao.md` §9 is the owner's step by step.
 
 import type { Seed } from '../shared/types';
 import { originOf, validateSeed } from '../shared/catalog';
@@ -22,6 +27,79 @@ const MISSING_SEED_MESSAGE =
   'private seed missing: resources/seed.json (see resources/seed.example.json)';
 const MISSING_PERMISSIONS_MESSAGE =
   'tinyjs.base.json must declare "permissions": { "camera": "...", "microphone": "..." }';
+
+/** Icon of a release nobody customised: tracked, 1024×1024 (`.agents/skills/tinyjs/SKILL.md`). */
+export const DEFAULT_ICON = 'assets/icon.png';
+
+/** Private icon of a custom build (RF-56): dropped in place, gitignored, like the seed. */
+export const PRIVATE_ICON = 'resources/icon.png';
+
+/** Generated copy of a `NOD_ICON` PNG, read from inside the project by every OS build. */
+export const STAGED_ICON = '.nod-icon.png';
+
+/** Smallest icon the pipeline is built around: the macOS `.icns` tinyjs writes tops out at 1024. */
+export const MIN_ICON_SIZE = 1024;
+
+/** PNG signature (8 bytes), then the IHDR chunk header: its length (13) and its type. */
+const PNG_HEADER = [
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+];
+
+/** The header above plus the 4-byte width and the 4-byte height that follow it. */
+const PNG_HEADER_BYTES = 24;
+
+/** Where the build takes the app icon from (RF-56). */
+export type IconSource = 'env' | 'private' | 'default' | 'none';
+
+/**
+ * App icon by precedence (RF-56): the non-empty `NOD_ICON` path, else the private
+ * `resources/icon.png`, else the tracked `assets/icon.png`. `none` means no file is there and
+ * tinyjs's own default (its template icon) stands.
+ */
+export function iconSource(
+  envIcon: string,
+  privateIconExists: boolean,
+  defaultIconExists: boolean,
+): IconSource {
+  if (envIcon !== '') return 'env';
+  if (privateIconExists) return 'private';
+  if (defaultIconExists) return 'default';
+  return 'none';
+}
+
+/**
+ * `icon` value the generated config names for a source: the file itself, or the staged copy for
+ * `NOD_ICON`. tinyjs resolves `icon` from the project root (`cli.js`: `cfg.icon || 'icon.png'`) and
+ * hands that same path to sips, to `dist/icon.png` and to the Windows icon embedder — only the
+ * first of the three takes a path outside the project, so the env file is staged inside it.
+ * `null` (source `none`) leaves the icon to tinyjs' own resolution.
+ */
+export function iconConfigPath(source: IconSource): string | null {
+  if (source === 'none') return null;
+  return source === 'env' ? STAGED_ICON : source === 'private' ? PRIVATE_ICON : DEFAULT_ICON;
+}
+
+/**
+ * Refuses an icon the build could not use (RF-56). tinyjs reads this one PNG for every OS: sips
+ * turns it into the macOS `.icns` (16…1024), Linux copies it to `dist/icon.png` and Windows
+ * embeds it — so the wrong file is a mistake to report here, with its path, not a release that
+ * silently ships a default or blurry icon later.
+ */
+export function assertIconPng(bytes: Uint8Array, source: string): void {
+  if (bytes.length < PNG_HEADER_BYTES || !PNG_HEADER.every((b, i) => bytes[i] === b)) {
+    throw new Error(`${source} is not a PNG: the app icon must be a PNG file (RF-56)`);
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = view.getUint32(16);
+  const height = view.getUint32(20);
+  if (width < MIN_ICON_SIZE || height < MIN_ICON_SIZE) {
+    throw new Error(
+      `${source} is ${width}x${height}: the app icon must be at least ` +
+        `${MIN_ICON_SIZE}x${MIN_ICON_SIZE} (tinyjs builds the macOS .icns up to that size, so a ` +
+        'smaller image only ships upscaled)',
+    );
+  }
+}
 
 /** What an org tool's origin may call: report the login result, use camera and microphone. */
 const TOOL_METHODS = ['login.report', 'media.camera', 'media.microphone'] as const;
@@ -86,6 +164,10 @@ function toolOrigins(seed: Seed): string[] {
  * `devPort` is the port the vite dev server takes (`NOD_DEV_PORT` in the entry block): in `dev`
  * both the page gate and `frontend.devUrl` name `http://127.0.0.1:<devPort>` — the smoke runs its
  * own server next to a developer's `app:dev` — and in `build` it changes nothing.
+ *
+ * `icon` is the app icon the build wears (RF-56), already resolved and checked by `iconForConfig`:
+ * `dev` shows it in the dev window and `build` in the `.app`/taskbar icon. `null` leaves the choice
+ * to tinyjs's own resolution (`assets/icon.png`, then a root `icon.png`, then the template icon).
  */
 export function generateConfig(
   base: Record<string, unknown>,
@@ -93,6 +175,7 @@ export function generateConfig(
   mode: 'dev' | 'build',
   appId?: string,
   devPort: number = DEFAULT_DEV_PORT,
+  icon: string | null = null,
 ): Record<string, unknown> {
   if (mode === 'build' && seed === null) throw new Error(MISSING_SEED_MESSAGE);
   // macOS kills a packaged app whose page captures camera or microphone without the usage strings
@@ -132,7 +215,35 @@ export function generateConfig(
   }
   if (mode === 'build' && seed !== null) config.resources = buildResources(seed);
   if (appId !== undefined && appId !== '') config.id = appId;
+  if (icon !== null) config.icon = icon;
   return config;
+}
+
+/**
+ * I/O half of RF-56, run before `generateConfig`: resolves the icon source, refuses a file the
+ * build could not use and stages a PNG given through `NOD_ICON` as `STAGED_ICON`. Returns the
+ * `icon` value for `generateConfig`, or `null` when there is no file to name.
+ */
+async function iconForConfig(root: string): Promise<string | null> {
+  const envIcon = process.env.NOD_ICON ?? '';
+  const source = iconSource(
+    envIcon,
+    await Bun.file(`${root}/${PRIVATE_ICON}`).exists(),
+    await Bun.file(`${root}/${DEFAULT_ICON}`).exists(),
+  );
+  const icon = iconConfigPath(source);
+  if (icon === null) return null;
+
+  // `NOD_ICON` is read as the owner typed it, relative to where the command runs; the project's own
+  // files are read from the root, which is where tinyjs resolves `icon` from, and named from there
+  // so the message reads `resources/icon.png` and not a path with `scripts/..` in it.
+  const named = source === 'env' ? envIcon : icon;
+  const file = Bun.file(source === 'env' ? named : `${root}/${named}`);
+  if (!(await file.exists())) throw new Error(`icon file not found: ${named}`);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  assertIconPng(bytes, named);
+  if (source === 'env') await Bun.write(`${root}/${icon}`, bytes);
+  return icon;
 }
 
 if (import.meta.main) {
@@ -179,7 +290,8 @@ if (import.meta.main) {
 
   let config: Record<string, unknown>;
   try {
-    config = generateConfig(base, seed, mode, process.env.NOD_APP_ID, devPort);
+    const icon = await iconForConfig(root);
+    config = generateConfig(base, seed, mode, process.env.NOD_APP_ID, devPort, icon);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

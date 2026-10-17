@@ -19,16 +19,18 @@
 
 import { Elysia, status, t } from 'elysia';
 
-import { sha256Hex } from '../../shared/encoding';
+import { fromBase64url, sha256Hex } from '../../shared/encoding';
 import {
   HOST_ROUTES,
   generateCode,
+  isPng,
   normalizeCode,
   type AdminPerson,
   type BootstrapResponse,
   type CodeResponse,
   type DeviceOs,
   type DeviceSession,
+  type GuildIconResponse,
   type HostEvent,
   type OrgTool,
   type PersonCreateResponse,
@@ -119,6 +121,15 @@ const promoteBody = t.Object({ personalId: t.String({ pattern: PERSONAL_ID }) })
 const bootstrapBody = t.Object({
   tools: t.Array(toolBody),
   roles: t.Array(t.Object({ id: idSchema, name: nameSchema, admin: t.Boolean() })),
+});
+
+/**
+ * SP03 §2's `GuildIconRequest`: base64url of the PNG bytes, so the schema refuses the alphabet that
+ * is not base64url (padding, `+`, `/`) before a handler sees it. The body limit of `host/app.ts`
+ * bounds the length — this path is in its icon exception — so no `maxLength` restates it here.
+ */
+const guildIconBody = t.Object({
+  png: t.String({ minLength: 1, pattern: '^[A-Za-z0-9_-]+$' }),
 });
 
 /** SP03 §2's `?person&tool&from&to&limit`, in the wire names of the URL (`AdminEventsQuery`). */
@@ -381,6 +392,50 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
       auth.now(),
     );
     return { created: ctx.body.tools.length };
+  })
+
+  // -------------------------------------------------------------- guild icon
+
+  /**
+   * SP03 §2: stores the guild icon — base64url of the PNG bytes — and answers the lowercase hex
+   * SHA-256 of exactly those bytes. That digest is what the snapshot signs (SP04 §2), so the icon is
+   * stored with it and never decoded again; the bytes go to SP01 §1's single file, and no copy is
+   * written anywhere else.
+   *
+   * A body that is not base64url, or whose bytes are not a PNG, is the 400 of SP03 §1 naming the
+   * field. Nothing is echoed: the message is static and the image is never logged.
+   */
+  .put(
+    HOST_ROUTES.adminGuildIcon,
+    { body: guildIconBody },
+    async (ctx) => {
+      const { repo } = hostOf(ctx);
+      let bytes: Uint8Array<ArrayBuffer>;
+      try {
+        // The schema caught a character outside the alphabet; this catches the rest of the encoding
+        // rule (`shared/encoding.ts`: padding, a length without whole bytes, non-zero trailing bits).
+        bytes = fromBase64url(ctx.body.png);
+      } catch {
+        return status(400, { error: 'invalid body: png is not base64url' });
+      }
+      if (!isPng(bytes)) return status(400, { error: 'invalid body: png must be a PNG' });
+      // SP03 §2's decoded ceiling is the encoded body's, one third smaller: `host/app.ts` gives this
+      // path the 512 KB of its icon exception, which refuses a base64 body that could exceed it.
+      const sha256 = await sha256Hex(bytes);
+      repo.setGuildIcon({ sha256, bytes });
+      const answer: GuildIconResponse = { sha256 };
+      return answer;
+    },
+  )
+
+  /**
+   * SP03 §2: removes the icon (`204`, and an idempotent one). The next snapshot carries
+   * `guildIcon: null`, which is what a Nod reads as "delete your copy and go back to the bundle
+   * icon" (SP04 §2).
+   */
+  .delete(HOST_ROUTES.adminGuildIcon, (ctx) => {
+    hostOf(ctx).repo.clearGuildIcon();
+    return status(204);
   })
 
   // -------------------------------------------------------------- events

@@ -310,6 +310,24 @@ export interface HostState {
   pendingWrites: number;
 }
 
+/**
+ * SP05 §6: which icon the Nod shows — the one it shipped with, or the PNG the guild's admin
+ * uploaded. One choice per machine: `app.icon` is the icon of the running app, not of a window.
+ */
+export type AppIconChoice = 'default' | 'guild';
+
+/** What `nod.appIcon` and `nod.setAppIcon` answer (SP05 §6). */
+export interface AppIconState {
+  /** The choice, as `store.json` holds it (`appIcon`); no secret, so a plain preference. */
+  choice: AppIconChoice;
+  /**
+   * A guild icon is on disk and can be applied: the last snapshot carries a `guildIcon` hash and the
+   * cached bytes hash to exactly that value (SP04 §2). False while the guild has none, while the
+   * bytes were never fetched, or after one that did not verify.
+   */
+  guildIconAvailable: boolean;
+}
+
 export interface AppInfo {
   version: string;
   seedVersion: number | null;
@@ -393,6 +411,15 @@ export interface ApiContract {
    * Admin only, like every write of the host's catalog.
    */
   'host.bootstrap': [void, { created: number; refused: boolean }];
+  /**
+   * SP05 §6, admin of a connected guild: stores the guild icon — the PNG every member's Nod can
+   * show as the app icon (`PUT /v1/admin/guild/icon`, SP03 §2). `png` is the base64url of the PNG
+   * bytes; the host refuses bytes that are not a PNG and answers their SHA-256, which is what the
+   * signed snapshot then carries (SP04 §2).
+   */
+  'host.setGuildIcon': [{ png: string }, { sha256: string }];
+  /** SP05 §6, admin of a connected guild: the guild has no icon again (`DELETE`, SP03 §2). */
+  'host.clearGuildIcon': [void, true];
 
   'catalog.list': [void, Entry[]];
   'catalog.get': [{ id: Id }, EntryDetails];
@@ -450,6 +477,16 @@ export interface ApiContract {
 
   /** `nod.*`, not `app.*`: the runtime has builtins under `app.` that would win (bridge.js:3156). */
   'nod.info': [void, AppInfo];
+  /**
+   * SP05 §6: the app icon this machine shows and whether a guild icon is available to show. Read by
+   * Settings → Account (the choice) and Settings → Hosts (the admin's card).
+   */
+  'nod.appIcon': [void, AppIconState];
+  /**
+   * SP05 §6: stores the choice and applies it — `guild` needs a verified guild icon on disk, and
+   * `default` puts the bundle icon back. Whole app, not one window, so nothing else moves.
+   */
+  'nod.setAppIcon': [{ choice: AppIconChoice }, AppIconState];
   'nod.checkUpdate': [void, UpdateInfo];
   'nod.installUpdate': [void, boolean];
   /** RF-55: hides the notice of one version on this machine; only the version string is stored. */

@@ -6,8 +6,11 @@
 import { call, errorMessage, on } from './api';
 import { button, clear, el, field, input, message } from './ui';
 import { originOf, slug } from '../shared/catalog';
+import { toBase64url } from '../shared/encoding';
 import { CODE_LENGTH, normalizeCode } from '../shared/host-api';
 import type {
+  AppIconChoice,
+  AppIconState,
   AppInfo,
   AuditEvent,
   Entry,
@@ -71,9 +74,8 @@ function iconDataUri(icon: RawIcon): string {
   return `data:${mime};base64,${icon.base64}`;
 }
 
-/** Base64 of the file, without the `data:` prefix (`RawIcon.base64`). */
-async function fileToBase64(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
+/** Base64 of these bytes, without the `data:` prefix (`RawIcon.base64` and the guild icon preview). */
+function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   const chunk = 0x8000;
   for (let start = 0; start < bytes.length; start += chunk) {
@@ -81,6 +83,14 @@ async function fileToBase64(file: File): Promise<string> {
   }
   return btoa(binary);
 }
+
+/**
+ * SP03 §2's body limit for `PUT /v1/admin/guild/icon`, in the encoded form that actually travels:
+ * 512 KB of base64url is a PNG of at most 384 KiB. Finding for the coordinator — the constant's home
+ * is `shared/host-api.ts`, which this slice does not own, so the literal is kept here and in
+ * `backend/main.ts` (`docs/handovers/i2b-guild-icon-app.md`).
+ */
+const GUILD_ICON_MAX_ENCODED = 512 * 1024;
 
 /** Text of the probe result (canonico §8). */
 function describeProbe(probe: Probe): string {
@@ -586,6 +596,14 @@ export function mountSettings(
     eventSync: null as EventSyncStatus | null,
     /** SP04 §1.3: the invite a `nod://join` link carried, spent by the join flow on mount. */
     join: ctx.join ?? null,
+    /** SP05 §6: the app-icon choice and whether a guild icon is available, as `nod.appIcon` answers. */
+    appIcon: null as AppIconState | null,
+    /**
+     * SP05 §6: the PNG an admin picked in this session — the base64url the upload takes, and the
+     * data URI of the preview. Only the host holds the stored icon's bytes: the page is handed the
+     * digest, never an image (SP03 §2), so an icon uploaded in an earlier session gets no preview.
+     */
+    guildIcon: null as { png: string; preview: string } | null,
   };
 
   let alive = true;
@@ -639,7 +657,7 @@ export function mountSettings(
 
   function select(
     name: string,
-    options: ReadonlyArray<{ value: string; label: string }>,
+    options: ReadonlyArray<{ value: string; label: string; disabled?: boolean }>,
     value: string,
     onChange?: (value: string) => void,
   ): HTMLSelectElement {
@@ -653,7 +671,19 @@ export function mountSettings(
             ? { change: (event: Event) => onChange((event.target as HTMLSelectElement).value) }
             : {},
       },
-      ...options.map((option) => el('option', { attrs: { value: option.value } }, option.label)),
+      ...options.map((option) =>
+        el(
+          'option',
+          {
+            attrs: {
+              value: option.value,
+              // An option that cannot be chosen right now keeps its place and its reason (SP05 §6).
+              ...(option.disabled === true ? { disabled: 'true' } : {}),
+            },
+          },
+          option.label,
+        ),
+      ),
     );
     node.value = value;
     return node;
@@ -758,10 +788,12 @@ export function mountSettings(
     if (!canShow(tab)) return;
     state.tab = tab;
     state.status = null;
-    // The invite code lives only while the People tab is on screen (canonico §9).
+    // The invite code lives only while the People tab is on screen (canonico §9), and a PNG picked
+    // for a guild only while its own tab is (SP05 §6).
     state.invite = null;
     state.inviteFor = null;
     state.editor = null;
+    state.guildIcon = null;
     hideRevealed();
     render();
     await load();
@@ -777,6 +809,8 @@ export function mountSettings(
       switch (state.tab) {
         case 'account':
           state.roles = await call('roles.list');
+          // SP05 §6: every person chooses the icon of this machine, admin or not.
+          state.appIcon = await call('nod.appIcon');
           break;
         case 'hosts':
           // SP05 §3: the tab reads the state itself instead of waiting for a push.
@@ -784,6 +818,11 @@ export function mountSettings(
           // B8a: whether the publish offer still applies is a question about the entries the
           // snapshot carries (RF-40), so the tab reads the same list the sidebar shows.
           state.entries = await call('catalog.list');
+          // SP05 §6: only the admin's card asks for the icon, and only a connected guild has one.
+          state.appIcon =
+            isAdmin() && state.host !== null && state.host.status !== 'none'
+              ? await call('nod.appIcon')
+              : null;
           break;
         case 'vault':
           state.vault = await call('vault.list');
@@ -982,6 +1021,8 @@ export function mountSettings(
       return box;
     }
     box.append(hostCard(host));
+    // SP05 §6: the guild's icon is the admin's, and it belongs to the guild's own card.
+    if (isAdmin()) box.append(guildIconCard());
     const offer = publishOffer();
     if (offer !== null) box.append(offer);
     // SP04 §3: signed out asks for a sign-in; on the same screen, the host can also be removed.
@@ -1028,6 +1069,9 @@ export function mountSettings(
       state.host = await call('host.remove', { keepPersonal });
       // A host that left takes the offer's history with it: another host starts from its own state.
       state.publishClosed = false;
+      // A PNG picked for that guild is not the next one's (SP05 §6).
+      state.guildIcon = null;
+      state.appIcon = null;
       state.status = { kind: 'ok', text: 'Host removed' };
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
@@ -1035,7 +1079,168 @@ export function mountSettings(
     render();
   }
 
+  /**
+   * SP05 §6, for the admin of a connected guild: the PNG every member's Nod may show as its app
+   * icon. The bytes go up as base64url (SP03 §2) and the host answers their SHA-256, which is what
+   * the signed snapshot then carries (SP04 §2) — so a member's Nod fetches the bytes back and keeps
+   * them only when they hash to that value. The stored icon's bytes never reach this page, so a
+   * preview exists only for the file picked in this session.
+   */
+  function guildIconCard(): HTMLElement {
+    const available = state.appIcon?.guildIconAvailable === true;
+    const picked = state.guildIcon;
+    const file = el('input', {
+      class: 'input',
+      attrs: { type: 'file', name: 'guildIcon', accept: 'image/png' },
+      on: {
+        change: (event: Event) => {
+          const chosen = (event.target as HTMLInputElement).files?.[0];
+          if (chosen !== undefined) void chooseGuildIcon(chosen);
+        },
+      },
+    });
+    const upload = button('Upload', () => uploadGuildIcon(), { kind: 'primary' });
+    upload.disabled = picked === null;
+    const remove = button('Remove', () => void clearGuildIcon(), { kind: 'ghost' });
+    remove.disabled = !available;
+    return el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'Guild icon'),
+      el(
+        'p',
+        { class: 'muted' },
+        available
+          ? 'The guild has an icon: every member can show it as Nod\'s app icon, in Account.'
+          : 'The guild has no icon. Uploading one lets every member show it as Nod\'s app icon.',
+      ),
+      el(
+        'div',
+        { class: 'row' },
+        picked === null
+          ? el('span', { class: 'empty' }, 'No file picked')
+          : el('img', {
+              class: 'guild-icon-preview',
+              attrs: { src: picked.preview, alt: 'The PNG just picked' },
+            }),
+        file,
+        upload,
+        remove,
+      ),
+      el(
+        'p',
+        { class: 'field-hint' },
+        'A PNG of up to 384 KiB. The host stores the bytes; only their hash travels to every Nod.',
+      ),
+    );
+  }
+
+  /** SP05 §6: the picked file becomes the upload body (base64url) and the preview (a data URI). */
+  async function chooseGuildIcon(file: File): Promise<void> {
+    state.status = null;
+    if (file.type !== 'image/png') {
+      state.status = { kind: 'error', text: 'The guild icon must be a PNG' };
+      render();
+      return;
+    }
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const png = toBase64url(bytes);
+      if (png.length > GUILD_ICON_MAX_ENCODED) {
+        state.guildIcon = null;
+        state.status = { kind: 'error', text: 'That PNG is too large — keep it under 384 KiB' };
+      } else {
+        state.guildIcon = { png, preview: `data:image/png;base64,${bytesToBase64(bytes)}` };
+      }
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  async function uploadGuildIcon(): Promise<void> {
+    const picked = state.guildIcon;
+    if (picked === null) return;
+    state.status = null;
+    try {
+      const answer = await call('host.setGuildIcon', { png: picked.png });
+      state.guildIcon = null;
+      // The digest the host answered is the one the next snapshot carries; the icon is available
+      // here as soon as the sync behind that write fetched and verified the bytes.
+      state.appIcon = await call('nod.appIcon');
+      state.status = { kind: 'ok', text: `Guild icon stored (${answer.sha256.slice(0, 12)}…)` };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  async function clearGuildIcon(): Promise<void> {
+    state.status = null;
+    try {
+      await call('host.clearGuildIcon');
+      state.guildIcon = null;
+      state.appIcon = await call('nod.appIcon');
+      state.status = { kind: 'ok', text: 'The guild has no icon again' };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
   // ---------------------------------------------------------------- tab: account
+
+  /**
+   * SP05 §6: the app icon of this machine — the bundle's, or the guild's PNG. One choice per
+   * machine (`app.icon` is the icon of the running app, not of a window), so it is on Account, which
+   * every person sees, and not on the admin screens. The Guild option is disabled while the guild
+   * has no verified icon: SP05 §6 keeps the choice honest instead of offering an icon that is not
+   * there.
+   */
+  function appIconCard(): HTMLElement {
+    const icon = state.appIcon;
+    const available = icon !== null && icon.guildIconAvailable;
+    const guild = icon?.choice === 'guild' && available;
+    const node = select(
+      'appIcon',
+      [
+        { value: 'default', label: 'Default' },
+        { value: 'guild', label: 'Guild icon', disabled: !available },
+      ],
+      // A guild icon that left — the admin removed it, or the host did — falls back to the bundle
+      // icon: the select shows what the machine is actually showing.
+      guild ? 'guild' : 'default',
+      (value) => void setAppIcon(value === 'guild' ? 'guild' : 'default'),
+    );
+    return el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'App icon'),
+      el('p', { class: 'muted' }, "The icon this machine shows for Nod in the Dock, the taskbar and the app switcher."),
+      el('div', { class: 'row' }, field('Icon', node)),
+      el(
+        'p',
+        { class: 'field-hint' },
+        available
+          ? "Guild icon: the PNG your guild's admin uploaded."
+          : 'This guild has no icon yet — the option appears once an admin uploads one.',
+      ),
+    );
+  }
+
+  async function setAppIcon(choice: AppIconChoice): Promise<void> {
+    state.status = null;
+    try {
+      state.appIcon = await call('nod.setAppIcon', { choice });
+      state.status = {
+        kind: 'ok',
+        text: choice === 'guild' ? 'Nod shows the guild icon' : 'Nod shows its own icon again',
+      };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
 
   function changePasswordCard(): HTMLElement {
     const current = input('current', { type: 'password', autocomplete: 'current-password' });
@@ -1147,6 +1352,8 @@ export function mountSettings(
         ),
       ),
     );
+    // SP05 §6: the icon of this machine, before the account's own cards.
+    box.append(appIconCard());
     box.append(changePasswordCard());
     // There is no biometrics on Linux (canonico §9): the shortcut is not even offered.
     if (state.info.os !== 'linux') box.append(biometricCard());
@@ -1791,7 +1998,7 @@ export function mountSettings(
       return;
     }
     try {
-      const base64 = await fileToBase64(file);
+      const base64 = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
       editor.icon = { type, base64 };
       editor.iconChanged = true;
       editor.savedIcon = null;
