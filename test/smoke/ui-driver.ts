@@ -48,6 +48,8 @@ const ROLE_USERNAME = 'role-user';
 const BLOCKED_USERNAME = 'blocked-user';
 const LOCAL_TOOL_TITLE = 'Local Notes';
 const LOCAL_DESK_TITLE = 'Local Desk';
+/** The guild's own tool of #28: created on the host, never in this machine's local tables. */
+const GUILD_ONLY_TITLE = 'Guild Only';
 /** The host's O2 minimum for the last check. Above `tinyjs.json`'s version. */
 const UPDATE_MIN_VERSION = '9.9.9';
 
@@ -143,6 +145,13 @@ function textIs(label: string) {
 
 function controlByText(label: string, root: ParentNode = document): HTMLButtonElement | null {
   return all<HTMLButtonElement>('button', root).find(textIs(label)) ?? null;
+}
+
+/** The tool titles the sidebar shows, in order: the tool button's `title` is the entry's own. */
+function sidebarTitles(): string[] {
+  return all<HTMLButtonElement>('.sidebar-tools .tool-icon').map(
+    (button) => button.getAttribute('title') ?? '',
+  );
 }
 
 function setValue(field: HTMLInputElement, value: string): void {
@@ -824,6 +833,14 @@ async function checkAdminDevices(): Promise<string> {
 }
 
 async function updateRequiredBanner(): Promise<string> {
+  // The tool this check turns on: an org tool of the guild's catalog that this machine's local
+  // tables never held. The store's own A and B are local rows too, so they stay in the sidebar either
+  // way (`temporarySeed`); this one can only come from the snapshot.
+  const before = await waitForValue('the guild tool in the sidebar', () => {
+    const titles = sidebarTitles();
+    return titles.some((title) => title.includes(GUILD_ONLY_TITLE)) ? titles : null;
+  });
+
   const stopped = await desk('/desk/host', { action: 'stop' });
   expect(String(stopped.detail ?? '').includes('stopped'), `host stop: ${String(stopped.detail)}`);
   const started = await desk('/desk/host', {
@@ -846,12 +863,51 @@ async function updateRequiredBanner(): Promise<string> {
   const sentence = text(banner);
   expect(sentence.includes('needs a newer Nod'), `banner = ${JSON.stringify(sentence)}`);
   expect(sentence.includes(UPDATE_MIN_VERSION), 'the banner does not name the required version');
+  expect(sentence.includes('disconnected'), `banner = ${JSON.stringify(sentence)}`);
+  expect(!sentence.includes('read-only'), `the banner still says read-only: ${JSON.stringify(sentence)}`);
   expect(controlByText('Check for updates', banner) !== null, 'the banner has no update action');
-  return `banner: ${sentence}`;
+
+  // The guild is disconnected: its own tool left the sidebar and the local catalog took over — the
+  // personal tool of the snapshot went with it, and the local rows are what is left.
+  const after = await waitForValue('the guild tool to leave the sidebar', () => {
+    const titles = sidebarTitles();
+    return titles.some((title) => title.includes(GUILD_ONLY_TITLE)) ? null : titles;
+  });
+  expect(
+    after.some((title) => title.includes('Tool A')) && after.some((title) => title.includes('Tool B')),
+    `the local catalog is not what the sidebar shows: ${JSON.stringify(after)}`,
+  );
+  expect(
+    !after.some((title) => title.includes(PERSONAL_TITLE)),
+    `a personal tool of the snapshot is still shown: ${JSON.stringify(after)}`,
+  );
+  // Settings → Hosts is the one screen that still shows the guild, with the reason on its card.
+  const reason = all<HTMLElement>('.message-error')
+    .map(text)
+    .find((line) => line.includes('needs a newer Nod'));
+  expect(reason !== undefined, 'the host card does not say why the guild is disconnected');
+
+  return `banner: ${sentence}; sidebar ${before.length} → ${after.length} tool(s), guild tool gone`;
 }
 
 async function adminFinal(): Promise<void> {
   await unlock(CONFIG.adminEmail);
+  await synced();
+  // O2/#28: one org tool this machine has never had locally, so the sidebar can show the guild's
+  // catalog leaving when the guild asks for a newer Nod.
+  await call('catalog.save', {
+    entry: {
+      id: 'guild-only',
+      title: GUILD_ONLY_TITLE,
+      url: `${CONFIG.originC}/guild-only`,
+      icon: null,
+      order: 15,
+      roles: [],
+      views: [],
+      auth: null,
+      active: true,
+    },
+  });
   await synced();
   const start = Date.now();
   let last = '';

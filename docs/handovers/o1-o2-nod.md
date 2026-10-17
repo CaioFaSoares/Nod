@@ -159,3 +159,58 @@ did run and pass, as did the 4 new client tests on the fake host and the 6 on th
 This file, per `docs/handovers/README.md` (one file per slice, its owner's: files touched, the
 acceptance and how each item was met, how it was obtained, and what was left out). The state of #27
 and #28 is the GitHub issues; this file closes nothing and decides no spec.
+
+## Owner decision 2026-10-17 — the disconnected guild (replaces the read-only reading of O2)
+
+The owner decided issue #28 on 2026-10-17 (`docs/canonico.md` §22, row "Nod older than the host's
+`minAppVersion`", **Decidido**): a Nod below the host's minimum **does not connect** — no sync, no
+host call but the discovery and `GET /v1/meta/app`, no join and no sign-in, and nothing from the
+cached snapshot shown. It runs on its local catalog, keeps the `host` row, the bearer and the cache
+on disk untouched, and shows the update banner until it is updated. That replaces this file's
+decision 2 ("read-only from cache") and the sentence the banner used to carry.
+
+| File | What changed |
+| --- | --- |
+| `shared/catalog.ts` | **New** `CatalogMode` + `catalogMode(hasHostRow, updateRequired)`: the one place that says which catalog a Nod serves — the snapshot's only while a `host` row exists **and** the app is not older than the minimum. |
+| `shared/version.ts` | **New** `tooOldFor(appVersion, minAppVersion)`: the gate's predicate (`null` on either side is no verdict). `backend/sync.ts`, `backend/main.ts` and their tests read it instead of comparing inline. |
+| `backend/sync.ts` | `updateRequiredNow()` is `repo.hostRecord() !== null && tooOldFor(...)`; `runOnce` ends after `refreshMinVersion` (as before) and its comments say what the state now means: the guild is disconnected and the run re-reads the minimum, which is the whole of what restores it. |
+| `backend/main.ts` | The O2 rule grew to the whole call surface: `HOST_READS` (new) + `HOST_WRITES` behind one guard (`hostReadRefused` next to `hostWriteRefused`), `host.revokeSession` moved into `HOST_WRITES`; `guildConnection()` (the former `keysConnection`) hands the key publish, the shares, the guild icon **and** the admin routes a `null` connection while disconnected; `refreshConnectedCatalog()` derives `connectedMode` from `catalogMode` and reports a mode that moved as a change (so the page re-reads the catalog on the transition, both ways); `snapshotBody()`, `leftoverTools()`, `vault.list` (no `decorate`), `shares.inbox`, `shares.recipients`, `assignments.missing` and `peers.list` answer empty; `host.presence` answers `[]`; `keys.mine` stays what it always was (this machine's own pair, read from `meta` and the keychain — it never reaches the host, so there is nothing to hide); **new exported `beginAuth`** is the prologue `host.activate` and `host.signIn` run — the discovery, the `minAppVersion` gate over it, and only then the salt request — so a Nod the guild's minimum is above sends no code, no `authKey` and no password. |
+| `src/app.ts` | The banner: `… needs a newer Nod (X or newer). Update to reconnect — the guild stays disconnected until then.` (no "read-only from its cache"). |
+| `src/settings.ts` | `hasHost()` and `sharing()` are false while the guild is disconnected, so Account (devices, fingerprint, colleagues), the People tab's Devices, Activity's host counters, the vault's inbox/holders/scope cards and the send/assign dialogs are the local-mode ones; the Hosts tab keeps the guild's card and now says on it why the guild is disconnected; the guild-icon card, the publish offer and the leftover offer are not drawn (`host.revokeSession`, `host.bootstrap` and `host.adoptLocalAsPersonal` are refused). |
+| `test/catalog.test.ts` | 4 tests: `catalogMode` and the catalog each half of the switch answers — local below the minimum (the `host` row staying), the snapshot's at and above it, local with no row at all. |
+| `test/join.test.ts` | **New.** 4 tests over `beginAuth` with a scripted discovery and connection: too old → refused with `update required — this guild needs a newer Nod`, no request out and no connection built, the minimum still observed; equal/newer/unreadable/a runtime without a version → the salt call goes out and the prologue answers. |
+| `test/sync.test.ts` | The O2 describe now says the guild is disconnected; the push-nothing test also pins `calls.meta === 1` and that the whole `host` row is byte-identical after the run. |
+| `test/smoke/ui-driver.ts` | `admin-final` creates one org tool the admin's machine never had locally (`catalog.save`, `Guild Only`); #28 asserts the new banner (it says `disconnected`, it does not say `read-only`), that the guild's tool left the sidebar, that the personal tool of the snapshot left with it, that the local `Tool A`/`Tool B` are what is shown, and that the host's card carries the reason. |
+| `docs/specs/` | SP03 §3 (the meta row + what a too-old Nod may call), SP04 §3 (the version gate rewritten), SP05 §3 (`HostState`'s two fields + the disconnected-guild bullet). |
+| `backend/context.md` | The O2 rules (the call surface and the connection) and the `sync.ts`, `connected-catalog.ts` and `main.ts` rows. |
+
+Not changed: `host/**` (nothing of the host's side moves: the deployment already serves the minimum),
+`backend/sync.ts`'s push-nothing behavior (it was already the gate; what changed is what the rest of
+the Nod does with it), `backend/repo.ts` (no new column and no migration — the disconnected state is
+derived, and nothing on disk is touched), `shared/host-api.ts`.
+
+Commands run and observed (this change's own files and the three smokes; no `typecheck`, no full
+`bun test`, no formatter):
+
+```
+$ bun test test/catalog.test.ts test/join.test.ts test/sync.test.ts test/version.test.ts
+114 pass, 0 fail, 394 expect() calls — Ran 114 tests across 4 files. [191.00ms]
+
+$ bun test/smoke/ui.ts --force
+ok     #35 holders list and admin card (106 ms) both people hold Tool A with date and scope; the admin card lists it
+ok     #30 changed colleague key (102 ms) the changed key is shown, Confirmed and the warning clears
+ok     #27 admin sees the person devices (102 ms) 1 device row(s) with Revoke
+ok     #28 update-required banner (279 ms) banner: UI Smoke Guild needs a newer Nod (9.9.9 or newer).
+       Update to reconnect — the guild stays disconnected until then.Check for updates;
+       sidebar 4 → 2 tool(s), guild tool gone
+ui smoke: ok (8 phase(s))
+
+$ bun test/smoke/connected.ts --force
+connected smoke ok: 14 phases, 111 steps, … plaintext hits: 0
+
+$ bun test/smoke/run.ts --force
+export: ok 14 event(s), no secret
+kdf vectors: ok 3 vectors matched …
+seal vectors: ok 2 vectors matched, 6 tampered refused …
+smoke ok: 14 steps
+```

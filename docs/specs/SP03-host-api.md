@@ -129,12 +129,17 @@ decodes no image — and the admin's upload is the only writer.
 | `POST /v1/credentials/:id/rotated` | owner or admin | — | `204`; records that a new secret was saved, clearing `rotationPending` (RF-48) |
 | `PUT /v1/admin/assignments` | admin | `{ credentialId, roleId, toolId, assigned }` | `204` |
 | `GET /v1/admin/assignments/missing` | admin | — | `[{ credentialId, toolId, roleId, personId }]`: members of an assigned role the tool is granted to, without a copy; a `client` is never listed |
-| `GET /v1/meta/app` | public | — | `{ minAppVersion, update: { url } \| null }` (O2) |
+| `GET /v1/meta/app` | public | — | `{ minAppVersion, update: { url } \| null }` (O2); the one route a too-old Nod still reads, once per sync run (SP04 §3) |
 
 Incoming shares and the caller's holders data travel inside `GET /v1/state` (SP04 §2). Every
 `Holder` row carries `toolId` — the credential's `credential_holders.tool_id` — in both the signed
 snapshot and `GET /v1/credentials/:id/holders`, so the admin's holders card names the tool without a
 separate lookup (`docs/handovers/block2-review.md` M7).
+
+`minAppVersion` is the oldest Nod the deployment takes. A Nod below it reaches no other route: the
+discovery (public) and this one are all it calls, it refuses the joins, the sign-in and every RPC
+that would reach the host, and it runs on its local catalog until it is updated (SP04 §3, owner
+decision of 2026-10-17).
 
 `update.url` is served for whoever runs the deployment: the tinyjs runtime takes no URL —
 `app.update.check()`/`install()` read the address fixed when the app was created — so the running

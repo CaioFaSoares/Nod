@@ -15,7 +15,7 @@ import { fromBase64url } from '../shared/encoding';
 import { HOST_ROUTES } from '../shared/host-api';
 import type { ClientEvent, EventsResponse } from '../shared/host-api';
 import { clearOrgData, outboxVerdict } from '../shared/host-merge';
-import { compareVersions } from '../shared/version';
+import { tooOldFor } from '../shared/version';
 import type { HostState } from '../shared/types';
 import { fingerprintOf, HostError } from './host-client';
 import type { HostConnection } from './host-client';
@@ -51,8 +51,8 @@ export const SIGNED_OUT_ERROR = 'signed out — sign in again';
 /**
  * O2/SP04 §1: what a write to the host is refused with while this Nod is older than the host's
  * `minAppVersion`. The sync pushes nothing in that state (`runOnce`), and the RPC gate of
- * `backend/main.ts` answers the methods that write to the host with this sentence, so the screen
- * shows why the write did not land instead of a status from a host that never saw it.
+ * `backend/main.ts` answers every method that reaches the host with this sentence, so the screen
+ * shows why the call did not land instead of a status from a host that never saw it.
  */
 export const UPDATE_REQUIRED_ERROR = 'update required — this guild needs a newer Nod';
 
@@ -134,14 +134,15 @@ export function createSync(deps: SyncDeps): Sync {
   let minAppVersion: string | null = null;
 
   /**
-   * O2: whether this Nod is too old for the host. A host that answered a `minAppVersion` no one can
-   * parse (or none at all) never sets this. False while this Nod has no `host` row: the flag is
-   * about a guild, and `host.remove` leaves nothing behind.
+   * O2/SP04 §1: whether this Nod is too old for the host — and so, by the owner's decision of
+   * 2026-10-17, disconnected from it: no write, no event, no snapshot, no other call than the two
+   * below, and the local catalog instead of the cached one (`shared/catalog.ts`'s `catalogMode`).
+   * A host that answered a `minAppVersion` no one can parse (or none at all) never sets this. False
+   * while this Nod has no `host` row: the flag is about a guild, and `host.remove` leaves nothing
+   * behind.
    */
   function updateRequiredNow(): boolean {
-    if (repo.hostRecord() === null) return false;
-    const version = deps.appVersion();
-    return version !== null && minAppVersion !== null && compareVersions(version, minAppVersion) < 0;
+    return repo.hostRecord() !== null && tooOldFor(deps.appVersion(), minAppVersion);
   }
 
   /**
@@ -290,8 +291,11 @@ export function createSync(deps: SyncDeps): Sync {
     if (connection === null || record === null) return state();
     await rememberFingerprint(record);
     const at = new Date(deps.now()).toISOString();
-    // O2: the minimum version first, before a byte of the person's own data leaves the machine —
-    // the host's answer decides whether this run pushes anything at all.
+    // O2: the minimum version first, before a byte of the person's own data leaves the machine — the
+    // host's answer decides whether this run does anything else at all. Too old, the run is over: the
+    // guild is disconnected, so no outbox flush, no events and no snapshot, and the catalog layer
+    // serves the local tables (`shared/catalog.ts`'s `catalogMode`). The next run re-reads the
+    // minimum, which is the whole of what restores the connection.
     await refreshMinVersion(connection);
     if (updateRequiredNow()) return publish();
     try {

@@ -92,3 +92,21 @@ export function compareVersions(left: string, right: string): number {
   }
   return 0;
 }
+
+/**
+ * O2/SP04 §1: whether the running app is older than the version a host says it serves —
+ * `Discovery.minAppVersion` (`GET /v1/meta/app` carries the same value, SP03 §3). The one place the
+ * gate is decided; the sync's run (`backend/sync.ts`), the two auth calls of a join
+ * (`backend/main.ts`) and their tests all read it.
+ *
+ * `null` on either side is no verdict, not "older": a runtime that has not told the backend its own
+ * version never stops the Nod, and a host that serves no minimum or one this file cannot parse never
+ * refuses it (`compareVersions` answers `0`).
+ */
+export function tooOldFor(appVersion: string | null, minAppVersion: string | null): boolean {
+  return (
+    appVersion !== null &&
+    minAppVersion !== null &&
+    compareVersions(appVersion, minAppVersion) < 0
+  );
+}

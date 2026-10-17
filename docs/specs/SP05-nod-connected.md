@@ -109,7 +109,7 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
 
 | Method | Params | Result | Who |
 | --- | --- | --- | --- |
-| `host.state` | — | `HostState` (`none` / `connected` / `stale`, guild, address, fingerprint, lastSyncAt, lastError, pending outbox count) | unlocked |
+| `host.state` | — | `HostState` (`none` / `connected` / `stale`, guild, address, fingerprint, lastSyncAt, lastError, pending outbox count, `updateRequired`, `minAppVersion`) | unlocked |
 | `host.discover` | `{ address }` | `{ guild, fingerprint }` | no session needed (first run) |
 | `host.activate` | `{ address, fingerprint, email, code, password, name? }` | `SessionState` | no session needed; `name` only for a setup code |
 | `host.signIn` | `{ address, fingerprint, email, password }` | `SessionState` | no session needed |
@@ -134,6 +134,20 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
 - `vault.reveal` and `vault.copy` gain the K5 gate: biometrics where the machine has them, the
   person's `password` otherwise (SP02 §9); without either the call fails and nothing is shown or
   copied. The same `password?` is on `shares.send`, `shares.accept` and the two assignment writes.
+- **O2, while this Nod is older than the guild's `minAppVersion` (owner decision 2026-10-17)**: the
+  guild is disconnected, so `host.state` carries `updateRequired: true` (the status stays the one the
+  host answered, and Settings → Hosts shows the guild with the reason), `host.activate` and
+  `host.signIn` refuse over the discovery's `minAppVersion` before any credential, every other RPC
+  that would reach the host is refused with `update required — this guild needs a newer Nod` — the
+  writes of the table above (with `host.revokeSession`, which the disconnected guild no longer keeps
+  open as a security action) and the two reads only the host can answer, `host.sessions` and
+  `people.sessions` — and the
+  RPCs whose answer is the cached snapshot (`shares.inbox`, `shares.recipients`, `holders.list`,
+  `assignments.missing`, `peers.list`, `host.localLeftovers`) answer empty — `keys.mine` is not one
+  of them: it reports this machine's own pair and never reaches the host. The whole catalog layer
+  runs on the local tables (`shared/catalog.ts`'s `catalogMode`): `catalog.list`, the sidebar, Home,
+  the palette, the roles/people screens and the vault list (no holders, no `rotationPending`) are
+  local, as if no host existed. The `host` row, the bearer and the cached body stay on disk.
 
 - Existing admin methods (`catalog.save`, `roles.*`, `people.*`, `invites.issue`) keep their names.
   When connected, the backend sends them to SP03 admin routes.

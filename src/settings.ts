@@ -1045,7 +1045,17 @@ export function mountSettings(
       hostLine('Last sync', host.lastSyncAt ?? 'never'),
       hostLine('Pending writes', String(host.pendingWrites)),
     );
-    if (host.status === 'signed-out') {
+    if (host.updateRequired) {
+      // O2/SP04 §1 (owner, 2026-10-17): the guild answered the version check and asked for a newer
+      // Nod — it is disconnected until then. This card is the one screen that still shows it.
+      card.append(
+        el(
+          'p',
+          { class: 'message message-error' },
+          `${host.guild ?? 'This guild'} needs a newer Nod${host.minAppVersion === null ? '' : ` (${host.minAppVersion} or newer)`} — disconnected until you update.`,
+        ),
+      );
+    } else if (host.status === 'signed-out') {
       card.append(
         el('p', { class: 'message message-info' }, 'Signed out — sign in again to keep syncing this guild.'),
       );
@@ -1140,7 +1150,9 @@ export function mountSettings(
   function publishOffer(): HTMLElement | null {
     const host = state.host;
     if (host === null || !isAdmin() || state.publishClosed) return null;
-    if (host.status === 'none' || host.status === 'signed-out') return null;
+    // O2/SP04 §1 (owner, 2026-10-17): the publish is a write to the host, so a disconnected Nod
+    // offers it nowhere — `host.bootstrap` would be refused.
+    if (host.status === 'none' || host.status === 'signed-out' || host.updateRequired) return null;
     if (state.entries.some((entry) => (entry.scope ?? 'org') === 'org')) return null;
     return el(
       'section',
@@ -1170,7 +1182,15 @@ export function mountSettings(
     const host = state.host;
     // Nothing without a host, and nothing while signed out: RF-39 empties the snapshot's org half on
     // a `401`, and the leftovers would then list every local tool as if the guild did not serve it.
-    if (host === null || host.status === 'none' || host.status === 'signed-out' || state.leftoversClosed) {
+    // Nothing while the guild is disconnected either (O2, owner 2026-10-17): the local tables are the
+    // catalog again, so nothing is a leftover, and keeping one would be a write to the host.
+    if (
+      host === null ||
+      host.status === 'none' ||
+      host.status === 'signed-out' ||
+      host.updateRequired ||
+      state.leftoversClosed
+    ) {
       return null;
     }
     if (state.leftovers.length === 0) return null;
@@ -1229,8 +1249,10 @@ export function mountSettings(
       return box;
     }
     box.append(hostCard(host));
-    // SP05 §6: the guild's icon is the admin's, and it belongs to the guild's own card.
-    if (isAdmin()) box.append(guildIconCard());
+    // SP05 §6: the guild's icon is the admin's, and it belongs to the guild's own card. Both this
+    // card and the two offers below reach the host, so a disconnected Nod (O2, owner 2026-10-17)
+    // offers none of them: its Hosts tab is the guild's card, and the way back is an update.
+    if (isAdmin() && !host.updateRequired) box.append(guildIconCard());
     const offer = publishOffer();
     if (offer !== null) box.append(offer);
     const leftovers = leftoverCard();
@@ -1581,8 +1603,9 @@ export function mountSettings(
    * why in the status line, instead of taking the whole Account tab down with it.
    */
   async function readOwnSessions(): Promise<DeviceSession[]> {
-    const host = state.host;
-    if (host === null || host.status === 'none') return [];
+    // `hasHost()` is the same test the devices card is drawn with, the disconnected guild included:
+    // there is nothing to ask for while this Nod is older than the guild's minimum (O2).
+    if (!hasHost()) return [];
     try {
       return await call('host.sessions');
     } catch (e) {
@@ -1972,9 +1995,16 @@ export function mountSettings(
     return owner === undefined || (me !== null && owner.personId === me.id);
   }
 
-  /** SP06: sharing is a question for the guild — without one there is no send, no inbox, no holders. */
+  /**
+   * Whether the guild answers the sharing screens at all — the vault's inbox, holders and scope rows,
+   * the send and assign dialogs, the missing list and the admin's Credential holders card. A
+   * signed-out session and a Nod that is older than the guild's minimum (`hasHost`) both answer no:
+   * the second is O2's disconnected guild, and it shows the same screen a Nod with no host shows.
+   */
   function sharing(): boolean {
-    return state.host !== null && (state.host.status === 'connected' || state.host.status === 'stale');
+    const host = state.host;
+    if (host === null || host.status === 'none' || host.status === 'signed-out') return false;
+    return !host.updateRequired;
   }
 
   /** True while this action is the one on screen waiting for the password. */
@@ -3810,12 +3840,17 @@ export function mountSettings(
   // ---------------------------------------------------------------- tab: activity
 
   /**
-   * Whether the Nod knows a host at all. `host.state` answers `none` rather than `null` for a Nod
-   * that was never connected — and `host.remove` leaves the same shape — so the absence of a host is
-   * this status, not a missing object (SP05 §3).
+   * Whether the Nod knows a guild it can work with. `host.state` answers `none` rather than `null`
+   * for a Nod that was never connected — and `host.remove` leaves the same shape — so the absence of
+   * a host is this status, not a missing object (SP05 §3).
+   *
+   * O2/SP04 §1 (owner decision 2026-10-17): a Nod older than the guild's `minAppVersion` is in the
+   * same place as far as every screen is concerned — the guild is disconnected, so the org tools, the
+   * devices, the colleagues, the leftovers and the sharing screens are the local ones. Settings →
+   * Hosts does not come through here: it shows the guild and its reason on the host's own card.
    */
   function hasHost(): boolean {
-    return state.host !== null && state.host.status !== 'none';
+    return state.host !== null && state.host.status !== 'none' && !state.host.updateRequired;
   }
 
   /**

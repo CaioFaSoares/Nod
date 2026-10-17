@@ -36,7 +36,7 @@ line is a DOM assertion made on the real screens; the RPC calls that create the 
 | `#35` holders | the credential's holders list and the admin's `Credential holders` card | `ok     #35 holders list and admin card (104 ms) both people hold Tool A with date and scope; the admin card lists it` |
 | `#30` changed key | Settings → Account, the Colleagues warning and Confirm | `ok     #30 changed colleague key (103 ms) the changed key is shown, Confirmed and the warning clears` |
 | `#27` admin devices | Settings → People, one person's Devices | `ok     #27 admin sees the person devices (102 ms) 1 device row(s) with Revoke` |
-| `#28` banner | Settings → Hosts, `Sync now` after the host restarted with `NOD_MIN_APP_VERSION=9.9.9` | `ok     #28 update-required banner (438 ms) banner: UI Smoke Guild needs a newer Nod (9.9.9 or newer). Until you update, Nod works read-only from its cache.Check for updates` |
+| `#28` banner | Settings → Hosts, `Sync now` after the host restarted with `NOD_MIN_APP_VERSION=9.9.9` | `ok     #28 update-required banner (279 ms) banner: UI Smoke Guild needs a newer Nod (9.9.9 or newer). Update to reconnect — the guild stays disconnected until then.Check for updates; sidebar 4 → 2 tool(s), guild tool gone` |
 
 `setup` steps (world, not acceptance): `admin-setup` (activate + bootstrap + roles + people + codes),
 `person2-join` (Q), `other-accept` (Q accepts the share by RPC, so the holder rows #35 needs exist),
@@ -76,7 +76,7 @@ phase admin-final (app id copland.nod.ui-admin)
 ok     #35 holders list and admin card (104 ms) both people hold Tool A with date and scope; the admin card lists it
 ok     #30 changed colleague key (103 ms) the changed key is shown, Confirmed and the warning clears
 ok     #27 admin sees the person devices (102 ms) 1 device row(s) with Revoke
-ok     #28 update-required banner (438 ms) banner: UI Smoke Guild needs a newer Nod (9.9.9 or newer). Until you update, Nod works read-only from its cache.Check for updates
+ok     #28 update-required banner (279 ms) banner: UI Smoke Guild needs a newer Nod (9.9.9 or newer). Update to reconnect — the guild stays disconnected until then.Check for updates; sidebar 4 → 2 tool(s), guild tool gone
 
 ui smoke: ok (8 phase(s))
 

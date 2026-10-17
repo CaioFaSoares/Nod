@@ -874,10 +874,13 @@ function clearBanner(): void {
 // ------------------------------------------------------------ notices (host, RF-55)
 
 /**
- * O2/SP04 §1: the guild serves a `minAppVersion` newer than this Nod, so the backend pushes nothing
- * to it and refuses every write that would reach it (`backend/sync.ts`, the `HOST_WRITES` gate of
- * `backend/main.ts`). The Nod stays usable from its cache, and this notice stays on top of the
- * window until the version moves — there is nothing to dismiss, which is the whole point.
+ * O2/SP04 §1: the guild serves a `minAppVersion` newer than this Nod, so the guild is disconnected:
+ * the backend reaches no route but the discovery and the version check, pushes nothing
+ * (`backend/sync.ts`) and refuses every call that would reach the host (`backend/main.ts`), and the
+ * Nod runs on its local catalog — no org tool, no share, nothing of the cached snapshot shown. The
+ * row, the token and the cache stay where they are, so updating is all it takes. This notice stays
+ * on top of the window until the version moves — there is nothing to dismiss, which is the whole
+ * point.
  */
 function renderUpdateRequiredNotice(slot: HTMLElement): void {
   const state = host;
@@ -891,7 +894,7 @@ function renderUpdateRequiredNotice(slot: HTMLElement): void {
       el(
         'p',
         { class: 'notice-text' },
-        `${guild} needs a newer Nod${required}. Until you update, Nod works read-only from its cache.`,
+        `${guild} needs a newer Nod${required}. Update to reconnect — the guild stays disconnected until then.`,
       ),
       el(
         'div',

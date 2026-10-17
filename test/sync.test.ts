@@ -901,9 +901,12 @@ describe('a run that outlives its host (F8)', () => {
 });
 
 /**
- * O2/SP04 §1: the host's `minAppVersion` against the running app. Older than it, the run pushes
- * nothing — outbox, events and snapshot all stay where they are — and the state says why; the
- * minimum is re-read on every run, so a host that lowers it (or an upgraded app) resumes by itself.
+ * O2/SP04 §1: the host's `minAppVersion` against the running app. Older than it, the guild is
+ * disconnected (owner decision 2026-10-17): the run makes no other call but the version check —
+ * outbox, events and snapshot all stay where they are — the state says why (`updateRequired`,
+ * `status` still `connected`, because the host did answer), and the local catalog takes over
+ * (`shared/catalog.ts`'s `catalogMode`, `test/catalog.test.ts`). The minimum is re-read on every run,
+ * so a host that lowers it (or an upgraded app) resumes by itself.
  */
 describe('minimum app version (O2)', () => {
   test('every run reads the minimum once', async () => {
@@ -915,14 +918,16 @@ describe('minimum app version (O2)', () => {
     expect(h.calls.meta).toBe(2);
   });
 
-  test('a host that needs a newer Nod pushes nothing and keeps the cache', async () => {
+  test('a host that needs a newer Nod pushes nothing and keeps the row and the cache', async () => {
     const h = harness({ meta: () => ({ minAppVersion: '0.4.0', update: null }) });
     enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, EARLIER);
     recordEvent(h, EARLIER);
+    const before = h.repo.hostRecord();
 
     const state = await h.sync.syncNow();
 
-    // Nothing reached the host: no write, no event batch, no state read.
+    // Nothing reached the host but the version check itself: no write, no event batch, no state read.
+    expect(h.calls.meta).toBe(1);
     expect(h.calls.request).toEqual([]);
     expect(h.calls.snapshot).toBe(0);
     expect(state.updateRequired).toBe(true);
@@ -930,6 +935,9 @@ describe('minimum app version (O2)', () => {
     // The person's writes and events are still here, waiting for the update.
     expect(h.repo.listOutbox()).toHaveLength(1);
     expect(h.repo.eventSyncCounts()).toEqual({ sent: 0, pending: 1 });
+    // The host's row and the cached body are untouched by the state: the guild is still there for
+    // Settings → Hosts, and updating is the whole of what brings it back.
+    expect(h.repo.hostRecord()).toEqual(before);
     // The host answered: this is not the stale state of a host that could not be reached.
     expect(state.status).toBe('connected');
     expect(state.lastError).toBeNull();

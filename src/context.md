@@ -12,6 +12,12 @@ The single page of the main window: sign-in, sidebar, Home, palette and Settings
   during its countdown (E02 §5). The page clears both right after.
 - **English everywhere**: text, identifiers, messages (`docs/canonico.md` RNF-08).
 - **Keyboard first**: every action reachable from the palette (`docs/canonico.md` RNF-07).
+- **O2 (owner decision 2026-10-17)**: while this Nod is older than the guild's `minAppVersion` the
+  guild is disconnected. The banner says so at the top of the window; `hasHost()` and `sharing()`
+  (`settings.ts`) are the page's half of the rule, so every screen that would read the guild — the
+  org tools, the devices, the colleagues, the inbox, the holders, the leftovers — shows the
+  local-mode one instead, and Settings → Hosts keeps the guild's card with the reason on it. The
+  backend answers empty or refuses the calls that would reach the host (`backend/context.md`).
 
 ## Screens (block 1 and block 2 landed)
 

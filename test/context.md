@@ -105,7 +105,7 @@ password, code or credential value ever reaches a file, a log or `store.json`.
 | `#24` add personal tool, sidebar order, favorite, warning | B7/SP05 §3–§4 | the dialog creates the tool, the sidebar lists it after the org tools and first once favorited, and its card carries the canonico §22 warning |
 | `#25` keep local tools | B8b/RF-40 | the Hosts tab lists the join's leftovers, all checked; `Keep as personal tools` turns them into personal tools, which Home shows with the warning |
 | `#27` devices | O1 | Account lists this machine's devices with Revoke; the admin's People tab opens one person's devices |
-| `#28` update-required banner | O2/SP04 §1 | after the host raises its minimum, `Sync now` shows the persistent notice naming the version |
+| `#28` update-required banner | O2/SP04 §1 | after the host raises its minimum, `Sync now` shows the persistent notice naming the version and saying the guild is disconnected, the guild's own tool leaves the sidebar (the local catalog takes over, the snapshot's personal tool with it), and Settings → Hosts keeps the guild's card with the reason |
 | `#29` key fingerprint | K1 | Account shows `XXXX-XXXX-XXXX-XXXX` and the status of this machine's pair |
 | `#30` changed colleague key | K2/RF-45 | a second machine re-keys P; the Colleagues list shows `key changed — confirm`, and Confirm clears it |
 | `#32`/`#33` inbox, reveal, copy | K4/K5 | Accept moves the share into the vault behind the dev-run password prompt; Reveal shows the value with its countdown and the DOM is clean at zero; Copy never renders it |

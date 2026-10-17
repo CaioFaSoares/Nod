@@ -12,11 +12,12 @@ import {
   verifyStoredPassword,
 } from '../shared/auth';
 import { BUILD_MODE_STAMP, stampMode } from '../shared/build-mode';
-import { auditUrl, exportSeed, originOf, validateEntry, validateSeed, visibleEntries } from '../shared/catalog';
+import { auditUrl, catalogMode, exportSeed, originOf, validateEntry, validateSeed, visibleEntries } from '../shared/catalog';
 import { fromBase64url, toBase64url } from '../shared/encoding';
 import { HOST_ROUTES, isPng } from '../shared/host-api';
 import { leftoverLocalTools, parseSnapshot } from '../shared/host-merge';
 import { MAIN_WINDOW, toolOfWindow } from '../shared/types';
+import { tooOldFor } from '../shared/version';
 import type {
   AppIconChoice,
   AppIconState,
@@ -238,10 +239,11 @@ export async function init(app: TinyApp): Promise<void> {
 
   // SP05 §6: the guild's icon on this machine (`guild-icon.png` under the data dir) and the choice
   // between it and the bundle icon. The file calls and the runtime's `app.icon` arrive as
-  // parameters, so `backend/guild-icon.ts` is driven by `bun test` with no runtime at all.
+  // parameters, so `backend/guild-icon.ts` is driven by `bun test` with no runtime at all. Its
+  // connection is the gated one: disconnected, no snapshot moves the icon and no byte is fetched.
   guildIcon = createGuildIcon({
     path: `${paths.data}/${GUILD_ICON_FILE}`,
-    connection: () => connectionOf(),
+    connection: () => guildConnection(),
     icon: (path) => app.icon(path),
     // §2/`docs/tinyjs.md` §6: Linux on Wayland has nowhere to put an app icon, and says so.
     iconSupported: supported(capabilities, 'icon'),
@@ -295,7 +297,7 @@ export async function init(app: TinyApp): Promise<void> {
     vault: required(vault, 'shares'),
     keys: required(keys, 'shares'),
     entry: (id) => catalogEntryOf(id),
-    connection: () => (requiresUpdate() ? null : connectionOf()),
+    connection: () => guildConnection(),
     gate: (reason, password) => authenticate(reason, password),
     onChanged: () => sync?.afterWrite(),
   });
@@ -332,7 +334,7 @@ export async function init(app: TinyApp): Promise<void> {
       // the page is waiting for does not depend on them.
       if (moved) {
         void keys?.observe();
-        void keys?.ensure(keysConnection());
+        void keys?.ensure(guildConnection());
       }
       // K9/SP06 §4: every run is a chance to deliver an update a save could not (`retryPending`),
       // and an applied snapshot is when an incoming `update` of a credential already held lands
@@ -476,7 +478,9 @@ function visibleEntriesOf(): Entry[] {
   if (r === null || person === null) return [];
   // SP05 §2: while a `host` row exists the entries are the snapshot's, in SP05 §4's order; without
   // one they are the local catalog's — SP05 §4's order too, with the person's own tools and their
-  // views (B7: favorites → org → personal, the rule the connected half already follows).
+  // views (B7: favorites → org → personal, the rule the connected half already follows). A Nod older
+  // than the guild's minimum is served the local half the same way (O2, owner 2026-10-17): the guild
+  // is disconnected, so `connectedMode` is false and this reads the tables.
   if (connectedMode) return connectedEntries;
   const layer = personal;
   return layer === null ? visibleEntries(r.listEntries(), person) : layer.localCatalog(person);
@@ -484,9 +488,9 @@ function visibleEntriesOf(): Entry[] {
 
 /**
  * SP05 §2: the effective catalog of the `host` row the caller just read — the snapshot while one
- * exists, the local tables otherwise. It is derived wherever the row can have moved (the boot, an
- * unlock, a join, a removal and every state the sync publishes) and answers whether the entries,
- * the roles and the person the host knows changed since the last derivation.
+ * exists and this Nod is not older than the guild's minimum, the local tables otherwise. It is
+ * derived wherever the row can have moved (the boot, an unlock, a join, a removal and every state
+ * the sync publishes) and answers whether what the page sees changed since the last derivation.
  *
  * The outbox goes in with the row: a personal write that is still queued is SP05 §2's overlay over
  * the snapshot's personal half, so the catalog this derivation answers already carries it.
@@ -497,9 +501,17 @@ function refreshConnectedCatalog(): boolean {
   if (r === null || catalog === null) return false;
   const record = r.hostRecord();
   const changed = catalog.refresh(record, r.listOutbox());
-  connectedMode = record !== null;
+  // O2/SP04 §1 (owner decision 2026-10-17): too old for the guild, the row's snapshot is not the
+  // catalog any more — the local tables are, as if no host existed. The row, the bearer and the
+  // cached body stay on disk, and Settings → Hosts keeps showing the guild.
+  const updated = catalogMode(record !== null, requiresUpdate()) === 'connected';
+  // A mode that moved is news to the page even when the snapshot did not (the transition into the
+  // disconnected state, and the one back out of it once the host lowers its minimum or the app is
+  // updated) — without this the sidebar would keep the catalog of the previous mode.
+  const moved = changed || updated !== connectedMode;
+  connectedMode = updated;
   connectedEntries = catalog.entries();
-  return changed;
+  return moved;
 }
 
 /** What a changed effective catalog moves: the sidebar's icons, the open tool windows, the page. */
@@ -526,8 +538,13 @@ function catalogEntryOf(id: Id): Entry | null {
  * M7/RF-54: the signed body of the last verified snapshot, or `null` without one. The signature was
  * checked before `backend/sync.ts` stored the bytes, so this parses what the pinned key signed;
  * `backend/shares.ts` reads its own fields from the same cached body.
+ *
+ * O2/SP04 §1 (owner, 2026-10-17): while this Nod is older than the guild's minimum the body is not
+ * shown at all — the guild is disconnected and the Nod runs on its local catalog — so the one reader
+ * of this (the admin's holders list, M7) answers empty. The bytes stay in the row.
  */
 function snapshotBody(): Snapshot | null {
+  if (requiresUpdate()) return null;
   const record = repo === null ? null : repo.hostRecord();
   if (record === null || record.snapshot === null) return null;
   try {
@@ -633,9 +650,14 @@ function rolesOf(): Role[] {
  * (RF-40's fix). The snapshot is read the way the catalog layer reads it; a body this side cannot
  * read answers nothing, the same way an absent one does, so the Hosts tab shows no offer rather than
  * an error the person cannot act on.
+ *
+ * O2/SP04 §1 (owner, 2026-10-17): while this Nod is older than the guild's minimum the guild is
+ * disconnected and the local tables are the catalog again, so nothing is a leftover and the offer to
+ * keep them has nothing to offer (`host.adoptLocalAsPersonal` is refused in that state).
  */
 function leftoverTools(): Entry[] {
   const r = repo;
+  if (requiresUpdate()) return [];
   const record = r === null ? null : r.hostRecord();
   if (r === null || record === null || record.snapshot === null) return [];
   let orgTools: Entry[];
@@ -797,19 +819,25 @@ const WITHOUT_SESSION: Partial<Record<Method, true>> = {
 };
 
 /**
- * O2/SP04 §1: the methods that write to the host. While this Nod is older than the host's
- * `minAppVersion` they are refused with `UPDATE_REQUIRED_ERROR`, before anything leaves the machine
- * — the sync pushes nothing in that state either (`backend/sync.ts`). The reads, `host.remove`, the
- * joins and the session revokes stay open on purpose: the person has to be able to look at the
- * guild, sign in, disconnect, and sign a device out of their account (O1) — the last one is a
- * security action, not a change to the guild's data.
+ * O2/SP04 §1 (owner decision 2026-10-17): the methods that reach the host. While this Nod is older
+ * than the host's `minAppVersion` the guild is **disconnected** — no call leaves the machine but the
+ * discovery and the `GET /v1/meta/app` of a sync run — so every one of them is refused with
+ * `UPDATE_REQUIRED_ERROR` before anything goes out. `HOST_WRITES`/`HOST_READS` below are that rule's
+ * two halves and `backend/sync.ts` pushes nothing in the same state.
+ *
+ * The reads of the *cached* snapshot are not host calls and are not here: they answer empty instead
+ * (`snapshotBody`, the `shares`/`keys` reads the catalog layer no longer feeds), and the catalog
+ * layer runs on the local tables (`shared/catalog.ts`'s `catalogMode`).
+ *
+ * `host.remove` stays open: it takes the row, the bearer and the cache away on this machine and asks
+ * the host nothing. The discovery stays open too (the person must be able to see the guild and its
+ * fingerprint); the joins and the sign-in refuse themselves over the discovery's `minAppVersion`,
+ * before the salt request, the code and the `authKey` (`beginAuth`).
  *
  * The person's writes of block 2 (`personal.*`, `favorites.set`) are here too (B8b's fix): while
- * connected they reach the host through the outbox, and an outdated Nod must not queue a write the
- * newer host may not read back. They stay out of the way in local mode: `requiresUpdate()` is
- * `false` while no `host` row exists, so a local-only Nod is never stopped by this gate. A write the
- * host holds nothing of is not here either: `catalog.importFromFile` and `vault.*` are this
- * machine's own.
+ * connected they reach the host through the outbox, and a disconnected Nod must not queue a write
+ * the newer host may not read back. A write the host holds nothing of is not here either:
+ * `catalog.importFromFile` and `vault.*` are this machine's own.
  */
 const HOST_WRITES: Partial<Record<Method, true>> = {
   // SP02 §7: with a host, the password is rewritten there first.
@@ -822,6 +850,9 @@ const HOST_WRITES: Partial<Record<Method, true>> = {
   'people.setRoles': true,
   'people.revoke': true,
   'people.revokeSession': true,
+  // O1/SP03 §2: `DELETE /v1/sessions/:id` is a write to the host's session row. It used to stay open
+  // as a security action; a disconnected guild reaches no route, so it is refused like the rest.
+  'host.revokeSession': true,
   'invites.issue': true,
   'host.bootstrap': true,
   // B8b: it writes the guild's personal half for this person (through the outbox), so an outdated
@@ -845,19 +876,36 @@ const HOST_WRITES: Partial<Record<Method, true>> = {
   // here: its connection is already null while the gate is up, so it waits as a pending marker).
   'shares.removeHolder': true,
   // K8/SP06 §4: the assignment row and the sealing of the copies behind it are the admin's writes
-  // to the host; `assignments.missing` is only a read and stays out of the table.
+  // to the host; `assignments.missing` is only a read and answers empty instead (O2).
   'assignments.set': true,
   'assignments.sealMissing': true,
 };
 
 /**
+ * O2/SP04 §1: the reads whose whole answer is the host's own — the device sessions of this person
+ * (O1) and of any person of the guild (the admin's People screen), over `GET /v1/sessions` and
+ * `GET /v1/admin/people/:id/sessions`. A disconnected Nod refuses them with the same sentence as the
+ * writes rather than answering a list it cannot know. `people.list`, `events.list` and
+ * `host.presence` are not here: they have a local answer (this machine's people and its own log) or
+ * the empty one of a Nod with no guild, and they answer that instead.
+ */
+const HOST_READS: Partial<Record<Method, true>> = {
+  'host.sessions': true,
+  'people.sessions': true,
+};
+
+/**
  * O2/SP04 §1: whether `method` is refused while this Nod is older than the host's `minAppVersion`.
- * The table is the one decision, and `requiresUpdate()` is the other; kept as a pure predicate so a
- * test can pin both halves (an outdated connected Nod refuses; a local one, with no `host` row, has
+ * The two tables are the one decision, and `requiresUpdate()` is the other; kept as pure predicates
+ * so a test can pin both halves (a disconnected Nod refuses; a local one, with no `host` row, has
  * `updateRequired` false and is never stopped) without booting the runtime.
  */
 export function hostWriteRefused(method: Method, updateRequired: boolean): boolean {
   return HOST_WRITES[method] === true && updateRequired;
+}
+
+export function hostReadRefused(method: Method, updateRequired: boolean): boolean {
+  return HOST_READS[method] === true && updateRequired;
 }
 
 /**
@@ -881,9 +929,12 @@ function guarded<M extends Method>(method: M, handler: Handler<M>): TinyApiHandl
       const person = unlockedPerson(method);
       if (ADMIN_ONLY[method] === true && !person.admin) throw new Error('only an admin can do this');
     }
-    // O2: the host is reachable, and it told this Nod it needs a newer one. The write would only be
-    // refused there (or, worse, silently change a catalog this build cannot read back).
-    if (hostWriteRefused(method, requiresUpdate())) throw new Error(UPDATE_REQUIRED_ERROR);
+    // O2: the guild is disconnected, and this method would reach the host — a write or a read only
+    // the host can answer. Anything else reaches no route and is answered below.
+    const outdated = requiresUpdate();
+    if (hostWriteRefused(method, outdated) || hostReadRefused(method, outdated)) {
+      throw new Error(UPDATE_REQUIRED_ERROR);
+    }
     return handler(params, app, meta);
   };
 }
@@ -1319,11 +1370,13 @@ function connectionOf(): HostConnection | null {
 }
 
 /**
- * K1/SP06 §2: the connection `backend/keys.ts` may publish this person's public keys over, or
- * `null`. The O2 rule holds here as it does for `HOST_WRITES`: while this Nod is older than the
- * host's `minAppVersion` no write leaves the machine, so the pair stays local until it is updated.
+ * K1/SP06 §2 + O2/SP04 §1: the connection every host call past the sync's own uses — the key
+ * publish, the share flows, the guild icon and the admin routes — or `null`. While this Nod is older
+ * than the host's `minAppVersion` the guild is disconnected (owner decision 2026-10-17), so there is
+ * none: the pair waits locally, the vault shares nothing, the icon on disk stays where it is, and the
+ * screens that would read the guild answer from this machine instead.
  */
-function keysConnection(): HostConnection | null {
+function guildConnection(): HostConnection | null {
   return requiresUpdate() ? null : connectionOf();
 }
 
@@ -1335,7 +1388,7 @@ function keysConnection(): HostConnection | null {
  * fails an unlock.
  */
 async function ensureKeys(regenerate: boolean): Promise<void> {
-  await keys?.ensure(keysConnection(), { regenerate });
+  await keys?.ensure(guildConnection(), { regenerate });
 }
 
 /**
@@ -1351,6 +1404,54 @@ function preAuthConnection(found: HostDiscovery): HostConnection {
     publicKey: found.pin.ed25519Public,
     personId: '',
   });
+}
+
+/** What the prologue of a join and of a sign-in hands back (SP02 §4). */
+export interface AuthPrologue {
+  /** SP04 §1: the discovery, whose document names the guild and the version it serves. */
+  found: HostDiscovery;
+  /** SP02 §4: the iteration count and the salt the host published for this email. */
+  published: SaltResponse;
+  /** The pre-auth connection the credential request goes over. */
+  connection: HostConnection;
+}
+
+/** What `beginAuth` needs, injected so a test drives it without a runtime. */
+export interface AuthPrologueDeps {
+  /** SP04 §1: the discovery — the address, with the fingerprint the person confirmed or the pin. */
+  discover: () => Promise<HostDiscovery>;
+  /** SP02 §4: the pre-auth connection built from that discovery (`preAuthConnection`). */
+  connect: (found: HostDiscovery) => HostConnection;
+  /** SP04 §1: the minimum the discovery carries, kept in memory for `host.state`. */
+  observe: (minAppVersion: string) => void;
+  /** O2: the version of the running app (`app.info().version`), or `null`. */
+  appVersion: () => string | null;
+}
+
+/**
+ * The two host calls a join and a sign-in make before any credential leaves the machine: the
+ * discovery of SP04 §1 and, only when the guild takes this Nod, the salt request of SP02 §4.
+ *
+ * O2/SP04 §1 (owner decision 2026-10-17): the discovery document already carries the guild's
+ * `minAppVersion`, so a Nod older than it stops right here — no access code, no `authKey` and no
+ * password reaches the host — with the sentence the sync's gate and the RPC gate answer with. A
+ * host that serves no minimum, or one `shared/version.ts` cannot read, refuses nothing. The check is
+ * the discovery's answer and not the remembered one: a Nod that was offline when the host raised the
+ * minimum must not spend a code on a join it cannot make.
+ *
+ * Exported, and free of `tjs`/`tiny`, so `bun test` pins it against a scripted discovery and
+ * connection: the rule is that nothing but the discovery leaves the machine while this Nod is too
+ * old.
+ */
+export async function beginAuth(deps: AuthPrologueDeps, email: string): Promise<AuthPrologue> {
+  const found = await deps.discover();
+  deps.observe(found.document.minAppVersion);
+  if (tooOldFor(deps.appVersion(), found.document.minAppVersion)) {
+    throw new Error(UPDATE_REQUIRED_ERROR);
+  }
+  const connection = deps.connect(found);
+  const published = await connection.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
+  return { found, published, connection };
 }
 
 /** SP03 §2's `device`: the host shows it in the session list (O1). None of it is a secret. */
@@ -1597,7 +1698,7 @@ const methods: { [M in Method]: Handler<M> } = {
       if (person !== null && person !== undefined) keys?.clearReseal(person.id);
       throw error;
     }
-    await keys?.reSeal(previousVaultKey, keysConnection());
+    await keys?.reSeal(previousVaultKey, guildConnection());
     return true;
   },
 
@@ -1612,7 +1713,9 @@ const methods: { [M in Method]: Handler<M> } = {
       text(parameters(params, 'invalid address').address, 'invalid address'),
     );
     // O2: the discovery already carries the oldest version the host serves, so the gate knows it
-    // before this Nod is even connected (a join that follows is read-only from its first sync on).
+    // before this Nod is even connected. The discovery itself is never refused — the person has to be
+    // able to see the guild and its fingerprint; the joins and the sign-in refuse themselves on this
+    // version (`beginAuth`).
     sync?.observeMinVersion(found.document.minAppVersion);
     // SP04 §1.3: the flow picked the invite up, so it is not offered again on the next call.
     pendingJoin = null;
@@ -1649,14 +1752,18 @@ const methods: { [M in Method]: Handler<M> } = {
       hostPinned: false,
       signIn: false,
       host: async () => {
-        // SP04 §1.3: the invite's `fp` must be the key the host answers. A mismatch throws here,
-        // before any request past the discovery, and stores nothing.
-        const found = await c.discover(address, { fingerprint });
-        // O2: the same gate the join's own sync applies, known from the discovery already.
-        sync?.observeMinVersion(found.document.minAppVersion);
-        const pre = preAuthConnection(found);
-        // SP02 §4: the host's iteration count for this derivation (it answers for any email).
-        const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
+        // SP04 §1.3: the invite's `fp` must be the key the host answers. A mismatch throws inside the
+        // discovery, before any request past it, and stores nothing. O2: the same call refuses a Nod
+        // the guild's `minAppVersion` is above, before the salt request and before the code is spent.
+        const { found, published, connection } = await beginAuth(
+          {
+            discover: () => c.discover(address, { fingerprint }),
+            connect: (host) => preAuthConnection(host),
+            observe: (version) => sync?.observeMinVersion(version),
+            appVersion: () => appVersion,
+          },
+          email,
+        );
         // SP02 §1: at activation the Nod chooses the person's salt. SP02 §7's reset is a new salt,
         // so the one the host answers is only read, never stored — another machine's cached salt is
         // what notices a reset, and it must never match by accident.
@@ -1672,7 +1779,7 @@ const methods: { [M in Method]: Handler<M> } = {
           device: await deviceOf(),
         };
         // SP02 §3: the setup code creates the first admin; an access code redeems one person's row.
-        const opened = await pre.request<TokenResponse>(
+        const opened = await connection.request<TokenResponse>(
           'POST',
           setup ? HOST_ROUTES.authSetup : HOST_ROUTES.authActivate,
           setup ? { ...body, name } : body,
@@ -1757,19 +1864,27 @@ const methods: { [M in Method]: Handler<M> } = {
       host: async () => {
         // SP04 §1: a host that is already added is pinned, so a second key is never accepted
         // silently; a host that is not has only the fingerprint the person confirmed (or the invite
-        // carried).
-        const found = await c.discover(
-          row === null ? address : row.address,
-          row === null ? { fingerprint } : { pinned: { kid: row.kid, ed25519Public: row.publicKey } },
+        // carried). O2: the discovery of a sign-in carries the minimum too — this Nod may have been
+        // offline when the host raised it — and a Nod below it signs in nowhere: the password is not
+        // even derived (`beginAuth`).
+        const { found, published, connection } = await beginAuth(
+          {
+            discover: () =>
+              c.discover(
+                row === null ? address : row.address,
+                row === null
+                  ? { fingerprint }
+                  : { pinned: { kid: row.kid, ed25519Public: row.publicKey } },
+              ),
+            connect: (host) => preAuthConnection(host),
+            observe: (version) => sync?.observeMinVersion(version),
+            appVersion: () => appVersion,
+          },
+          email,
         );
-        // O2: the discovery of a sign-in carries the minimum too; this Nod may have been offline
-        // when the host raised it.
-        sync?.observeMinVersion(found.document.minAppVersion);
-        const pre = preAuthConnection(found);
         // SP02 §4: the person's own salt for an activated account (a fake one would sign nobody in).
-        const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
         const keys = await s.deriveFor(password, published.salt, published.iterations);
-        const opened = await pre.request<TokenResponse>('POST', HOST_ROUTES.authLogin, {
+        const opened = await connection.request<TokenResponse>('POST', HOST_ROUTES.authLogin, {
           email,
           authKey: toBase64url(keys.authKey),
           device: await deviceOf(),
@@ -1879,7 +1994,7 @@ const methods: { [M in Method]: Handler<M> } = {
     const r = required(repo, 'host.bootstrap');
     const actor = unlockedPerson('host.bootstrap');
     const store = required(icons, 'host.bootstrap');
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
     if (admin === null) throw new Error('Nod is not connected to a host');
 
     // The local catalog, not the effective one: publishing the snapshot's own tools back to the host
@@ -1958,7 +2073,7 @@ const methods: { [M in Method]: Handler<M> } = {
    * only to the Nod that fetched them.
    */
   'host.setGuildIcon': async (params): Promise<{ sha256: string }> => {
-    const connection = connectionOf();
+    const connection = guildConnection();
     if (connection === null) throw new Error('Nod is not connected to a host');
     const png = guildIconBody(parameters(params, 'invalid guild icon').png);
     const answer = await connection.request<GuildIconResponse>('PUT', HOST_ROUTES.adminGuildIcon, {
@@ -1973,7 +2088,7 @@ const methods: { [M in Method]: Handler<M> } = {
 
   /** SP05 §6, SP03 §2: the guild has no icon again, and the next body says `guildIcon: null`. */
   'host.clearGuildIcon': async (): Promise<true> => {
-    const connection = connectionOf();
+    const connection = guildConnection();
     if (connection === null) throw new Error('Nod is not connected to a host');
     await connection.request('DELETE', HOST_ROUTES.adminGuildIcon);
     await afterHostWrite();
@@ -1987,7 +2102,7 @@ const methods: { [M in Method]: Handler<M> } = {
    */
   'host.sessions': async (): Promise<DeviceSession[]> => {
     unlockedPerson('host.sessions');
-    const connection = connectionOf();
+    const connection = guildConnection();
     if (connection === null) throw new Error('Nod is not connected to a host');
     return await connection.sessions();
   },
@@ -1999,7 +2114,7 @@ const methods: { [M in Method]: Handler<M> } = {
    */
   'host.revokeSession': async (params): Promise<true> => {
     unlockedPerson('host.revokeSession');
-    const connection = connectionOf();
+    const connection = guildConnection();
     if (connection === null) throw new Error('Nod is not connected to a host');
     await connection.revokeSession(text(parameters(params, 'invalid session').id, 'invalid session'));
     return true;
@@ -2018,9 +2133,12 @@ const methods: { [M in Method]: Handler<M> } = {
    * K2/SP06 §2: the guild's colleagues, the fingerprint of each and whether the pair is the one
    * this machine pinned. The read is also a first sight (SP06 §2), so a colleague whose keys the
    * roster just started carrying is pinned here and the screen never misses what the next applied
-   * snapshot would have pinned. A local account, or one with no snapshot yet, answers nothing.
+   * snapshot would have pinned. A local account, or one with no snapshot yet, answers nothing — and
+   * so does a disconnected Nod (O2, owner 2026-10-17): the roster the list comes from is the cached
+   * body, and nothing of the guild is shown while this build is too old for it.
    */
-  'peers.list': (): Promise<PeerKey[]> => required(keys, 'peers.list').peers(),
+  'peers.list': (): Promise<PeerKey[]> =>
+    requiresUpdate() ? Promise.resolve([]) : required(keys, 'peers.list').peers(),
 
   /**
    * K2/RF-45: the person confirmed that a changed key is really that colleague's. The pair whose
@@ -2040,11 +2158,12 @@ const methods: { [M in Method]: Handler<M> } = {
 
   /**
    * RF-58: who in the guild is online now (`GET /v1/presence`). Not inside the signed snapshot, so it
-   * is asked for on its own; without a host there is no guild and the answer is empty.
+   * is asked for on its own; without a host — or while this Nod is older than the guild's minimum, so
+   * the guild is disconnected — there is no guild to ask and the answer is empty.
    */
   'host.presence': async (): Promise<PresenceEntry[]> => {
     unlockedPerson('host.presence');
-    const connection = connectionOf();
+    const connection = guildConnection();
     if (connection === null) return [];
     return await connection.presence();
   },
@@ -2154,7 +2273,7 @@ const methods: { [M in Method]: Handler<M> } = {
     const person = unlockedPerson('catalog.save');
     const p = parameters(params, 'invalid entry');
     const entry = validateEntry(p.entry);
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
 
     // SP05 §3: while a host is connected the catalog is the host's, so this write goes to
     // `PUT /v1/admin/tools/:id` and the local `tool` rows stay untouched (SP05 §2).
@@ -2211,7 +2330,7 @@ const methods: { [M in Method]: Handler<M> } = {
     // The entry the page sees: the snapshot's while connected, the local row otherwise.
     const previous = catalogEntryOf(id);
     if (previous === null) throw new Error('tool not found');
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
 
     // SP05 §3: removing a connected entry removes the host's row. The local row, its icon and the
     // credentials saved for it are this machine's own and stay (the local catalog is not the catalog
@@ -2293,7 +2412,7 @@ const methods: { [M in Method]: Handler<M> } = {
     const r = required(repo, 'roles.save');
     const person = unlockedPerson('roles.save');
     const wanted = role(parameters(params, 'invalid role').role);
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
 
     // SP05 §3: the guild's roles live on the host while connected (B5 reads them from the snapshot;
     // this is the write side).
@@ -2328,7 +2447,7 @@ const methods: { [M in Method]: Handler<M> } = {
     const r = required(repo, 'roles.remove');
     const person = unlockedPerson('roles.remove');
     const id = text(parameters(params, 'invalid role').id, 'invalid id');
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
 
     if (admin !== null) {
       // The host refuses the role that would leave the guild without an admin (`409`); the failure
@@ -2366,7 +2485,7 @@ const methods: { [M in Method]: Handler<M> } = {
     const granted = booleanValue(p.granted, 'invalid grant');
     const roleId = text(p.roleId, 'invalid role');
     const toolId = text(p.toolId, 'invalid tool');
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
 
     // SP05 §3/SP03 §2: a grant is the host's row on an org entry; the host is the one that decides
     // whether the entry is an org one at all.
@@ -2399,7 +2518,7 @@ const methods: { [M in Method]: Handler<M> } = {
 
   // -------------------------------------------------------------- people and invites
   'people.list': async () => {
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
     // SP05 §4: the People tab lists the guild's people while connected, from `GET
     // /v1/admin/people` (never a salt or a hash, SP03 §2). The local `person` table holds this
     // machine's accounts, which is a different question in connected mode.
@@ -2412,7 +2531,7 @@ const methods: { [M in Method]: Handler<M> } = {
     const p = parameters(params, 'invalid person');
     const personId = text(p.personId, 'invalid person');
     const roles = textList(p.roles, 'invalid roles');
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
 
     if (admin !== null) {
       const updated = await admin.setRoles(personId, roles);
@@ -2448,7 +2567,7 @@ const methods: { [M in Method]: Handler<M> } = {
     const p = parameters(params, 'invalid person');
     const personId = text(p.personId, 'invalid person');
     const deleteCredentials = booleanValue(p.deleteCredentials, 'invalid revocation');
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
 
     // SP05 §3–§4: revoking a guild member is disabling them on the host (`PATCH
     // /v1/admin/people/:id { disabled: true }`), which ends every session of theirs (SP03 §2, RF-39).
@@ -2500,7 +2619,7 @@ const methods: { [M in Method]: Handler<M> } = {
    */
   'people.sessions': async (params): Promise<DeviceSession[]> => {
     unlockedPerson('people.sessions');
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
     if (admin === null) throw new Error('Nod is not connected to a host');
     const personId = text(parameters(params, 'invalid person').personId, 'invalid person');
     return await admin.sessions(personId);
@@ -2512,7 +2631,7 @@ const methods: { [M in Method]: Handler<M> } = {
    */
   'people.revokeSession': async (params): Promise<true> => {
     unlockedPerson('people.revokeSession');
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
     if (admin === null) throw new Error('Nod is not connected to a host');
     await admin.revokeSession(text(parameters(params, 'invalid session').id, 'invalid session'));
     return true;
@@ -2523,7 +2642,7 @@ const methods: { [M in Method]: Handler<M> } = {
     const actor = unlockedPerson('invites.issue');
     const p = parameters(params, 'invalid invite');
     const roles = textList(p.roles, 'invalid roles');
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
 
     // SP05 §3: while connected the same question — "a code to hand over" — is the host's
     // `POST /v1/admin/people` (create the person and their access code) or, for somebody who is
@@ -2582,11 +2701,16 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   // -------------------------------------------------------------- vault
-  // K7/RF-54: the list carries `holders` and `rotationPending` from the snapshot.
-  'vault.list': () =>
-    required(shares, 'vault.list').decorate(
-      required(vault, 'vault.list').list(unlockedPerson('vault.list').id),
-    ),
+  /**
+   * K7/RF-54: the vault list, with the holders and the `rotationPending` chip of each item. Both come
+   * from the cached snapshot, so a Nod older than the guild's minimum — disconnected (O2, owner
+   * 2026-10-17) — shows the machine's own items undecorated instead, exactly as it does with no host
+   * at all.
+   */
+  'vault.list': () => {
+    const items = required(vault, 'vault.list').list(unlockedPerson('vault.list').id);
+    return requiresUpdate() ? items : required(shares, 'vault.list').decorate(items);
+  },
 
   'vault.save': async (params) => {
     const r = required(repo, 'vault.save');
@@ -2714,8 +2838,13 @@ const methods: { [M in Method]: Handler<M> } = {
 
   // -------------------------------------------------------------- shares (K4–K7, SP06 §4–§5)
 
-  /** K4/SP06 §5: the people the credential's scope could reach, with their key state. */
+  /**
+   * K4/SP06 §5: the people the credential's scope could reach, with their key state. The roster and
+   * the pinned keys that answer it come from the cached snapshot, so a disconnected Nod (O2, owner
+   * 2026-10-17) has nobody to offer — the same answer a Nod with no host gives.
+   */
   'shares.recipients': (params) => {
+    if (requiresUpdate()) return [];
     const toolId = text(parameters(params, 'invalid credential').toolId, 'invalid tool');
     return required(shares, 'shares.recipients').recipients(toolId);
   },
@@ -2729,8 +2858,12 @@ const methods: { [M in Method]: Handler<M> } = {
     return await required(shares, 'shares.send').send(toolId, to, optionalPassword(p.password));
   },
 
-  /** K4: the snapshot's open shares addressed to me — metadata only, never the sealed copy. */
-  'shares.inbox': () => required(shares, 'shares.inbox').inbox(),
+  /**
+   * K4: the snapshot's open shares addressed to me — metadata only, never the sealed copy. The inbox
+   * is the cached snapshot's, so a disconnected Nod (O2, owner 2026-10-17) shows none: the shares are
+   * still in the body on disk and appear the moment the guild takes this Nod back.
+   */
+  'shares.inbox': () => (requiresUpdate() ? [] : required(shares, 'shares.inbox').inbox()),
 
   /**
    * K4/SP06 §4: opens the share, lands it in the vault bound to the tool's origin and accepts it on
@@ -2777,8 +2910,12 @@ const methods: { [M in Method]: Handler<M> } = {
     );
   },
 
-  /** K8/RF-47 (admin): the members of the assigned roles still without a copy, as of the last sync. */
-  'assignments.missing': () => required(shares, 'assignments.missing').missing(),
+  /**
+   * K8/RF-47 (admin): the members of the assigned roles still without a copy, as of the last sync.
+   * The list is the host's answer, so a disconnected Nod (O2, owner 2026-10-17) has none to show —
+   * the read itself does not run while the guild is disconnected.
+   */
+  'assignments.missing': () => (requiresUpdate() ? [] : required(shares, 'assignments.missing').missing()),
 
   /**
    * K8/SP06 §4 (admin): seals a copy to every member of the list this Nod can reach, with the one
@@ -2831,7 +2968,7 @@ const methods: { [M in Method]: Handler<M> } = {
     if (limit !== undefined) filter.limit = limit;
     // SP05 §4: Settings → Activity shows the guild's own log while connected (`GET
     // /v1/admin/events`, SP03 §2) — the local event table is this machine's queue for the host.
-    const admin = hostAdminFor(connectionOf());
+    const admin = hostAdminFor(guildConnection());
     if (admin !== null) return await admin.listEvents(filter);
     return r.listEvents(filter);
   },
