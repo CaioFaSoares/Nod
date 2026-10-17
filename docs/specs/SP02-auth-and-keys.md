@@ -90,8 +90,10 @@ the host verifies against a fixed dummy hash, so timing doesn't tell who exists 
   - the person, for any of their sessions;
   - the admin, for anyone's;
   - disabling the person, which revokes all of theirs.
-- **Nod side**: the token lives in the keychain under `nod.host.<hostKid>.<personId>`, never in
-  SQLite or `store.json`. It is read only after the local unlock (§6).
+- **Nod side**: the token is kept under `nod.host.<hostKid>.<personId>`, never in plaintext in SQLite
+  or in `store.json`. It is read only after the local unlock (§6). Since 0.5.1 (RF-63) it is sealed
+  as a `bv1.` value under `vaultKey` with that string as AAD (§8) and kept in the `secret` table of
+  `nod.db` (`backend/secret-store.ts` `sealedSecrets`); a password change re-seals it in the §7 batch.
 - Errors: every sign-in failure answers `401 { "error": "invalid credentials" }`; every code failure
   answers `401 { "error": "invalid code" }`.
 - Rate limits answer `429 { "error": "too many attempts" }`:
@@ -155,6 +157,11 @@ Keychain value of each credential, replacing today's plaintext:
   after encoding: about 1.8 KB of JSON. Longer values are refused with a clear message.
 - Each vault index row also stores `origin` (the tool's origin when saved). The login adapter fills
   only when the window's origin equals it (B9, RF-38).
+- Since 0.5.1 (RF-63) these values — and the E02 pair's `nod.keys.<person>` — are kept in the
+  `secret` table of `nod.db` under the same key instead of one keychain item each; only `bv1.` values
+  are ever written there. A value an older Nod left in the keychain moves to the table on its first
+  read, and every one of the person's values is read once right after the unlock, so the keychain
+  prompts of that move come together.
 
 ## 9. Biometrics
 
@@ -169,6 +176,12 @@ Today `nod.bio.<person>` holds the person id as a marker (`backend/session.ts`).
 - Any host call that needs a fresh sign-in after the session token expires asks for the password.
 - Enabling or disabling biometrics writes or deletes the item.
 - Linux has no biometrics (`docs/canonico.md` §9), so the item never exists there.
+
+- Since 0.5.1 (RF-63) this item is the only one the Nod keeps in the system keychain. Whether a
+  person has it is a `store.json` flag (`biometric_people`, `{ [personId]: boolean }`), written beside
+  every write or delete of the item, so the entry screen and the password unlock never read the
+  keychain; a person with no flag yet (enabled by an older Nod) is answered by one read of the item.
+  The biometric unlock reads the item once, after `app.authenticate`.
 
 The gate for reveal, copy, accept and send (E02 §5) is `app.authenticate` wherever the runtime
 reports the `authenticate` capability — the **machine's** capability, not the per-person shortcut of

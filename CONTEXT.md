@@ -121,6 +121,8 @@ _Evite_: modo local, desconectado (como sinônimo)
 
 **Chaveiro** — keychain (`SecretStore`, `app.secrets`):
 O armazenamento de credenciais do sistema operacional — Keychain, Credential Manager, Secret Service.
+Desde 0.5.1 (RF-63) guarda só o item de biometria `nod.bio.<pessoa>`; os demais segredos são valores
+`bv1.` na tabela `secret` do `nod.db`, atrás do mesmo `SecretStore` (`backend/secret-store.ts`).
 
 **Cofre** — vault (`VaultItem`):
 As credenciais das ferramentas de uma pessoa, guardadas no chaveiro; o banco guarda só o índice.

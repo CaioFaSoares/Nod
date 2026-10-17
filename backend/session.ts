@@ -3,8 +3,9 @@
 // Nothing here imports `tjs` or `tiny`: repository, keychain, `store` and authenticator come in
 // through `deps`, which keeps this slice testable with `bun test`. A secret never reaches an event,
 // `store`, log or file: the database holds only a verifier — the v1 PBKDF2 `PasswordHash` or the V2
-// `check` of SP02 §6 — and the keychain holds `nod.bio.<person>` with `base64url(vaultKey)`
-// (SP02 §9). The keys of an unlock live in this module's memory and `lock()` forgets them (SP02 §6).
+// `check` of SP02 §6 — and the `bv1.` values sealed under the `vaultKey` (RF-63), and the system
+// keychain holds `nod.bio.<person>` with `base64url(vaultKey)` (SP02 §9). The keys of an unlock live
+// in this module's memory and `lock()` forgets them (SP02 §6).
 import {
   PBKDF2_ITERATIONS,
   PASSWORD_V2_ALGORITHM,
@@ -27,6 +28,7 @@ import {
   plainVaultCredential,
 } from '../shared/vault-crypto';
 import { HostError } from './host-client';
+import { BIOMETRIC_ITEM_PREFIX } from './secret-store';
 import { keysKey } from './keys';
 import { reencryptVaultItems } from './vault';
 import type { DerivedKeys, PasswordHashV2 } from '../shared/auth';
@@ -63,11 +65,16 @@ export const OFFLINE_SESSION_ERROR = 'offline session — lock and enter the gui
  * it derived, without asking the person to enable biometrics a second time.
  */
 const BIOMETRIC_PENDING_KEY = 'biometric_pending';
+/**
+ * 0.5.1 (RF-63): whether each person has the biometric item, as `{ [personId]: boolean }` — a
+ * preference of `store.json`, never the item's value. The entry screen asks this on every state, and
+ * reading the item itself would put the system keychain's prompt in front of the fingerprint; the
+ * item is read only by `unlockBiometric`, after `app.authenticate` confirmed the person.
+ */
+const BIOMETRIC_PEOPLE_KEY = 'biometric_people';
 /** Unlock backoff, persisted in `meta` (RF-23). */
 const META_FAILURES = 'unlock_failures';
 const META_LAST_FAILURE = 'unlock_last_failure';
-/** Prefix of the OS keychain key that marks a person's biometrics as enabled. */
-const BIOMETRIC_PREFIX = 'nod.bio.';
 /** Reason shown by the operating system in the biometric dialog (`app.authenticate`). */
 const BIOMETRIC_REASON = 'Unlock Nod';
 
@@ -114,6 +121,7 @@ const FAKE_PASSWORD: PasswordHash = {
 
 export interface SessionDeps {
   repo: Repo;
+  /** The `SecretStore` of `backend/secret-store.ts`: the `nod.bio.*` item and the `bv1.` values. */
   keychain: SecretStore;
   /** Runtime `store`: persistent across runs. Here only `last_person`. */
   store: {
@@ -123,6 +131,12 @@ export interface SessionDeps {
   /** `app.authenticate` at runtime; a double in the tests. */
   authenticate: (reason: string) => Promise<boolean>;
   biometricAvailable: boolean;
+  /**
+   * SP02 §7, RF-63: keys of `bv1.` values sealed under this person's `vaultKey` beside the vault and
+   * the E02 pair — the guild bearer — that a password change re-seals in the same batch. Each key is
+   * also its AAD. None by default.
+   */
+  sealedExtras?: (personId: Id) => string[];
   /** PBKDF2 iterations (§3). The tests pass 1000; the default is the runtime one. */
   iterations?: number;
   /** Injectable clock (backoff and invite validity in the tests). Default: `new Date()`. */
@@ -340,7 +354,7 @@ export function createSession(deps: SessionDeps): Session {
   // ---------------------------------------------------------------- biometrics and wait
 
   function biometricKey(personId: Id): string {
-    return `${BIOMETRIC_PREFIX}${personId}`;
+    return `${BIOMETRIC_ITEM_PREFIX}${personId}`;
   }
 
   async function lastPersonId(): Promise<Id | null> {
@@ -348,9 +362,33 @@ export function createSession(deps: SessionDeps): Session {
     return typeof raw === 'string' && raw.length > 0 ? raw : null;
   }
 
+  /** RF-63: `BIOMETRIC_PEOPLE_KEY` as read from `store`; anything this build cannot read is empty. */
+  async function biometricPeople(): Promise<Record<Id, boolean>> {
+    const raw = await deps.store.get(BIOMETRIC_PEOPLE_KEY);
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    const people: Record<Id, boolean> = {};
+    for (const [id, enabled] of Object.entries(raw)) if (typeof enabled === 'boolean') people[id] = enabled;
+    return people;
+  }
+
+  /** RF-63: records whether `personId` has the biometric item, beside every write or delete of it. */
+  async function markBiometric(personId: Id, enabled: boolean): Promise<void> {
+    const people = await biometricPeople();
+    people[personId] = enabled;
+    await deps.store.set(BIOMETRIC_PEOPLE_KEY, people);
+  }
+
+  /**
+   * RF-63: answered from `store`, so the entry screen never reads the keychain. A person an older
+   * Nod enabled has no flag yet: one read of the item answers it, and the answer is kept.
+   */
   async function hasBiometrics(personId: Id): Promise<boolean> {
     if (!deps.biometricAvailable) return false;
-    return (await deps.keychain.get(biometricKey(personId))) !== null;
+    const known = (await biometricPeople())[personId];
+    if (known !== undefined) return known;
+    const enabled = (await deps.keychain.get(biometricKey(personId))) !== null;
+    await markBiometric(personId, enabled);
+    return enabled;
   }
 
   function failures(): number {
@@ -628,20 +666,19 @@ export function createSession(deps: SessionDeps): Session {
   }
 
   /**
-   * SP02 §9 (V1): the biometric item holds `base64url(vaultKey)`. A password unlock is when a key
-   * exists, so it is where an item that still holds the old marker (the person id) is rewritten —
-   * and where a person whose marker was dropped after a biometric attempt gets the item back, with
-   * no second "enable" by their hand. A keychain that refuses is not a reason to refuse the unlock:
-   * the next password unlock tries again.
+   * SP02 §9 (V1): the biometric item holds `base64url(vaultKey)`. A person whose old marker (the
+   * person id) was dropped by a biometric attempt gets the item back at the next password unlock,
+   * the moment a key exists, with no second "enable" by their hand. Only that pending case writes:
+   * RF-63 keeps the password unlock off the keychain, so an item that still holds a marker is found
+   * by the biometric attempt itself (`unlockBiometric`). A keychain that refuses is not a reason to
+   * refuse the unlock: the next password unlock tries again.
    */
   async function refreshBiometricItem(personId: Id, key: Uint8Array<ArrayBuffer>): Promise<void> {
     if (!deps.biometricAvailable) return;
-    const pending = (await deps.store.get(BIOMETRIC_PENDING_KEY)) === personId;
-    const existing = await deps.keychain.get(biometricKey(personId));
-    if (existing !== null && decodeVaultKey(existing) !== null) return;
-    if (existing === null && !pending) return;
+    if ((await deps.store.get(BIOMETRIC_PENDING_KEY)) !== personId) return;
     if (!(await deps.keychain.set(biometricKey(personId), toBase64url(key)))) return;
-    if (pending) await deps.store.set(BIOMETRIC_PENDING_KEY, null);
+    await deps.store.set(BIOMETRIC_PENDING_KEY, null);
+    await markBiometric(personId, true);
     knownBiometric = true;
   }
 
@@ -706,7 +743,10 @@ export function createSession(deps: SessionDeps): Session {
     const last = await lastPersonId();
     if (!(await deps.authenticate(BIOMETRIC_REASON))) throw new Error(BIOMETRICS_DECLINED);
 
+    // RF-63: the one keychain read of a biometric unlock, after the system confirmed the person.
     const stored = last === null ? null : await deps.keychain.get(biometricKey(last));
+    // An item gone from the keychain (removed by hand) stops being offered on the entry screen.
+    if (last !== null && stored === null) await markBiometric(last, false);
     const found = last === null ? null : deps.repo.personById(last);
     if (last === null || stored === null || found === null) throw new Error(BIOMETRICS_DISABLED);
     // 0.5.0 (RF-60): a guild tile opens only for the guild's own person, like the password unlock
@@ -719,6 +759,7 @@ export function createSession(deps: SessionDeps): Session {
       // no `vaultKey` to open the vault. It goes, and the next password unlock writes the key.
       await deps.keychain.delete(biometricKey(last));
       await deps.store.set(BIOMETRIC_PENDING_KEY, last);
+      await markBiometric(last, false);
       knownBiometric = false;
       throw new Error(BIOMETRICS_NEED_PASSWORD);
     }
@@ -763,6 +804,7 @@ export function createSession(deps: SessionDeps): Session {
     if (!(await deps.keychain.set(biometricKey(person.id), toBase64url(keys.vaultKey)))) {
       throw new Error(BIOMETRIC_REFUSED);
     }
+    await markBiometric(person.id, true);
     await deps.store.set(LAST_PERSON_KEY, person.id);
     return state();
   }
@@ -775,6 +817,7 @@ export function createSession(deps: SessionDeps): Session {
   async function disableBiometric(): Promise<SessionState> {
     const person = requireUnlocked();
     await deps.keychain.delete(biometricKey(person.id));
+    await markBiometric(person.id, false);
     if ((await deps.store.get(BIOMETRIC_PENDING_KEY)) === person.id) {
       await deps.store.set(BIOMETRIC_PENDING_KEY, null);
     }
@@ -914,12 +957,13 @@ export function createSession(deps: SessionDeps): Session {
     // SP02 §9: the biometric item is keyed by person id and holds `base64url(vaultKey)`. It moves
     // with the row and takes the key of the adopted account, or biometrics would go on unlocking
     // this session with a key that opens nothing.
-    const marker = await deps.keychain.get(`${BIOMETRIC_PREFIX}${from}`);
-    if (marker === null) return;
-    if (!(await deps.keychain.set(`${BIOMETRIC_PREFIX}${to}`, toBase64url(toVaultKey)))) {
+    if (!(await hasBiometrics(from))) return;
+    if (!(await deps.keychain.set(biometricKey(to), toBase64url(toVaultKey)))) {
       throw new Error('the system keychain refused to move the biometric item');
     }
-    await deps.keychain.delete(`${BIOMETRIC_PREFIX}${from}`);
+    await markBiometric(to, true);
+    await deps.keychain.delete(biometricKey(from));
+    await markBiometric(from, false);
   }
 
   /**
@@ -1060,14 +1104,18 @@ export function createSession(deps: SessionDeps): Session {
       person.id,
       previousVaultKey,
       newKeys.vaultKey,
-      // M1/SP02 §7: the E02 pair's keychain value (`backend/keys.ts`, `nod.keys.<person>`, AAD = the
-      // same string) is a `bv1.` value under this very key, so it moves in the same batch: a crash
-      // after it can no longer leave the pair sealed under a key nothing holds. What is left for
-      // `keys.reSeal` afterwards is the host's blob, which its own mark makes republishable.
-      [{ key: keysKey(person.id), aad: keysKey(person.id) }],
+      // M1/SP02 §7: the E02 pair's value (`backend/keys.ts`, `nod.keys.<person>`, AAD = the same
+      // string) is a `bv1.` value under this very key, so it moves in the same batch: a crash after
+      // it can no longer leave the pair sealed under a key nothing holds. What is left for
+      // `keys.reSeal` afterwards is the host's blob, which its own mark makes republishable. RF-63:
+      // the guild bearer (`sealedExtras`) is sealed under the same key and rides along.
+      [keysKey(person.id), ...(deps.sealedExtras?.(person.id) ?? [])].map((key) => ({ key, aad: key })),
     );
-    const biometric = await deps.keychain.get(biometricKey(person.id));
-    if (biometric !== null && !(await deps.keychain.set(biometricKey(person.id), toBase64url(newKeys.vaultKey)))) {
+    // RF-63: the flag, not a read of the item, says whether there is one to move.
+    if (
+      (await hasBiometrics(person.id)) &&
+      !(await deps.keychain.set(biometricKey(person.id), toBase64url(newKeys.vaultKey)))
+    ) {
       throw new Error(BIOMETRIC_REFUSED);
     }
     // Then the row: the vault is readable with the new password and the old one opens nothing.
@@ -1094,6 +1142,7 @@ export function createSession(deps: SessionDeps): Session {
     const removed = deps.repo.removeVaultOf(personId);
     for (const item of removed) await deps.keychain.delete(item.keychainKey);
     await deps.keychain.delete(biometricKey(personId));
+    await markBiometric(personId, false);
     // SP02 §7/V1: the next activation of this account (or of the local row it replaces) is a reset,
     // and `onActivated` subscribers hear it as one.
     lastWiped = personId;

@@ -166,6 +166,10 @@ CREATE TABLE IF NOT EXISTS peer_keys (
   pending_fingerprint TEXT,
   pending_since       TEXT
 );
+CREATE TABLE IF NOT EXISTS secret (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
 
 /**
@@ -191,11 +195,16 @@ CREATE TABLE IF NOT EXISTS peer_keys (
  * `6` is RF-62's tool category: `tool.category`, the display name the guild gave a local org row
  * (a personal row keeps `NULL`). One column of an existing table, so a `5` database gets it from
  * `addColumns` and every row it holds reads as uncategorized.
+ *
+ * `7` is 0.5.1's `secret` table (RF-63, `backend/secret-store.ts`): the `bv1.` values that used to
+ * be one keychain item each — credentials, the E02 pair, the guild bearer — sealed under the
+ * person's `vaultKey` and kept here, so the system keychain holds only the biometric item. One new
+ * table and no other change, so a `6` database gets it from the `CREATE … IF NOT EXISTS` above.
  */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
-/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2–v5, current. */
-const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, 5, SCHEMA_VERSION];
+/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2–v6, current. */
+const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, 5, 6, SCHEMA_VERSION];
 
 /**
  * The database was created by an older Nod (v1, in Portuguese). `migrate` throws this and touches
@@ -600,6 +609,13 @@ export interface Repo {
   // meta
   meta(key: string): string | null;
   setMeta(key: string, value: string): void;
+  /**
+   * 0.5.1 (RF-63): one value of the `secret` table — always a `bv1.` envelope under the person's
+   * `vaultKey` (`backend/secret-store.ts` refuses anything else), never a plaintext.
+   */
+  secret(key: string): string | null;
+  setSecret(key: string, value: string): void;
+  deleteSecret(key: string): void;
   // host (connected mode, SP05 §2)
   /**
    * The one `host` row, or `null` without a host. Everything the Nod sends to a host is built from
@@ -1695,6 +1711,23 @@ CREATE TABLE vault_item_rebuilt (
     ]);
   }
 
+  // ---------------------------------------------------------------- secret (RF-63)
+
+  function secret(key: string): string | null {
+    return singleRow<{ value: string }>('SELECT value FROM secret WHERE key = ?', [key])?.value ?? null;
+  }
+
+  function setSecret(key: string, value: string): void {
+    db.run('INSERT INTO secret (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value', [
+      key,
+      value,
+    ]);
+  }
+
+  function deleteSecret(key: string): void {
+    db.run('DELETE FROM secret WHERE key = ?', [key]);
+  }
+
   // ---------------------------------------------------------------- host (connected mode)
 
   function buildHost(l: HostRow): HostRecord {
@@ -1969,6 +2002,9 @@ CREATE TABLE vault_item_rebuilt (
     loginResults,
     meta,
     setMeta,
+    secret,
+    setSecret,
+    deleteSecret,
     hostRecord,
     saveHost,
     saveHostSnapshot,
