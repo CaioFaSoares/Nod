@@ -12,8 +12,8 @@
 // V1/SP02 §8: the keychain value is never the credential in clear. `save` seals it with the
 // session's `vaultKey` (AAD = the keychain key) through `shared/vault-crypto.ts`, and `read` opens
 // it with the same key. Values without the `bv1.` prefix are legacy plaintext: `read` still opens
-// them so an upgrade never loses a credential, and `migrateLegacy` re-encrypts them at the first
-// unlock of the person (called by `backend/main.ts` after the session has keys).
+// them so an upgrade never loses a credential. Since RF-63 the store never hands one back — the
+// keychain import of `backend/main.ts` (`importLegacy`) seals them on the way into the `secret` table.
 import { originOf } from '../shared/catalog';
 import { exportVault, importVault } from '../shared/vault-export';
 import {
@@ -79,12 +79,6 @@ export interface Vault {
   remove(personId: Id, toolId: Id): Promise<void>;
   removeAllOf(personId: Id): Promise<void>;
   removeAllForTool(toolId: Id): Promise<void>;
-  /**
-   * SP02 §8: re-encrypts the legacy plaintext values of one person under the session's `vaultKey`,
-   * value by value in place; a value already sealed and a keychain value that is absent are left
-   * alone, so running it again after a failure is safe. Answers how many values it rewrote.
-   */
-  migrateLegacy(personId: Id): Promise<number>;
   export(personId: Id, password: string): Promise<string>;
   import(personId: Id, blob: string, password: string): Promise<number>;
 }
@@ -216,32 +210,6 @@ export function createVault(deps: VaultDeps): Vault {
     }
   }
 
-  /**
-   * SP02 §8: the first unlock after V1 turns every legacy plaintext value of the person into a
-   * `bv1.` one. It reads through the index, so an item whose keychain value is gone is nothing to
-   * rewrite; a value that does not fit the keychain limit stays plaintext rather than blocking the
-   * rest, and the next unlock tries it again — the run is idempotent by construction.
-   */
-  async function migrateLegacy(personId: Id): Promise<number> {
-    const vaultKey = requireVaultKey();
-    let migrated = 0;
-    for (const item of deps.repo.listVault(personId)) {
-      const raw = await deps.keychain.get(item.keychainKey);
-      if (raw === null || isSealedVaultValue(raw)) continue;
-      const credential = plainVaultCredential(raw);
-      if (credential === null) continue;
-      let value: string;
-      try {
-        value = await encryptVaultValue(vaultKey, item.keychainKey, credential);
-      } catch {
-        continue; // over the limit: the plaintext value stays readable until it is saved again
-      }
-      if (!(await deps.keychain.set(item.keychainKey, value))) throw new Error(KEYCHAIN_REFUSED);
-      migrated += 1;
-    }
-    return migrated;
-  }
-
   async function exportItems(personId: Id): Promise<VaultExportItem[]> {
     const items: VaultExportItem[] = [];
     for (const item of deps.repo.listVault(personId)) {
@@ -282,7 +250,6 @@ export function createVault(deps: VaultDeps): Vault {
     remove,
     removeAllOf,
     removeAllForTool,
-    migrateLegacy,
     export: exportToBlob,
     import: importFromBlob,
   };

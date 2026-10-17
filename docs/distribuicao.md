@@ -65,6 +65,16 @@ Na máquina de destino, com o `Nod.app` em `/Applications`:
    right-click não funciona mais); ou, no terminal,
 3. `xattr -d com.apple.quarantine /Applications/Nod.app`.
 
+**Move it to `/Applications` before the first launch, and always launch it from there.** A
+quarantined app opened from Downloads or straight from the `.dmg` runs from a new random path on
+every launch (macOS "App Translocation", `/private/var/folders/…/AppTranslocation/<UUID>/d/Nod.app`),
+and the keychain treats each of those paths as a different app: the Touch ID item (`nod.bio.*`, RF-63)
+asks for the login password again every time. Seen on 2026-10-17 in the item's access list, which
+named `Nod 2.app`, `Nod 3.app` and `Nod 4.app` under three translocation folders. Clearing the
+quarantine (step 3) on the copy in `/Applications` is what stops it; an update installed by the app
+itself is not quarantined. One prompt per new unsigned build remains until releases are signed with a
+fixed certificate (`signIdentity`/`TINYJS_SIGN_IDENTITY`).
+
 Distribuição sem esse passo exige **Developer ID Application + notarização** (Apple Developer
 Program) — melhoria opcional, ver `docs/canonico.md` §19.
 

@@ -159,9 +159,13 @@ Keychain value of each credential, replacing today's plaintext:
   only when the window's origin equals it (B9, RF-38).
 - Since 0.5.1 (RF-63) these values — and the E02 pair's `nod.keys.<person>` — are kept in the
   `secret` table of `nod.db` under the same key instead of one keychain item each; only `bv1.` values
-  are ever written there. A value an older Nod left in the keychain moves to the table on its first
-  read, and every one of the person's values is read once right after the unlock, so the keychain
-  prompts of that move come together.
+  are ever written there, and outside `nod.bio.*` the backend never reads, writes or deletes a
+  keychain item in normal use (each such call was a password prompt whenever the item's ACL did not
+  name the running build). What an older Nod left in the keychain is copied once, read-only, right
+  after the first unlock — only keys the table lacks; a plaintext is sealed on the way in — and a
+  `meta` mark (`keychain_imported.<person>`) is set after that one attempt whatever happened: an item
+  the keychain refused (the person denied the prompt) is counted in `keychain_import_skipped.<person>`
+  and never retried, so it can never bring the prompt back. The old items stay in the keychain untouched.
 
 ## 9. Biometrics
 
@@ -187,7 +191,9 @@ The gate for reveal, copy, accept and send (E02 §5) is `app.authenticate` where
 reports the `authenticate` capability — the **machine's** capability, not the per-person shortcut of
 `session.state.biometric` (`docs/canonico.md` §22, "gate where biometrics exist"). The page reads
 that capability from `nod.info` (`biometricAvailable`) and sends no password there: the operating
-system's prompt is what runs, each time.
+system's prompt is what runs. Since 0.5.1 a confirmation — the Touch ID unlock, or a gate that
+passed — covers the same person's next gated calls until 15 minutes pass without one (`GATE_WINDOW_MS`
+in `backend/main.ts`); a lock forgets it (owner, 2026-10-17: "peça sempre no máximo uma vez").
 
 A typed password is the factor only where the capability is absent (Linux, `docs/canonico.md` §9)
 and, in a non-release dev run (`tinyjs dev`), where it exists too — the Proposto "gate in a dev run"

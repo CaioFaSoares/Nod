@@ -6,14 +6,15 @@
 // (`nod.host.<kid>.<person>`) — is a `bv1.` envelope under the person's `vaultKey` (SP02 §8), so the
 // keychain added nothing to their confidentiality, only one operating-system prompt per item each
 // time the app's signature changed (macOS names the binary in the item's ACL, `docs/tinyjs.md` §5).
-// Those values now live in the `secret` table, and the system keychain keeps exactly one item per
-// person: `nod.bio.<person>`, the `vaultKey` that biometrics unlocks (SP02 §9). One fingerprint, one
-// keychain read, and everything else opens from memory.
+// Those values live in the `secret` table, and the system keychain keeps exactly one item per
+// person: `nod.bio.<person>`, the `vaultKey` that biometrics unlocks (SP02 §9).
 //
-// Values written by an older Nod are still in the keychain. A read that misses the table looks
-// there once: a `bv1.` value moves into the table and its item is deleted; a plaintext one (a legacy
-// credential, a bearer of 0.5.0) is handed back as it is and moves on its next write, which is
-// sealed. The table never holds a plaintext: `set` refuses anything that is not `bv1.`.
+// The rule that keeps the prompts away: outside `nod.bio.*`, the store **never** touches the system
+// keychain — no fallback read on a miss, no delete of an old copy. Each of those used to be one more
+// password prompt whenever the item's ACL did not name the running build. What an older Nod left in
+// the keychain is brought over by `importLegacySecrets` alone: read-only, only for keys the table
+// lacks, once per person (`backend/main.ts` keeps the marker). The old items are left in the keychain
+// untouched, since deleting them is itself a prompt.
 //
 // Nothing here imports `tjs` or `tiny`; `bun test` drives it with an in-memory keychain and SQLite.
 import { decryptVaultBytes, encryptVaultBytes, isSealedVaultValue } from '../shared/vault-crypto';
@@ -31,85 +32,107 @@ export interface SecretRows {
 
 /**
  * The backend's `SecretStore`: `nod.bio.*` goes to the system keychain, every other key to the
- * `secret` table, with the read-once move of what an older Nod left in the keychain.
+ * `secret` table and nowhere else. The table never holds a plaintext: `set` refuses anything that
+ * is not `bv1.`.
  */
 export function createSecretStore(deps: { rows: SecretRows; keychain: SecretStore }): SecretStore {
   function inKeychain(key: string): boolean {
     return key.startsWith(BIOMETRIC_ITEM_PREFIX);
   }
 
-  /**
-   * The keychain item an older Nod left under `key`, removed. A refusal (the person denied the
-   * system prompt) leaves a stale copy behind and is not a reason to fail the write that replaced
-   * it: the table is the value from now on, and the next delete of the key tries again.
-   */
-  async function dropLegacy(key: string): Promise<boolean> {
-    try {
-      return await deps.keychain.delete(key);
-    } catch {
-      return false;
-    }
-  }
-
   return {
     async get(key) {
-      if (inKeychain(key)) return deps.keychain.get(key);
-      const stored = deps.rows.secret(key);
-      if (stored !== null) return stored;
-      const legacy = await deps.keychain.get(key);
-      if (legacy === null || !isSealedVaultValue(legacy)) return legacy;
-      deps.rows.setSecret(key, legacy);
-      await dropLegacy(key);
-      return legacy;
+      return inKeychain(key) ? deps.keychain.get(key) : deps.rows.secret(key);
     },
     async set(key, value) {
       if (inKeychain(key)) return deps.keychain.set(key, value);
       if (!isSealedVaultValue(value)) return false;
-      // The first write under a key is where a plaintext an older Nod left in the keychain is
-      // replaced; afterwards the keychain has nothing under it.
-      const first = deps.rows.secret(key) === null;
       deps.rows.setSecret(key, value);
-      if (first) await dropLegacy(key);
       return true;
     },
     async delete(key) {
       if (inKeychain(key)) return deps.keychain.delete(key);
       const had = deps.rows.secret(key) !== null;
       deps.rows.deleteSecret(key);
-      const legacy = await dropLegacy(key);
-      return had || legacy;
+      return had;
     },
   };
+}
+
+/** The `meta` rows `importLegacySecrets` keeps its one-shot marker and its report in. */
+export interface ImportMarks {
+  meta(key: string): string | null;
+  setMeta(key: string, value: string): void;
+}
+
+/** RF-63: the `meta` key that says a person's keychain import was attempted (never repeated). */
+export function legacyImportedKey(personId: string): string {
+  return `keychain_imported.${personId}`;
+}
+
+/** RF-63: the `meta` key that counts the old items a person's import could not read (refused). */
+export function legacySkippedKey(personId: string): string {
+  return `keychain_import_skipped.${personId}`;
+}
+
+/**
+ * RF-63: brings what an older Nod left in the system keychain for `personId` into the `secret`
+ * table — **one attempt per person, ever**. Only keys the table lacks are read, each once; nothing
+ * is ever written to or deleted from the keychain. A `bv1.` value is copied as it is; a plaintext (a
+ * 0.5.0 bearer, a pre-V1 credential) goes through `seal`, and is dropped when `seal` answers `null`.
+ * A read the keychain refuses (the person denied the system prompt) is skipped and counted under
+ * `legacySkippedKey`, never retried: the marker is set after the attempt whatever happened, so a
+ * refused item can never bring the prompt back at the next unlock. Answers how many were skipped.
+ */
+export async function importLegacySecrets(
+  deps: { rows: SecretRows & ImportMarks; keychain: SecretStore },
+  personId: string,
+  keys: readonly string[],
+  seal: (key: string, plaintext: string) => Promise<string | null>,
+): Promise<number> {
+  if (deps.rows.meta(legacyImportedKey(personId)) === '1') return 0;
+  let skipped = 0;
+  try {
+    for (const key of keys) {
+      if (key.startsWith(BIOMETRIC_ITEM_PREFIX) || deps.rows.secret(key) !== null) continue;
+      let raw: string | null;
+      try {
+        raw = await deps.keychain.get(key);
+      } catch {
+        skipped += 1;
+        continue;
+      }
+      if (raw === null) continue;
+      const value = isSealedVaultValue(raw) ? raw : await seal(key, raw).catch(() => null);
+      if (value !== null && isSealedVaultValue(value)) deps.rows.setSecret(key, value);
+    }
+  } finally {
+    deps.rows.setMeta(legacyImportedKey(personId), '1');
+    if (skipped > 0) deps.rows.setMeta(legacySkippedKey(personId), String(skipped));
+  }
+  return skipped;
 }
 
 /**
  * A `SecretStore` for values that are not `bv1.` by themselves — the guild bearer (SP02 §5): each
  * one is sealed under the session's `vaultKey` with its key as the AAD before it reaches `store`,
  * and opened on the way out. Locked (no `vaultKey`), nothing is written and nothing opens — the
- * bearer is read only after the unlock (SP02 §5). A plaintext an older Nod left in the keychain is
- * answered as it is and, with a key in hand, sealed into the table at once.
+ * bearer is read only after the unlock (SP02 §5).
  */
 export function sealedSecrets(store: SecretStore, vaultKey: () => Uint8Array<ArrayBuffer> | null): SecretStore {
-  async function set(key: string, value: string): Promise<boolean> {
-    const sealer = vaultKey();
-    if (sealer === null) return false;
-    return store.set(key, await encryptVaultBytes(sealer, key, new TextEncoder().encode(value)));
-  }
-
   return {
     async get(key) {
       const raw = await store.get(key);
-      if (raw === null) return null;
       const opener = vaultKey();
-      if (!isSealedVaultValue(raw)) {
-        if (opener !== null) await set(key, raw);
-        return raw;
-      }
-      if (opener === null) return null;
+      if (raw === null || opener === null) return null;
       const bytes = await decryptVaultBytes(opener, key, raw);
       return bytes === null ? null : new TextDecoder().decode(bytes);
     },
-    set,
+    async set(key, value) {
+      const sealer = vaultKey();
+      if (sealer === null) return false;
+      return store.set(key, await encryptVaultBytes(sealer, key, new TextEncoder().encode(value)));
+    },
     delete: (key) => store.delete(key),
   };
 }
