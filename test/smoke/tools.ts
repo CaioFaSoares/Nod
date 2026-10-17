@@ -7,7 +7,7 @@
 // C: form login with the same shape as A, but its origin is NOT in the seed, so the runtime gate
 //    does not allow `login.report` for it. It counts every `POST /login` it receives and serves
 //    the counter at `GET /stats` (login-loop regression, step 10 of the smoke).
-// Provider: only the SSO round trip; it never calls the Bond API.
+// Provider: only the SSO round trip; it never calls the Nod API.
 //
 // USERNAME/SECRET_A are the same pair `test/smoke/smoke.html` writes to the vault.
 

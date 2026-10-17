@@ -52,6 +52,7 @@ function snapshot(fields: Partial<Snapshot> = {}): Snapshot {
       },
     ],
     favorites: ['jitsi'],
+    guildIcon: null,
     ...fields,
   };
 }

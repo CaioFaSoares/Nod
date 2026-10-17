@@ -1,4 +1,4 @@
-# Builds the Bond for every OS and publishes the zips + auto-update manifest as a GitHub Release
+# Builds Nod for every OS and publishes the zips + auto-update manifest as a GitHub Release
 # whenever a branch named release-* is pushed. Process and caveats: docs/distribuicao.md §8.
 name: release
 
@@ -103,47 +103,63 @@ jobs:
       - run: bun install --frozen-lockfile
 
       # The private seed (and any icon it references) never enters git (AGENTS.md). It arrives as
-      # the BOND_PRIVATE_RESOURCES secret: base64 of a tar.gz whose paths are relative to resources/.
+      # the NOD_PRIVATE_RESOURCES secret: base64 of a tar.gz whose paths are relative to resources/.
       - name: restore private resources
         env:
-          BOND_PRIVATE_RESOURCES: ${{ secrets.BOND_PRIVATE_RESOURCES }}
+          NOD_PRIVATE_RESOURCES: ${{ secrets.NOD_PRIVATE_RESOURCES }}
         run: |
-          if [ -z "$BOND_PRIVATE_RESOURCES" ]; then
-            echo "::error::secret BOND_PRIVATE_RESOURCES is missing (docs/distribuicao.md §8)"
+          if [ -z "$NOD_PRIVATE_RESOURCES" ]; then
+            echo "::error::secret NOD_PRIVATE_RESOURCES is missing (docs/distribuicao.md §8)"
             exit 1
           fi
-          printf '%s' "$BOND_PRIVATE_RESOURCES" | base64 -d | tar -xzf - -C resources
-          test -f resources/seed.json || { echo "::error::BOND_PRIVATE_RESOURCES has no seed.json"; exit 1; }
+          printf '%s' "$NOD_PRIVATE_RESOURCES" | base64 -d | tar -xzf - -C resources
+          test -f resources/seed.json || { echo "::error::NOD_PRIVATE_RESOURCES has no seed.json"; exit 1; }
+          # RF-56: an `icon.png` in the same tarball is the custom app icon; without one the release
+          # wears the tracked assets/icon.png (docs/distribuicao.md §9).
+          if [ -f resources/icon.png ]; then
+            echo "app icon: resources/icon.png (custom, from NOD_PRIVATE_RESOURCES)"
+          else
+            echo "app icon: assets/icon.png (tracked default)"
+          fi
 
       - name: generate tinyjs.json
-        run: bun scripts/gen-config.ts build
+        run: |
+          bun scripts/gen-config.ts build
+          # RF-56: gen-config picks the private icon on its own; a release wearing the wrong icon is
+          # worse than a failed build, so say which one and refuse the mismatch.
+          icon=$(bun -e 'console.log(JSON.parse(await Bun.file("tinyjs.json").text()).icon ?? "none")')
+          echo "tinyjs.json icon: $icon"
+          if [ -f resources/icon.png ] && [ "$icon" != "resources/icon.png" ]; then
+            echo "::error::NOD_PRIVATE_RESOURCES carries icon.png but the build would use $icon"
+            exit 1
+          fi
 
+      # Outside .build: `tinyjs build` (inside `publish`) wipes .build before packing.
       - name: release notes
         env:
           MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          mkdir -p .build
-          printf '%s\n' "${MESSAGE:-Bond ${{ needs.prepare.outputs.version }}}" > .build/release-notes.md
+          printf '%s\n' "${MESSAGE:-Nod ${{ needs.prepare.outputs.version }}}" > "${{ runner.temp }}/release-notes.md"
 
       - name: publish (macOS arm64 + x86_64)
         if: runner.os == 'macOS'
         run: |
           tinyjs version
-          tinyjs publish --arch arm64 --notes-file .build/release-notes.md
-          tinyjs publish --arch x86_64 --notes-file .build/release-notes.md
+          tinyjs publish --arch arm64 --notes-file "${{ runner.temp }}/release-notes.md"
+          tinyjs publish --arch x86_64 --notes-file "${{ runner.temp }}/release-notes.md"
 
       - name: publish (Linux)
         if: runner.os == 'Linux'
         run: |
           tinyjs version
-          tinyjs publish --notes-file .build/release-notes.md
+          tinyjs publish --notes-file "${{ runner.temp }}/release-notes.md"
 
       - name: publish (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           tinyjs version
-          tinyjs publish --notes-file .build/release-notes.md
+          tinyjs publish --notes-file "${{ runner.temp }}/release-notes.md"
 
       - name: check manifest version
         env:
@@ -167,10 +183,10 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       TAG: ${{ needs.prepare.outputs.tag }}
-      # Where the release goes: this repository unless vars.BOND_RELEASE_REPO names another one
-      # (then secrets.BOND_RELEASE_TOKEN needs contents:write on it).
-      RELEASE_REPO: ${{ vars.BOND_RELEASE_REPO || github.repository }}
-      GH_TOKEN: ${{ secrets.BOND_RELEASE_TOKEN || github.token }}
+      # Where the release goes: this repository unless vars.NOD_RELEASE_REPO names another one
+      # (then secrets.NOD_RELEASE_TOKEN needs contents:write on it).
+      RELEASE_REPO: ${{ vars.NOD_RELEASE_REPO || github.repository }}
+      GH_TOKEN: ${{ secrets.NOD_RELEASE_TOKEN || github.token }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -188,7 +204,7 @@ jobs:
           find parts -type f ! -name manifest.json -exec cp {} out/ \;
           ls -la out
           {
-            echo "### Bond $VERSION"
+            echo "### Nod $VERSION"
             echo
             echo '```json'
             jq 'del(.notes)' out/manifest.json
@@ -214,7 +230,7 @@ jobs:
             target=()
             [ "$RELEASE_REPO" = "${{ github.repository }}" ] && target=(--target "${{ github.sha }}")
             gh release create "$TAG" out/* --repo "$RELEASE_REPO" "${target[@]}" \
-              --title "Bond $VERSION" \
+              --title "Nod $VERSION" \
               --notes-file <(jq -r '.notes // empty' out/manifest.json) \
               --latest
           fi

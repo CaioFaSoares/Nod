@@ -1,6 +1,6 @@
-// Credential vault of Bond — docs/arquitetura.md §4; concepts in docs/canonico.md §11.
+// Credential vault of Nod — docs/arquitetura.md §4; concepts in docs/canonico.md §11.
 //
-// The credential value lives only in the OS keychain (key `bond.cred.<person>.<tool>`); the
+// The credential value lives only in the OS keychain (key `nod.cred.<person>.<tool>`); the
 // database keeps the index (`VaultItem`), never the secret. Nothing here imports `tjs` or `tiny`:
 // the repository and the keychain come in through `deps`, which keeps the slice testable with
 // `bun test`. The `credential_saved`/`credential_removed`/`vault_exported`/`vault_imported` events
@@ -47,7 +47,7 @@ export interface Vault {
  */
 export function createVault(deps: VaultDeps): Vault {
   function key(personId: Id, toolId: Id): string {
-    return `bond.cred.${personId}.${toolId}`;
+    return `nod.cred.${personId}.${toolId}`;
   }
 
   function list(personId: Id): VaultItem[] {
@@ -125,7 +125,7 @@ export function createVault(deps: VaultDeps): Vault {
 
   async function removeAllForTool(toolId: Id): Promise<void> {
     // Removing a tool from the catalog (canonico §8, A6) has to take every person's credential with
-    // it: the keychain item and the index row, or the next `bond.cred.*` read finds a ghost.
+    // it: the keychain item and the index row, or the next `nod.cred.*` read finds a ghost.
     const items = deps.repo.vaultItemsByTool(toolId);
     for (const item of items) {
       await deps.keychain.delete(item.keychainKey);

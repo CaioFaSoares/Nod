@@ -25,7 +25,7 @@ import { bootHost, type Host } from './main';
 import { createRepo, type Repo } from './repo';
 import { MAX_EVENTS_PER_BATCH } from './routes/events';
 
-const DEVICE = { name: 'bond-events-test', os: 'macos', appVersion: '0.3.0' } as const;
+const DEVICE = { name: 'nod-events-test', os: 'macos', appVersion: '0.3.0' } as const;
 
 /** What a test needs from an app: Elysia's answer to one `Request`. */
 type HttpApp = { handle(request: Request): Promise<Response> };
@@ -44,11 +44,11 @@ const hosts: TestHost[] = [];
 const dirs: string[] = [];
 
 async function startHost(): Promise<TestHost> {
-  const dir = mkdtempSync(join(tmpdir(), 'bond-events-'));
+  const dir = mkdtempSync(join(tmpdir(), 'nod-events-'));
   dirs.push(dir);
   const config: HostConfig = {
     dataDir: dir,
-    publicUrl: 'https://bond.example',
+    publicUrl: 'https://nod.example',
     port: DEFAULT_PORT,
     dev: false,
   };
@@ -75,7 +75,7 @@ afterEach(() => {
 
 const instant = (): string => new Date().toISOString();
 
-/** One event as the Bond sends it (SP04 §5): the client id plus the fields of `ClientEvent`. */
+/** One event as the Nod sends it (SP04 §5): the client id plus the fields of `ClientEvent`. */
 function event(id: string, overrides: Partial<ClientEvent> = {}): ClientEvent {
   return {
     id,
@@ -110,7 +110,7 @@ function post(app: HttpApp, body: unknown, token: string | null): Promise<Respon
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (token !== null) headers.authorization = `Bearer ${token}`;
   return app.handle(
-    new Request(`http://bond.test${HOST_ROUTES.events}`, {
+    new Request(`http://nod.test${HOST_ROUTES.events}`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
@@ -162,7 +162,7 @@ function eventKinds(): string[] {
 describe('POST /v1/events', () => {
   test('the batch lands on the session person and the ids the host holds come back', async () => {
     const host = await startHost();
-    const ada = await signedIn(host, 'ada@bond.test');
+    const ada = await signedIn(host, 'ada@nod.test');
     const sent = [
       event('e1', {
         kind: 'tool_opened',
@@ -204,7 +204,7 @@ describe('POST /v1/events', () => {
 
   test('the same batch twice leaves one row per event and acks the same ids', async () => {
     const host = await startHost();
-    const ada = await signedIn(host, 'ada@bond.test');
+    const ada = await signedIn(host, 'ada@nod.test');
     const sent = [event('e1'), event('e2', { kind: 'unlocked' }), event('e3', { kind: 'locked' })];
 
     const first = await post(host.app, { events: sent }, ada.token);
@@ -239,7 +239,7 @@ describe('POST /v1/events', () => {
 
   test('an empty batch is honest: nothing lands and nothing is acked', async () => {
     const host = await startHost();
-    const ada = await signedIn(host, 'ada@bond.test');
+    const ada = await signedIn(host, 'ada@nod.test');
 
     const response = await post(host.app, { events: [] }, ada.token);
     expect(response.status).toBe(200);
@@ -251,7 +251,7 @@ describe('POST /v1/events', () => {
 
   test('500 events land and the 501st answers 400 without writing', async () => {
     const host = await startHost();
-    const ada = await signedIn(host, 'ada@bond.test');
+    const ada = await signedIn(host, 'ada@nod.test');
     const many = Array.from({ length: MAX_EVENTS_PER_BATCH + 1 }, (_, index) => event(`e${index}`));
 
     const over = await post(host.app, { events: many }, ada.token);
@@ -269,7 +269,7 @@ describe('POST /v1/events', () => {
 
   test('a body that is not a batch of client events answers 400 naming the field', async () => {
     const host = await startHost();
-    const ada = await signedIn(host, 'ada@bond.test');
+    const ada = await signedIn(host, 'ada@nod.test');
 
     const noBatch = await post(host.app, {}, ada.token);
     expect(noBatch.status).toBe(400);
@@ -294,7 +294,7 @@ describe('POST /v1/events', () => {
 
   test('every kind the shared EventType declares is accepted, and an unknown one is refused', async () => {
     const host = await startHost();
-    const ada = await signedIn(host, 'ada@bond.test');
+    const ada = await signedIn(host, 'ada@nod.test');
     const kinds = eventKinds();
     expect(kinds.length).toBeGreaterThan(20);
 
@@ -326,7 +326,7 @@ describe('POST /v1/events', () => {
 
   test('a url lands as origin + pathname: query string and fragment never reach the row', async () => {
     const host = await startHost();
-    const ada = await signedIn(host, 'ada@bond.test');
+    const ada = await signedIn(host, 'ada@nod.test');
 
     const response = await post(
       host.app,
@@ -363,8 +363,8 @@ describe('POST /v1/events', () => {
 
   test("the person is the session's, never the body's", async () => {
     const host = await startHost();
-    const ada = await signedIn(host, 'ada@bond.test');
-    const bob = await signedIn(host, 'bob@bond.test');
+    const ada = await signedIn(host, 'ada@nod.test');
+    const bob = await signedIn(host, 'bob@nod.test');
 
     const response = await post(
       host.app,
@@ -380,8 +380,8 @@ describe('POST /v1/events', () => {
 
   test('an id the host already holds for another person is not taken over', async () => {
     const host = await startHost();
-    const ada = await signedIn(host, 'ada@bond.test');
-    const bob = await signedIn(host, 'bob@bond.test');
+    const ada = await signedIn(host, 'ada@nod.test');
+    const bob = await signedIn(host, 'bob@nod.test');
 
     await post(
       host.app,
@@ -404,7 +404,7 @@ describe('POST /v1/events', () => {
 
   test('a batch without a live session answers 401 and writes nothing', async () => {
     const host = await startHost();
-    const ada = await signedIn(host, 'ada@bond.test');
+    const ada = await signedIn(host, 'ada@nod.test');
     const batch = { events: [event('e1')] };
 
     const anonymous = await post(host.app, batch, null);

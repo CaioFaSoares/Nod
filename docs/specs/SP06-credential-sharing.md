@@ -27,7 +27,7 @@ another route; nothing in E02 is built on an unproven primitive.
   - one X25519 pair for receiving;
   - one Ed25519 pair for signing.
 - The **private** keys are exported as PKCS#8, encrypted like a vault value (`bv1.` format, SP02 §8,
-  AAD `bond.keys.<person>`), and stored in the keychain under `bond.keys.<person>`.
+  AAD `nod.keys.<person>`), and stored in the keychain under `nod.keys.<person>`.
 - The **public** keys go to `PUT /v1/keys` as raw 32 bytes, base64url.
 - **Fingerprint** of a person: SHA-256 of `x25519Public || ed25519Public`, first 10 bytes, Crockford
   base32 `XXXX-XXXX-XXXX-XXXX`, shown in Settings → Account.

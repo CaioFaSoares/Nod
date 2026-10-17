@@ -2,16 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Bond — connected smoke (two instances)</title>
+    <title>Nod — connected smoke (two instances)</title>
   </head>
   <body>
-    <pre id="log">Bond connected smoke: waiting for the runtime…</pre>
+    <pre id="log">Nod connected smoke: waiting for the runtime…</pre>
     <script>
       // Test page for the two-instance smoke (SP05 §5). Plain JavaScript, no bundler.
       // This file is a TEMPLATE: test/smoke/connected.ts replaces its one config marker with the
       // JSON of the launch { phase, nonce, address, guild, desk, originA, adminEmail,
-      // personEmail, methods } and writes the result to the app store (tiny.store.set), which the
-      // runner reads at <app data>/store.json.
+      // personEmail, methods, guildIcon } and writes the result to the app store (tiny.store.set),
+      // which the runner reads at <app data>/store.json.
       //
       // The page drives the API through the real path (tiny.api.call), phase by phase:
       //
@@ -21,10 +21,16 @@
       //                                 redeems and the saved credential comes along; publish the
       //                                 local tools, create P with role `team`, grant Tool A to
       //                                 `team`, sync; hand P's code over
+      //                      SP05 §6    and upload the guild's PNG (host.setGuildIcon)
       //   person-join        SP05 §5.3  P activates, the granted tool appears (it is the host's
       //                     SP05 §5.5  entry: P's own seed has no row for it), the vault fills on
       //                                 its origin; host stopped: lock/unlock, tools from the cache,
       //                                 `stale`; host restarted: the events go up
+      //                      SP05 §6    and this machine reports the guild icon as available and
+      //                                 shows it (nod.appIcon, nod.setAppIcon); the PNG itself is the
+      //                                 runner's check, read off P's data dir after the phase
+      //   admin-clear        SP05 §6    the admin removes the guild icon
+      //   person-cleared     SP05 §6    P's next sync deletes the file and drops the guild option
       //   admin-revoke       SP05 §5.4  the admin revokes P
       //   person-signed-out  SP05 §5.4  P's next sync: `signed-out`, the org tools gone
       //
@@ -39,7 +45,7 @@
          *  app data dirs under the smoke's own ids, and it never leaves this page. */
         const ACCOUNT_PASSWORD = 'smoke-connected-1';
 
-        /** F1: the credential the admin Bond saves before the join. Not a secret either: it is a
+        /** F1: the credential the admin Nod saves before the join. Not a secret either: it is a
          *  throwaway value of a throwaway keychain, and it is compared, never printed. */
         const LOCAL_SECRET = 'smoke-local-secret';
 
@@ -59,7 +65,7 @@
           personCode: null,
           toolId: null,
           personId: null,
-          /** F1: the local account of the admin Bond before the join, and the credential it saved. */
+          /** F1: the local account of the admin Nod before the join, and the credential it saved. */
           localPersonId: null,
           localToolId: null,
           /** The guild person id the local account became. */
@@ -209,7 +215,7 @@
         }
 
         /**
-         * F1: the admin's Bond is not a blank machine — it already has a local account with the very
+         * F1: the admin's Nod is not a blank machine — it already has a local account with the very
          * email the setup code will claim. Creating it here is what makes the join answer the choice
          * instead of adopting without asking.
          */
@@ -262,7 +268,7 @@
         }
 
         /**
-         * F1: the setup code against a Bond that already holds that email. The join answers the
+         * F1: the setup code against a Nod that already holds that email. The join answers the
          * choice — `local-account` — **before any host call**, so the single-use setup code is not
          * spent deciding; the next step is the one that redeems it.
          */
@@ -323,7 +329,7 @@
             'the item belongs to ' + summarize(item.personId) + ', not to the guild person',
           );
           expect(
-            item.keychainKey === 'bond.cred.' + shared.guildPersonId + '.' + shared.localToolId,
+            item.keychainKey === 'nod.cred.' + shared.guildPersonId + '.' + shared.localToolId,
             'the keychain key is ' + summarize(item.keychainKey),
           );
           const revealed = await call('vault.reveal', { toolId: shared.localToolId });
@@ -491,8 +497,8 @@
             password: ACCOUNT_PASSWORD,
           });
           shared.personCode = null;
-          // This Bond has no account at all (F3's first run), so the join answers the session
-          // outright — the choice only comes up when the email is already an account of this Bond.
+          // This Nod has no account at all (F3's first run), so the join answers the session
+          // outright — the choice only comes up when the email is already an account of this Nod.
           expect(answer && answer.kind === 'session', 'host.activate answered ' + summarize(answer));
           const state = answer.session;
           expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
@@ -617,6 +623,95 @@
           return 'the admin\'s machine sent ' + counts.sent + ' event(s); pending ' + counts.pending;
         }
 
+        // ------------------------------------------------------- SP05 §6 — the guild icon
+
+        /** Twelve hex of a digest: enough to compare two of them by eye, and no secret. */
+        function shortDigest(digest) {
+          return String(digest).slice(0, 12) + '…';
+        }
+
+        /**
+         * SP05 §6, SP03 §2: the admin uploads the guild's PNG. The host keeps the bytes and answers
+         * their SHA-256 — the digest the next signed body carries (SP04 §2), and the one the runner
+         * compares P's file against after its phase.
+         */
+        async function stepSetGuildIcon() {
+          const answer = await call('host.setGuildIcon', { png: CONFIG.guildIcon.png });
+          expect(
+            !!answer && answer.sha256 === CONFIG.guildIcon.sha256,
+            'host.setGuildIcon answered ' + summarize(answer),
+          );
+          return (
+            'the host stored the PNG (' +
+            CONFIG.guildIcon.png.length +
+            ' base64url chars) and answered sha256 ' +
+            shortDigest(answer.sha256)
+          );
+        }
+
+        /** The digest travels inside the next signed body: this is the sync that brings it. */
+        async function stepGuildIconSync() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          return 'status connected; the signed body carries the icon digest';
+        }
+
+        /**
+         * SP04 §2, this machine: the bytes come back on the sync that applied the digest, and are
+         * kept only when they hash to it. `backend/main.ts` chains that fetch without awaiting it, so
+         * this reads `nod.appIcon` until it lands.
+         */
+        async function stepPersonGuildIconAvailable() {
+          const icon = await waitUntil(
+            () => call('nod.appIcon'),
+            (state) => state.guildIconAvailable === true,
+            STATE_TIMEOUT_MS,
+            (state) => 'guildIconAvailable = ' + JSON.stringify(state.guildIconAvailable),
+          );
+          return (
+            'nod.appIcon reports guildIconAvailable true (choice ' + JSON.stringify(icon.choice) + ')'
+          );
+        }
+
+        /** SP05 §6: the choice applies the verified PNG as this machine's app icon. */
+        async function stepPersonAppIconGuild() {
+          const chosen = await call('nod.setAppIcon', { choice: 'guild' });
+          expect(chosen && chosen.choice === 'guild', 'nod.setAppIcon answered ' + summarize(chosen));
+          const read = await call('nod.appIcon');
+          expect(read.choice === 'guild', 'nod.appIcon reads back ' + summarize(read.choice));
+          expect(
+            read.guildIconAvailable === true,
+            'guildIconAvailable = ' + JSON.stringify(read.guildIconAvailable),
+          );
+          return 'the choice is guild and it reads back: ' + summarize(read);
+        }
+
+        /** SP05 §6, SP03 §2: the guild has no icon again; the next body says `guildIcon: null`. */
+        async function stepClearGuildIcon() {
+          const ok = await call('host.clearGuildIcon');
+          expect(ok === true, 'host.clearGuildIcon answered ' + summarize(ok));
+          return 'the host dropped the icon; the next signed body says guildIcon null';
+        }
+
+        /**
+         * SP04 §2/SP05 §6: the sync applies the body whose `guildIcon` is null, so the file the
+         * icon was verified against is deleted and the bundle icon comes back. The stored choice is a
+         * preference and stays; the file itself is the runner's check, after the phase.
+         */
+        async function stepPersonGuildIconGone() {
+          const icon = await waitUntil(
+            () => call('nod.appIcon'),
+            (state) => state.guildIconAvailable === false,
+            STATE_TIMEOUT_MS,
+            (state) => 'guildIconAvailable = ' + JSON.stringify(state.guildIconAvailable),
+          );
+          return (
+            'guildIconAvailable false after the sync (the stored choice is still ' +
+            JSON.stringify(icon.choice) +
+            ')'
+          );
+        }
+
         // ------------------------------------------------------------------ SP05 §5.4 — revoke
 
         async function stepAdminState() {
@@ -715,6 +810,8 @@
             ['2.11 people.list (P of the guild)', stepPersonListed],
             ['2.12 roles.grant (Tool A to team)', stepGrant],
             ['2.13 host.syncNow (the grant travels)', stepGrantVisible],
+            ['6.1 host.setGuildIcon (the guild PNG)', stepSetGuildIcon],
+            ['6.2 host.syncNow (the signed digest)', stepGuildIconSync],
           ],
           'person-join': [
             ['3.1 session.state (no account yet)', stepPersonStateFresh],
@@ -722,6 +819,8 @@
             ['3.3 host.discover', stepPersonDiscover],
             ['3.4 host.activate (access code)', stepActivatePerson],
             ['3.5 host.syncNow', stepPersonSync],
+            ['6.3 nod.appIcon (guildIconAvailable)', stepPersonGuildIconAvailable],
+            ['6.4 nod.setAppIcon (guild)', stepPersonAppIconGuild],
             ['3.6 catalog.list (the granted tool)', stepGrantedToolAppears],
             ['3.7 vault.save (Tool A)', stepVaultSave],
             ['3.8 tools.open (fill on the origin)', stepFill],
@@ -733,6 +832,15 @@
             ['5.6 catalog.list (after the unlock)', stepCatalogAfterUnlock],
             ['5.7 desk: start the host', stepHostUp],
             ['5.8 host.syncNow (back online)', stepOnlineSync],
+          ],
+          'admin-clear': [
+            ['6.5 session.unlock (admin)', stepAdminUnlock],
+            ['6.6 host.clearGuildIcon', stepClearGuildIcon],
+          ],
+          'person-cleared': [
+            ['6.7 session.unlock (P)', stepPersonUnlockAgain],
+            ['6.8 host.syncNow (guildIcon null)', stepPersonSync],
+            ['6.9 nod.appIcon (the guild icon is gone)', stepPersonGuildIconGone],
           ],
           'admin-revoke': [
             ['4.1 session.state', stepAdminState],

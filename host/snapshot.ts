@@ -2,8 +2,8 @@
 // version) and the per-person snapshot of §2 (the body, its version, and the Ed25519 signature over
 // the exact bytes that travel).
 //
-// Why it is one module: `/.well-known/bond` and `GET /v1/state` are the same subject — the host's
-// Ed25519 pair, what the Bond pins from it, and what the host signs with it. `host/routes/state.ts`
+// Why it is one module: `/.well-known/nod` and `GET /v1/state` are the same subject — the host's
+// Ed25519 pair, what the Nod pins from it, and what the host signs with it. `host/routes/state.ts`
 // mounts the two routes and owns the HTTP surface; everything the bytes depend on lives here, so the
 // routes never touch key material or a digest.
 //
@@ -44,6 +44,12 @@ export interface SnapshotSource {
   personalTools: HostTool[];
   personalViews: HostView[];
   favorites: Id[];
+  /**
+   * The guild icon's digest, or null (SP04 §2's `guildIcon`). The guild serves one icon, so this row
+   * is the same for every person — and it is the digest alone, never the bytes: the Nod downloads
+   * those from `GET /v1/guild/icon` (SP03 §2).
+   */
+  guildIcon: string | null;
 }
 
 /** The reads of SP04 §2, in one place: the admin's catalog or the entries my roles are granted. */
@@ -55,6 +61,7 @@ export function snapshotSource(repo: Repo, me: HostPerson): SnapshotSource {
     personalTools: repo.listPersonalTools(me.id),
     personalViews: repo.listPersonalViews(me.id),
     favorites: repo.favorites(me.id),
+    guildIcon: repo.guildIconHash(),
   };
 }
 
@@ -120,6 +127,9 @@ export function snapshotDocument(
     personalTools: source.personalTools.map(entryOf),
     personalViews: source.personalViews.map(personalViewOf),
     favorites: source.favorites,
+    // SP04 §2: the digest is inside the signed bytes, so an icon swapped on the host moves the
+    // version and a Nod that holds the old signature refuses the new one.
+    guildIcon: source.guildIcon,
   };
 }
 
@@ -171,7 +181,7 @@ const issuedStates = new Map<Id, { content: string; issuedAt: string }>();
  *   is part of the body, so a fresh instant per response would give every poll a new version and
  *   `304` could never happen (SP04 §2 asks for both). The host keeps, per person, the instant of the
  *   content it issued last; content that did not move keeps its instant. A restart forgets the table
- *   and re-issues an instant — newer than the one the Bond accepted, which is what SP04 §2 requires.
+ *   and re-issues an instant — newer than the one the Nod accepted, which is what SP04 §2 requires.
  *
  * In memory on purpose: it is an optimisation of the answer, not data, exactly like the rate limits
  * of SP02 §5 (`host/context.md`).
@@ -231,7 +241,7 @@ export async function signSnapshot(body: string, key: SigningKey): Promise<Snaps
   return { kid: key.kid, sig: toBase64url(signature) };
 }
 
-/** SP04 §2's `Bond-Signature: kid=<kid>; sig=<base64url>`, the one spelling its client parses. */
+/** SP04 §2's `Nod-Signature: kid=<kid>; sig=<base64url>`, the one spelling its client parses. */
 export function signatureHeader(signature: SnapshotSignature): string {
   return `kid=${signature.kid}; sig=${signature.sig}`;
 }
@@ -248,7 +258,7 @@ export function publicKeyOf(key: SigningKey): string {
   // `host/keys.ts` refuses a signing key without `x` at boot, so this is unreachable for a host that
   // is serving. It stays a refusal instead of a silent empty key.
   if (raw === undefined) throw new Error('the signing key carries no public key');
-  // SP04 §1.1: the Bond refuses a key that is not the 32 raw bytes of an Ed25519 pair, and a key file
+  // SP04 §1.1: the Nod refuses a key that is not the 32 raw bytes of an Ed25519 pair, and a key file
   // edited by hand is the one way this host could not carry one.
   if (fromBase64url(raw).length !== PUBLIC_KEY_BYTES) {
     throw new Error('the signing key is not a 32-byte Ed25519 public key');
@@ -283,7 +293,7 @@ export async function fingerprintOf(rawPublicKey: Uint8Array<ArrayBuffer>): Prom
   return formatCode(out);
 }
 
-/** `GET /.well-known/bond` (SP04 §1): what the Bond shows and pins before it signs in. */
+/** `GET /.well-known/nod` (SP04 §1): what the Nod shows and pins before it signs in. */
 export async function discoveryDocument(input: {
   guild: string;
   key: SigningKey;

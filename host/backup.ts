@@ -51,12 +51,12 @@ function positive(raw: string | undefined, name: string, fallback: number, integ
   return value;
 }
 
-/** `BOND_BACKUP_EVERY_HOURS` (default 24) and `BOND_BACKUP_KEEP` (default 14), as compose passes them. */
+/** `NOD_BACKUP_EVERY_HOURS` (default 24) and `NOD_BACKUP_KEEP` (default 14), as compose passes them. */
 export function loadBackupSettings(env: Record<string, string | undefined>): BackupSettings {
   return {
     // Hours may be fractional: a deploy proof runs an interval of minutes, not days.
-    everyHours: positive(env.BOND_BACKUP_EVERY_HOURS, 'BOND_BACKUP_EVERY_HOURS', DEFAULT_BACKUP_EVERY_HOURS, false),
-    keep: positive(env.BOND_BACKUP_KEEP, 'BOND_BACKUP_KEEP', DEFAULT_BACKUP_KEEP, true),
+    everyHours: positive(env.NOD_BACKUP_EVERY_HOURS, 'NOD_BACKUP_EVERY_HOURS', DEFAULT_BACKUP_EVERY_HOURS, false),
+    keep: positive(env.NOD_BACKUP_KEEP, 'NOD_BACKUP_KEEP', DEFAULT_BACKUP_KEEP, true),
   };
 }
 
@@ -170,7 +170,7 @@ export type RestoreOutcome = {
 /**
  * SP07 §3: check the backup, then swap it in. The target data dir must be empty — a restore never
  * overwrites a live volume, so a restore into an existing volume first moves it aside. The key
- * files travel with the database: without them every pinned Bond refuses the host (SP07 §4).
+ * files travel with the database: without them every pinned Nod refuses the host (SP07 §4).
  */
 export function restoreBackup(sourceFile: string, dataDir: string, dbFile: string): RestoreOutcome {
   if (!existsSync(sourceFile)) throw new BackupError(`backup file not found: ${sourceFile}`);
@@ -186,7 +186,7 @@ export function restoreBackup(sourceFile: string, dataDir: string, dbFile: strin
   }
 
   if (existsSync(dataDir) && !statSync(dataDir).isDirectory()) {
-    throw new BackupError(`${dataDir} is not a directory: BOND_DATA must be the data dir`);
+    throw new BackupError(`${dataDir} is not a directory: NOD_DATA must be the data dir`);
   }
   const occupied = existsSync(dataDir) ? readdirSync(dataDir) : [];
   if (occupied.length > 0) {

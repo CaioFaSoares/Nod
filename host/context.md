@@ -12,13 +12,17 @@ timer; `Dockerfile` and `compose.yaml` deploy it with the volume at `/data`. `re
 block 1 query and the rules SP01 §2 keeps out of SQL. `app.ts` builds the repo and the auth service
 once, decorates the request context with them and mounts one plugin per route group: `routes/auth.ts`
 (`POST /v1/auth/{salt,activate,setup,login}`, `/logout`, `/password` — H4), `routes/admin.ts` (the
-admin group of SP03 §2 — H5), `routes/state.ts` (discovery + the signed state — H6) and
-`routes/events.ts` (`POST /v1/events` — H8); `auth.ts` holds the argon2id hash and verify, the salt
+admin group of SP03 §2 — H5), `routes/state.ts` (discovery + the signed state — H6),
+`routes/events.ts` (`POST /v1/events` — H8) and `routes/guild.ts` (`GET /v1/guild/icon` — I2h);
+`auth.ts` holds the argon2id hash and verify, the salt
 lookup, the session tokens, the rate limits and the `personAuth`/`adminAuth` guards each group mounts
-for itself; `snapshot.ts` builds the discovery document and the signed snapshot. The SP03 §2 person
+for itself; `snapshot.ts` builds the discovery document and the signed snapshot. The guild icon
+(the admin's upload in `routes/admin.ts`, the person's download in `routes/guild.ts`) lives in two
+`meta` rows and travels as the digest inside the snapshot (SP03 §2, SP04 §2). The SP03 §2 person
 routes that no block 1 story landed (`GET`/`DELETE /v1/sessions`, the personal tools and views,
 favorites — O1, B7) are still to come, as is block 2 (SP01 §3 tables, SP03 §3's credential routes,
-SP06). Handovers: `docs/handovers/h1.md`, `h2.md`, `h4.md`, `h5.md`, `h6.md`, `h8.md`, `h9.md`.
+SP06). Handovers: `docs/handovers/h1.md`, `h2.md`, `h4.md`, `h5.md`, `h6.md`, `h8.md`, `h9.md`,
+`i2h-guild-icon-host.md`.
 
 ## Stack (decided 2026-10-16)
 
@@ -39,9 +43,10 @@ is never imported at runtime and never ships in the image. One process, one SQLi
 | `auth.ts` | The auth service: argon2id over `authKey`, real or fake salt, session tokens, the rate limits, and the `personAuth`/`adminAuth` guards | SP02, SP03 §1 |
 | `routes/auth.ts` | The auth routes: `salt`, `activate`, `setup`, `login` (public) and `logout`, `password` (person) | SP02, SP03 §2 |
 | `routes/admin.ts` | The admin group: people, their access codes and sessions, roles, grants, org tools, the one-time bootstrap and the event list; every route behind `adminAuth` (mounts `personAuth` first) | SP01 §2, SP02 §3, SP03 §2 |
-| `routes/state.ts` | `GET /.well-known/bond` (public) and `GET /v1/state` (person), the signed snapshot and its `If-None-Match` | SP04 §1–§2 |
+| `routes/state.ts` | `GET /.well-known/nod` (public) and `GET /v1/state` (person), the signed snapshot and its `If-None-Match` | SP04 §1–§2 |
 | `routes/events.ts` | `POST /v1/events`: the event batch, client-id idempotency, the ack | SP04 §5, SP03 §2 |
-| `snapshot.ts` | The discovery document, the fingerprint; per-person snapshot, version, Ed25519 signature | SP04 §1–§2 |
+| `routes/guild.ts` | `GET /v1/guild/icon` (person): the guild PNG byte for byte, `ETag: "<sha256>"`, `404` without one | SP03 §2 |
+| `snapshot.ts` | The discovery document, the fingerprint; per-person snapshot, version, `guildIcon`, Ed25519 signature | SP04 §1–§2 |
 | `keys.ts` | Signing key and host secret files | SP01 §1 |
 | `backup.ts` | `VACUUM INTO`, rotation and restore. Names neither `bun:sqlite` nor its constructor — the handle is typed from `Host` — so the connection stays in `migrations.ts`; the check runs `PRAGMA integrity_check` on the restored copy through `openDatabase` | SP07 §4 |
 | `cli/*.ts` | `setup-code`, `backup-now`, `restore` | SP07 §3 |
@@ -52,6 +57,7 @@ is never imported at runtime and never ships in the image. One process, one SQLi
 | `admin.test.ts` | The admin surface, on the real app over a temp data dir: every route, the code shown once, the reissue, the revocation, the last admin, the bootstrap window, the filters | SP01 §2, SP02 §3, SP03 §1–§2 |
 | `state.test.ts` | The discovery and the signed snapshot on the real app, with the Nod client end to end | SP04 §1–§2 |
 | `events.test.ts` | The event batch on the real app: client ids, idempotency, the ack, the 500 cap | SP04 §5, SP03 §1–§2 |
+| `guild-icon.test.ts` | The guild icon on the real app: the admin's upload and digest, the 400/403/413, the byte-for-byte download with its `ETag`, the delete, and `Snapshot.guildIcon` inside the signed bytes | SP03 §2, SP04 §2 |
 | `backup.test.ts` | `VACUUM INTO`, rotation, the restore triple, and the connection invariant | SP07 §4 |
 
 ## Rules
@@ -80,7 +86,13 @@ is never imported at runtime and never ships in the image. One process, one SQLi
   `x-forwarded-for`, else the socket. They reset with the process, and a restart is the operator's
   answer to a stuck budget.
 - **The body limit is decided in `app.ts`**, before the body is parsed: 256 KB everywhere, 512 KB
-  where a tool body may carry an `entry.icon` (SP03 §1).
+  where a body may carry an icon — an `entry.icon` data URI or the guild PNG the admin uploads
+  (SP03 §1).
+- **The guild icon is bytes plus their digest, in two `meta` rows** (`GUILD_ICON_HASH_KEY`,
+  `GUILD_ICON_BYTES_KEY`, `repo.ts`): `PUT /v1/admin/guild/icon` stores both (`400` when the bytes
+  are not a PNG), `GET /v1/guild/icon` answers the bytes with the digest as the `ETag`, and
+  `Snapshot.guildIcon` carries the digest alone — a tampered icon fails the Nod's own comparison
+  (SP03 §2, SP04 §2).
 - **Personal data is filtered by owner in the repo**, not only in routes. An admin doesn't see
   another person's personal tools.
 - **An org tool write carries the host clock as `updatedAt`** (`routes/admin.ts`); only the personal

@@ -1,6 +1,6 @@
 ---
 id: B02
-frente: bond
+frente: nod
 titulo: integração do backend tinyjs (sessão, cofre, palcos, adaptador, sonda, seed, main)
 status: fechada
 tipo: cobertura
@@ -10,7 +10,7 @@ destino: —
 aberta_em: 2026-10-15
 ---
 
-Autoriza tocar código no repositório `Bond/` para as fatias de `docs/arquitetura.md` §4
+Autoriza tocar código no repositório `Nod/` para as fatias de `docs/arquitetura.md` §4
 (`backend/sessao.ts`, `backend/cofre.ts`, `backend/palcos.ts`, `backend/adaptador.ts`,
 `backend/sonda-rede.ts`, `backend/seed.ts`, `backend/icones.ts`, `backend/main.ts`) e §6
 (`scripts/gen-config.ts`). Requisitos: `docs/canonico.md` §14 — todos os RF de F1 a F4.

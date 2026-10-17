@@ -1,4 +1,4 @@
-// Typed client for the Bond API. The page talks to the backend only through here.
+// Typed client for the Nod API. The page talks to the backend only through here.
 // Method names and types come from shared/types.ts (ApiContract).
 import type { Method, Params, PushEvents, Result } from '../shared/types';
 

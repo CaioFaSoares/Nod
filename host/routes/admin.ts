@@ -5,7 +5,7 @@
 // `adminAuth` covers every route below it, so a caller who is not an admin person never reaches a
 // handler (SP03 §1). The bodies are the shapes of `shared/host-api.ts` — `PersonCreateRequest`,
 // `PersonUpdateRequest`, `RoleRequest`, `GrantRequest`, `OrgTool`, `PromoteRequest`,
-// `BootstrapRequest`, `AdminEventsQuery` — so the Bond and the host validate the same fields; a body
+// `BootstrapRequest`, `AdminEventsQuery` — so the Nod and the host validate the same fields; a body
 // that fails its schema is the 400 `app.ts` builds, naming the field.
 //
 // The repo owns every rule and every status (`host/repo.ts`, SP01 §2): a taken email, a stale
@@ -15,20 +15,22 @@
 // No secret leaves here. The access code is generated once (SP02 §3), stored as the hex SHA-256 of
 // its normalized form, and returned only in the answer that created it: never listed, never logged,
 // and `GET /v1/admin/people` carries no salt and no hash (H2 decision 2). Admin tool writes pass the
-// host clock as `updatedAt`; only the personal writes of SP03 §2 carry the Bond's (SP04 §4).
+// host clock as `updatedAt`; only the personal writes of SP03 §2 carry the Nod's (SP04 §4).
 
 import { Elysia, status, t } from 'elysia';
 
-import { sha256Hex } from '../../shared/encoding';
+import { fromBase64url, sha256Hex } from '../../shared/encoding';
 import {
   HOST_ROUTES,
   generateCode,
+  isPng,
   normalizeCode,
   type AdminPerson,
   type BootstrapResponse,
   type CodeResponse,
   type DeviceOs,
   type DeviceSession,
+  type GuildIconResponse,
   type HostEvent,
   type OrgTool,
   type PersonCreateResponse,
@@ -48,7 +50,7 @@ import {
 /** SP01 §2: an entry id is a slug, the same pattern `shared/catalog.ts` validates a catalog with. */
 const ENTRY_ID = '^[a-z0-9][a-z0-9-]{0,39}$';
 
-/** SP03 §2: the personal tool ids the Bond generates. */
+/** SP03 §2: the personal tool ids the Nod generates. */
 const PERSONAL_ID = '^p-[a-z0-9]{10}$';
 
 /** A uuid (person, session, view id); the length bounds a value a caller cannot usefully exceed. */
@@ -119,6 +121,15 @@ const promoteBody = t.Object({ personalId: t.String({ pattern: PERSONAL_ID }) })
 const bootstrapBody = t.Object({
   tools: t.Array(toolBody),
   roles: t.Array(t.Object({ id: idSchema, name: nameSchema, admin: t.Boolean() })),
+});
+
+/**
+ * SP03 §2's `GuildIconRequest`: base64url of the PNG bytes, so the schema refuses the alphabet that
+ * is not base64url (padding, `+`, `/`) before a handler sees it. The body limit of `host/app.ts`
+ * bounds the length — this path is in its icon exception — so no `maxLength` restates it here.
+ */
+const guildIconBody = t.Object({
+  png: t.String({ minLength: 1, pattern: '^[A-Za-z0-9_-]+$' }),
 });
 
 /** SP03 §2's `?person&tool&from&to&limit`, in the wire names of the URL (`AdminEventsQuery`). */
@@ -328,7 +339,7 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
     const { repo, auth } = hostOf(ctx);
     const id = ctx.params.id;
     if (ctx.body.id !== id) return status(400, { error: 'invalid body: id must match the path id' });
-    // The host clock, never the body's: an org write has no `updatedAt` of the Bond's (SP04 §4).
+    // The host clock, never the body's: an org write has no `updatedAt` of the Nod's (SP04 §4).
     const saved: OrgTool = repo.saveOrgTool(toToolInput(id, ctx.body), auth.now());
     return saved;
   })
@@ -381,6 +392,50 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
       auth.now(),
     );
     return { created: ctx.body.tools.length };
+  })
+
+  // -------------------------------------------------------------- guild icon
+
+  /**
+   * SP03 §2: stores the guild icon — base64url of the PNG bytes — and answers the lowercase hex
+   * SHA-256 of exactly those bytes. That digest is what the snapshot signs (SP04 §2), so the icon is
+   * stored with it and never decoded again; the bytes go to SP01 §1's single file, and no copy is
+   * written anywhere else.
+   *
+   * A body that is not base64url, or whose bytes are not a PNG, is the 400 of SP03 §1 naming the
+   * field. Nothing is echoed: the message is static and the image is never logged.
+   */
+  .put(
+    HOST_ROUTES.adminGuildIcon,
+    { body: guildIconBody },
+    async (ctx) => {
+      const { repo } = hostOf(ctx);
+      let bytes: Uint8Array<ArrayBuffer>;
+      try {
+        // The schema caught a character outside the alphabet; this catches the rest of the encoding
+        // rule (`shared/encoding.ts`: padding, a length without whole bytes, non-zero trailing bits).
+        bytes = fromBase64url(ctx.body.png);
+      } catch {
+        return status(400, { error: 'invalid body: png is not base64url' });
+      }
+      if (!isPng(bytes)) return status(400, { error: 'invalid body: png must be a PNG' });
+      // SP03 §2's decoded ceiling is the encoded body's, one third smaller: `host/app.ts` gives this
+      // path the 512 KB of its icon exception, which refuses a base64 body that could exceed it.
+      const sha256 = await sha256Hex(bytes);
+      repo.setGuildIcon({ sha256, bytes });
+      const answer: GuildIconResponse = { sha256 };
+      return answer;
+    },
+  )
+
+  /**
+   * SP03 §2: removes the icon (`204`, and an idempotent one). The next snapshot carries
+   * `guildIcon: null`, which is what a Nod reads as "delete your copy and go back to the bundle
+   * icon" (SP04 §2).
+   */
+  .delete(HOST_ROUTES.adminGuildIcon, (ctx) => {
+    hostOf(ctx).repo.clearGuildIcon();
+    return status(204);
   })
 
   // -------------------------------------------------------------- events

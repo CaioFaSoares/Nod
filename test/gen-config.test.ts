@@ -1,17 +1,25 @@
 // Proves the observable behavior of `scripts/gen-config.ts` (v2 release config slice).
 // Contract: docs/arquitetura.md §2 (origin gate) and §6 (build and dev); requirements:
-// docs/canonico.md §19, RF-26, RF-27.
+// docs/canonico.md §19, RF-26, RF-27, RF-56.
 // Run with `bun test test/`.
 
 import { describe, expect, test } from 'bun:test';
-import { generateConfig } from '../scripts/gen-config';
+import {
+  DEFAULT_ICON,
+  PRIVATE_ICON,
+  STAGED_ICON,
+  assertIconPng,
+  generateConfig,
+  iconConfigPath,
+  iconSource,
+} from '../scripts/gen-config';
 import { validateSeed } from '../shared/catalog';
 import type { Entry, Seed } from '../shared/types';
 
 const BASE: Record<string, unknown> = {
-  name: 'bond',
-  title: 'Bond',
-  id: 'studio.copland.bond',
+  name: 'nod',
+  title: 'Nod',
+  id: 'copland.nod',
   version: '0.1.0',
   frontend: { dist: 'dist', devUrl: 'http://127.0.0.1:5173' },
   permissions: { camera: 'why camera', microphone: 'why microphone' },
@@ -86,8 +94,8 @@ describe('generateConfig', () => {
     const config = generateConfig(BASE, await exampleSeed(), 'build');
 
     expect(config.resources).toEqual(['seed.json', 'tray.png']);
-    expect(config.name).toBe('bond');
-    expect(config.id).toBe('studio.copland.bond');
+    expect(config.name).toBe('nod');
+    expect(config.id).toBe('copland.nod');
     expect(config.frontend).toEqual(BASE.frontend);
     expect(config.update).toBeUndefined();
   });
@@ -181,17 +189,84 @@ describe('generateConfig', () => {
   test('seed update turns on the daily update', () => {
     const config = generateConfig(
       BASE,
-      seed([], { update: { url: 'https://releases.example.com/bond' } }),
+      seed([], { update: { url: 'https://releases.example.com/nod' } }),
       'build',
     );
 
-    expect(config.update).toEqual({ url: 'https://releases.example.com/bond', auto: 'daily' });
+    expect(config.update).toEqual({ url: 'https://releases.example.com/nod', auto: 'daily' });
   });
 
   test('appId replaces the base id', () => {
-    expect(generateConfig(BASE, null, 'dev', 'com.example.bond.smoke').id).toBe(
-      'com.example.bond.smoke',
+    expect(generateConfig(BASE, null, 'dev', 'com.example.nod.smoke').id).toBe(
+      'com.example.nod.smoke',
     );
-    expect(generateConfig(BASE, null, 'dev').id).toBe('studio.copland.bond');
+    expect(generateConfig(BASE, null, 'dev').id).toBe('copland.nod');
+  });
+});
+
+describe('app icon (RF-56)', () => {
+  test('precedence: NOD_ICON, then resources/icon.png, then assets/icon.png', () => {
+    expect(iconSource('/tmp/other.png', true, true)).toBe('env');
+    expect(iconSource('', true, true)).toBe('private');
+    expect(iconSource('', false, true)).toBe('default');
+    expect(iconSource('', false, false)).toBe('none');
+  });
+
+  test('the config names the source file, and the staged copy for NOD_ICON', () => {
+    expect(iconConfigPath('env')).toBe(STAGED_ICON);
+    expect(iconConfigPath('private')).toBe(PRIVATE_ICON);
+    expect(iconConfigPath('default')).toBe(DEFAULT_ICON);
+    expect(iconConfigPath('none')).toBeNull();
+  });
+
+  test('generateConfig carries the icon; without one the key stays out', async () => {
+    const built = generateConfig(
+      BASE,
+      await exampleSeed(),
+      'build',
+      undefined,
+      undefined,
+      PRIVATE_ICON,
+    );
+    expect(built.icon).toBe(PRIVATE_ICON);
+    expect(generateConfig(BASE, null, 'dev', undefined, undefined, STAGED_ICON).icon).toBe(
+      STAGED_ICON,
+    );
+    // tinyjs' own resolution is left alone: `assets/icon.png` defaults to `icon.png` at the root.
+    expect(generateConfig(BASE, null, 'dev').icon).toBeUndefined();
+    expect(generateConfig(BASE, await exampleSeed(), 'build').icon).toBeUndefined();
+  });
+
+  test('the tracked default passes the icon check', async () => {
+    const bytes = new Uint8Array(
+      await Bun.file(new URL('../assets/icon.png', import.meta.url)).arrayBuffer(),
+    );
+
+    expect(() => assertIconPng(bytes, DEFAULT_ICON)).not.toThrow();
+  });
+
+  test('a PNG smaller than the icon size is refused, naming the size', async () => {
+    const bytes = new Uint8Array(
+      await Bun.file(new URL('../resources/tray.png', import.meta.url)).arrayBuffer(),
+    );
+
+    expect(() => assertIconPng(bytes, 'resources/tray.png')).toThrow('32x32');
+    expect(() => assertIconPng(bytes, 'resources/tray.png')).toThrow('1024x1024');
+  });
+
+  test('a file that is not a PNG is refused, whole or truncated', async () => {
+    const bytes = new Uint8Array(
+      await Bun.file(new URL('../tinyjs.base.json', import.meta.url)).arrayBuffer(),
+    );
+
+    expect(() => assertIconPng(bytes, 'tinyjs.base.json')).toThrow('is not a PNG');
+    expect(() => assertIconPng(new Uint8Array(0), 'empty.png')).toThrow('is not a PNG');
+    expect(() => assertIconPng(bytes.subarray(0, 8), 'truncated.png')).toThrow('is not a PNG');
+    // Right signature, wrong first chunk: a PNG file with a GIF header inside.
+    const notIhdr = Uint8Array.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x47, 0x49, 0x46, 0x38, 0, 0, 4,
+      0, 0, 0, 4, 0,
+    ]);
+    expect(() => assertIconPng(notIhdr, 'not-ihdr.png')).toThrow('is not a PNG');
   });
 });

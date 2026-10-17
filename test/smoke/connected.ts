@@ -6,7 +6,7 @@
 //
 // What runs here, all on loopback and with no external network:
 //
-//   - the real host (`bun host/main.ts`) on a free port, over a temp data dir, with `BOND_DEV=1`;
+//   - the real host (`bun host/main.ts`) on a free port, over a temp data dir, with `NOD_DEV=1`;
 //   - the setup code of that host (`bun host/cli/setup-code.ts`, the same environment) — held in
 //     memory, never printed, never written to a file;
 //   - the local fake tools of `test/smoke/tools.ts` (the stand-ins for the internal tools);
@@ -21,18 +21,29 @@
 // gone, and "network on" is the same data dir started again.
 //
 // Steps 4 and 5 of SP05 §5 conflict for P (a revoked person cannot push later), so the phases run
-// in the order the acceptance needs: publish, join and reconnect, revoke, then the doomed sync.
+// in the order the acceptance needs: publish, join and reconnect, the guild icon's removal, revoke,
+// then the doomed sync.
 //
 //   phase admin-publish      SP05 §5.2  a local account with the guild email and a credential saved
 //                                       for it, then host.activate with the setup code: the join
 //                                       answers F1's choice (nothing sent), the same code redeems
 //                                       with it, the credential comes along; publish local tools,
 //                                       create P with role `team`, grant the tool to `team`, sync
+//                            SP05 §6    and upload the guild's PNG (`host.setGuildIcon`)
 //   phase person-join        SP05 §5.3  P activates, sees the granted tool, saves a credential
 //                            SP05 §5.5  and fills the login; host stopped: lock/unlock, tools still
 //                                       there, `stale`; host restarted: sync pushes P's events
+//                            SP05 §6    and P's app reports the guild icon as available and shows
+//                                       it (`nod.setAppIcon`); the runner then reads the PNG off P's
+//                                       own data dir
+//   phase admin-clear        SP05 §6    the admin removes the guild icon
+//   phase person-cleared     SP05 §6    P's next sync deletes the file and puts the bundle icon back
 //   phase admin-revoke       SP05 §5.4  the admin revokes P
 //   phase person-signed-out  SP05 §5.4  P's next sync: `signed-out`, org tools gone
+//
+// The two §6 phases sit between the join and the revocation because that window is the only one in
+// which the icon can be removed while P still syncs: after the revocation P's sync is the
+// `signed-out` one, which says nothing about a guild icon.
 //
 // P's seed is not the admin's (see `temporarySeed`): the granted tool is the host's entry, with no
 // local `tool` row under it. Step 3.7/3.8 therefore prove a host-only tool receiving a credential,
@@ -47,12 +58,14 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
+import { GUILD_ICON_FILE } from '../../backend/guild-icon';
+import { sha256Hex, toBase64url } from '../../shared/encoding';
 import type { Tools } from './tools';
 import { startTools } from './tools';
 
 /** The two app ids of the smoke: the real installation is never touched. */
-const ADMIN_APP_ID = 'studio.copland.bond.smoke-admin';
-const PERSON_APP_ID = 'studio.copland.bond.smoke-person';
+const ADMIN_APP_ID = 'copland.nod.smoke-admin';
+const PERSON_APP_ID = 'copland.nod.smoke-person';
 
 /** One dev port per instance: neither is 5173, which a developer's `bun run app:dev` takes. */
 const ADMIN_DEV_PORT = 5199;
@@ -62,7 +75,7 @@ const PERSON_DEV_PORT = 5200;
 const ADMIN_EMAIL = 'admin@smoke.test';
 const PERSON_EMAIL = 'person@smoke.test';
 
-/** The guild name the host is booted with (`BOND_GUILD_NAME`), asserted by both pages. */
+/** The guild name the host is booted with (`NOD_GUILD_NAME`), asserted by both pages. */
 const GUILD_NAME = 'Smoke Guild';
 
 const ROOT = join(import.meta.dir, '..', '..');
@@ -72,6 +85,14 @@ const CONNECTED_TEMPLATE = join(import.meta.dir, 'connected.html');
 const SEED = join(ROOT, 'resources', 'seed.json');
 const SEED_BACKUP = join(GENERATED_DIR, 'seed.json.bak');
 const TINYJS_JSON = join(ROOT, 'tinyjs.json');
+
+/**
+ * The PNG the admin uploads as the guild icon (SP05 §6): a small, real, versioned PNG of the
+ * repository — the tray's (`docs/arquitetura.md`), 32×32 RGBA, 304 bytes. Nothing is invented and
+ * nothing is copied: the runner reads this file once, hashes it and hands the page its base64url, so
+ * both sides work with the same bytes and the digest compared at the end is the digest uploaded.
+ */
+const GUILD_ICON_PNG = join(ROOT, 'resources', 'tray.png');
 
 /** The host's data dir: temp, wiped at start and at the end like the app data dirs. */
 const HOST_DATA = join(CONNECTED_DIR, 'host-data');
@@ -100,9 +121,26 @@ interface SmokeResult {
   error?: string | null;
 }
 
+/**
+ * The guild icon fixture of one run (SP05 §6): the bytes the admin's page uploads and the digest the
+ * runner compares the person's file against. Base64url is the form `host.setGuildIcon` takes (SP03 §2).
+ */
+interface GuildIconFixture {
+  /** The PNG, base64url without padding: exactly what travels in `host.setGuildIcon({ png })`. */
+  png: string;
+  /** Its SHA-256, lowercase hex: the digest the host answers and the signed body carries. */
+  sha256: string;
+}
+
 /** One launch of the app: which app id, which dev port, which page phase. */
 interface Phase {
-  name: 'admin-publish' | 'person-join' | 'admin-revoke' | 'person-signed-out';
+  name:
+    | 'admin-publish'
+    | 'person-join'
+    | 'admin-clear'
+    | 'person-cleared'
+    | 'admin-revoke'
+    | 'person-signed-out';
   appId: string;
   devPort: number;
 }
@@ -110,6 +148,8 @@ interface Phase {
 const PHASES: Phase[] = [
   { name: 'admin-publish', appId: ADMIN_APP_ID, devPort: ADMIN_DEV_PORT },
   { name: 'person-join', appId: PERSON_APP_ID, devPort: PERSON_DEV_PORT },
+  { name: 'admin-clear', appId: ADMIN_APP_ID, devPort: ADMIN_DEV_PORT },
+  { name: 'person-cleared', appId: PERSON_APP_ID, devPort: PERSON_DEV_PORT },
   { name: 'admin-revoke', appId: ADMIN_APP_ID, devPort: ADMIN_DEV_PORT },
   { name: 'person-signed-out', appId: PERSON_APP_ID, devPort: PERSON_DEV_PORT },
 ];
@@ -240,10 +280,10 @@ function resolveMethods(): Methods {
 /** `bun scripts/gen-config.ts dev`, with the smoke id and dev port; the last call drops both. */
 function runGenConfig(appId: string | null, devPort: number | null): { code: number; output: string } {
   const env: Record<string, string | undefined> = { ...process.env };
-  if (appId !== null) env.BOND_APP_ID = appId;
-  else delete env.BOND_APP_ID;
-  if (devPort !== null) env.BOND_DEV_PORT = String(devPort);
-  else delete env.BOND_DEV_PORT;
+  if (appId !== null) env.NOD_APP_ID = appId;
+  else delete env.NOD_APP_ID;
+  if (devPort !== null) env.NOD_DEV_PORT = String(devPort);
+  else delete env.NOD_DEV_PORT;
   const result = Bun.spawnSync(['bun', 'scripts/gen-config.ts', 'dev'], {
     cwd: ROOT,
     env,
@@ -264,6 +304,7 @@ function generatePage(
   address: string,
   deskOrigin: string,
   methods: Methods,
+  icon: GuildIconFixture,
 ): string {
   const template = readFileSync(CONNECTED_TEMPLATE, 'utf8');
   if (template.split(MARKER).length !== 2) {
@@ -279,6 +320,8 @@ function generatePage(
     adminEmail: ADMIN_EMAIL,
     personEmail: PERSON_EMAIL,
     methods,
+    // SP05 §6: the PNG the admin's page uploads, and the digest it must come back.
+    guildIcon: { png: icon.png, sha256: icon.sha256 },
   });
   const page = join(CONNECTED_DIR, `${phase.name}.html`);
   writeFileSync(page, template.replace(MARKER, () => config));
@@ -367,6 +410,7 @@ async function runPhase(
   deskOrigin: string,
   address: string,
   methods: Methods,
+  icon: GuildIconFixture,
 ): Promise<{ ok: boolean; error: string | null; steps: Step[] }> {
   const nonce = crypto.randomUUID();
   // The seed of this app id: `gen-config` reads it here (the runtime gate of `login.report`) and the
@@ -376,7 +420,7 @@ async function runPhase(
   if (gen.code !== 0) {
     return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
   }
-  const page = generatePage(phase, nonce, tools, address, deskOrigin, methods);
+  const page = generatePage(phase, nonce, tools, address, deskOrigin, methods, icon);
 
   const app = spawn('tinyjs', ['dev'], {
     cwd: ROOT,
@@ -385,8 +429,8 @@ async function runPhase(
     env: {
       ...process.env,
       TINYJS_HTML: page,
-      BOND_APP_ID: phase.appId,
-      BOND_DEV_PORT: String(phase.devPort),
+      NOD_APP_ID: phase.appId,
+      NOD_DEV_PORT: String(phase.devPort),
     },
   });
   let output = '';
@@ -448,10 +492,10 @@ function hostControl(dataDirPath: string): HostControl {
   const port = freePort();
   const env: Record<string, string | undefined> = {
     ...process.env,
-    BOND_DATA: dataDirPath,
-    BOND_DEV: '1',
-    BOND_PUBLIC_URL: `http://127.0.0.1:${port}`,
-    BOND_GUILD_NAME: GUILD_NAME,
+    NOD_DATA: dataDirPath,
+    NOD_DEV: '1',
+    NOD_PUBLIC_URL: `http://127.0.0.1:${port}`,
+    NOD_GUILD_NAME: GUILD_NAME,
     PORT: String(port),
   };
   let child: ChildProcess | null = null;
@@ -647,7 +691,7 @@ function hostRows(personEmail: string): HostRows {
   }
 }
 
-// ------------------------------------------------------------- the admin Bond's own rows
+// ------------------------------------------------------------- the admin Nod's own rows
 
 /** The id the host holds for an email; `null` when the host has no such person. */
 function hostPersonId(email: string): string | null {
@@ -663,7 +707,7 @@ function hostPersonId(email: string): string | null {
 }
 
 /**
- * The admin Bond's vault row after the run — read before `clean()` wipes the app data dir. It is F1's
+ * The admin Nod's vault row after the run — read before `clean()` wipes the app data dir. It is F1's
  * proof on the real surface: the credential saved **before** the join belongs to the guild person
  * the local account became, and its keychain key was renamed with it (the keychain itself is the
  * OS's; the page's own `vault.reveal` is what proves the value opens under the new key).
@@ -675,7 +719,7 @@ interface AdminVault {
 }
 
 function adminVault(): AdminVault {
-  const file = join(dataDir(ADMIN_APP_ID), 'bond.db');
+  const file = join(dataDir(ADMIN_APP_ID), 'nod.db');
   if (!existsSync(file)) return { lines: ["the admin's database is missing"], personId: null, keychainKey: null };
   const db = new Database(file, { readonly: true });
   try {
@@ -716,7 +760,7 @@ interface PersonVault {
 }
 
 function personVault(expectedOrigin: string): PersonVault {
-  const file = join(dataDir(PERSON_APP_ID), 'bond.db');
+  const file = join(dataDir(PERSON_APP_ID), 'nod.db');
   if (!existsSync(file))
     return { lines: ["P's database is missing"], origin: null, localRows: -1 };
   const db = new Database(file, { readonly: true });
@@ -744,6 +788,54 @@ function personVault(expectedOrigin: string): PersonVault {
   } finally {
     db.close();
   }
+}
+
+// ------------------------------------------------------------- the guild icon on P's disk
+
+/** What the runner read on P's disk: the lines it prints, and whether it is what SP04 §2 says. */
+interface IconFileCheck {
+  lines: string[];
+  ok: boolean;
+}
+
+/**
+ * SP04 §2/SP05 §6, the runner's half of the proof: the file the app itself wrote under its own data
+ * dir. The page cannot report this — where that directory is, is this runner's own `dataDir()` — so
+ * the last link of the chain is read here: the bytes on P's disk hash to what the host answered for
+ * the admin's upload, and the icon is the guild's own PNG, not another one.
+ */
+async function personGuildIconFile(icon: GuildIconFixture): Promise<IconFileCheck> {
+  const file = join(dataDir(PERSON_APP_ID), GUILD_ICON_FILE);
+  if (!existsSync(file)) {
+    return {
+      lines: [`${GUILD_ICON_FILE}: (missing), the uploaded PNG's sha256 is ${digestHead(icon.sha256)}`],
+      ok: false,
+    };
+  }
+  const bytes = new Uint8Array(readFileSync(file));
+  const observed = await sha256Hex(bytes);
+  return {
+    lines: [
+      `${GUILD_ICON_FILE}: ${bytes.byteLength} byte(s), sha256 ${digestHead(observed)} ` +
+        `(the uploaded PNG's ${digestHead(icon.sha256)})`,
+    ],
+    ok: observed === icon.sha256,
+  };
+}
+
+/** The same file after the admin removed the icon: SP04 §2's `null` deletes it on the next sync. */
+function personGuildIconGone(): IconFileCheck {
+  const file = join(dataDir(PERSON_APP_ID), GUILD_ICON_FILE);
+  const size = existsSync(file) ? readFileSync(file).byteLength : null;
+  return {
+    lines: [`${GUILD_ICON_FILE}: ${size === null ? '(gone)' : `still there (${size} bytes)`}`],
+    ok: size === null,
+  };
+}
+
+/** Twelve hex of a digest: enough to compare two of them by eye, and the PNG it names is public. */
+function digestHead(digest: string): string {
+  return `${digest.slice(0, 12)}…`;
 }
 
 // ------------------------------------------------------------- main
@@ -849,11 +941,24 @@ async function main(): Promise<number> {
     const address = `http://127.0.0.1:${host.port}`;
     desk = startDesk({ address, setupCode, host });
 
+    // SP05 §6: the fixture both halves of the icon proof work with. Reading the repository's own PNG
+    // here is what lets the runner hash exactly the bytes the page uploads.
+    if (!existsSync(GUILD_ICON_PNG)) {
+      console.error(`the guild icon fixture is missing: ${GUILD_ICON_PNG}`);
+      return 1;
+    }
+    const iconBytes = new Uint8Array(readFileSync(GUILD_ICON_PNG));
+    const icon: GuildIconFixture = { png: toBase64url(iconBytes), sha256: await sha256Hex(iconBytes) };
+    console.log(
+      `guild icon fixture: ${GUILD_ICON_PNG} (${iconBytes.byteLength} bytes, ` +
+        `sha256 ${digestHead(icon.sha256)})`,
+    );
+
     let failed = false;
     const phaseResults: { name: string; steps: number }[] = [];
     for (const phase of PHASES) {
       console.log(`\nphase ${phase.name} (app id ${phase.appId}, dev port ${phase.devPort})`);
-      const result = await runPhase(phase, tools, desk.origin, address, methods);
+      const result = await runPhase(phase, tools, desk.origin, address, methods, icon);
       for (const step of result.steps) {
         console.log(`${step.ok ? 'ok    ' : 'FAILED'} ${step.step} (${step.ms} ms) ${step.detail}`);
       }
@@ -863,6 +968,29 @@ async function main(): Promise<number> {
       }
       if (!result.steps.every((step) => step.ok)) failed = true;
       phaseResults.push({ name: phase.name, steps: result.steps.length });
+
+      // SP05 §6, the runner's half: what P's own disk holds after the phase that chose the guild
+      // icon, and after the phase that saw the admin remove it. Read here, before `clean()` wipes the
+      // app data dirs — and read only here, because the file belongs to the app and the page never
+      // learns where that directory is.
+      if (phase.name === 'person-join') {
+        const check = await personGuildIconFile(icon);
+        console.log("\nP's guild icon file after the phase (SP05 §6):");
+        for (const line of check.lines) console.log(`  ${line}`);
+        if (!check.ok) {
+          console.error("P's guild-icon.png is not the PNG the admin uploaded");
+          failed = true;
+        }
+      }
+      if (phase.name === 'person-cleared') {
+        const check = personGuildIconGone();
+        console.log("\nP's guild icon file after the clear (SP05 §6):");
+        for (const line of check.lines) console.log(`  ${line}`);
+        if (!check.ok) {
+          console.error("P's guild-icon.png survived the sync that carried guildIcon: null");
+          failed = true;
+        }
+      }
 
       // The person's phase is the one that needs the code the admin handed over; without it the
       // later phases would fail for the wrong reason and say nothing about the flow.
@@ -904,12 +1032,12 @@ async function main(): Promise<number> {
       failed = true;
     }
 
-    // F1: the admin Bond had a local account with the guild's email and a credential saved before
+    // F1: the admin Nod had a local account with the guild's email and a credential saved before
     // the join. The join adopted it, so the vault row has to carry the guild's person id and the
     // keychain key of that id — the page's own reveal (step 2.4c) is what proves the value moved.
     const guildPerson = hostPersonId(ADMIN_EMAIL);
     const adopted = adminVault();
-    console.log("\nthe admin Bond's vault row after the adopt (F1):");
+    console.log("\nthe admin Nod's vault row after the adopt (F1):");
     for (const line of adopted.lines) console.log(`  ${line}`);
     if (guildPerson === null) {
       console.error('the host holds no person for the smoke admin');
@@ -922,10 +1050,10 @@ async function main(): Promise<number> {
         );
         failed = true;
       }
-      if (adopted.keychainKey !== `bond.cred.${guildPerson}.${TOOL_A_ID}`) {
+      if (adopted.keychainKey !== `nod.cred.${guildPerson}.${TOOL_A_ID}`) {
         console.error(
           `the keychain key of ${TOOL_A_ID} is ${JSON.stringify(adopted.keychainKey)}, ` +
-            `expected bond.cred.${guildPerson}.${TOOL_A_ID}`,
+            `expected nod.cred.${guildPerson}.${TOOL_A_ID}`,
         );
         failed = true;
       }

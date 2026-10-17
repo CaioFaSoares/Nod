@@ -1,4 +1,4 @@
-// Domain and API contract for Bond.
+// Domain and API contract for Nod.
 // Concepts: docs/canonico.md (§7 window model, §8 catalog, §9 identity, §10 roles, §11 vault,
 // §13 audit, §16 data). Module signatures: docs/arquitetura.md.
 // Imported by the backend, the frontend and the tests: nothing here may depend on `tjs`, `tiny`
@@ -123,7 +123,7 @@ export interface VaultItem {
   toolId: Id;
   label: string;
   username: string;
-  /** key of the item in the OS keychain: bond.cred.<person>.<tool> */
+  /** key of the item in the OS keychain: nod.cred.<person>.<tool> */
   keychainKey: string;
   createdAt: string;
   updatedAt: string;
@@ -279,7 +279,7 @@ export interface SessionState {
 }
 
 /**
- * F1: what a join answers. `local-account` is the typed "this Bond already has an account with this
+ * F1: what a join answers. `local-account` is the typed "this Nod already has an account with this
  * email" of SP05 §4's flow: it is answered **before any host call**, so the code is not spent, and
  * the page asks which account wins — the guild's (the join goes out again with `adoptLocal: true`,
  * which re-keys the local person onto the host person id, `backend/session.ts`) or the local one (the
@@ -291,7 +291,7 @@ export type JoinResult =
   | { kind: 'local-account'; personId: Id; email: string; name: string };
 
 /**
- * Connected mode (SP05 §3): the one host a Bond knows, as Settings → Hosts shows it. `none` without
+ * Connected mode (SP05 §3): the one host a Nod knows, as Settings → Hosts shows it. `none` without
  * a `host` row; `connected` after the last sync succeeded; `stale` when it failed (SP04 §3) — the
  * cache stays in use and the sidebar says `offline`; `signed-out` after a `401`, which asks the
  * person to sign in again (RF-39). `fingerprint` is SP04 §1.1's string of the pinned key.
@@ -302,12 +302,30 @@ export interface HostState {
   guild: string | null;
   address: string | null;
   fingerprint: string | null;
-  /** ISO 8601 UTC of the last snapshot the Bond verified; null before the first one. */
+  /** ISO 8601 UTC of the last snapshot the Nod verified; null before the first one. */
   lastSyncAt: string | null;
   /** Why the last sync failed, as Settings → Hosts shows it; null after one that worked. */
   lastError: string | null;
   /** Writes waiting in the outbox (SP04 §4). */
   pendingWrites: number;
+}
+
+/**
+ * SP05 §6: which icon the Nod shows — the one it shipped with, or the PNG the guild's admin
+ * uploaded. One choice per machine: `app.icon` is the icon of the running app, not of a window.
+ */
+export type AppIconChoice = 'default' | 'guild';
+
+/** What `nod.appIcon` and `nod.setAppIcon` answer (SP05 §6). */
+export interface AppIconState {
+  /** The choice, as `store.json` holds it (`appIcon`); no secret, so a plain preference. */
+  choice: AppIconChoice;
+  /**
+   * A guild icon is on disk and can be applied: the last snapshot carries a `guildIcon` hash and the
+   * cached bytes hash to exactly that value (SP04 §2). False while the guild has none, while the
+   * bytes were never fetched, or after one that did not verify.
+   */
+  guildIconAvailable: boolean;
 }
 
 export interface AppInfo {
@@ -357,7 +375,7 @@ export interface ApiContract {
 
   // connected mode (SP05 §3). `discover`, `activate` and `signIn` work with no session at all:
   // the first run has no account yet, and the password only ever travels page → backend. F3: when
-  // this Bond already has an account and no host, the two joins need that account's session.
+  // this Nod already has an account and no host, the two joins need that account's session.
   'host.state': [void, HostState];
   'host.discover': [{ address: string }, { guild: string; fingerprint: string }];
   'host.activate': [
@@ -386,13 +404,22 @@ export interface ApiContract {
   /** `keepPersonal` is SP05 §3's choice about the local personal tools (block 2). */
   'host.remove': [{ keepPersonal: boolean }, HostState];
   /**
-   * B8a: publishes this Bond's local catalog — the `org` rows of the local `tool` table, with their
+   * B8a: publishes this Nod's local catalog — the `org` rows of the local `tool` table, with their
    * views and their icons, and the local roles — to a host that has no org tool yet (SP03 §2
    * `/v1/admin/bootstrap`). `refused` is the host's `409`: the window is closed because the guild
    * already holds org tools (H5 decision 12), which is an answer and not a failure of the call.
    * Admin only, like every write of the host's catalog.
    */
   'host.bootstrap': [void, { created: number; refused: boolean }];
+  /**
+   * SP05 §6, admin of a connected guild: stores the guild icon — the PNG every member's Nod can
+   * show as the app icon (`PUT /v1/admin/guild/icon`, SP03 §2). `png` is the base64url of the PNG
+   * bytes; the host refuses bytes that are not a PNG and answers their SHA-256, which is what the
+   * signed snapshot then carries (SP04 §2).
+   */
+  'host.setGuildIcon': [{ png: string }, { sha256: string }];
+  /** SP05 §6, admin of a connected guild: the guild has no icon again (`DELETE`, SP03 §2). */
+  'host.clearGuildIcon': [void, true];
 
   'catalog.list': [void, Entry[]];
   'catalog.get': [{ id: Id }, EntryDetails];
@@ -448,13 +475,23 @@ export interface ApiContract {
   'events.syncStatus': [void, EventSyncStatus];
   'events.exportToFile': [{ path: string }, true];
 
-  /** `bond.*`, not `app.*`: the runtime has builtins under `app.` that would win (bridge.js:3156). */
-  'bond.info': [void, AppInfo];
-  'bond.checkUpdate': [void, UpdateInfo];
-  'bond.installUpdate': [void, boolean];
+  /** `nod.*`, not `app.*`: the runtime has builtins under `app.` that would win (bridge.js:3156). */
+  'nod.info': [void, AppInfo];
+  /**
+   * SP05 §6: the app icon this machine shows and whether a guild icon is available to show. Read by
+   * Settings → Account (the choice) and Settings → Hosts (the admin's card).
+   */
+  'nod.appIcon': [void, AppIconState];
+  /**
+   * SP05 §6: stores the choice and applies it — `guild` needs a verified guild icon on disk, and
+   * `default` puts the bundle icon back. Whole app, not one window, so nothing else moves.
+   */
+  'nod.setAppIcon': [{ choice: AppIconChoice }, AppIconState];
+  'nod.checkUpdate': [void, UpdateInfo];
+  'nod.installUpdate': [void, boolean];
   /** RF-55: hides the notice of one version on this machine; only the version string is stored. */
-  'bond.dismissUpdate': [{ version: string }, true];
-  'bond.quit': [void, true];
+  'nod.dismissUpdate': [{ version: string }, true];
+  'nod.quit': [void, true];
 
   /** The only call accepted from tool windows (the tool's origin). */
   'login.report': [{ state: ReportState }, true];
@@ -467,7 +504,7 @@ export type Result<M extends Method> = ApiContract[M][1];
 /** What the login adapter script reports back (canonico §11). */
 export type ReportState = 'no-form' | 'form' | 'filled' | 'error';
 
-/** What a `bond://join` link carries (SP04 §1.3): no secret — an address, a fingerprint, a code. */
+/** What a `nod://join` link carries (SP04 §1.3): no secret — an address, a fingerprint, a code. */
 export interface JoinInvite {
   address: string;
   fingerprint: string;
@@ -485,7 +522,7 @@ export interface PushEvents {
    */
   host: HostState;
   /**
-   * A `bond://join?host=…&fp=…[&code=…]` link arrived (SP04 §1.3): the join screen opens with the
+   * A `nod://join?host=…&fp=…[&code=…]` link arrived (SP04 §1.3): the join screen opens with the
    * invite's host, fingerprint and code prefilled. Delivered again on the next `session.state`
    * until the join flow picks it up with `host.discover`.
    */
@@ -496,7 +533,7 @@ export interface PushEvents {
    * RF-55: the automatic check of the release channel (backend/main.ts). The notice to show, or
    * `null` when there is nothing to announce — no channel, no newer release, or that version was
    * dismissed on this machine. A dismissed version never comes back through here; Settings' manual
-   * check (`bond.checkUpdate`) answers with it regardless.
+   * check (`nod.checkUpdate`) answers with it regardless.
    */
   update: UpdateInfo | null;
 }

@@ -31,7 +31,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const TEAM: Role = { id: 'team', name: 'Team', admin: false };
 const FINANCE: Role = { id: 'finance', name: 'Finance', admin: false };
 
-/** SP04 §2's `me`, for the person this Bond signs in as unless the case says otherwise. */
+/** SP04 §2's `me`, for the person this Nod signs in as unless the case says otherwise. */
 function me(patch: Partial<Snapshot['me']> = {}): Snapshot['me'] {
   return {
     id: PERSON,
@@ -74,6 +74,7 @@ function body(patch: Partial<Omit<Snapshot, 'api'>> = {}): string {
     personalTools: [],
     personalViews: [],
     favorites: [],
+    guildIcon: null,
     ...patch,
   });
 }
@@ -92,7 +93,7 @@ function personalView(id: string, entryId: string): PersonalView {
   };
 }
 
-interface Bond {
+interface Nod {
   db: SqlDb;
   repo: Repo;
   catalog: ConnectedCatalog;
@@ -104,13 +105,13 @@ interface Bond {
   rederive(): boolean;
 }
 
-/** A Bond with a pinned host row and a movable clock. */
-function bondWithHost(now = NOW): Bond {
+/** A Nod with a pinned host row and a movable clock. */
+function nodWithHost(now = NOW): Nod {
   const db = memorySqlite();
   const repo = createRepo(db);
   repo.migrate();
   repo.saveHost({
-    address: 'https://bond.example.test',
+    address: 'https://nod.example.test',
     guild: 'Example Guild',
     kid: 'kid-a',
     publicKey: 'cGlu',
@@ -139,7 +140,7 @@ function idsOf(catalog: ConnectedCatalog): string[] {
   return catalog.entries().map((entry) => entry.id);
 }
 
-/** Every row of the local-mode catalog tables, as text: what a connected Bond may not move. */
+/** Every row of the local-mode catalog tables, as text: what a connected Nod may not move. */
 function localCatalogText(db: SqlDb): string {
   return ['tool', 'tool_view', 'tool_grant', 'role']
     .map((table) => JSON.stringify(db.all(`SELECT * FROM ${table}`)))
@@ -191,7 +192,7 @@ async function serveSigner(): Promise<Signer> {
       const signature = toBase64url(await sign(new TextEncoder().encode(current.signed), pair.privateKey));
       return new Response(current.body, {
         status: 200,
-        headers: { ETag: '"v1"', 'Bond-Signature': `kid=${kid}; sig=${signature}` },
+        headers: { ETag: '"v1"', 'Nod-Signature': `kid=${kid}; sig=${signature}` },
       });
     },
   });
@@ -213,35 +214,35 @@ async function serveSigner(): Promise<Signer> {
 
 describe('SP05 §2 — the catalog comes from the snapshot', () => {
   test('the org tools and the roles are the snapshot ones, and the local tables stay untouched', () => {
-    const bond = bondWithHost();
-    bond.repo.saveEntry(tool('local-kanban', { roles: [] }));
-    bond.repo.saveRole({ id: 'local-role', name: 'Local', admin: false });
-    const before = localCatalogText(bond.db);
+    const nod = nodWithHost();
+    nod.repo.saveEntry(tool('local-kanban', { roles: [] }));
+    nod.repo.saveRole({ id: 'local-role', name: 'Local', admin: false });
+    const before = localCatalogText(nod.db);
 
-    expect(bond.sync(body({ orgTools: [tool('jitsi')] }))).toBe(true);
+    expect(nod.sync(body({ orgTools: [tool('jitsi')] }))).toBe(true);
 
-    expect(idsOf(bond.catalog)).toEqual(['jitsi']);
-    expect(bond.catalog.roles().map((role) => role.id)).toEqual(['team', 'finance']);
-    expect(bond.catalog.current()?.me.id).toBe(PERSON);
+    expect(idsOf(nod.catalog)).toEqual(['jitsi']);
+    expect(nod.catalog.roles().map((role) => role.id)).toEqual(['team', 'finance']);
+    expect(nod.catalog.current()?.me.id).toBe(PERSON);
 
     // SP05 §2: the `tool`/`role` tables keep the local-mode catalog, byte for byte — "removing the
-    // host returns to them" — and the local tool is not what the connected Bond shows.
-    expect(localCatalogText(bond.db)).toBe(before);
-    expect(bond.repo.listEntries().map((entry) => entry.id)).toEqual(['local-kanban']);
-    expect(bond.catalog.roles().map((role) => role.id)).not.toContain('local-role');
+    // host returns to them" — and the local tool is not what the connected Nod shows.
+    expect(localCatalogText(nod.db)).toBe(before);
+    expect(nod.repo.listEntries().map((entry) => entry.id)).toEqual(['local-kanban']);
+    expect(nod.catalog.roles().map((role) => role.id)).not.toContain('local-role');
   });
 
   test('an entry keeps what the host sent: grants, views, icon, scope, order', () => {
-    const bond = bondWithHost();
+    const nod = nodWithHost();
     const granted = tool('jitsi', {
       icon: 'data:image/png;base64,AA',
       order: 7,
       roles: [TEAM.id, FINANCE.id],
       views: [{ id: 'view-org', label: 'Sprint', url: 'https://jitsi.example.test/sprint', mode: 'window' }],
     });
-    bond.sync(body({ orgTools: [granted] }));
+    nod.sync(body({ orgTools: [granted] }));
 
-    const entry = bond.catalog.entries()[0];
+    const entry = nod.catalog.entries()[0];
     expect(entry?.roles).toEqual([TEAM.id, FINANCE.id]);
     expect(entry?.views.map((view) => view.label)).toEqual(['Sprint']);
     expect(entry?.icon).toBe('data:image/png;base64,AA');
@@ -250,73 +251,73 @@ describe('SP05 §2 — the catalog comes from the snapshot', () => {
   });
 
   test('a person with the granted role sees the tool; another role does not', () => {
-    const team = bondWithHost();
+    const team = nodWithHost();
     team.sync(body({ orgTools: [tool('jitsi')] }));
     expect(idsOf(team.catalog)).toEqual(['jitsi']);
 
     // The host filters per person; a body that carried a tool no role of mine holds grants nothing.
-    const finance = bondWithHost();
+    const finance = nodWithHost();
     finance.sync(body({ me: me({ roles: [FINANCE.id] }), orgTools: [tool('jitsi')] }));
     expect(idsOf(finance.catalog)).toEqual([]);
     expect(finance.catalog.roles().map((role) => role.id)).toEqual(['team', 'finance']);
 
     // An admin sees the whole guild catalog, whatever the grants say (SP04 §2).
-    const admin = bondWithHost();
+    const admin = nodWithHost();
     admin.sync(body({ me: me({ roles: [], admin: true }), orgTools: [tool('jitsi')] }));
     expect(idsOf(admin.catalog)).toEqual(['jitsi']);
   });
 
   test('a grant added on the host shows the tool after the next sync, only for that role', () => {
-    const bond = bondWithHost();
-    bond.sync(body({ version: 'v1' }));
-    expect(idsOf(bond.catalog)).toEqual([]);
+    const nod = nodWithHost();
+    nod.sync(body({ version: 'v1' }));
+    expect(idsOf(nod.catalog)).toEqual([]);
 
     const granted = body({ version: 'v2', issuedAt: '2026-10-16T10:04:00.000Z', orgTools: [tool('jitsi')] });
-    expect(bond.sync(granted, 'v2', '2026-10-16T10:05:00.000Z')).toBe(true);
-    expect(idsOf(bond.catalog)).toEqual(['jitsi']);
-    expect(bond.catalog.current()?.version).toBe('v2');
+    expect(nod.sync(granted, 'v2', '2026-10-16T10:05:00.000Z')).toBe(true);
+    expect(idsOf(nod.catalog)).toEqual(['jitsi']);
+    expect(nod.catalog.current()?.version).toBe('v2');
 
     // The same new grant, read by a person of another role: still nothing to show.
-    const finance = bondWithHost();
+    const finance = nodWithHost();
     finance.sync(body({ version: 'v1' }));
     finance.sync(body({ version: 'v2', me: me({ roles: [FINANCE.id] }), orgTools: [tool('jitsi')] }), 'v2');
     expect(idsOf(finance.catalog)).toEqual([]);
   });
 
   test('without a body there is nothing of the guild, and removing the host returns to nothing', () => {
-    const bond = bondWithHost();
-    expect(bond.rederive()).toBe(false);
-    expect(bond.catalog.current()).toBeNull();
-    expect(idsOf(bond.catalog)).toEqual([]);
-    expect(bond.catalog.roles()).toEqual([]);
+    const nod = nodWithHost();
+    expect(nod.rederive()).toBe(false);
+    expect(nod.catalog.current()).toBeNull();
+    expect(idsOf(nod.catalog)).toEqual([]);
+    expect(nod.catalog.roles()).toEqual([]);
 
-    expect(bond.sync(body({ orgTools: [tool('jitsi')] }))).toBe(true);
-    expect(idsOf(bond.catalog)).toEqual(['jitsi']);
+    expect(nod.sync(body({ orgTools: [tool('jitsi')] }))).toBe(true);
+    expect(idsOf(nod.catalog)).toEqual(['jitsi']);
 
-    bond.repo.clearHost();
+    nod.repo.clearHost();
     // Losing the host is news like any other: the catalog goes from the guild's entries to none.
-    expect(bond.rederive()).toBe(true);
-    expect(bond.catalog.current()).toBeNull();
-    expect(idsOf(bond.catalog)).toEqual([]);
-    expect(bond.catalog.roles()).toEqual([]);
+    expect(nod.rederive()).toBe(true);
+    expect(nod.catalog.current()).toBeNull();
+    expect(idsOf(nod.catalog)).toEqual([]);
+    expect(nod.catalog.roles()).toEqual([]);
   });
 });
 
 describe('SP05 §4 — order and views', () => {
   test('the favorites come first, then the org tools, then the personal ones', () => {
-    const bond = bondWithHost();
+    const nod = nodWithHost();
     const mine = tool('mine', { scope: 'personal', ownerId: PERSON, roles: [], order: 3 });
-    bond.sync(
+    nod.sync(
       body({
         orgTools: [tool('alpha', { order: 1 }), tool('beta', { order: 2 })],
         personalTools: [mine],
         favorites: ['beta', 'mine'],
       }),
     );
-    expect(idsOf(bond.catalog)).toEqual(['beta', 'mine', 'alpha']);
+    expect(idsOf(nod.catalog)).toEqual(['beta', 'mine', 'alpha']);
 
     // A favorite that resolves to no entry is skipped, wherever it sits in the list.
-    bond.sync(
+    nod.sync(
       body({
         orgTools: [tool('alpha', { order: 1 }), tool('beta', { order: 2 })],
         personalTools: [mine],
@@ -324,70 +325,70 @@ describe('SP05 §4 — order and views', () => {
       }),
       'v2',
     );
-    expect(idsOf(bond.catalog)).toEqual(['beta', 'mine', 'alpha']);
+    expect(idsOf(nod.catalog)).toEqual(['beta', 'mine', 'alpha']);
   });
 
   test('a personal view hangs under its entry, after the entry own views', () => {
-    const bond = bondWithHost();
+    const nod = nodWithHost();
     const jitsi = tool('jitsi', {
       views: [{ id: 'view-org', label: 'Sprint', url: 'https://jitsi.example.test/sprint', mode: 'window' }],
     });
-    bond.sync(body({ orgTools: [jitsi], personalViews: [personalView('view-mine', 'jitsi')] }));
+    nod.sync(body({ orgTools: [jitsi], personalViews: [personalView('view-mine', 'jitsi')] }));
 
     // The index of a view is what `tools.openView` reads, so the order is the contract.
-    expect(bond.catalog.entries()[0]?.views.map((view) => view.label)).toEqual(['Sprint', 'view-mine']);
+    expect(nod.catalog.entries()[0]?.views.map((view) => view.label)).toEqual(['Sprint', 'view-mine']);
   });
 
   test('a personal view of an entry I do not see travels nowhere', () => {
-    const bond = bondWithHost();
-    bond.sync(
+    const nod = nodWithHost();
+    nod.sync(
       body({ orgTools: [tool('jitsi')], personalViews: [personalView('view-ghost', 'ghost-tool')] }),
     );
-    expect(idsOf(bond.catalog)).toEqual(['jitsi']);
-    expect(bond.catalog.entries()[0]?.views).toEqual([]);
+    expect(idsOf(nod.catalog)).toEqual(['jitsi']);
+    expect(nod.catalog.entries()[0]?.views).toEqual([]);
   });
 });
 
 describe('RF-37 — the 14-day cached window', () => {
   test('inside the window the org tools show; past it they hide and the personal ones stay', () => {
-    const bond = bondWithHost();
+    const nod = nodWithHost();
     const mine = tool('mine', { scope: 'personal', ownerId: PERSON, roles: [] });
-    bond.sync(body({ orgTools: [tool('jitsi')], personalTools: [mine], favorites: ['jitsi'] }));
+    nod.sync(body({ orgTools: [tool('jitsi')], personalTools: [mine], favorites: ['jitsi'] }));
 
-    bond.clock.at = Date.parse(SYNCED) + 14 * DAY_MS - 1;
-    expect(bond.catalog.current()?.orgUsable).toBe(true);
-    expect(idsOf(bond.catalog)).toEqual(['jitsi', 'mine']);
+    nod.clock.at = Date.parse(SYNCED) + 14 * DAY_MS - 1;
+    expect(nod.catalog.current()?.orgUsable).toBe(true);
+    expect(idsOf(nod.catalog)).toEqual(['jitsi', 'mine']);
 
     // The window is the half-open `[lastSyncAt, lastSyncAt + 14d)`: the day it completes, the org
     // half is hidden until a sync succeeds, and a favorite of a hidden tool goes with it.
-    bond.clock.at = Date.parse(SYNCED) + 14 * DAY_MS;
-    expect(bond.catalog.current()?.orgUsable).toBe(false);
-    expect(idsOf(bond.catalog)).toEqual(['mine']);
-    expect(bond.catalog.roles().map((role) => role.id)).toEqual(['team', 'finance']);
+    nod.clock.at = Date.parse(SYNCED) + 14 * DAY_MS;
+    expect(nod.catalog.current()?.orgUsable).toBe(false);
+    expect(idsOf(nod.catalog)).toEqual(['mine']);
+    expect(nod.catalog.roles().map((role) => role.id)).toEqual(['team', 'finance']);
   });
 
   test('a sync that changed nothing reopens the window without re-reading the body', () => {
-    const bond = bondWithHost();
+    const nod = nodWithHost();
     const raw = body({ orgTools: [tool('jitsi')] });
-    bond.sync(raw);
+    nod.sync(raw);
 
-    bond.clock.at = Date.parse(SYNCED) + 14 * DAY_MS + 1;
-    expect(idsOf(bond.catalog)).toEqual([]);
+    nod.clock.at = Date.parse(SYNCED) + 14 * DAY_MS + 1;
+    expect(idsOf(nod.catalog)).toEqual([]);
 
     // The `304` of the same body: the host answered, so the cache is current again.
-    expect(bond.sync(raw, 'v1', new Date(bond.clock.at).toISOString())).toBe(true);
-    expect(idsOf(bond.catalog)).toEqual(['jitsi']);
+    expect(nod.sync(raw, 'v1', new Date(nod.clock.at).toISOString())).toBe(true);
+    expect(idsOf(nod.catalog)).toEqual(['jitsi']);
 
     // And the next sync of the same body tells the page nothing new — the signal is what is shown.
-    expect(bond.sync(raw, 'v1', new Date(bond.clock.at + 60_000).toISOString())).toBe(false);
-    expect(idsOf(bond.catalog)).toEqual(['jitsi']);
+    expect(nod.sync(raw, 'v1', new Date(nod.clock.at + 60_000).toISOString())).toBe(false);
+    expect(idsOf(nod.catalog)).toEqual(['jitsi']);
   });
 });
 
 describe('the verified bytes (SP04 §2, SP05 §2)', () => {
   test('a tampered body is refused by the client, and the previous cache stays', async () => {
     const signer = await serveSigner();
-    const bond = bondWithHost();
+    const nod = nodWithHost();
     const connection = createHostClient({ fetch, keychain: memoryKeychain() }).connect(signer.pin(PERSON));
 
     const first = body({ orgTools: [tool('jitsi')] });
@@ -395,8 +396,8 @@ describe('the verified bytes (SP04 §2, SP05 §2)', () => {
     const verified = await connection.snapshot();
     if (verified.notModified) throw new Error('expected a body');
     expect(verified.raw).toBe(first);
-    expect(bond.sync(verified.raw)).toBe(true);
-    expect(idsOf(bond.catalog)).toEqual(['jitsi']);
+    expect(nod.sync(verified.raw)).toBe(true);
+    expect(idsOf(nod.catalog)).toEqual(['jitsi']);
 
     // One byte changed after signing: the client refuses it before anything parses it, so no row
     // and no cache ever sees it.
@@ -404,31 +405,31 @@ describe('the verified bytes (SP04 §2, SP05 §2)', () => {
     signer.answer(tampered.replace('STEALER', 'STEALEN'), tampered);
     const refused = await refusalOf(connection.snapshot());
     expect(refused.failure).toBe('signature');
-    expect(bond.repo.hostRecord()?.snapshot).toBe(first);
+    expect(nod.repo.hostRecord()?.snapshot).toBe(first);
 
-    expect(bond.rederive()).toBe(false);
-    expect(idsOf(bond.catalog)).toEqual(['jitsi']);
+    expect(nod.rederive()).toBe(false);
+    expect(idsOf(nod.catalog)).toEqual(['jitsi']);
     signer.stop();
   });
 
   test('a stored body that is not the document keeps the previous cache', () => {
-    const bond = bondWithHost();
-    bond.sync(body({ orgTools: [tool('jitsi')] }));
-    expect(idsOf(bond.catalog)).toEqual(['jitsi']);
+    const nod = nodWithHost();
+    nod.sync(body({ orgTools: [tool('jitsi')] }));
+    expect(idsOf(nod.catalog)).toEqual(['jitsi']);
 
     // Signed and stored — the client checks the signature and the envelope, `shared/host-merge.ts`
-    // reads the document — but not a body this Bond can show.
+    // reads the document — but not a body this Nod can show.
     const refused = [
       'not json',
       '{"api":2,"version":"v2","issuedAt":"2026-10-16T10:05:00.000Z"}',
       body({ version: 'v3', me: me({ id: OTHER_PERSON }), orgTools: [tool('jitsi', { order: 9 })] }),
     ];
     for (const raw of refused) {
-      expect(bond.sync(raw, 'v9')).toBe(false);
-      expect(idsOf(bond.catalog)).toEqual(['jitsi']);
+      expect(nod.sync(raw, 'v9')).toBe(false);
+      expect(idsOf(nod.catalog)).toEqual(['jitsi']);
       // The catalog keeps answering with the body it is showing, not with the row it refused.
-      expect(bond.catalog.current()?.version).toBe('v1');
-      expect(bond.catalog.entries()[0]?.order).toBe(1);
+      expect(nod.catalog.current()?.version).toBe('v1');
+      expect(nod.catalog.entries()[0]?.order).toBe(1);
     }
   });
 });

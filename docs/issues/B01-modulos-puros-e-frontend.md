@@ -1,6 +1,6 @@
 ---
 id: B01
-frente: bond
+frente: nod
 titulo: módulos puros (shared/), repositório SQLite e páginas do frontend
 status: fechada
 tipo: cobertura
@@ -10,7 +10,7 @@ destino: —
 aberta_em: 2026-10-15
 ---
 
-Autoriza tocar código no repositório `Bond/` para as fatias de `docs/arquitetura.md` §3 (`shared/`),
+Autoriza tocar código no repositório `Nod/` para as fatias de `docs/arquitetura.md` §3 (`shared/`),
 §4 `backend/sqlite.ts` e `backend/repo.ts`, e §5 (páginas). Requisitos: `docs/canonico.md` §14 —
 RF-01 a RF-13, RF-19 a RF-29 na parte de lógica e de interface.
 

@@ -19,7 +19,8 @@ Duas origens para o arquivo:
 
 Os ícones referenciados pelas entradas ficam em `resources/` (caminho relativo, sem `..`); o
 `scripts/gen-config.ts` os lista no `tinyjs.json` e o build os empacota junto com o seed e com o
-`tray.png`, o ícone da bandeja no Linux.
+`tray.png`, o ícone da bandeja no Linux. O **ícone do app** (o do Dock/taskbar, outro assunto) tem
+a sua própria seção: §9.
 
 ## 2. Gerar o artefato
 
@@ -92,10 +93,12 @@ o dono quiser; o app verifica checksum e assinatura antes de trocar a release.
 ## 7. O que nunca vai para o git
 
 - `resources/seed.json` — o seed privado;
+- `resources/icon.png` — o ícone privado de uma build customizada (RF-56, §9);
+- `.nod-icon.png` — cópia gerada de um ícone dado por `NOD_ICON` (§9);
 - `tinyjs.json` — gerado, e o gate de origins sai do seed.
 
-Ambos já estão no `.gitignore`. O versionado no lugar deles é só `resources/seed.example.json`, com
-dados falsos.
+Todos já estão no `.gitignore`. O versionado no lugar deles é só `resources/seed.example.json`, com
+dados falsos (e o ícone versionado é o `assets/icon.png`).
 
 ## 8. Automated release (GitHub Actions)
 
@@ -109,10 +112,10 @@ dados falsos.
 
    | Target | Runner | Output |
    | --- | --- | --- |
-   | macOS | `macos-15` | `bond-<v>-macos-arm64.zip` and `bond-<v>-macos-x86_64.zip` (`publish --arch` twice) |
-   | Linux x86_64 | `ubuntu-24.04` | `bond-<v>-linux-x86_64.tar.gz` |
-   | Linux arm64 | `ubuntu-24.04-arm` | `bond-<v>-linux-arm64.tar.gz` |
-   | Windows | `windows-2025` | `bond-<v>-win.zip` |
+   | macOS | `macos-15` | `nod-<v>-macos-arm64.zip` and `nod-<v>-macos-x86_64.zip` (`publish --arch` twice) |
+   | Linux x86_64 | `ubuntu-24.04` | `nod-<v>-linux-x86_64.tar.gz` |
+   | Linux arm64 | `ubuntu-24.04-arm` | `nod-<v>-linux-arm64.tar.gz` |
+   | Windows | `windows-2025` | `nod-<v>-win.zip` |
 
 3. **Release**: merges the per-OS `manifest.json` files into one, then creates release
    `release-<version>` — the `prepare` job prints the tag, the prefix included (`docs/canonico.md`
@@ -120,11 +123,18 @@ dados falsos.
 
 **One-time setup:**
 
-- Secret `BOND_PRIVATE_RESOURCES`: the private files of `resources/` (§1, §7) as base64 of a
+- Secret `NOD_PRIVATE_RESOURCES`: the private files of `resources/` (§1, §7) as base64 of a
   tar.gz, with paths relative to `resources/`. With `seed.json` plus any icons it references:
 
   ```
-  tar -czf - -C resources seed.json icons | base64 | gh secret set BOND_PRIVATE_RESOURCES
+  tar -czf - -C resources seed.json icons | base64 | gh secret set NOD_PRIVATE_RESOURCES
+  ```
+
+  A custom app icon rides in the same secret (RF-56, §9) — add `resources/icon.png` to the archive
+  and the release wears it, no other step:
+
+  ```
+  tar -czf - -C resources seed.json icon.png | base64 | gh secret set NOD_PRIVATE_RESOURCES
   ```
 
   GitHub caps a secret at 48 KB. If the icons don't fit, put them in the seed as data URIs.
@@ -141,7 +151,7 @@ dados falsos.
 - **Public repository: auto-update works.** The repository is public, so release files download
   without authentication and an installed Nod fetches its manifest and its archives straight from
   GitHub Releases. The release repository is this one — `RELEASE_REPO` already defaults to
-  `github.repository`. `BOND_RELEASE_REPO` plus a `BOND_RELEASE_TOKEN` with `contents: write` are
+  `github.repository`. `NOD_RELEASE_REPO` plus a `NOD_RELEASE_TOKEN` with `contents: write` are
   only for putting the release in *another* repository, which then has to be public too.
 - **Public repository: the seed becomes public.** Every archive carries the seed (§1): addresses,
   roles, grants and invite hashes. With a public repository anyone who downloads a release reads
@@ -151,3 +161,43 @@ dados falsos.
   builds are unsigned (§4).
 - **macOS runner cost.** On a private repository, macOS runner minutes cost more than Linux ones
   (`https://docs.github.com/en/billing/reference/actions-runner-pricing`).
+
+## 9. Custom builds (app icon)
+
+Written in English, like everything from 2026-10-16 on; the rest of this file is the pt-BR text of
+before. Requirement: RF-56 (`docs/canonico.md` §14).
+
+A release wears the tracked `assets/icon.png` — 1024×1024, the size tinyjs documents
+(`.agents/skills/tinyjs/SKILL.md` §"Project layout"). A custom build wears another icon without
+editing one tracked file:
+
+| Source | How |
+| --- | --- |
+| `resources/icon.png` | drop the PNG there; private and gitignored, like the seed — this is the flow to keep |
+| `NOD_ICON=/path/to.png` | `NOD_ICON=/path/to.png bun run app:build`; a one-off, the file stays where it is |
+| neither | `assets/icon.png`, exactly as before |
+
+`scripts/gen-config.ts` resolves the source in that order (`NOD_ICON` wins, then
+`resources/icon.png`, then `assets/icon.png`) and writes the winner into the generated `tinyjs.json`
+`"icon"` key — the key tinyjs reads instead of its own default (`cfg.icon || 'icon.png'`). One PNG
+serves every OS: sips turns it into the macOS `.icns` (16…1024), Linux copies it to
+`dist/icon.png` and Windows embeds it (`~/.tinyjs/cli.js`, `tinyjs build`; release facts in
+`.agents/skills/tinyjs/references/release.md`).
+
+- The file must be a PNG of at least 1024×1024. Anything else fails the build with the path and the
+  real size in the message (`scripts/gen-config.ts`, `assertIconPng`) — a smaller image would only
+  ship upscaled, and a non-PNG would fall back to the default icon silently.
+- A PNG passed through `NOD_ICON` is copied to `.nod-icon.png` (generated, gitignored) because
+  tinyjs resolves `icon` from the project root and hands that same path to sips, to
+  `dist/icon.png` and to the Windows icon embedder. The tracked `assets/icon.png` is never written,
+  so `git status` stays clean either way.
+- `bun run app:dev` wears the same icon in the dev window; the seeded `resources/` list of the
+  release does not ship it — the icon is a build input, not app data.
+- **The app title stays Nod.** `title`/`name` in `tinyjs.base.json` are outside this flow: a release
+  with another name is a different decision, not a knob of the icon.
+- In CI (§8) the icon travels inside `NOD_PRIVATE_RESOURCES`; the workflow prints which icon the
+  build will wear and refuses the release when the secret carries `icon.png` and `tinyjs.json` says
+  otherwise.
+
+Everything else of a custom build is the normal step (§2): the seed is still the private one and the
+build still fails without it.

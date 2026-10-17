@@ -50,6 +50,7 @@ const BODY: Snapshot = {
   personalTools: [entry('mine', { scope: 'personal', ownerId: 'p1' })],
   personalViews: [],
   favorites: ['jitsi'],
+  guildIcon: null,
 };
 const BODY_RAW = JSON.stringify(BODY);
 
@@ -828,7 +829,7 @@ describe('a run that outlives its host (F8)', () => {
   });
 
   test('a 401 that outlives its host neither forgets the token nor signs the new row out', async () => {
-    // The same host added again: its keychain item is the same `bond.host.<kid>.<personId>`.
+    // The same host added again: its keychain item is the same `nod.host.<kid>.<personId>`.
     const h = harness({ snapshot: signedOut });
     h.sync.start();
     h.repo.clearHost();

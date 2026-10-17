@@ -1,4 +1,4 @@
-// The effective catalog of a connected Bond (SP05 §2, §4; RF-34): the org tools, the roles and the
+// The effective catalog of a connected Nod (SP05 §2, §4; RF-34): the org tools, the roles and the
 // grants of the verified snapshot, parsed once per change and kept in memory, with the 14-day window
 // of `docs/canonico.md` §22 (owner, 2026-10-16) applied on top of it.
 //
@@ -82,7 +82,7 @@ function readBody(raw: string, personId: Id): SnapshotRows | null {
   }
   try {
     const rows = parseSnapshot(value);
-    // The host signs per person, so a body naming someone else is not this Bond's snapshot: refused
+    // The host signs per person, so a body naming someone else is not this Nod's snapshot: refused
     // like a body that does not read, because what is at stake is showing a guild's catalog.
     return rows.me.id === personId ? rows : null;
   } catch {
@@ -124,7 +124,7 @@ export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCat
   let builtOnce = false;
   /**
    * The catalog as text, the change detector of the push. It starts at `JSON.stringify(null)`, the
-   * empty catalog of a Bond that was never connected, so the first refresh of that state is not
+   * empty catalog of a Nod that was never connected, so the first refresh of that state is not
    * news.
    */
   let signature: string = JSON.stringify(null);
@@ -161,7 +161,7 @@ export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCat
 
   /**
    * The effective catalog of the last row seen, rebuilt only when its inputs moved: the body, or the
-   * 14-day verdict of the clock (RF-37). A Bond that sat idle past the window therefore hides the org
+   * 14-day verdict of the clock (RF-37). A Nod that sat idle past the window therefore hides the org
    * half the moment it is read, and nothing is rebuilt while the verdict is the same — which is what
    * keeps an ordinary read free of work.
    */
@@ -176,7 +176,7 @@ export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCat
       builtUsable = usable;
       builtOnce = true;
       // The catalog is worth its own text: what `refresh` compares to answer whether the page has
-      // anything new. `null` is the empty catalog, the state a Bond with no host row is in.
+      // anything new. `null` is the empty catalog, the state a Nod with no host row is in.
       signature = JSON.stringify(built);
     }
     return built;
@@ -193,7 +193,7 @@ export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCat
     } else if (record.snapshot !== parsedFrom) {
       parsedFrom = record.snapshot;
       // A body that does not read keeps the previous cache: the row holds the last bytes the pinned
-      // key signed, and a snapshot the Bond cannot read is not one it may show.
+      // key signed, and a snapshot the Nod cannot read is not one it may show.
       const read = readBody(record.snapshot, record.personId);
       if (read !== null) {
         parsed = read;

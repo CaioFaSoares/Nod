@@ -19,6 +19,7 @@ import { RepoError, createRepo, type Repo } from './repo';
 import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
 import { eventRoutes } from './routes/events';
+import { guildRoutes } from './routes/guild';
 import { stateRoutes } from './routes/state';
 
 export type AppDeps = {
@@ -32,9 +33,11 @@ export type AppDeps = {
 export const MAX_BODY_BYTES = 256 * 1024;
 export const MAX_ICON_BODY_BYTES = 512 * 1024;
 
-/** The two routes whose body carries an `entry.icon` data URI (SP03 §1, §2). */
+/** The routes whose body carries an icon: an `entry.icon` data URI or the guild PNG (SP03 §1, §2). */
 export function bodyLimitFor(path: string): number {
-  return path.startsWith('/v1/admin/tools') || path.startsWith('/v1/admin/bootstrap')
+  return path.startsWith('/v1/admin/tools') ||
+    path.startsWith('/v1/admin/bootstrap') ||
+    path === HOST_ROUTES.adminGuildIcon
     ? MAX_ICON_BODY_BYTES
     : MAX_BODY_BYTES;
 }
@@ -90,17 +93,18 @@ export function createApp(deps: AppDeps) {
       if (error instanceof NotFound) return status(404, { error: 'not found' });
       // Never the message: an unexpected error may carry a value from the request (SP03 §1), and no
       // request body is ever logged (host/context.md). The path alone is enough to find it.
-      console.error(`bond host: unexpected error on ${request.method} ${new URL(request.url).pathname}`);
+      console.error(`nod host: unexpected error on ${request.method} ${new URL(request.url).pathname}`);
       return status(500, { error: 'internal error' });
     })
 
     .get(HOST_ROUTES.health, () => 'ok')
 
-    // SP03 §2: the four route groups in one line each, in this order — auth (H4), admin (H5), state
-    // (H6), events (H8). Each carries its own guards, so a group mounted later keeps its own access
-    // rules and the levels of the groups above stay inside them (H4's regression test).
+    // SP03 §2: the route groups in one line each, in this order — auth (H4), admin (H5), state
+    // (H6), events (H8), guild (I2h). Each carries its own guards, so a group mounted later keeps its
+    // own access rules and the levels of the groups above stay inside them (H4's regression test).
     .use(authRoutes)
     .use(adminRoutes)
     .use(stateRoutes)
-    .use(eventRoutes);
+    .use(eventRoutes)
+    .use(guildRoutes);
 }

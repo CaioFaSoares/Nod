@@ -1,6 +1,6 @@
 ---
 id: E01
-frente: bond
+frente: nod
 titulo: Connected mode — a self-hosted host that people sign in to, with org tools, personal tools and favorites
 status: proposto
 tipo: epico
@@ -56,7 +56,7 @@ sequenceDiagram
     O->>C: deploy compose (host + volume)
     C->>H: first boot: empty DB, signing key; operator runs setup-code in the container terminal
     O->>B: Settings → Hosts → Add host (address)
-    B->>H: GET /.well-known/bond (key fingerprint)
+    B->>H: GET /.well-known/nod (key fingerprint)
     O->>B: confirm fingerprint, sign in with setup code, set password
     H-->>B: owner becomes host admin; token → keychain
     O->>B: publish local tools as org tools (empty host only)
@@ -207,7 +207,7 @@ vaultKey = HMAC-SHA256(master, "bond/vault/v1")           → never leaves the m
 
 **The vault itself** stays on the machine and never syncs (§4). Each credential value is
 encrypted with `vaultKey` (AES-256-GCM, a nonce per write) before it goes into the keychain under
-`bond.cred.<person>.<tool>` (`docs/canonico.md` §11). What changes from today:
+`nod.cred.<person>.<tool>` (`docs/canonico.md` §11). What changes from today:
 
 - **Fixed:** another process of the same OS user that reads the keychain item gets ciphertext. This
   closes the limit accepted in `docs/canonico.md` §11.
@@ -263,7 +263,7 @@ Rules:
   - per email: 5 code attempts and 3 emails every 15 minutes;
   - per IP: rate limited;
   - the same reply whether or not the email exists.
-- **Optional shortcut**: after approving, the page can offer `bond://signed-in` to bring the Nod
+- **Optional shortcut**: after approving, the page can offer `nod://signed-in` to bring the Nod
   to the front (`urlScheme`, single instance — `docs/tinyjs.md` §8). Polling already finished the
   sign-in, so the shortcut is cosmetic.
 
@@ -293,7 +293,7 @@ SMTP client per stack:
 
 ## 8. Sync contract
 
-- `GET /.well-known/bond` → API version, host public key (Ed25519) + fingerprint, minimum app
+- `GET /.well-known/nod` → API version, host public key (Ed25519) + fingerprint, minimum app
   version, available sign-in methods.
 - `GET /v1/state` (`If-None-Match`) → one **signed full snapshot**
   `{ version, issuedAt, keyId, me, roles, orgTools, personalTools, favorites }`, filtered to the
@@ -306,7 +306,7 @@ SMTP client per stack:
 - **When**: on unlock, every N minutes while unlocked (backend timer — `docs/tinyjs.md` §3), and
   "Sync now".
 - **Trust**: the host key is pinned at Add host (fingerprint shown to confirm, or carried by an
-  invite link `bond://join?host=…&code=…&fp=…`); every snapshot must verify against it; a key change
+  invite link `nod://join?host=…&code=…&fp=…`); every snapshot must verify against it; a key change
   is an explicit re-add, never silent. Ed25519 is native in the Nod runtime (`docs/tinyjs.md` §5).
 - **Vault binding**: each vault item stores the origin it was saved for; the login adapter never
   fills when the tool's origin differs. With the host able to change any tool URL, this is what
@@ -475,7 +475,7 @@ These requirements entered `docs/canonico.md` §14 on 2026-10-16 (RF-30 to RF-43
 | RF-40 | Adding a host offers local tools as personal tools; an empty host's first admin may publish them as org tools. | After Add host, no local tool disappears. |
 | RF-41 | The host runs as one compose with data on a volume and a scheduled backup. | Redeploy keeps data; a backup restores into a fresh host. |
 | RF-42 | The password never leaves the machine: the host receives only `authKey`. | A capture of activation, sign-in and password change shows no password; the host DB has only `argon2id(authKey)` and the salt. |
-| RF-43 | Vault values in the keychain are encrypted with `vaultKey`; a password reset by access code wipes that machine's vault. | Reading `bond.cred.*` with the system keychain tool shows ciphertext; after a reset, the old credentials are gone and the Nod asks for them again. |
+| RF-43 | Vault values in the keychain are encrypted with `vaultKey`; a password reset by access code wipes that machine's vault. | Reading `nod.cred.*` with the system keychain tool shows ciphertext; after a reset, the old credentials are gone and the Nod asks for them again. |
 
 ## 15. Open questions for the owner
 

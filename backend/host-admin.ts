@@ -2,8 +2,8 @@
 // the Activity read, and B8a's one-time publish — each one mapped to the route of SP03 §2 that owns
 // it, over the `HostConnection` the caller already holds (RF-30: no host row, no connection).
 //
-// The shapes in and out are `shared/host-api.ts`'s, so the Bond and the host validate the same fields;
-// the conversion the other way — this Bond's `EventFilter` into SP03 §2's query, a `HostEvent` into the
+// The shapes in and out are `shared/host-api.ts`'s, so the Nod and the host validate the same fields;
+// the conversion the other way — this Nod's `EventFilter` into SP03 §2's query, a `HostEvent` into the
 // `AuditEvent` the Activity tab renders — happens here and nowhere else.
 //
 // The bearer is never named here: `HostConnection` reads it from the keychain per call (SP02 §5). No
@@ -32,7 +32,7 @@ import { HostError, type HostConnection } from './host-client';
 
 /**
  * SP03 §2's `409` on `POST /v1/admin/bootstrap` — the window closes with the first org tool
- * (H5 decision 12). The host's own body never reaches the Bond, so this is the Bond's sentence.
+ * (H5 decision 12). The host's own body never reaches the Nod, so this is the Nod's sentence.
  */
 export const BOOTSTRAP_CLOSED = 'the guild already has org tools';
 
@@ -132,7 +132,7 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
 
   /**
    * One host event as the Activity tab reads it. `kind` stays a string on the wire — a newer host may
-   * have kinds this Bond does not know (SP03 §2) — and lands in `type`, which the table prints.
+   * have kinds this Nod does not know (SP03 §2) — and lands in `type`, which the table prints.
    * `receivedAt` is the host clock of the batch that brought it in: it answers the column's question
    * ("is it on the host, and since when?") for a row that is on the host by construction.
    */
@@ -239,7 +239,7 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
         return { created: answer.created, refused: false };
       } catch (error) {
         // The closed window is an answer for the screen (the offer is over), not a failed call: the
-        // host refused because it already has org tools, and nothing of this Bond's catalog moved.
+        // host refused because it already has org tools, and nothing of this Nod's catalog moved.
         if (error instanceof HostError && error.status === 409) return { created: 0, refused: true };
         if (error instanceof HostError && error.status === 404) throw new Error(NOT_ON_HOST);
         throw error;

@@ -4,7 +4,7 @@
 //
 // Pure, like every other module of `shared/`: the language, `crypto.subtle`, `crypto.getRandomValues`
 // and `btoa`. No `tjs`, no `tiny`, no DOM, no `bun:*` — the same bytes in the host (Bun) and in the
-// Bond backend (txiki.js).
+// Nod backend (txiki.js).
 //
 // Decoding is written out instead of leaning on `atob`: the two runtimes' decoders differ on
 // non-canonical input (trailing bits that are not zero), and one contract cannot answer two ways.

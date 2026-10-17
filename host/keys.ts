@@ -1,6 +1,6 @@
 // The two files beside the database (SP01 §1). Both are created on first boot, both live with mode
 // 0600, and both are reused untouched on every later boot — a restore that lacks them makes every
-// pinned Bond refuse the host (SP07 §4).
+// pinned Nod refuse the host (SP07 §4).
 //
 // Nothing here ever logs or returns a private key: the caller gets the key material in memory.
 
@@ -12,7 +12,7 @@ export const HOST_SECRET_FILE = 'host-secret';
 export const KEY_FILE_MODE = 0o600;
 export const HOST_SECRET_BYTES = 32;
 
-/** Ed25519 key pair as JWK, plus the id the Bond pins (SP01 §1, SP04 §1). */
+/** Ed25519 key pair as JWK, plus the id the Nod pins (SP01 §1, SP04 §1). */
 export type SigningKey = {
   kid: string;
   publicJwk: JsonWebKey;

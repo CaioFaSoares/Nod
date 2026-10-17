@@ -31,7 +31,7 @@ Princípios:
    `docs/downscale-carna.md`.
 6. **Sem código de terceiros dentro.** O Nod não tem sistema de extensões: ele cadastra endereços.
 7. **Escopo fino.** Nada entra no v1 sem uma linha de requisito aqui. O que não está na lista é
-   próxima sprint — hoje isso inclui hospedar a casca em `bond.example.com` e as abas por iframe.
+   próxima sprint — hoje isso inclui hospedar a casca em `nod.example.com` e as abas por iframe.
 
 ## 2. Escopo
 
@@ -61,7 +61,7 @@ Fora (não-objetivos do v1):
 - Isolar duas identidades da mesma ferramenta na mesma máquina: um app tem um perfil de cookies só
   (`docs/tinyjs.md` §3).
 
-Adiado para a próxima sprint, por decisão do dono (2026-10-15): mapear `bond.example.com` e as
+Adiado para a próxima sprint, por decisão do dono (2026-10-15): mapear `nod.example.com` e as
 abas por iframe. Só volta quando hospedar algo além das regras do sistema virar atrativo — e aí
 deixa de ser casca fina (§23, questão 11).
 
@@ -277,7 +277,7 @@ que o administrador controle, por papel, o que cada pessoa enxerga.
 guardar uma senha de um serviço. autenticar e pronto"):
 
 - Cada credencial vive no **chaveiro do sistema operacional** via `app.secrets` — macOS Keychain,
-  Windows Credential Manager, Linux Secret Service —, com chave `bond.cred.<pessoa>.<ferramenta>`.
+  Windows Credential Manager, Linux Secret Service —, com chave `nod.cred.<pessoa>.<ferramenta>`.
   É o armazenamento que a própria documentação do runtime recomenda para token, e o único que o
   sistema operacional protege (`docs/tinyjs.md` §5).
 - O banco local guarda só o índice: ferramenta, rótulo, usuário, chave no chaveiro, datas. Nunca o
@@ -354,7 +354,7 @@ máquina.
 | RF-05 | A paleta (`⌘K`) lista entradas e vistas permitidas ao papel da pessoa e as abre por teclado. | Pessoa com papel `time` vê Kanban na paleta e não vê a entrada do financeiro. |
 | RF-06 | Entradas sem concessão não aparecem nem são restauradas. | Revogar a concessão esconde a entrada na paleta e nas janelas restauradas. |
 | RF-07 | O administrador emite convite de uso único, com validade, e a pessoa cria conta com ele. | Convite usado duas vezes falha na segunda; convite expirado falha com a mesma mensagem. |
-| RF-08 | O cadastro da credencial de uma ferramenta grava o valor no chaveiro do sistema e o índice no banco local. | Inspeção do banco local não mostra o valor; o chaveiro do sistema mostra a chave `bond.cred.*`; apagar a credencial remove os dois. |
+| RF-08 | O cadastro da credencial de uma ferramenta grava o valor no chaveiro do sistema e o índice no banco local. | Inspeção do banco local não mostra o valor; o chaveiro do sistema mostra a chave `nod.cred.*`; apagar a credencial remove os dois. |
 | RF-09 | Abrir uma ferramenta entra sem digitação, pela cascata: sessão existente, formulário preenchido, ou fluxo do provedor do próprio site. | Com credencial no cofre, a janela entra logada; numa ferramenta com SSO, o provedor resolve e o cofre não tem item dela; sem nada disso, mostra a tela de login. |
 | RF-10 | Falha de adaptador é visível e reversível. | Adaptador quebrado deixa a tela de login utilizável e registra um evento de falha. |
 | RF-11 | O administrador cria papéis e alterna concessões; a visibilidade muda sem reiniciar. | Conceder o Kanban ao papel `financeiro` faz a entrada aparecer na paleta do próximo uso. |
@@ -389,7 +389,7 @@ máquina.
 | RF-40 | Adding a host offers local tools as personal tools; an empty host's first admin may publish them as org tools. | After Add host, no local tool disappears. |
 | RF-41 | The host runs as one compose with data on a volume and a scheduled backup. | Redeploy keeps data; a backup restores into a fresh host. |
 | RF-42 | The password never leaves the machine: the host receives only `authKey`. | A capture of activation, sign-in and password change shows no password; the host DB has only `argon2id(authKey)` and the salt. |
-| RF-43 | Vault values in the keychain are encrypted with `vaultKey`; a password reset by access code wipes that machine's vault. | Reading `bond.cred.*` with the system keychain tool shows ciphertext; after a reset, the old credentials are gone and the Nod asks for them again. |
+| RF-43 | Vault values in the keychain are encrypted with `vaultKey`; a password reset by access code wipes that machine's vault. | Reading `nod.cred.*` with the system keychain tool shows ciphertext; after a reset, the old credentials are gone and the Nod asks for them again. |
 | RF-44 | Credentials cross the host only sealed to the receiver's key and signed by the sender. | The host DB and a traffic capture show no username or secret in clear; a share with a bad signature is refused. |
 | RF-45 | A changed public key of a colleague blocks sending until confirmed. | Swapping Bob's key on the host makes Alice's Nod warn and refuse until she confirms. |
 | RF-46 | Revealing, copying, accepting and sending a credential each pass the gate; a revealed secret hides itself after a visible countdown. | With biometrics cancelled, nothing is shown, copied, accepted or sent; a revealed secret shows a countdown and is hidden when it ends. |
@@ -398,6 +398,8 @@ máquina.
 | RF-53 | Each credential has a sharing scope — role, blocked or org — enforced on send and re-send. | A "role" credential can't be sent to someone with no common role; a "blocked" one offers no send at all. |
 | RF-54 | Each credential shows its holders. | After Alice sends Figma to Bob, both see "Alice, Bob" with date and scope. |
 | RF-55 | The Nod notices on its own when a newer release exists and tells the person, without them opening Settings. | With a release `release-X.Y.Z` newer than the installed version published, the Nod shows a new-version notice within one launch or one day; with none, no notice. |
+| RF-56 | A build can carry a custom app icon without editing tracked files. | With `resources/icon.png` or `NOD_ICON` set, the built app shows that icon; without it, the default; `git status` stays clean. |
+| RF-57 | An admin sets a guild icon; each person chooses Default or Guild icon for their app. | Admin uploads a PNG; after sync a member's Settings offers Guild icon and choosing it changes the Dock/taskbar icon; a tampered icon (hash not matching the signed snapshot) is refused. |
 
 ## 15. Requisitos não funcionais
 
@@ -537,7 +539,7 @@ momento, isso passa a ser validado online e a se atualizar sozinho.
 - **Windows**: nenhuma estratégia de assinatura é documentada pelo runtime; o caminho é a pasta
   portátil do `build` enquanto isso não for estudado.
 - **Linux**: tarball por arquitetura; `.desktop` se registra na primeira execução.
-- O app declara `urlScheme` (`bond://`) para deep link de entrada/vista e instância única.
+- O app declara `urlScheme` (`nod://`) para deep link de entrada/vista e instância única.
 
 ## 20. Segurança e ameaças
 
@@ -564,7 +566,7 @@ momento, isso passa a ser validado online e a se atualizar sozinho.
 | F4 — release privada | Seed travado embutido, build por sistema, manifesto, liberação manual no macOS documentada, deep link. | RF-26, RF-27 e instalação numa máquina que não a do build, seguindo o passo a passo da liberação. |
 | F5 — host fino | Servidor Elixir com catálogo, contas, convites, concessões, eventos; validação online e auto-update; OIDC das ferramentas que aceitam. | RF-17, RF-18, RF-14. Fase de pesquisa: começa por um recorte escrito. The host shipped as Bun + Elysia in Block 1 (§18, §22 "Host"), not as Elixir; the remaining half (online validation, auto-update, tool OIDC) is still open. |
 | Block 1 — one guild, synced (2026-10-16) | The host (`host/`, Bun + Elysia 2 beta, one compose) and connected Nod: add host and pin its key, sign-in by access code, org tools/roles/grants from a signed snapshot, personal tools and favorites, the event push, and the Coolify deploy — RF-30 to RF-43. | `bun test/smoke/connected.ts --force` (40 steps, two app ids, SP05 §5 steps 2–5), plus `bun test/smoke/run.ts --force` (14 steps) and `bun test test/ host/` (582). |
-| Próxima sprint (fora das fases) | Mapear `bond.example.com` e as abas por iframe, e decidir se hospedar algo além das regras passou a ser atrativo. | Um recorte escrito com o custo (casca deixa de funcionar offline) e o ganho. |
+| Próxima sprint (fora das fases) | Mapear `nod.example.com` e as abas por iframe, e decidir se hospedar algo além das regras passou a ser atrativo. | Um recorte escrito com o custo (casca deixa de funcionar offline) e o ganho. |
 
 ## 22. Registro de decisões
 
@@ -614,15 +616,17 @@ Status: `Proposto` espera leitura do dono; `Aberto` espera pesquisa; só o dono 
 | Sharing scope and holders | Each credential has a scope — role (default), blocked, org — and shows who holds it (`docs/epics/E02-credential-sharing.md` §1) | anyone to anyone | Owner on 2026-10-16: "só entre pessoas da mesma role… ou bloqueado ou publica pra org"; "é bom ver que consegue ver aquele password" | Decidido (2026-10-16) |
 | Docked view and tabs | Docked mode **is the default**: tabs shown over the main window's center panel as frameless windows the Nod keeps on the slot, several tabs per tool, links clicked inside a tool adopted as tabs next to it; Windows mode stays as a setting (`docs/epics/E03-docked-tabs.md`) | iframes; tool windows only | Owner on 2026-10-16: center panel showing the open tab, detachable, several tabs per tool; "padrão é docked view". The docked mechanics remain a proposal until spikes S0–S4; iframes stay out (§7). Blocked by B05 | Decidido (2026-10-16): default and intent; mechanics Proposto |
 | Detach without reload | Detaching or docking a tab keeps the same window and page (frame toggled, no `parent`); never a reload (`docs/epics/E03-docked-tabs.md` §3) | reopen as a framed window (page reloads) | Owner on 2026-10-16: "quero que deatachar nao perca o progresso" | Decidido (2026-10-16) |
-| Quick links | Open any `http(s)` link in an ad-hoc tab (palette, `bond://open?url=`) and save any tab to the sidebar in one step, as a personal view or personal tool (`docs/epics/E03-docked-tabs.md` §5) | catalog-only navigation (§2) | Owner on 2026-10-16: "abrir link no bond e/ou salvar link novo na barra lateral mais rápido" | Decidido (2026-10-16) |
-| Web Nod | Optional browser version served by the host behind `WEB_UI=true`: same accounts, tools open in new browser tabs, no autofill or vault; clients as a kind of person (`docs/epics/E04-web-bond.md`) | app only; iframe tabs on the web (§23 q11) | Owner on 2026-10-16: "hospedar junto do stack, opcionalmente, uma versão não headless… para clientes acessarem material nosso"; later phase | Proposto |
+| Quick links | Open any `http(s)` link in an ad-hoc tab (palette, `nod://open?url=`) and save any tab to the sidebar in one step, as a personal view or personal tool (`docs/epics/E03-docked-tabs.md` §5) | catalog-only navigation (§2) | Owner on 2026-10-16: "abrir link no bond e/ou salvar link novo na barra lateral mais rápido" | Decidido (2026-10-16) |
+| Web Nod | Optional browser version served by the host behind `WEB_UI=true`: same accounts, tools open in new browser tabs, no autofill or vault; clients as a kind of person (`docs/epics/E04-web-nod.md`) | app only; iframe tabs on the web (§23 q11) | Owner on 2026-10-16: "hospedar junto do stack, opcionalmente, uma versão não headless… para clientes acessarem material nosso"; later phase | Proposto |
 | Reveal countdown | A revealed credential stays visible a few seconds with a countdown indicator, then hides (`docs/epics/E02-credential-sharing.md` §5) | stay until closed; no grace | Owner on 2026-10-16: "visivel por alguns segundos com indicador de quanto tempo" | Decidido (2026-10-16) |
 | Personal tools and favorites | A person adds personal tools and favorites org tools; both follow the person through the host (`docs/epics/E01-connected-mode.md` §6) | org catalog only | Owner on 2026-10-16: "um usuário pode adicionar suas proprias ferramentas… favoritar ferramentas da org" | Decidido (2026-10-16) |
 | Connected mode | Optional host address per install; without it the Nod stays exactly as today (`docs/epics/E01-connected-mode.md`) | host mandatory; local only | Owner on 2026-10-16: offline "como eu quiser", or a server address to sync people and permissions; "sincronizar com uma central pra ser tipo um core mesmo" | Decidido (2026-10-16) |
 | Identity of the tools | SSO into the tools is a later milestone (M4); the first phases keep the login cascade (`docs/epics/E01-connected-mode.md` §13) | ready OIDC provider from day one; Boruta inside an Elixir host | The owner wants a simple self-contained host first; SSO needs an OIDC provider, the costliest piece; owner approved gate #1 on 2026-10-16 | Decidido (2026-10-16) |
 | Host address at runtime | Configurable at runtime: the person types the host address or opens an invite link; the host is the central core that people, roles, grants and catalog sync from (`docs/epics/E01-connected-mode.md` §2, §8) | address pinned by the seed per release ("env travada") | Owner on 2026-10-16: env travada was a simpler first version; adding a tool (e.g. Jitsi) in the admin must make it appear for everyone | Decidido (2026-10-16) |
 | Host trust at enrollment | TLS + host key pinned at Add host; invite links carry the key fingerprint and must match; vault items bound to origin (`docs/epics/E01-connected-mode.md` §8) | no pinning | A typed address must not let a different server silently take over the catalog later; owner approved gate #1 on 2026-10-16 | Decidido (2026-10-16) |
-| Product and repository name | The project and the repository are **Nod** (`CaioFaSoares/Nod`), renamed from `Bond` on 2026-10-16; the docs, the README and the repo name use Nod from that date. Internal identifiers keep the old name (app id, `bond.*` keys, `BOND_*` env, `bond://`, `bond.db`, `/.well-known/bond`) until a full rename with migration (`docs/rename-nod.md`) | keep `Bond`; rename every identifier now | Owner on 2026-10-16: the repository is Nod, and from now on the docs name it Nod | Decidido (2026-10-16) |
+| Product and repository name | The project and the repository are **Nod** (`CaioFaSoares/Nod`), renamed from `Bond` on 2026-10-16; the docs, the README and the repo name use Nod from that date (`docs/rename-nod.md`) | keep `Bond` | Owner on 2026-10-16: the repository is Nod, and from now on the docs name it Nod | Decidido (2026-10-16) |
+| Internal rename to Nod | The identifier rename landed in **0.3.5 as a clean cutover**: app id `copland.nod`, `nod://` deep links, `nod.*` RPC methods, `NOD_*` environment variables, `/.well-known/nod`, `Nod-Signature`, `nod.db`, keychain keys under `nod.*`. No data migration and no compatibility aliases — an installed 0.3.0 starts fresh. The KDF/HKDF/seal protocol labels stay as they were (changing them would change every derived key). Hosts are redeployed with `NOD_*` env (`docs/rename-nod.md`) | migration plus compatibility aliases; keep the internal identifiers | Owner on 2026-10-16: "pode renomear, tem problema nao, limpa no 0.3.5" | Decidido (2026-10-16) |
+| Custom icons | A release can wear a custom app icon without touching tracked files (`resources/icon.png` or `NOD_ICON`, RF-56), and the guild icon the admin uploads is chosen per person — Default or Guild (RF-57) | an icon baked into the release only; one org-wide icon for everybody | Owner on 2026-10-16: "quero poder fazer builds customizadas com ícones diferentes de forma mais simples ou trocar o ícone dele por um custom por guild e escolher" | Decidido (2026-10-16) |
 | Distribuição macOS | Ad-hoc com liberação manual documentada; Developer ID só como melhoria | comprar o certificado antes de F4 | Dono em 2026-10-15: "somos devs, não tem problema repassar isso pros outros" | Decidido (2026-10-15) |
 | Extensões | Fora do v1: o Nod cadastra endereços, não hospeda código | registro/manifesto/actor como na Carna | Escopo: casca fina | Proposto |
 | Duas identidades na mesma ferramenta | Fora: um app tem um perfil de cookies | um app por identidade | Não há isolamento por janela (`docs/tinyjs.md` §10) | Proposto |
@@ -653,11 +657,11 @@ Questões:
 9. Uma pessoa pode precisar de duas identidades na mesma ferramenta (por exemplo, conta pessoal e
    conta de trabalho no Discord)? Se sim, o desenho exige um segundo app com outro `id`.
 10. Quantos palcos quentes a máquina real aguenta sem pesar — o padrão 3 é palpite até a medição?
-11. Hospedar a casca em `bond.example.com` e usar abas por iframe: **adiado para a próxima
+11. Hospedar a casca em `nod.example.com` e usar abas por iframe: **adiado para a próxima
     sprint** (2026-10-15). O recorte a fazer lá é custo (deixa de funcionar offline) contra o ganho
     (abas de verdade, quando hospedar algo além das regras virar atrativo).
     Revisited on 2026-10-16 with a different goal — a browser portal served by the host, for clients,
-    without iframe tabs: `docs/epics/E04-web-bond.md`.
+    without iframe tabs: `docs/epics/E04-web-nod.md`.
 12. Quantas pessoas recebem a release, e o seed embutido pode ser lido por quem recebe? Hoje isso é
     aceito (é organização, não segredo), mas convém saber se cada release é por pessoa ou por grupo.
 

@@ -1157,7 +1157,7 @@ describe('tool windows — closing and restoring', () => {
 // ---------------------------------------------------------------- shortcuts
 
 describe('tool windows — global shortcuts', () => {
-  test('the shortcuts are registered once while a Bond window is focused and released after', async () => {
+  test('the shortcuts are registered once while a Nod window is focused and released after', async () => {
     const env = fakeEnvironment();
     const toolWindows = makeToolWindows(env);
     await toolWindows.open('kanban');

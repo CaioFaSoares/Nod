@@ -1,4 +1,4 @@
-// The Bond's side of the host connection: discovery, the pin, the bearer, the signed snapshot and
+// The Nod's side of the host connection: discovery, the pin, the bearer, the signed snapshot and
 // the one typed error every failure becomes (SP04 §1–§2, SP02 §5; `backend/context.md`).
 //
 // The runtime arrives as parameters — `fetch` and the keychain (`app.secrets`) — so this same file
@@ -11,7 +11,7 @@
 // without a host the only thing that can reach a host is a person-initiated discovery.
 //
 // Secret rule (`AGENTS.md`): the bearer lives in the system keychain under
-// `bond.host.<kid>.<personId>` (SP02 §5) and is never named in a message, an error or a log of this
+// `nod.host.<kid>.<personId>` (SP02 §5) and is never named in a message, an error or a log of this
 // file.
 
 import { originOf } from '../shared/catalog';
@@ -61,7 +61,7 @@ const HOST_FAILED = 'the host failed to answer';
 /** `fetch` rejected, or the deadline passed: the host was not reached (SP04 §3 keeps the cache). */
 const HOST_OFFLINE = 'could not reach the host';
 /** An answer that is not the document the route defines. */
-const HOST_NOT_A_HOST = 'the host is not a Bond host';
+const HOST_NOT_A_HOST = 'the host is not a Nod host';
 /** SP04 §2: the bytes are not the bytes the pinned key signed. */
 const HOST_UNSIGNED = 'the snapshot is not signed by the host key';
 /** SP04 §2: an `issuedAt` older than the last accepted one. */
@@ -69,7 +69,7 @@ const HOST_STALE = 'the host answered an older snapshot than the last accepted o
 /** SP02 §5: the bearer could not be stored, so the sign-in cannot be kept. */
 const HOST_KEYCHAIN_REFUSED = 'the system keychain refused the token';
 
-/** The methods the Bond sends (SP03 §2: `GET`/`POST`, the personal `PUT`/`DELETE`, admin `PATCH`). */
+/** The methods the Nod sends (SP03 §2: `GET`/`POST`, the personal `PUT`/`DELETE`, admin `PATCH`). */
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 /** What `fetch` looks like from here: the runtime's global, injected (`backend/probe-net.ts`). */
@@ -171,7 +171,7 @@ export type SnapshotResult =
 export interface HostConnection {
   /** The host this connection was built for, as it was pinned. */
   readonly host: PinnedHost;
-  /** The keychain item of the bearer: `bond.host.<kid>.<personId>` (SP02 §5). */
+  /** The keychain item of the bearer: `nod.host.<kid>.<personId>` (SP02 §5). */
   tokenKey(): string;
   /** Stores the token the host returned once (SP02 §5). The token is passed through, never kept. */
   saveToken(token: string): Promise<void>;
@@ -179,6 +179,14 @@ export interface HostConnection {
   forgetToken(): Promise<void>;
   /** One call with the bearer, its answer typed by the caller (SP03 §2). */
   request<T>(method: HttpMethod, path: string, body?: unknown): Promise<T>;
+  /**
+   * One `GET` whose answer is raw bytes rather than a JSON document: today that is only
+   * `GET /v1/guild/icon` (SP03 §2), whose body is a PNG and whose digest is what the snapshot
+   * signed. Everything else about the call is `request`'s — the bearer read from the keychain, the
+   * deadline, `redirect: 'error'` and the same failures (`backend/guild-icon.ts` decides what to do
+   * with them). A `404` — the guild has no icon — is the `refused` failure.
+   */
+  getBytes(path: string): Promise<Uint8Array<ArrayBuffer>>;
   /** The signed snapshot; `version` is the last accepted one (the `ETag` of SP04 §2). */
   snapshot(options?: { version?: string | null; notOlderThan?: string | null }): Promise<SnapshotResult>;
 }
@@ -249,7 +257,7 @@ export function createHostClient(deps: HostClientDeps): HostClient {
     return new HostError('invalid', HOST_NOT_A_HOST);
   }
 
-  /** SP04 §2: no signature this Bond can check, whatever the reason (absent, malformed, wrong key). */
+  /** SP04 §2: no signature this Nod can check, whatever the reason (absent, malformed, wrong key). */
   function unsigned(): HostError {
     return new HostError('signature', HOST_UNSIGNED);
   }
@@ -304,7 +312,7 @@ export function createHostClient(deps: HostClientDeps): HostClient {
       throw new HostError('offline', HOST_OFFLINE);
     }
     // No body is read on a failure: the host's message is the host's, and echoing it would put a
-    // string the Bond did not write into an error, a log or an event (`AGENTS.md`).
+    // string the Nod did not write into an error, a log or an event (`AGENTS.md`).
     if (!response.ok && response.status !== 304) throw failureOf(response.status);
     return response;
   }
@@ -335,7 +343,7 @@ export function createHostClient(deps: HostClientDeps): HostClient {
     return value === 'access-code' || value === 'email';
   }
 
-  /** SP04 §1's `Discovery`, shape-checked: the fields the Bond reads before it pins anything. */
+  /** SP04 §1's `Discovery`, shape-checked: the fields the Nod reads before it pins anything. */
   function readDiscovery(value: unknown): Discovery {
     if (typeof value !== 'object' || value === null) throw notAHost();
     const document = value as Partial<Discovery>;
@@ -371,7 +379,7 @@ export function createHostClient(deps: HostClientDeps): HostClient {
     return snapshot as Snapshot;
   }
 
-  /** SP04 §2's `Bond-Signature: kid=<kid>; sig=<base64url>`. */
+  /** SP04 §2's `Nod-Signature: kid=<kid>; sig=<base64url>`. */
   function readSignature(header: string | null): SnapshotSignature {
     if (header === null) throw unsigned();
     let kid: string | null = null;
@@ -407,7 +415,7 @@ export function createHostClient(deps: HostClientDeps): HostClient {
     const document = readDiscovery(await readJson(response));
     const publicKey = publicKeyBytes(document.key.ed25519Public);
     const fingerprint = await fingerprintOf(publicKey);
-    // The host computes the same string; one that disagrees with itself is not a Bond host. Both
+    // The host computes the same string; one that disagrees with itself is not a Nod host. Both
     // sides are normalized first: grouping and case are presentation, not identity.
     if (normalizeFingerprint(fingerprint) !== normalizeFingerprint(document.fingerprint)) throw notAHost();
 
@@ -437,7 +445,7 @@ export function createHostClient(deps: HostClientDeps): HostClient {
 
   function connect(host: PinnedHost): HostConnection {
     // SP04 §1.1 holds for every call, not only for discovery: a `host` row edited by hand cannot
-    // make the Bond talk plain `http` to a real host.
+    // make the Nod talk plain `http` to a real host.
     const address = originOf(host.address);
     const publicKey = publicKeyBytes(host.publicKey);
     // SP02 §5's keychain item: read on every call, passed straight to the header, never logged,
@@ -449,6 +457,15 @@ export function createHostClient(deps: HostClientDeps): HostClient {
       // 204 is the answer of the routes that answer nothing (logout, the deletes, favorites).
       if (response.status === 204) return undefined as T;
       return (await readJson(response)) as T;
+    }
+
+    async function getBytes(path: string): Promise<Uint8Array<ArrayBuffer>> {
+      // The body is an image, not a document: `accept` says so, and nothing here parses or echoes
+      // what came back — `backend/guild-icon.ts` hashes the bytes before it trusts them.
+      const response = await send('GET', `${address}${path}`, undefined, await deps.keychain.get(key), {
+        accept: 'image/png',
+      });
+      return await readBody(response);
     }
 
     async function snapshot(
@@ -499,6 +516,7 @@ export function createHostClient(deps: HostClientDeps): HostClient {
         await deps.keychain.delete(key);
       },
       request,
+      getBytes,
       snapshot,
     };
   }
@@ -508,5 +526,5 @@ export function createHostClient(deps: HostClientDeps): HostClient {
 
 /** The keychain item of the bearer (SP02 §5): one per host key and per host person. */
 export function hostTokenKey(kid: string, personId: Id): string {
-  return `bond.host.${kid}.${personId}`;
+  return `nod.host.${kid}.${personId}`;
 }

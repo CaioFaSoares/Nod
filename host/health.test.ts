@@ -22,9 +22,9 @@ const dirs: string[] = [];
 
 /** A data dir that lives only for the duration of the test. */
 function tempConfig(over: Partial<HostConfig> = {}): HostConfig {
-  const dataDir = mkdtempSync(join(tmpdir(), 'bond-host-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'nod-host-'));
   dirs.push(dataDir);
-  return { dataDir, publicUrl: 'https://bond.example', port: DEFAULT_PORT, dev: false, ...over };
+  return { dataDir, publicUrl: 'https://nod.example', port: DEFAULT_PORT, dev: false, ...over };
 }
 
 function fileMode(path: string): number {
@@ -41,7 +41,7 @@ describe('boot', () => {
     const host = await bootHost(config);
     const app = createApp({ config, db: host.db });
 
-    const response = await app.handle(new Request('http://bond.test/health'));
+    const response = await app.handle(new Request('http://nod.test/health'));
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('ok');
 
@@ -94,41 +94,41 @@ describe('boot', () => {
 });
 
 describe('environment', () => {
-  const base = { BOND_DATA: '/data', BOND_PUBLIC_URL: 'https://bond.example' };
+  const base = { NOD_DATA: '/data', NOD_PUBLIC_URL: 'https://nod.example' };
 
   test('an https public URL with no other variable set is enough', () => {
     const config = loadConfig({ ...base });
     expect(config).toEqual({
       dataDir: '/data',
-      publicUrl: 'https://bond.example',
+      publicUrl: 'https://nod.example',
       port: DEFAULT_PORT,
       dev: false,
     });
   });
 
   test('a non-https public URL is refused outside dev', () => {
-    expect(() => loadConfig({ ...base, BOND_PUBLIC_URL: 'http://bond.example' })).toThrow(
+    expect(() => loadConfig({ ...base, NOD_PUBLIC_URL: 'http://nod.example' })).toThrow(
       ConfigError,
     );
     expect(() =>
-      loadConfig({ BOND_DATA: '/data', BOND_PUBLIC_URL: 'http://127.0.0.1:8080' }),
+      loadConfig({ NOD_DATA: '/data', NOD_PUBLIC_URL: 'http://127.0.0.1:8080' }),
     ).toThrow(ConfigError);
   });
 
   test('dev accepts a plain http address', () => {
     const config = loadConfig({
-      BOND_DATA: '/data',
-      BOND_PUBLIC_URL: 'http://127.0.0.1:8080',
-      BOND_DEV: '1',
+      NOD_DATA: '/data',
+      NOD_PUBLIC_URL: 'http://127.0.0.1:8080',
+      NOD_DEV: '1',
     });
     expect(config.dev).toBe(true);
     expect(config.publicUrl).toBe('http://127.0.0.1:8080');
   });
 
-  test('BOND_DATA and BOND_PUBLIC_URL are required, PORT must be a real port', () => {
-    expect(() => loadConfig({ BOND_PUBLIC_URL: 'https://bond.example' })).toThrow(ConfigError);
-    expect(() => loadConfig({ BOND_DATA: '/data' })).toThrow(ConfigError);
-    expect(() => loadConfig({ ...base, BOND_PUBLIC_URL: 'not a url' })).toThrow(ConfigError);
+  test('NOD_DATA and NOD_PUBLIC_URL are required, PORT must be a real port', () => {
+    expect(() => loadConfig({ NOD_PUBLIC_URL: 'https://nod.example' })).toThrow(ConfigError);
+    expect(() => loadConfig({ NOD_DATA: '/data' })).toThrow(ConfigError);
+    expect(() => loadConfig({ ...base, NOD_PUBLIC_URL: 'not a url' })).toThrow(ConfigError);
     expect(() => loadConfig({ ...base, PORT: 'no' })).toThrow(ConfigError);
     expect(() => loadConfig({ ...base, PORT: '0' })).toThrow(ConfigError);
     expect(() => loadConfig({ ...base, PORT: '65536' })).toThrow(ConfigError);

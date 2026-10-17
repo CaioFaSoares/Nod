@@ -14,6 +14,7 @@ export const SEAL_SIGNATURE_LENGTH = 64;
 
 /** HKDF `info` of the seal (SP06 §3): changing it changes every sealed body. */
 const SEAL_INFO = 'bond/share/v1';
+// frozen protocol label (kept 'bond' on purpose: changing it changes every derived key)
 /** AES-GCM tag length in bytes; the ciphertext of the body carries it (SP06 §1). */
 const GCM_TAG_LENGTH = 16;
 /** AES-256 key length: the HKDF output length of SP06 §3. */

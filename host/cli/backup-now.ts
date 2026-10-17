@@ -2,7 +2,7 @@
 // `bun run backup-now` (SP07 §3): one §4 pass against the data dir, then exit. It runs beside a
 // serving host — the pass reads through its own connection and never stops the service.
 //
-//   BOND_DATA=/data BOND_PUBLIC_URL=https://… bun run backup-now
+//   NOD_DATA=/data NOD_PUBLIC_URL=https://… bun run backup-now
 
 import { bootHost } from '../main';
 import { loadBackupSettings, runBackup, type BackupSettings } from '../backup';

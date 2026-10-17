@@ -1,4 +1,4 @@
-// The host side of auth (SP02 §2, §4, §5; SP03 §1): argon2id over the `authKey` the Bond derived,
+// The host side of auth (SP02 §2, §4, §5; SP03 §1): argon2id over the `authKey` the Nod derived,
 // the salt lookup that cannot enumerate emails, the session tokens and their sliding expiry, the
 // in-memory rate limits, and the two guards every route file mounts.
 //
@@ -53,6 +53,7 @@ export const FAILURES_PER_EMAIL = 10;
 export const EMAIL_WINDOW_MS = 15 * 60_000;
 
 /** SP02 §4: what an unknown email is verified against, so a sign-in takes the same time either way. */
+// frozen protocol label (kept 'bond' on purpose: changing it changes every derived key)
 const DUMMY_AUTH_KEY = 'bond/auth/dummy/v1';
 
 /** Past this many tracked addresses or emails the stale windows are dropped (one process, SP07 §2). */

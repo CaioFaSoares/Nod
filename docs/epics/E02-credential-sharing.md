@@ -1,6 +1,6 @@
 ---
 id: E02
-frente: bond
+frente: nod
 titulo: Credential sharing — send, assign and share tool logins between people of a guild, end to end
 status: proposto
 tipo: epico

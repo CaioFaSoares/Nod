@@ -102,7 +102,7 @@ export function openPalette(ctx: {
   const lock = 'Lock';
   items.push({ label: lock, key: matchKey(lock), run: () => ctx.lock() });
   const quit = 'Quit';
-  items.push({ label: quit, key: matchKey(quit), run: () => call('bond.quit') });
+  items.push({ label: quit, key: matchKey(quit), run: () => call('nod.quit') });
 
   const search = el('input', {
     class: 'input palette-input',

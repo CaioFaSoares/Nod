@@ -1,14 +1,16 @@
-// Backend entry point of Bond (docs/arquitetura.md §4): opens the database, applies the bundled
+// Backend entry point of Nod (docs/arquitetura.md §4): opens the database, applies the bundled
 // seed and wires session, vault and tool windows. It exports the `api` (every key of `ApiContract`,
 // with the §2 window guard) and the runtime hooks.
 // No secret crosses this frontier: only `vault.reveal` returns a credential, and no secret ever
 // enters an event, `store` or a log.
 import { generateInviteCode, hashInviteCode, inviteIsValid, randomSalt, verifyStoredPassword } from '../shared/auth';
 import { auditUrl, exportSeed, originOf, validateEntry, validateSeed, visibleEntries } from '../shared/catalog';
-import { toBase64url } from '../shared/encoding';
-import { HOST_ROUTES } from '../shared/host-api';
+import { fromBase64url, toBase64url } from '../shared/encoding';
+import { HOST_ROUTES, isPng } from '../shared/host-api';
 import { MAIN_WINDOW, toolOfWindow } from '../shared/types';
 import type {
+  AppIconChoice,
+  AppIconState,
   AppInfo,
   Entry,
   EntryDetails,
@@ -35,12 +37,15 @@ import type {
 import type {
   ActivateRequest,
   Device,
+  GuildIconRequest,
+  GuildIconResponse,
   LoginRequest,
   PasswordChangeRequest,
   SaltResponse,
   TokenResponse,
 } from '../shared/host-api';
 import { createConnectedCatalog } from './connected-catalog';
+import { createGuildIcon, GUILD_ICON_FILE } from './guild-icon';
 import { hostAdminFor, orgViewsOf } from './host-admin';
 import { createHostClient } from './host-client';
 import { createIcons } from './icons';
@@ -53,6 +58,7 @@ import { createSync } from './sync';
 import { createToolWindows } from './tool-windows';
 import { createVault } from './vault';
 import type { ConnectedCatalog } from './connected-catalog';
+import type { GuildIcon } from './guild-icon';
 import type { HostClient, HostConnection, HostDiscovery } from './host-client';
 import type { Icons } from './icons';
 import type { Repo } from './repo';
@@ -74,6 +80,11 @@ let client: HostClient | null = null;
 /** The sync timer and its state (B4). Built with the database, started and stopped by the session. */
 let sync: Sync | null = null;
 /**
+ * The guild icon and the app-icon choice (SP05 §6): the PNG `guild-icon.png` under the data dir,
+ * fetched once per signed hash, plus the preference `appIcon` of `store.json`.
+ */
+let guildIcon: GuildIcon | null = null;
+/**
  * The effective catalog (B5): the snapshot's entries and roles while a `host` row exists, the local
  * tables otherwise (SP05 §2). Re-derived wherever the row can have moved.
  */
@@ -83,7 +94,7 @@ let connectedMode = false;
 /** The entries the effective catalog holds while connected — empty until the first snapshot reads. */
 let connectedEntries: Entry[] = [];
 /**
- * SP04 §1.3's `bond://join` link, kept until the join flow picks it up (`host.discover`) or a host
+ * SP04 §1.3's `nod://join` link, kept until the join flow picks it up (`host.discover`) or a host
  * is added. Not a secret — the address, the fingerprint and the code the person was given — and it
  * never goes to a file, an event or `store`.
  */
@@ -119,7 +130,7 @@ export async function init(app: TinyApp): Promise<void> {
   } catch (error) {
     // The window still opens: `session.state` and every other handler answer with the reason
     // instead of a raw SQLite message, and nothing else is wired (there is no database to wire).
-    bootFailure = `Bond couldn't open its database: ${reason(error)}`;
+    bootFailure = `Nod couldn't open its database: ${reason(error)}`;
     return;
   }
   repo = database;
@@ -153,6 +164,25 @@ export async function init(app: TinyApp): Promise<void> {
   refreshConnectedCatalog();
   await refreshIcons();
 
+  // SP05 §6: the guild's icon on this machine (`guild-icon.png` under the data dir) and the choice
+  // between it and the bundle icon. The file calls and the runtime's `app.icon` arrive as
+  // parameters, so `backend/guild-icon.ts` is driven by `bun test` with no runtime at all.
+  guildIcon = createGuildIcon({
+    path: `${paths.data}/${GUILD_ICON_FILE}`,
+    connection: () => connectionOf(),
+    icon: (path) => app.icon(path),
+    // §2/`docs/tinyjs.md` §6: Linux on Wayland has nowhere to put an app icon, and says so.
+    iconSupported: supported(capabilities, 'icon'),
+    files: {
+      // `tjs.readFile` answers a loosely typed view of the bytes it read; one copy in the app's
+      // start-up hands `backend/guild-icon.ts` the `Uint8Array<ArrayBuffer>` a digest takes.
+      read: async (path) => new Uint8Array(await tjs.readFile(path)),
+      write: (path, bytes) => tjs.writeFile(path, bytes),
+      remove: removeFile,
+    },
+    store: { get: (key) => app.store.get(key), set: (key, value) => app.store.set(key, value) },
+  });
+
   session = createSession({
     repo: database,
     keychain: app.secrets,
@@ -175,6 +205,9 @@ export async function init(app: TinyApp): Promise<void> {
       // SP05 §2: a run that moved the snapshot moves the catalog with it, and the page hears it once
       // — a `304` advances `last_sync_at` alone, and the catalog it would push is the same one.
       if (refreshConnectedCatalog()) afterCatalogChange();
+      // SP05 §6: the snapshot's `guildIcon` is what says which icon this machine should hold. The
+      // call is chained, not awaited: the state push the page is waiting for does not depend on it.
+      syncGuildIcon();
       // F2: the snapshot's `me` is also what the local person follows — the name and the admin flag
       // of a connected account are the host's to say, and the page hears about it when they move.
       void reconcileConnectedIdentity();
@@ -221,12 +254,12 @@ export async function init(app: TinyApp): Promise<void> {
 // ---------------------------------------------------------------- database boot
 
 /**
- * §4: opens `bond.db` and brings it to the current schema. A database written by Bond v1 is moved
+ * §4: opens `nod.db` and brings it to the current schema. A database written by Nod v1 is moved
  * aside — nothing is deleted — and a fresh one takes its place, with the name of the moved file
  * kept in `meta.legacy_database` so the owner can find it.
  */
 async function openDatabase(directory: string): Promise<Repo> {
-  const path = `${directory}/bond.db`;
+  const path = `${directory}/nod.db`;
   const handle = openSqlite(path);
   try {
     const repository = createRepo(handle);
@@ -245,15 +278,15 @@ async function openDatabase(directory: string): Promise<Repo> {
 }
 
 /**
- * Renames `bond.db` and the WAL siblings that exist to `bond.v1-<yyyyMMddHHmmss>.db` — in UTC, the
+ * Renames `nod.db` and the WAL siblings that exist to `nod.v1-<yyyyMMddHHmmss>.db` — in UTC, the
  * clock the whole app keeps — in the same directory. Answers the new name. Nothing is deleted: the
  * moved files are the whole v1 database, for whoever wants to look at it.
  */
 async function moveDatabaseAside(directory: string): Promise<string> {
   const stamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
-  const moved = `bond.v1-${stamp}.db`;
+  const moved = `nod.v1-${stamp}.db`;
   for (const suffix of ['', '-wal', '-shm']) {
-    const from = `${directory}/bond.db${suffix}`;
+    const from = `${directory}/nod.db${suffix}`;
     if (await fileExists(from)) await tjs.rename(from, `${directory}/${moved}${suffix}`);
   }
   return moved;
@@ -423,14 +456,14 @@ function setTray(app: TinyApp, resources: string | null, available: boolean): bo
   if (!available) return false;
   try {
     app.tray.set({
-      title: 'Bond',
+      title: 'Nod',
       icon: trayIcon(resources),
-      tooltip: 'Bond',
+      tooltip: 'Nod',
       menu: [
-        { id: 'open', label: 'Open Bond' },
+        { id: 'open', label: 'Open Nod' },
         { id: 'lock', label: 'Lock' },
         { separator: true },
-        { id: 'quit', label: 'Quit Bond' },
+        { id: 'quit', label: 'Quit Nod' },
       ],
     });
     return true;
@@ -471,10 +504,12 @@ const ADMIN_ONLY: Partial<Record<Method, true>> = {
   'people.revoke': true,
   'invites.issue': true,
   'host.bootstrap': true,
+  'host.setGuildIcon': true,
+  'host.clearGuildIcon': true,
   'events.list': true,
   'events.syncStatus': true,
   'events.exportToFile': true,
-  'bond.installUpdate': true,
+  'nod.installUpdate': true,
 };
 
 /** The only methods that work with the session locked (§2); the rest require an unlock. */
@@ -487,8 +522,8 @@ const WITHOUT_SESSION: Partial<Record<Method, true>> = {
   'host.discover': true,
   'host.activate': true,
   'host.signIn': true,
-  'bond.info': true,
-  'bond.quit': true,
+  'nod.info': true,
+  'nod.quit': true,
 };
 
 /**
@@ -535,7 +570,7 @@ function unlockedPerson(where: string): Person {
 // ---------------------------------------------------------------- input helpers
 
 function required<T>(value: T | null, where: string): T {
-  if (value === null) throw new Error(`${where}: Bond has not finished starting`);
+  if (value === null) throw new Error(`${where}: Nod has not finished starting`);
   return value;
 }
 
@@ -643,7 +678,7 @@ function push<K extends keyof PushEvents>(event: K, data: PushEvents[K]): void {
 }
 
 /**
- * F1: the typed answer of a join whose email is a local account of this Bond and whose person has
+ * F1: the typed answer of a join whose email is a local account of this Nod and whose person has
  * not decided which one wins. It is answered before any host call — the code the person was given is
  * whole — and the page asks (SP05 §4's join flow, `src/settings.ts`).
  */
@@ -685,7 +720,7 @@ async function dismissedUpdate(): Promise<string | null> {
 /**
  * RF-55: checks the release channel and pushes the notice. Nothing here blocks the boot — `init`
  * only arms the timer — and nothing here installs: installing is the person's call (A13,
- * `bond.installUpdate`). A failure turns into one audit event with the reason and nothing else.
+ * `nod.installUpdate`). A failure turns into one audit event with the reason and nothing else.
  */
 async function refreshUpdateNotice(): Promise<void> {
   const app = runtime;
@@ -713,7 +748,7 @@ async function refreshUpdateNotice(): Promise<void> {
 }
 
 /** RF-55: one check shortly after the launch, then one every 24 hours. Without a channel the seed
- * names, none of this runs — no address in the code, no call out of a Bond that has no channel. */
+ * names, none of this runs — no address in the code, no call out of a Nod that has no channel. */
 function startUpdateWatch(): void {
   if (bundledSeed === null || bundledSeed.update === null) return;
   setTimeout(() => void refreshUpdateNotice(), UPDATE_FIRST_CHECK_MS);
@@ -726,6 +761,9 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
   // SP05 §2: before anything reads an entry — a join has just added the `host` row, and the tools
   // this function pushes next come from the effective catalog.
   refreshConnectedCatalog();
+  // SP05 §6: the icon of the cached snapshot, before the loop's first run: after a restart the app
+  // carries the bundle icon again, and this is what puts the guild's back.
+  syncGuildIcon();
   push('session', state);
   push('tools', open.state());
   await open.restore();
@@ -743,7 +781,7 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
 
 /** §4: locking closes every tool window and the popups they opened. */
 function lockSession(): SessionState {
-  // SP04 §3: nothing is synced while locked — the state a locked Bond shows is the cache.
+  // SP04 §3: nothing is synced while locked — the state a locked Nod shows is the cache.
   sync?.stop();
   const state = required(session, 'session.lock').lock();
   required(windows, 'session.lock').closeAll();
@@ -788,7 +826,7 @@ async function afterHostWrite(): Promise<void> {
 // ---------------------------------------------------------------- connected mode (SP05, SP04)
 
 /**
- * SP04 §1.3: `bond://join?host=<address>&fp=<fingerprint>[&code=<code>]`. Every other link — another
+ * SP04 §1.3: `nod://join?host=<address>&fp=<fingerprint>[&code=<code>]`. Every other link — another
  * scheme, another host, a missing `host` or `fp` — answers null and the app ignores it.
  */
 function parseJoinLink(url: string): JoinInvite | null {
@@ -798,8 +836,8 @@ function parseJoinLink(url: string): JoinInvite | null {
   } catch {
     return null;
   }
-  if (parsed.protocol !== 'bond:') return null;
-  // `bond://join` puts the action in the authority; a link typed as `bond:join` has it in the path.
+  if (parsed.protocol !== 'nod:') return null;
+  // `nod://join` puts the action in the authority; a link typed as `nod:join` has it in the path.
   const action = parsed.host !== '' ? parsed.host : parsed.pathname.replaceAll('/', '');
   if (action.toLowerCase() !== 'join') return null;
   const address = parsed.searchParams.get('host');
@@ -857,10 +895,96 @@ async function deviceOf(): Promise<Device> {
   return { name: arch === null ? system : `${system} ${arch}`, os: system, appVersion: info.version };
 }
 
-/** SP05 §3 `host.state`: the one guild, or the `none` of a Bond that was never connected. */
+/** SP05 §3 `host.state`: the one guild, or the `none` of a Nod that was never connected. */
 function hostState(): HostState {
   return required(sync, 'host.state').state();
 }
+
+// ---------------------------------------------------------------- guild icon (SP05 §6)
+
+/**
+ * `tjs.remove(path)` deletes a file. txiki.js has it — its own bridge uses it for its temporary
+ * files — but `backend/tjs.d.ts` is the minimal typing file for the globals this backend uses and
+ * does not declare it yet. Finding for the coordinator, who owns that file; this slice keeps one
+ * named cast here instead of editing someone else's typings. The read is late on purpose: no global
+ * is touched while the module is being evaluated.
+ */
+function removeFile(path: string): Promise<void> {
+  const files = tjs as unknown as { remove: (path: string) => Promise<void> };
+  return files.remove(path);
+}
+
+/**
+ * SP04 §2's `guildIcon` of the body in the `host` row: the digest, or `null` when that body says the
+ * guild has no icon. `undefined` is a different answer — no `host` row at all (or a body that does
+ * not read) — and it means the machine is not connected, so nothing of the guild's is touched.
+ */
+function snapshotIconHash(): string | null | undefined {
+  const row = repo === null ? null : repo.hostRecord();
+  if (row === null) return undefined;
+  if (row.snapshot === null) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(row.snapshot) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== 'object' || value === null || !('guildIcon' in value)) return undefined;
+  const icon = value.guildIcon;
+  return typeof icon === 'string' && icon !== '' ? icon : null;
+}
+
+/**
+ * SP05 §6: hands the icon of the snapshot just applied to `backend/guild-icon.ts`. It is called
+ * after every state the sync publishes and once after an unlock, and never awaited: the page is
+ * waiting for the state, not for a PNG, and a failure leaves the icon the machine already has —
+ * which the next sync retries.
+ */
+function syncGuildIcon(): void {
+  const icon = guildIcon;
+  if (icon === null) return;
+  const hash = snapshotIconHash();
+  // RF-30: without a `host` row there is no guild whose icon could have moved. `host.remove` is what
+  // deletes the file in that case.
+  if (hash === undefined) return;
+  void icon.sync(hash).catch(() => undefined);
+}
+
+/** SP05 §6: `nod.setAppIcon`'s one parameter, refused with the same sentence as the screen's. */
+function appIconChoice(value: unknown): AppIconChoice {
+  if (value !== 'default' && value !== 'guild') throw new Error('invalid app icon choice');
+  return value;
+}
+
+/**
+ * SP05 §6/SP03 §2: the PNG an admin picked, as `PUT /v1/admin/guild/icon` takes it — base64url of
+ * the bytes. The host decides (it refuses anything that is not a PNG and anything past its body
+ * limit); this side checks the same two things first so that the refusal is one sentence instead of
+ * a `400` from a guild the person cannot see.
+ */
+function guildIconBody(value: unknown): string {
+  const png = text(value, 'invalid guild icon');
+  let bytes: Uint8Array<ArrayBuffer>;
+  try {
+    bytes = fromBase64url(png);
+  } catch {
+    throw new Error('invalid guild icon');
+  }
+  if (!isPng(bytes)) throw new Error('the guild icon must be a PNG');
+  // SP03 §2 caps the route's body at 512 KB, and what travels is the base64url of the bytes: a
+  // larger PNG is refused here, before a body no host would take. (`docs/handovers/
+  // i2b-guild-icon-app.md` has the finding that the constant is not in `shared/host-api.ts`.)
+  if (png.length > GUILD_ICON_MAX_ENCODED) {
+    throw new Error('the guild icon is too large — PNG files up to 384 KiB');
+  }
+  return png;
+}
+
+/**
+ * SP03 §2's body limit for the icon routes, in the encoded form that actually travels: a 512 KB
+ * base64url string is a PNG of at most 384 KiB.
+ */
+const GUILD_ICON_MAX_ENCODED = 512 * 1024;
 
 /** The invites that still travel in an export: unused and unexpired (canonico §9). */
 function activeInvites(r: Repo, now: Date): InviteSeed[] {
@@ -924,7 +1048,7 @@ function usualLogin(results: LoginResult[]): LoginResult | null {
 const methods: { [M in Method]: Handler<M> } = {
   // -------------------------------------------------------------- session
   'session.state': () => {
-    // SP04 §1.3: the page subscribes before it calls this at boot, so a `bond://join` link that
+    // SP04 §1.3: the page subscribes before it calls this at boot, so a `nod://join` link that
     // arrived while it was loading is handed over here.
     if (pendingJoin !== null) push('join', pendingJoin);
     return required(session, 'session.state').state();
@@ -1010,11 +1134,11 @@ const methods: { [M in Method]: Handler<M> } = {
     // SP05 §2 keeps one guild at a time. Replacing the row here would drop the current host's
     // bearer and snapshot without a word, so the person removes the host first.
     if (r.hostRecord() !== null) {
-      throw new Error('Bond is already connected to a host — remove it first');
+      throw new Error('Nod is already connected to a host — remove it first');
     }
 
     const setup = name !== undefined;
-    // F1/F3/F7: the local half of the join first — the collision with a local account of this Bond
+    // F1/F3/F7: the local half of the join first — the collision with a local account of this Nod
     // and the choice it asks for, the unlocked session F3 demands, and the one sentence a wrong code
     // becomes. Nothing here has reached the host yet: a join the page has not decided does not spend
     // the code (`hostPinned` is `false` by construction — activation refuses over an existing host).
@@ -1030,7 +1154,7 @@ const methods: { [M in Method]: Handler<M> } = {
         const pre = preAuthConnection(found);
         // SP02 §4: the host's iteration count for this derivation (it answers for any email).
         const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
-        // SP02 §1: at activation the Bond chooses the person's salt. SP02 §7's reset is a new salt,
+        // SP02 §1: at activation the Nod chooses the person's salt. SP02 §7's reset is a new salt,
         // so the one the host answers is only read, never stored — another machine's cached salt is
         // what notices a reset, and it must never match by accident.
         const salt = randomSalt();
@@ -1104,14 +1228,14 @@ const methods: { [M in Method]: Handler<M> } = {
     const adoptLocal = optional(p.adoptLocal, (value) => booleanValue(value, 'invalid join')) ?? false;
 
     const row = r.hostRecord();
-    // F3: with a host row this is the sign-in of the host this Bond already has. It goes to the
+    // F3: with a host row this is the sign-in of the host this Nod already has. It goes to the
     // address the row pinned and to no other — the page prefills it from the row, so a different one
-    // is a Bond being pointed at a second host, not a sign-in.
+    // is a Nod being pointed at a second host, not a sign-in.
     if (row !== null && originOf(address) !== originOf(row.address)) {
-      throw new Error('this Bond is connected to another host — remove it first');
+      throw new Error('this Nod is connected to another host — remove it first');
     }
     // F1/F3/F7: the same local gate. With a host row the session may stay locked (that is the
-    // signed-out case F3 is about) and the attempt pays the unlock backoff; without one, a Bond that
+    // signed-out case F3 is about) and the attempt pays the unlock backoff; without one, a Nod that
     // already has an account needs that account's session like `host.activate` does.
     const gate = await s.joinGate({
       email,
@@ -1181,7 +1305,7 @@ const methods: { [M in Method]: Handler<M> } = {
 
   'host.syncNow': async () => {
     if (required(repo, 'host.syncNow').hostRecord() === null) {
-      throw new Error('Bond is not connected to a host');
+      throw new Error('Nod is not connected to a host');
     }
     return await required(sync, 'host.syncNow').syncNow();
   },
@@ -1197,6 +1321,8 @@ const methods: { [M in Method]: Handler<M> } = {
     // SP02 §5: the bearer goes with the host; without a row nothing would ever read it again.
     if (connection !== null) await connection.forgetToken();
     r.clearHost();
+    // SP05 §6: the guild's icon goes with the guild — the file and the app icon it was showing.
+    await required(guildIcon, 'host.remove').reset();
     // SP05 §2: without a `host` row the local tables are the catalog again — "removing the host
     // returns to them" — so the effective catalog and the page's list are re-derived here.
     refreshConnectedCatalog();
@@ -1207,7 +1333,7 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   /**
-   * B8a (SP05 §4, RF-40): the first admin of a host that has no org tool publishes this Bond's local
+   * B8a (SP05 §4, RF-40): the first admin of a host that has no org tool publishes this Nod's local
    * catalog — the `org` rows of the local `tool` table with their views and their icons, and the
    * local roles — through `POST /v1/admin/bootstrap`. The host writes it all in one go and refuses a
    * second time (SP03 §2); the refusal comes back as `refused` so the offer can end without the page
@@ -1218,13 +1344,13 @@ const methods: { [M in Method]: Handler<M> } = {
     const actor = unlockedPerson('host.bootstrap');
     const store = required(icons, 'host.bootstrap');
     const admin = hostAdminFor(connectionOf());
-    if (admin === null) throw new Error('Bond is not connected to a host');
+    if (admin === null) throw new Error('Nod is not connected to a host');
 
     // The local catalog, not the effective one: publishing the snapshot's own tools back to the host
     // would be a no-op at best. A local personal tool is not part of the guild's catalog (RF-40).
     const local = r.listEntries().filter((entry) => (entry.scope ?? 'org') === 'org');
     const tools = await localEntriesWithIcons(local, store);
-    if (tools.length === 0) throw new Error('this Bond has no local tools to publish');
+    if (tools.length === 0) throw new Error('this Nod has no local tools to publish');
     const roles = r.listRoles();
 
     const answer = await admin.bootstrap(tools, roles);
@@ -1239,6 +1365,35 @@ const methods: { [M in Method]: Handler<M> } = {
     });
     await afterHostWrite();
     return answer;
+  },
+
+  /**
+   * SP05 §6, SP03 §2: the PNG the guild shows as its app icon. Admin only (the §2 guard) and only
+   * while a host is connected: the host stores the bytes and answers their SHA-256, which is what
+   * reaches every member inside the next signed snapshot (SP04 §2) — the bytes themselves travel
+   * only to the Nod that fetched them.
+   */
+  'host.setGuildIcon': async (params): Promise<{ sha256: string }> => {
+    const connection = connectionOf();
+    if (connection === null) throw new Error('Nod is not connected to a host');
+    const png = guildIconBody(parameters(params, 'invalid guild icon').png);
+    const answer = await connection.request<GuildIconResponse>('PUT', HOST_ROUTES.adminGuildIcon, {
+      png,
+    } satisfies GuildIconRequest);
+    // The write landed on the host, so what is left is to make it visible: the sync that follows
+    // brings the body whose `guildIcon` is this digest, and the state push fetches and applies the
+    // bytes (`syncGuildIcon`). A host that cannot be reached leaves the write where it landed.
+    await afterHostWrite();
+    return { sha256: answer.sha256 };
+  },
+
+  /** SP05 §6, SP03 §2: the guild has no icon again, and the next body says `guildIcon: null`. */
+  'host.clearGuildIcon': async (): Promise<true> => {
+    const connection = connectionOf();
+    if (connection === null) throw new Error('Nod is not connected to a host');
+    await connection.request('DELETE', HOST_ROUTES.adminGuildIcon);
+    await afterHostWrite();
+    return true;
   },
 
   // -------------------------------------------------------------- catalog
@@ -1611,7 +1766,7 @@ const methods: { [M in Method]: Handler<M> } = {
     // the account goes with it (A14).
     if (deleteCredentials) await store.removeAllOf(personId);
     else r.removeVaultOf(personId);
-    await required(runtime, 'people.revoke').secrets.delete(`bond.bio.${personId}`);
+    await required(runtime, 'people.revoke').secrets.delete(`nod.bio.${personId}`);
 
     r.addEvent({
       personId,
@@ -1824,10 +1979,10 @@ const methods: { [M in Method]: Handler<M> } = {
   /** SP04 §5: the sent/pending counters of Settings → Activity. Counters only — no event travels. */
   'events.syncStatus': () => required(repo, 'events.syncStatus').eventSyncCounts(),
 
-  // -------------------------------------------------------------- bond
-  'bond.info': async (): Promise<AppInfo> => {
-    const r = required(repo, 'bond.info');
-    const info = await required(runtime, 'bond.info').info();
+  // -------------------------------------------------------------- nod
+  'nod.info': async (): Promise<AppInfo> => {
+    const r = required(repo, 'nod.info');
+    const info = await required(runtime, 'nod.info').info();
     return {
       version: info.version,
       seedVersion: storedSeedVersion(r),
@@ -1837,11 +1992,11 @@ const methods: { [M in Method]: Handler<M> } = {
     };
   },
 
-  'bond.checkUpdate': () => required(runtime, 'bond.checkUpdate').update.check(),
+  'nod.checkUpdate': () => required(runtime, 'nod.checkUpdate').update.check(),
 
-  'bond.installUpdate': async (): Promise<boolean> => {
-    const r = required(repo, 'bond.installUpdate');
-    const person = unlockedPerson('bond.installUpdate');
+  'nod.installUpdate': async (): Promise<boolean> => {
+    const r = required(repo, 'nod.installUpdate');
+    const person = unlockedPerson('nod.installUpdate');
     // A13: the install restarts the app, so the event goes in before it starts.
     r.addEvent({
       personId: person.id,
@@ -1851,17 +2006,33 @@ const methods: { [M in Method]: Handler<M> } = {
       result: 'requested',
       detail: null,
     });
-    return required(runtime, 'bond.installUpdate').update.install();
+    return required(runtime, 'nod.installUpdate').update.install();
+  },
+
+  /**
+   * SP05 §6: the app icon of this machine and whether a guild icon is available to show. Read by
+   * Settings → Account (the choice) and by the admin's card in Settings → Hosts.
+   */
+  'nod.appIcon': async (): Promise<AppIconState> => await required(guildIcon, 'nod.appIcon').state(),
+
+  /**
+   * SP05 §6: stores the choice and applies it — `guild` needs a verified guild icon on disk, and
+   * `default` puts the bundle icon back. A machine whose system has no app icon (Linux on Wayland)
+   * says so through `capabilities()`; the choice is kept all the same, for a session that has one.
+   */
+  'nod.setAppIcon': async (params): Promise<AppIconState> => {
+    const choice = appIconChoice(parameters(params, 'invalid app icon choice').choice);
+    return await required(guildIcon, 'nod.setAppIcon').setChoice(choice);
   },
 
   /** RF-55: hides the notice of one version on this machine; `store` keeps the version string. */
-  'bond.dismissUpdate': async (params): Promise<true> => {
-    const app = required(runtime, 'bond.dismissUpdate');
+  'nod.dismissUpdate': async (params): Promise<true> => {
+    const app = required(runtime, 'nod.dismissUpdate');
     const version = text(parameters(params, 'invalid dismissal').version, 'invalid version');
     // `store.set` answers false when it could not write: better to say so than to hide a notice
     // that comes back on the next launch.
     if (!(await app.store.set(DISMISSED_UPDATE_KEY, version))) {
-      throw new Error('Bond could not save the dismissal');
+      throw new Error('Nod could not save the dismissal');
     }
     if (updateNotice !== null && updateNotice.latest === version) {
       updateNotice = null;
@@ -1870,8 +2041,8 @@ const methods: { [M in Method]: Handler<M> } = {
     return true;
   },
 
-  'bond.quit': () => {
-    required(runtime, 'bond.quit').quit();
+  'nod.quit': () => {
+    required(runtime, 'nod.quit').quit();
     return true;
   },
 
@@ -1894,7 +2065,7 @@ export const api: Record<string, TinyApiHandler> = Object.fromEntries(
 // ---------------------------------------------------------------- runtime hooks
 
 /**
- * SP04 §1.3: a `bond://join?host=…&fp=…[&code=…]` link (tinyjs' `"urlScheme"`, the second launch
+ * SP04 §1.3: a `nod://join?host=…&fp=…[&code=…]` link (tinyjs' `"urlScheme"`, the second launch
  * forwarding to the running copy). The window comes forward and the page opens the join screen with
  * the invite prefilled; anything else the launcher forwards is ignored. The code is the person's own
  * — it is never logged, written to a file or put in an event.

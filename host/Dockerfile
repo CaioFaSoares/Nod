@@ -1,8 +1,8 @@
 # The host image (SP07 §1). Build from the repo root — `host/` imports `shared/`:
 #
-#   docker build -f host/Dockerfile -t bond-host .
+#   docker build -f host/Dockerfile -t nod-host .
 #
-# `host/package.json` holds the host's only dependency (Elysia, exact beta), so the Bond app's
+# `host/package.json` holds the host's only dependency (Elysia, exact beta), so the Nod app's
 # dependencies never enter the image.
 
 # `--filter ./host` from SP07 §1 needs the repo root to be a workspace root declaring `host`; it is
@@ -18,7 +18,7 @@ WORKDIR /app
 COPY --from=deps /app/host/node_modules ./host/node_modules
 COPY shared ./shared
 COPY host ./host
-ENV NODE_ENV=production BOND_DATA=/data PORT=8080
+ENV NODE_ENV=production NOD_DATA=/data PORT=8080
 RUN mkdir -p /data && chown bun:bun /data
 USER bun
 EXPOSE 8080

@@ -156,7 +156,7 @@ export const authRoutes = new Elysia({ name: 'host-auth-routes' })
     const now = auth.now();
     const opened = repo.transaction(() => {
       if (repo.redeemCode('activate', person.id, codeHash, now) === null) return null;
-      // SP02 §7: activation stores the salt the Bond chose; a reissued code resets it.
+      // SP02 §7: activation stores the salt the Nod chose; a reissued code resets it.
       repo.activatePerson(person.id, { salt: ctx.body.salt, authHash }, now);
       insertSession(repo, person.id, ctx.body.device, tokenHash, now);
       return { token, personId: person.id };

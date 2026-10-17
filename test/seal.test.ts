@@ -17,7 +17,7 @@ import {
 /**
  * The two SP06 §3 vectors: produced once by this same module under Bun (2026-10-16) with a pinned
  * ephemeral pair and nonce, so the whole `sealed` string is reproducible. `test/smoke/run.ts` keeps
- * its own copy of the same values and re-seals them under the Bond runtime (txiki.js): the two
+ * its own copy of the same values and re-seals them under the Nod runtime (txiki.js): the two
  * copies cannot drift silently, whichever stops matching fails. Vector 1 is a `send` with a
  * non-ASCII secret; vector 2 an `org` `assign`, so both payload shapes are covered.
  */
@@ -43,6 +43,7 @@ const SEAL_KEYS = {
   senderEd25519PublicKey: '9c8ba7c6523a23951cc8f3f30c7e1bd55ad04058bbc2f17023ee823753e6214c',
 };
 
+// frozen protocol label (kept 'bond' on purpose: changing it changes every derived key)
 const SEAL_VECTORS: SealVector[] = [
   {
     payload: {

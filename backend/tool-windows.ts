@@ -136,7 +136,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   const logins = new Map<Id, LoginResult>();
   /** Failures with no live window behind them (the window never opened). */
   const failures = new Map<Id, string>();
-  /** Bond windows focused right now: only with one focused do the shortcuts exist (canonico §7). */
+  /** Nod windows focused right now: only with one focused do the shortcuts exist (canonico §7). */
   const focused = new Set<string>();
   /** Popup windows a tool window opened and that are still live: closed on lock (D1). */
   const popups = new Set<string>();
@@ -735,7 +735,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     }
   }
 
-  /** Global shortcuts exist only while some Bond window is focused (canonico §7). */
+  /** Global shortcuts exist only while some Nod window is focused (canonico §7). */
   function updateHotkeys(): void {
     if (deps.hotkeys && focused.size > 0) {
       for (let n = 1; n <= 9; n += 1) registerHotkey(`digit-${n}`, combo(String(n), deps.os));
@@ -753,9 +753,9 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   }
 
   function onFocus(windowId: string, isFocused: boolean): void {
-    const isBondWindow =
+    const isNodWindow =
       windowId === MAIN_WINDOW || windows.has(windowId) || popups.has(windowId);
-    if (!isBondWindow) return;
+    if (!isNodWindow) return;
     if (isFocused) focused.add(windowId);
     else focused.delete(windowId);
     updateHotkeys();

@@ -11,15 +11,16 @@ still hold: secrets only in the keychain, the page only calls `src/api.ts`, the 
 | --- | --- |
 | `shared/auth.ts` | `deriveKeys`, `PasswordHashV2` (SP02 §1, §6) |
 | `shared/host-api.ts` (new) | Types of SP03/SP04: `Discovery`, `Snapshot`, request/response bodies; **and** the code helpers — `CODE_ALPHABET`, `CODE_BYTES`, `CODE_LENGTH`, `generateCode`, `formatCode`, `normalizeCode`, `validateCode`, `normalizeEmail` (SP02 §3). They landed here, not in `shared/auth.ts` (c1); `shared/auth.ts` keeps the derivation. |
-| `shared/types.ts` | `Entry.scope/ownerId`, `View.id/scope/ownerId`, `HostState`, new `ApiContract` methods (§3) |
+| `shared/types.ts` | `Entry.scope/ownerId`, `View.id/scope/ownerId`, `HostState`, `AppIconChoice`/`AppIconState`, new `ApiContract` methods (§3) |
 | `shared/host-merge.ts` (new) | Pure: snapshot → local rows; sidebar order (favorites, org, personal); outbox replay decisions |
-| `backend/host-client.ts` (new) | `fetch` to the host; bearer from the keychain; discovery; signature check; error mapping |
+| `backend/host-client.ts` (new) | `fetch` to the host; bearer from the keychain; discovery; signature check; error mapping; `getBytes`, the one route whose answer is bytes (§6) |
 | `backend/sync.ts` (new) | Timer, triggers, outbox flush, event push, snapshot apply, stale state, backoff (SP04 §3–§5) |
 | `backend/repo.ts` | Migration to `user_version = 3` (§2) |
 | `backend/session.ts` | V2 local verifier and its migration; keys kept in memory while unlocked; biometric item holds `vaultKey` (SP02 §6, §9) |
 | `backend/vault.ts` | `origin` per item, fill only on that origin (B9); block 2: `bv1.` encryption (V1) |
-| `backend/main.ts` | New RPC methods; admin methods routed to the host when connected (§3) |
-| `src/settings.ts` | Settings → Hosts tab; admin tabs read/write through the same RPC (the backend decides local or host) |
+| `backend/guild-icon.ts` (new) | The guild's PNG on this machine and the app-icon choice: fetch on a moved hash, verify the digest, cache in `<data>/guild-icon.png`, apply through `app.icon` (§6) |
+| `backend/main.ts` | New RPC methods; admin methods routed to the host when connected (§3); the guild icon of every applied snapshot and of the host's removal (§6) |
+| `src/settings.ts` | Settings → Hosts tab; admin tabs read/write through the same RPC (the backend decides local or host); the App icon select and the admin's Guild icon card (§6) |
 | `src/app.ts` | Sidebar order; stale badge; favorites toggle; personal tool add |
 
 ## 2. Local schema, `user_version = 3` (block 1)
@@ -80,7 +81,7 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
 - **Personal tools** live in the snapshot plus the outbox overlay. In local mode they are `tool`
   rows with `scope = 'personal'`.
 - The local `person` row for a connected account is created at activation with the host person id
-  as its id. Keychain keys `bond.cred.<person>.<tool>` therefore stay stable across machines and
+  as its id. Keychain keys `nod.cred.<person>.<tool>` therefore stay stable across machines and
   sync (`docs/canonico.md` §11).
 
 ## 3. RPC additions (`ApiContract`)
@@ -95,6 +96,8 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
 | `host.remove` | `{ keepPersonal: boolean }` | `HostState` | unlocked |
 | `host.bootstrap` | — | `{ created: number; refused: boolean }` | unlocked, admin (B8a); publishes the local org tools to an empty host; the host's `409` is `{ created: 0, refused: true }` |
 | `events.syncStatus` | — | counts of sent and pending events | unlocked (B10); the two numbers Settings → Activity shows |
+| `nod.appIcon` / `nod.setAppIcon` | `— / { choice }` | `AppIconState` | unlocked; every person picks the icon of this machine (§6) |
+| `host.setGuildIcon` / `host.clearGuildIcon` | `{ png }` / `—` | `{ sha256 }` / `true` | unlocked, admin, connected; the guild's icon (§6, SP03 §2) |
 | `host.sessions` / `host.revokeSession` | `— / { id }` | `DeviceSession[] / true` | unlocked (block 2, O1) |
 | `personal.saveTool` / `personal.removeTool` | `{ entry }` / `{ id }` | `Entry` / `true` | unlocked (block 2) |
 | `personal.saveView` / `personal.removeView` | `{ view }` / `{ id }` | `View` / `true` | unlocked (block 2) |
@@ -116,16 +119,20 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
     (or password if already activated) → set password → done.
   - With a host: guild, address, fingerprint, last sync, pending writes, "Sync now",
     "Remove host" (with the keep-personal choice, default on).
+  - Admin of a connected guild: a "Guild icon" card with the picked PNG's preview, "Upload" and
+    "Remove" (§6).
 - **First-run screen** gets a third path, "Join a guild", beside create account and invite.
 - **Sidebar**: favorites first in their order, then org tools, then personal tools. A small "offline"
   badge while stale.
 - **Admin tabs**, when connected:
   - People: email, name, roles; "New access code" shows the code once with a copy button.
   - Tools, Roles, Activity: same screens, host data.
+- **Settings → Account**: an "App icon" card — Default or Guild icon, the second offered only while
+  the guild has one (§6).
 
 ## 5. Acceptance (block 1 smoke, B11)
 
-On two machines, or two app ids on one machine (`BOND_APP_ID`, as `test/smoke/run.ts` already does):
+On two machines, or two app ids on one machine (`NOD_APP_ID`, as `test/smoke/run.ts` already does):
 
 1. Without a host, the existing smoke passes unchanged.
 2. Admin: Add host with the setup code; publish local tools (B8a); create person P with role
@@ -138,3 +145,43 @@ On two machines, or two app ids on one machine (`BOND_APP_ID`, as `test/smoke/ru
 4. Admin revokes P → P's next sync shows signed out and the org tools disappear.
 5. Network off on P: unlock works, tools show, "offline" badge; network on: events are sent and
    show on the host.
+
+## 6. Guild icon and the app icon
+
+The admin uploads the guild's icon inside the Nod; every member's Nod may then show it as the app
+icon. The routes are SP03 §2's (`PUT`/`DELETE /v1/admin/guild/icon`, `GET /v1/guild/icon`) and the
+signed field is SP04 §2's `Snapshot.guildIcon` — only the **digest** is signed, the bytes travel on
+their own route.
+
+- **`backend/guild-icon.ts`** (new) owns `<app data dir>/guild-icon.png` and the preference, with the
+  connection, `app.icon`, `tjs`'s file calls and `store` injected. After every state the sync
+  publishes, and once after an unlock, `backend/main.ts` hands it the `guildIcon` of the body in the
+  `host` row:
+  - the hash equals the one the file on disk hashes to → nothing is requested;
+  - the hash moved → one `GET /v1/guild/icon` (raw bytes, the bearer of every other call, through
+    `HostConnection.getBytes`), and the bytes are written **only** when their SHA-256 is exactly the
+    signed value; other bytes are refused and nothing is written;
+  - `guildIcon: null`, or a fetch that failed, leaves no icon applied: the file is deleted on `null`,
+    and a digest that does not match what is on disk is never shown;
+  - no `host` row → no request at all (RF-30).
+- **The choice** is `appIcon` in `store.json`: `'default' | 'guild'`, and anything else reads as
+  `default`. It is applied through the runtime's `app.icon(path)` — `''` resets to the bundle icon —
+  only when `capabilities().icon !== false` (Linux has no protocol for it on a Wayland session;
+  `docs/tinyjs.md` §6). A restart starts from the bundle icon, so the cached snapshot's icon is
+  re-applied on the unlock; `host.remove` deletes the file and puts the bundle icon back, and the
+  preference stays (it is a preference, not a fact about one guild).
+- **The two reads and the two writes** are §3's `nod.appIcon`, `nod.setAppIcon`,
+  `host.setGuildIcon` and `host.clearGuildIcon`. `nod.setAppIcon` refuses `guild` while no verified
+  icon is on disk, so the screen can only offer what the machine has.
+- **Screens**: Settings → Account gains **App icon** — a select of Default / Guild icon, the Guild
+  option **disabled with a hint** while the guild has none. Settings → Hosts gains, for the admin,
+  **Guild icon**: the PNG is picked with `<input type=file accept="image/png">`, read as base64url
+  for the upload and previewed as a data URI, with **Upload** and **Remove**. The stored icon's
+  **bytes never reach the page** — only the digest travels — so a preview exists for the file picked
+  in the session and not for one uploaded by an earlier run.
+- **The size ceiling is the encoded one.** SP03 §1's body limit for the icon route is 512 KB of
+  body, and the base64url body is larger than the bytes: the usable PNG is at most 384 KiB
+  (393 216 bytes). The page and `backend/main.ts` check that number before the call; the constant has
+  no shared home yet (finding in `docs/handovers/i2b-guild-icon-app.md`).
+- **Nothing here is a secret**: an icon is a public image, the preference is one word, and no
+  message of the module carries a token or a host body.

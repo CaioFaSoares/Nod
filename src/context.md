@@ -17,7 +17,7 @@ The single page of the main window: sign-in, sidebar, Home, palette and Settings
 
 | Screen | Change | Story | Spec |
 | --- | --- | --- | --- |
-| First run | Third path: "Join a guild"; a `bond://join` invite opens it | B2 | SP05 §4 |
+| First run | Third path: "Join a guild"; a `nod://join` invite opens it | B2 | SP05 §4 |
 | Settings → Hosts (new) | Add (address → guild + fingerprint → email + code), activate, sign in, status, sync now, remove; the signed-out notice | B2 | SP05 §4 |
 | Settings → People/Tools/Roles/Activity | Same screens; data from the host when connected; "New access code"; Activity's sent vs pending | B6, B10 | SP05 §4 |
 | Sidebar | Order favorites → org → personal; "offline" badge | B4 | SP05 §4 |

@@ -1,4 +1,4 @@
-// Pure merge of one verified host snapshot into the Bond's own shapes (SP04 §2, §4, SP05 §1–§2,
+// Pure merge of one verified host snapshot into the Nod's own shapes (SP04 §2, §4, SP05 §1–§2,
 // §4): the rows the catalog layer keeps, the sidebar order, the one decision an outbox replay asks
 // for and the window in which the cached org half may still be shown.
 //
@@ -12,7 +12,7 @@ import type { Entry, Id, Role } from './types';
 // ---------------------------------------------------------------- the cached org window
 
 /**
- * `docs/canonico.md` §22, "Stale cache" (owner, 2026-10-16): a connected Bond that is offline keeps
+ * `docs/canonico.md` §22, "Stale cache" (owner, 2026-10-16): a connected Nod that is offline keeps
  * showing org tools from the cache for 14 days after the last successful sync, and after that hides
  * them until a sync succeeds (RF-37, RF-39). `backend/sync.ts` keeps the cache; the catalog layer
  * decides with `orgToolsUsable` whether the org half of it is still shown.
@@ -50,6 +50,10 @@ export class SnapshotShapeError extends Error {
  * The rows one verified snapshot holds: the org half (the guild's roles and the org tools granted to
  * me, `Entry.roles` carrying the grants), the personal half, and the favorites in the person's order
  * (SP04 §2). This is what SP05 §2 calls the cache "parsed once per change and kept in memory".
+ *
+ * `guildIcon` is the guild's own icon as the snapshot carries it (the host-side digest of the guild
+ * PNG, or `null` when the guild has none); it is kept beside the rows so a cache rewrite preserves
+ * it exactly as it was signed.
  */
 export interface SnapshotRows {
   me: Snapshot['me'];
@@ -58,6 +62,7 @@ export interface SnapshotRows {
   personalTools: Entry[];
   personalViews: PersonalView[];
   favorites: Id[];
+  guildIcon: string | null;
 }
 
 /** The rows plus the two fields the `host` row stores beside the body (SP04 §2). */
@@ -142,12 +147,14 @@ function readBody(value: unknown): SnapshotBody {
       personalTools: list(body.personalTools, 'personalTools').map(readEntry),
       personalViews: list(body.personalViews, 'personalViews').map(readPersonalView),
       favorites: list(body.favorites, 'favorites').map((id) => text(id, 'favorites')),
+      // Cosmetic, so read permissively: a missing or non-string icon is `null`, not a shape refusal.
+      guildIcon: typeof body.guildIcon === 'string' ? body.guildIcon : null,
     },
   };
 }
 
 /**
- * SP04 §2's snapshot body, read into the rows the Bond keeps. `backend/host-client.ts` has already
+ * SP04 §2's snapshot body, read into the rows the Nod keeps. `backend/host-client.ts` has already
  * checked the bytes with the pinned key; this is the shape check of the document itself, which is
  * where the rest of the body stops being `unknown` (B1 left it here on purpose).
  */
@@ -157,7 +164,7 @@ export function parseSnapshot(value: unknown): SnapshotRows {
 
 /**
  * SP04 §3, RF-39: a `401` drops the org half of the cache and keeps the personal half. `raw` is the
- * body the Bond holds; the answer is the body to hold instead, with the guild's roles and org tools
+ * body the Nod holds; the answer is the body to hold instead, with the guild's roles and org tools
  * gone and `me`, the personal tools, the personal views and the favorites keeping their place.
  *
  * The body no longer carries the bytes the host signed, so the caller must not offer its `version`
@@ -189,6 +196,7 @@ export function clearOrgData(raw: string): string | null {
     personalTools: body.rows.personalTools,
     personalViews: body.rows.personalViews,
     favorites: body.rows.favorites,
+    guildIcon: body.rows.guildIcon,
   };
   return JSON.stringify(cleared);
 }

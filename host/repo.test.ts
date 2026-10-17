@@ -37,7 +37,7 @@ const databases: { dir: string; close: () => void }[] = [];
 
 /** A repo on a fresh migrated database of its own, the way the host boots one. */
 function newRepo() {
-  const dir = mkdtempSync(join(tmpdir(), 'bond-host-repo-'));
+  const dir = mkdtempSync(join(tmpdir(), 'nod-host-repo-'));
   const db = openDatabase(join(dir, 'host.db'));
   applyMigrations(db);
   databases.push({ dir, close: () => db.close() });
@@ -94,7 +94,7 @@ function personal(id: string, over: Partial<EntryInput> = {}): EntryInput {
 
 /** An activated person with no role: most rules have nothing to do with the admin flag. */
 function activatedMember(repo: Repo, id = 'p1'): HostPerson {
-  const person = repo.createPerson({ id, email: `${id}@bond.test`, name: id }, NOW);
+  const person = repo.createPerson({ id, email: `${id}@nod.test`, name: id }, NOW);
   repo.activatePerson(id, { salt: 'c2FsdC1tZW1iZXI', authHash: '$argon2id$member' }, NOW);
   return person;
 }
@@ -103,7 +103,7 @@ function activatedMember(repo: Repo, id = 'p1'): HostPerson {
 function activatedAdmin(repo: Repo): HostPerson {
   repo.saveRole(ADMIN);
   const person = repo.createPerson(
-    { id: 'p-admin', email: 'Admin@Bond.Test', name: 'Ada', roles: ['admin'] },
+    { id: 'p-admin', email: 'Admin@Nod.Test', name: 'Ada', roles: ['admin'] },
     NOW,
   );
   repo.activatePerson(person.id, { salt: 'c2FsdC1hZG1pbg', authHash: '$argon2id$admin' }, NOW);
@@ -147,7 +147,7 @@ describe('schema', () => {
 
   test('the schema itself refuses an entry or a view whose scope and owner disagree', () => {
     const { db, repo } = newRepo();
-    repo.createPerson({ id: 'p1', email: 'a@bond.test', name: 'Ada' }, NOW);
+    repo.createPerson({ id: 'p1', email: 'a@nod.test', name: 'Ada' }, NOW);
 
     const entry = (scope: string, owner: string | null, id: string) =>
       db
@@ -208,19 +208,19 @@ describe('schema', () => {
 describe('people', () => {
   test('the email is normalized and taken once', () => {
     const { repo } = newRepo();
-    const created = repo.createPerson({ id: 'p1', email: '  Ada@Bond.Test ', name: 'Ada' }, NOW);
+    const created = repo.createPerson({ id: 'p1', email: '  Ada@Nod.Test ', name: 'Ada' }, NOW);
 
-    expect(created.email).toBe('ada@bond.test');
+    expect(created.email).toBe('ada@nod.test');
     expect(created.kind).toBe('member');
     expect(created.createdAt).toBe(NOW);
     expect(created.activatedAt).toBeNull();
     expect(created.disabledAt).toBeNull();
     expect(created.roles).toEqual([]);
     expect(created.admin).toBe(false);
-    expect(repo.personByEmail('ADA@bond.test')?.id).toBe('p1');
-    expect(repo.personByEmail('nobody@bond.test')).toBeNull();
+    expect(repo.personByEmail('ADA@nod.test')?.id).toBe('p1');
+    expect(repo.personByEmail('nobody@nod.test')).toBeNull();
 
-    expect(() => repo.createPerson({ id: 'p2', email: 'ada@bond.test', name: 'Ada' }, NOW)).toThrow(
+    expect(() => repo.createPerson({ id: 'p2', email: 'ada@nod.test', name: 'Ada' }, NOW)).toThrow(
       ConflictError,
     );
     expect(repo.listPeople()).toHaveLength(1);
@@ -228,8 +228,8 @@ describe('people', () => {
 
   test('activation stores salt and hash once, and only the auth read returns them', () => {
     const { repo } = newRepo();
-    repo.createPerson({ id: 'p1', email: 'a@bond.test', name: 'Ada' }, NOW);
-    expect(repo.personAuthByEmail('a@bond.test')).toEqual({
+    repo.createPerson({ id: 'p1', email: 'a@nod.test', name: 'Ada' }, NOW);
+    expect(repo.personAuthByEmail('a@nod.test')).toEqual({
       person: expect.objectContaining({ id: 'p1' }),
       salt: null,
       authHash: null,
@@ -238,7 +238,7 @@ describe('people', () => {
     repo.activatePerson('p1', { salt: 'c2FsdA', authHash: '$argon2id$first' }, NOW);
     repo.activatePerson('p1', { salt: 'c2FsdB', authHash: '$argon2id$second' }, hoursAfter(NOW, 1));
 
-    const auth = repo.personAuthByEmail('a@bond.test');
+    const auth = repo.personAuthByEmail('a@nod.test');
     expect(auth?.salt).toBe('c2FsdB');
     expect(auth?.authHash).toBe('$argon2id$second');
     // The activation stamp is the first one (SP02 §3), and the record never carries them.
@@ -251,7 +251,7 @@ describe('people', () => {
     const { repo } = newRepo();
     repo.saveRole(ADMIN);
     repo.saveRole(TEAM);
-    repo.createPerson({ id: 'p1', email: 'a@bond.test', name: 'Ada', roles: ['team'] }, NOW);
+    repo.createPerson({ id: 'p1', email: 'a@nod.test', name: 'Ada', roles: ['team'] }, NOW);
 
     expect(repo.personById('p1')?.roles).toEqual(['team']);
     expect(repo.personById('p1')?.admin).toBe(false);
@@ -267,8 +267,8 @@ describe('people', () => {
 
     // A password change keeps the activation and swaps salt and hash (SP02 §7).
     repo.changeAuth('p1', { salt: 'c2FsdC1uZXc', authHash: '$argon2id$new' });
-    expect(repo.personAuthByEmail('a@bond.test')?.authHash).toBe('$argon2id$new');
-    expect(repo.personAuthByEmail('a@bond.test')?.salt).toBe('c2FsdC1uZXc');
+    expect(repo.personAuthByEmail('a@nod.test')?.authHash).toBe('$argon2id$new');
+    expect(repo.personAuthByEmail('a@nod.test')?.salt).toBe('c2FsdC1uZXc');
     expect(repo.personById('p1')?.activatedAt).toBeNull();
     expect(() => repo.changeAuth('ghost', { salt: 'x', authHash: 'y' })).toThrow(NotFoundError);
   });
@@ -277,7 +277,7 @@ describe('people', () => {
 describe('access and setup codes', () => {
   test('a code is consumed once, and a setup code is another purpose', () => {
     const { repo } = newRepo();
-    repo.createPerson({ id: 'p1', email: 'a@bond.test', name: 'Ada' }, NOW);
+    repo.createPerson({ id: 'p1', email: 'a@nod.test', name: 'Ada' }, NOW);
     const codeHash = sha256Hex('ABCDEFGH');
     const setupHash = sha256Hex('ABCDEFGHJKLMNPQR');
 
@@ -302,7 +302,7 @@ describe('access and setup codes', () => {
 
   test('the fifth wrong try kills the code, and so does the expiry', () => {
     const { db, repo } = newRepo();
-    repo.createPerson({ id: 'p1', email: 'a@bond.test', name: 'Ada' }, NOW);
+    repo.createPerson({ id: 'p1', email: 'a@nod.test', name: 'Ada' }, NOW);
     // SP01 §2 makes `code_hash` unique, so every issued code has its own (as its 5 random bytes do).
     const right = sha256Hex('ABCDEFGH');
     const right2 = sha256Hex('JKLMNPQR');
@@ -352,7 +352,7 @@ describe('access and setup codes', () => {
 
   test('issuing a new code revokes the previous unused one', () => {
     const { repo } = newRepo();
-    repo.createPerson({ id: 'p1', email: 'a@bond.test', name: 'Ada' }, NOW);
+    repo.createPerson({ id: 'p1', email: 'a@nod.test', name: 'Ada' }, NOW);
     const first = sha256Hex('AAAA1111');
     const second = sha256Hex('BBBB2222');
 
@@ -450,13 +450,13 @@ describe('sessions', () => {
         expect(repo.redeemCode('setup', null, codeHash, NOW)?.id).toBe('c1');
         repo.saveRole(ADMIN);
         repo.createPerson(
-          { id: 'p1', email: 'a@bond.test', name: 'Ada', roles: ['admin'] },
+          { id: 'p1', email: 'a@nod.test', name: 'Ada', roles: ['admin'] },
           NOW,
         );
         throw new Error('the route changed its mind');
       }),
     ).toThrow('the route changed its mind');
-    expect(repo.personByEmail('a@bond.test')).toBeNull();
+    expect(repo.personByEmail('a@nod.test')).toBeNull();
     expect(repo.listRoles()).toEqual([]);
     // The consumed code came back with the rest of the rollback.
     expect(usedAt()).toBeNull();
@@ -465,7 +465,7 @@ describe('sessions', () => {
       const code = repo.redeemCode('setup', null, codeHash, NOW);
       repo.saveRole(ADMIN);
       const person = repo.createPerson(
-        { id: 'p1', email: 'a@bond.test', name: 'Ada', roles: ['admin'] },
+        { id: 'p1', email: 'a@nod.test', name: 'Ada', roles: ['admin'] },
         NOW,
       );
       repo.activatePerson('p1', { salt: 'c2FsdA', authHash: '$argon2id$setup' }, NOW);
@@ -476,7 +476,7 @@ describe('sessions', () => {
       return { code, person, session };
     });
     expect(setup.code?.id).toBe('c1');
-    expect(setup.person.email).toBe('a@bond.test');
+    expect(setup.person.email).toBe('a@nod.test');
     expect(setup.session.personId).toBe('p1');
     expect(repo.adminCount()).toBe(1);
     expect(repo.redeemCode('setup', null, codeHash, NOW)).toBeNull();
@@ -505,7 +505,7 @@ describe('last admin', () => {
   test('a second activated admin makes the first one removable', () => {
     const { repo } = newRepo();
     activatedAdmin(repo);
-    repo.createPerson({ id: 'p2', email: 'b@bond.test', name: 'Bo', roles: ['admin'] }, NOW);
+    repo.createPerson({ id: 'p2', email: 'b@nod.test', name: 'Bo', roles: ['admin'] }, NOW);
 
     // Created but not activated: still one admin, so the guard holds.
     expect(repo.adminCount()).toBe(1);
@@ -525,7 +525,7 @@ describe('last admin', () => {
     expect(repo.adminCount()).toBe(0);
 
     repo.removeRole('team');
-    repo.createPerson({ id: 'p1', email: 'a@bond.test', name: 'Ada' }, NOW);
+    repo.createPerson({ id: 'p1', email: 'a@nod.test', name: 'Ada' }, NOW);
     expect(repo.setDisabled('p1', true, NOW).disabledAt).toBe(NOW);
 
     repo.saveRole(ADMIN);
@@ -849,7 +849,7 @@ describe('secrets', () => {
 
     // What the host receives (SP02 §1–§2): the salt in clear, `argon2id(authKey)`, and hashes.
     repo.saveRole(ADMIN);
-    repo.createPerson({ id: 'p1', email: 'a@bond.test', name: 'Ada', roles: ['admin'] }, NOW);
+    repo.createPerson({ id: 'p1', email: 'a@nod.test', name: 'Ada', roles: ['admin'] }, NOW);
     const authHash = await Bun.password.hash(authKey, { algorithm: 'argon2id' });
     repo.activatePerson('p1', { salt: 'c2FsdC1ieXRlcy0xNg', authHash }, NOW);
     repo.issueCode(

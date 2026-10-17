@@ -1,9 +1,9 @@
-// Local session of Bond — docs/arquitetura.md §4; concepts in docs/canonico.md §9 and §11.
+// Local session of Nod — docs/arquitetura.md §4; concepts in docs/canonico.md §9 and §11.
 //
 // Nothing here imports `tjs` or `tiny`: repository, keychain, `store` and authenticator come in
 // through `deps`, which keeps this slice testable with `bun test`. A secret never reaches an event,
 // `store`, log or file: the database holds only a verifier — the v1 PBKDF2 `PasswordHash` or the V2
-// `check` of SP02 §6 — and the keychain holds only `bond.bio.<person>`. The keys of an unlock live
+// `check` of SP02 §6 — and the keychain holds only `nod.bio.<person>`. The keys of an unlock live
 // in this module's memory and `lock()` forgets them (SP02 §6).
 import {
   PBKDF2_ITERATIONS,
@@ -32,9 +32,9 @@ const LAST_PERSON_KEY = 'last_person';
 const META_FAILURES = 'unlock_failures';
 const META_LAST_FAILURE = 'unlock_last_failure';
 /** Prefix of the OS keychain key that marks a person's biometrics as enabled. */
-const BIOMETRIC_PREFIX = 'bond.bio.';
+const BIOMETRIC_PREFIX = 'nod.bio.';
 /** Reason shown by the operating system in the biometric dialog (`app.authenticate`). */
-const BIOMETRIC_REASON = 'Unlock Bond';
+const BIOMETRIC_REASON = 'Unlock Nod';
 
 const INVALID_EMAIL = 'enter a valid email';
 const NAME_REQUIRED = 'name is required';
@@ -49,12 +49,12 @@ const BIOMETRICS_DISABLED = 'biometrics are not enabled';
 /** A connected change needs the row's `authKey` (SP02 §7): a v1 row has none to send. */
 const NOT_CONNECTED = 'this account has no host password to change';
 /**
- * F3: a Bond that already has an account is not connected to a guild from the lock screen — the
+ * F3: a Nod that already has an account is not connected to a guild from the lock screen — the
  * person who holds this machine's keychain decides what happens to its accounts.
  */
-const JOIN_NEEDS_UNLOCK = 'unlock this Bond first, then join the guild';
-/** F1: the join's email is an account of this Bond, and not the one the session was unlocked as. */
-const JOIN_OTHER_ACCOUNT = 'this email belongs to another account of this Bond — unlock it, then join';
+const JOIN_NEEDS_UNLOCK = 'unlock this Nod first, then join the guild';
+/** F1: the join's email is an account of this Nod, and not the one the session was unlocked as. */
+const JOIN_OTHER_ACCOUNT = 'this email belongs to another account of this Nod — unlock it, then join';
 /**
  * F7: the join's own refusal. `preAuthConnection`'s routes answer `401` for a wrong code or password
  * (SP02 §5), and the client reads every `401` as "signed out" — a sentence about a session that was
@@ -92,7 +92,7 @@ export interface SessionDeps {
 
 /**
  * F1/F3: what the local side of a join decided before any host call (`Session.joinGate`). `join`
- * means the host may be asked, and `local` is the account of this Bond the host person will replace
+ * means the host may be asked, and `local` is the account of this Nod the host person will replace
  * (`null` when the email is nobody's here); `choose` means a local person holds the join's email and
  * the person has not said which account wins — nothing was sent and the code is not spent.
  */
@@ -142,7 +142,7 @@ export interface Session {
     email: string;
     /** F1: the person chose the guild account over the local account of the same email. */
     adoptLocal: boolean;
-    /** F3: the caller's own reading of the `host` row — a Bond with an account *and* a host is not
+    /** F3: the caller's own reading of the `host` row — a Nod with an account *and* a host is not
      *  the lock-screen case F3 is about. */
     hostPinned: boolean;
     /** F3: this join is a sign-in, so it pays the unlock backoff like any other password check. */
@@ -174,7 +174,7 @@ export interface Session {
     next: string,
     host?: (request: PasswordChangeRequest) => Promise<void>,
   ): Promise<void>;
-  /** SP02 §7: every `bond.cred.<person>.*` item of the keychain and the index rows of that person. */
+  /** SP02 §7: every `nod.cred.<person>.*` item of the keychain and the index rows of that person. */
   wipeVault(personId: Id): Promise<void>;
   /**
    * F2: the snapshot's `me` (SP04 §2) is the last word on the connected person — its name and its
@@ -201,7 +201,7 @@ export function createSession(deps: SessionDeps): Session {
   let currentKeys: DerivedKeys | null = null;
   // `lock()` is synchronous (§4) and the keychain is asynchronous: the `biometric` field of the
   // state it returns comes from this last read. `state()` (called on unlock, on account creation
-  // and by `bond.info`) and `enableBiometric` are what refresh it.
+  // and by `nod.info`) and `enableBiometric` are what refresh it.
   let knownBiometric = false;
 
   function now(): Date {
@@ -505,7 +505,7 @@ export function createSession(deps: SessionDeps): Session {
 
     const keys = await deriveFor(p.password, p.salt, p.iterations);
     // F1: the roles of an adopted local account survive the re-key, and the host's flag is
-    // reconciled on top of them — the admin of a local Bond that joins as a plain member keeps
+    // reconciled on top of them — the admin of a local Nod that joins as a plain member keeps
     // every other local role, and the snapshot has the last word about the flag anyway (F2).
     const keptLocal = adopt !== null && holder !== null && holder.person.id === adopt ? holder.person.roles : [];
     // `admin` is the host's flag; the local row carries it through the admin role, which is what
@@ -545,9 +545,9 @@ export function createSession(deps: SessionDeps): Session {
     return admin ? [...rest, adminRoleId] : rest;
   }
 
-  /** The keychain key of one credential: `bond.cred.<person>.<tool>` (`backend/vault.ts`). */
+  /** The keychain key of one credential: `nod.cred.<person>.<tool>` (`backend/vault.ts`). */
   function credentialKey(personId: Id, toolId: Id): string {
-    return `bond.cred.${personId}.${toolId}`;
+    return `nod.cred.${personId}.${toolId}`;
   }
 
   /**
@@ -597,8 +597,8 @@ export function createSession(deps: SessionDeps): Session {
 
     // F1: whoever holds the email of this join, in any state.
     const holder = deps.repo.personByEmailAnyState(email);
-    // F3: a Bond that already has an account is not connected to a guild from the lock screen —
-    // only somebody who can open this Bond's accounts decides that. The first run (no account at
+    // F3: a Nod that already has an account is not connected to a guild from the lock screen —
+    // only somebody who can open this Nod's accounts decides that. The first run (no account at
     // all) keeps working without a session, which is what the third path of SP05 §4 is for.
     if (current === null && (holder !== null || (!p.hostPinned && deps.repo.countPeople() > 0))) {
       throw new Error(JOIN_NEEDS_UNLOCK);
@@ -705,7 +705,7 @@ export function createSession(deps: SessionDeps): Session {
   /**
    * SP02 §7: the vault of one person is wiped — the index rows and every keychain item they point
    * at. The caller runs it when a sign-in finds a salt different from the cached one, before
-   * `adoptConnectedAccount`. A `bond.cred.*` item the index does not know cannot be reached:
+   * `adoptConnectedAccount`. A `nod.cred.*` item the index does not know cannot be reached:
    * `SecretStore` has no enumeration.
    */
   async function wipeVault(personId: Id): Promise<void> {

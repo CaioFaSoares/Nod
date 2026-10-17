@@ -1,4 +1,4 @@
-// Bond repository — §4 of `docs/arquitetura.md`.
+// Nod repository — §4 of `docs/arquitetura.md`.
 //
 // All of the app's SQL lives here: no other slice writes SQL. The schema is the one from §16 of
 // `docs/canonico.md` with the additions of the architecture contract (see `SCHEMA` below).
@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS host_outbox (
 /**
  * Schema version of `SCHEMA`, kept in `PRAGMA user_version` (§4). A database that carries it needs
  * nothing but the `CREATE … IF NOT EXISTS` above; a database without a version is either empty (a
- * fresh install), v2-shaped from a build older than the versioning, or one written by an older Bond
+ * fresh install), v2-shaped from a build older than the versioning, or one written by an older Nod
  * — and that last one is refused whole instead of half-migrated.
  *
  * `3` is SP05 §2's connected schema: the two `host` tables, the event's client id and sent time,
@@ -170,7 +170,7 @@ export const SCHEMA_VERSION = 3;
 const KNOWN_VERSIONS: readonly number[] = [0, 2, SCHEMA_VERSION];
 
 /**
- * The database was created by an older Bond (v1, in Portuguese). `migrate` throws this and touches
+ * The database was created by an older Nod (v1, in Portuguese). `migrate` throws this and touches
  * nothing: the tables it holds (`pessoa`, a `meta (chave, valor)`, …) are not this build's, and
  * creating a v2 schema alongside them would leave the file ambiguous instead of recovered.
  */
@@ -192,7 +192,7 @@ interface PersonRow {
   revoked_at: string | null;
   /** `PasswordHashV2.check` (SP02 §6); `NULL` on a v1 row. */
   password_check: string | null;
-  /** `'PBKDF2-SHA256'` (v1) or `'BOND-KDF-V1'` (V2). */
+  /** `'PBKDF2-SHA256'` (v1) or `PASSWORD_V2_ALGORITHM` (V2). */
   password_algorithm: string;
 }
 
@@ -285,7 +285,7 @@ interface OutboxRowSql {
 /**
  * The one `host` row of SP05 §2 as the rest of the backend reads it: the pinned host (address, key,
  * person id, salt) and the cache of the last verified snapshot. No token field exists, on purpose
- * (SP02 §5): the bearer is a keychain item, `bond.host.<kid>.<personId>`.
+ * (SP02 §5): the bearer is a keychain item, `nod.host.<kid>.<personId>`.
  */
 export interface HostRecord {
   address: string;
@@ -297,7 +297,7 @@ export interface HostRecord {
   personId: Id;
   /** The host salt, for offline unlock (SP02 §6). */
   salt: string;
-  /** The last snapshot the Bond verified, verbatim, or `null` before the first sync. */
+  /** The last snapshot the Nod verified, verbatim, or `null` before the first sync. */
   snapshot: string | null;
   version: string | null;
   issuedAt: string | null;
@@ -344,7 +344,7 @@ export type EventInput = Omit<AuditEvent, 'id' | 'at' | 'clientId' | 'sentAt'> &
  */
 export interface Repo {
   /**
-   * Brings the database to `SCHEMA_VERSION`. A database written by an older Bond throws
+   * Brings the database to `SCHEMA_VERSION`. A database written by an older Nod throws
    * `LegacyDatabaseError`; a version this build does not know throws `unsupported database
    * version: <n>`.
    */
@@ -369,7 +369,7 @@ export interface Repo {
   personByEmail(email: string): { person: Person; password: PasswordHash } | null;
   /**
    * The person plus the verifier their row carries (SP02 §6): the V2 record when
-   * `password_algorithm` is `'BOND-KDF-V1'`, the v1 PBKDF2 hash otherwise — the read every local
+   * `password_algorithm` is `PASSWORD_V2_ALGORITHM`, the v1 PBKDF2 hash otherwise — the read every local
    * unlock and password gate goes through. Case-insensitive; ignores revoked people.
    */
   personAuthByEmail(email: string): { person: Person; password: StoredPassword } | null;
@@ -398,7 +398,7 @@ export interface Repo {
    * `person` row (the id, and nothing else of it), its `person_role` rows, its `vault_item` rows and
    * every `event` that named it (the audit is that person's own history, `docs/canonico.md` §13).
    *
-   * A credential's keychain key carries the person id (`bond.cred.<person>.<tool>`,
+   * A credential's keychain key carries the person id (`nod.cred.<person>.<tool>`,
    * `backend/vault.ts`), so each row's `keychain_key` is rewritten with `keychainKeyOf(item)` and the
    * answer carries the items exactly as they were read — the old key included. Renaming the keychain
    * items themselves is the caller's: only the session reaches the keychain.
@@ -499,7 +499,7 @@ export interface Repo {
   setMeta(key: string, value: string): void;
   // host (connected mode, SP05 §2)
   /**
-   * The one `host` row, or `null` without a host. Everything the Bond sends to a host is built from
+   * The one `host` row, or `null` without a host. Everything the Nod sends to a host is built from
    * this row (RF-30: no row, no client, no call).
    */
   hostRecord(): HostRecord | null;
@@ -587,7 +587,7 @@ export function createRepo(db: SqlDb): Repo {
   }
 
   /**
-   * A database with no schema version is an older Bond's when it holds a table this build does not
+   * A database with no schema version is an older Nod's when it holds a table this build does not
    * know (`pessoa`, …) or a `meta` table whose columns are not this build's — `key` is the column
    * every read here asks for, and v1's `meta` was `(chave, valor)`.
    */
@@ -623,7 +623,7 @@ export function createRepo(db: SqlDb): Repo {
     // what a v2 database's accounts can still be unlocked with, once (SP02 §6's migration).
     addColumn('person', 'password_check', 'TEXT');
     addColumn('person', 'password_algorithm', "TEXT NOT NULL DEFAULT 'PBKDF2-SHA256'");
-    // B1: a personal tool is a `tool` row while the Bond is in local mode (SP05 §2).
+    // B1: a personal tool is a `tool` row while the Nod is in local mode (SP05 §2).
     addColumn('tool', 'scope', "TEXT NOT NULL DEFAULT 'org'");
     addColumn('tool', 'owner_id', 'TEXT');
     // B10: the stable client id of an event and when the host acked it (SP04 §5).
@@ -720,7 +720,7 @@ CREATE TABLE vault_item_rebuilt (
       throw new Error(`unsupported database version: ${version}`);
     }
     if (version === 0 && isLegacy()) {
-      throw new LegacyDatabaseError('this database was created by an older Bond');
+      throw new LegacyDatabaseError('this database was created by an older Nod');
     }
     db.exec(SCHEMA);
     addColumns();
@@ -853,7 +853,7 @@ CREATE TABLE vault_item_rebuilt (
   }
 
   /**
-   * SP02 §6: the row's verifier. A `password_algorithm` of `BOND-KDF-V1` makes the row V2 — it has
+   * SP02 §6: the row's verifier. A `password_algorithm` of `PASSWORD_V2_ALGORITHM` makes the row V2 — it has
    * no v1 hash and its `check` decides; anything else is the v1 PBKDF2 hash. A V2 row with no
    * `check` reads as an empty one, which matches no password.
    */
@@ -937,7 +937,7 @@ CREATE TABLE vault_item_rebuilt (
       // `vault_item`s would collide on `UNIQUE (person_id, tool_id)`. Refusing here keeps the join
       // from ending in a raw SQLite message — and the transaction leaves both rows as they were.
       if (singleRow<{ id: Id }>('SELECT id FROM person WHERE id = ?', [p.toId]) !== null) {
-        throw new Error('this Bond already holds an account of that guild person');
+        throw new Error('this Nod already holds an account of that guild person');
       }
       const items = db
         .all<VaultRow>('SELECT * FROM vault_item WHERE person_id = ?', [p.fromId])
@@ -1341,7 +1341,7 @@ CREATE TABLE vault_item_rebuilt (
    * machine's events would be dropped as duplicates.
    *
    * A row recorded before the column existed (local mode, or an older build) gets one the first time
-   * it is offered to the host: a Bond that never connects writes nothing extra. A row that is
+   * it is offered to the host: a Nod that never connects writes nothing extra. A row that is
    * already `sent_at` cannot be one of these — the ack is matched by client id.
    */
   function backfillEventClientIds(): void {

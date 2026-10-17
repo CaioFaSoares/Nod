@@ -1,4 +1,4 @@
-/* Bond — the single stylesheet of the main window (docs/arquitetura.md §5).
+/* Nod — the single stylesheet of the main window (docs/arquitetura.md §5).
    Sober dark theme, monospace, high contrast, visible focus, no UI dependency.
    Consumed by index.html, src/app.ts, src/palette.ts and src/settings.ts.
    Classes required by src/ui.ts: .button .button-primary .button-danger .button-ghost .field
@@ -528,7 +528,7 @@ button {
 }
 
 .tool-icon.loading {
-  animation: bond-pulse 1.4s ease-in-out infinite;
+  animation: nod-pulse 1.4s ease-in-out infinite;
 }
 
 .digit {
@@ -539,7 +539,7 @@ button {
   color: var(--muted);
 }
 
-@keyframes bond-pulse {
+@keyframes nod-pulse {
   0%,
   100% {
     opacity: 1;
@@ -789,6 +789,16 @@ button {
 /* SP04 §1.1's fingerprint is read out loud: keep it selectable and evenly spaced. */
 .fingerprint {
   letter-spacing: 0.08em;
+}
+
+/* SP05 §6: the guild's icon is shown at its own size, next to the file the admin picked. */
+.guild-icon-preview {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
 }
 
 /* The join flow draws its own sections; inside the auth card they are sections, not cards. */

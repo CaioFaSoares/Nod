@@ -8,7 +8,7 @@ export type HostConfig = {
   publicUrl: string;
   /** Port inside the container network; `PORT` in the Dockerfile (SP07 §1). */
   port: number;
-  /** Dev runs may point `BOND_PUBLIC_URL` at a plain `http://` address. */
+  /** Dev runs may point `NOD_PUBLIC_URL` at a plain `http://` address. */
   dev: boolean;
 };
 
@@ -27,30 +27,30 @@ function parsePort(raw: string | undefined): number {
 
 function parsePublicUrl(raw: string | undefined, dev: boolean): string {
   if (raw === undefined || raw === '') {
-    throw new ConfigError('BOND_PUBLIC_URL is required (the https address the proxy exposes)');
+    throw new ConfigError('NOD_PUBLIC_URL is required (the https address the proxy exposes)');
   }
   let parsed: URL;
   try {
     parsed = new URL(raw);
   } catch {
-    throw new ConfigError(`invalid BOND_PUBLIC_URL: ${raw}`);
+    throw new ConfigError(`invalid NOD_PUBLIC_URL: ${raw}`);
   }
-  // SP07 §2: the host refuses to start outside dev when the address the Bond will pin is not https.
+  // SP07 §2: the host refuses to start outside dev when the address the Nod will pin is not https.
   if (!dev && parsed.protocol !== 'https:') {
-    throw new ConfigError(`BOND_PUBLIC_URL must be https:// outside dev: ${raw}`);
+    throw new ConfigError(`NOD_PUBLIC_URL must be https:// outside dev: ${raw}`);
   }
   return raw;
 }
 
 export function loadConfig(env: Record<string, string | undefined>): HostConfig {
-  const dataDir = env.BOND_DATA?.trim();
+  const dataDir = env.NOD_DATA?.trim();
   if (!dataDir) {
-    throw new ConfigError('BOND_DATA is required (the directory holding the database and key files)');
+    throw new ConfigError('NOD_DATA is required (the directory holding the database and key files)');
   }
-  const dev = env.BOND_DEV === '1' || env.BOND_DEV === 'true';
+  const dev = env.NOD_DEV === '1' || env.NOD_DEV === 'true';
   return {
     dataDir,
-    publicUrl: parsePublicUrl(env.BOND_PUBLIC_URL?.trim(), dev),
+    publicUrl: parsePublicUrl(env.NOD_PUBLIC_URL?.trim(), dev),
     port: parsePort(env.PORT?.trim()),
     dev,
   };
