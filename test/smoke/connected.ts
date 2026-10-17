@@ -15,10 +15,10 @@
 //     `TINYJS_HTML` page, result channel through `<app data>/store.json`).
 //
 // The pages drive the flow; this runner is the world around them, and it takes part through one
-// loopback endpoint ("the desk"): the admin page asks it for the setup code, hands P's access code
-// back (never through a file: the code exists in this process' memory and in the page's), and the
-// person page asks it to stop and start the host — SP05 §5.5's "network off" is the host process
-// gone, and "network on" is the same data dir started again.
+// loopback endpoint ("the desk"): the admin page asks it for the setup code, hands the invite code
+// it issued for each member back (never through a file: the code exists in this process' memory and
+// in the page's), and the person page asks it to stop and start the host — SP05 §5.5's "network off"
+// is the host process gone, and "network on" is the same data dir started again.
 //
 // Steps 4 and 5 of SP05 §5 conflict for P (a revoked person cannot push later), so the phases run
 // in the order the acceptance needs: publish, join and reconnect, the guild icon's removal, the
@@ -28,8 +28,8 @@
 //                                       for it, then host.activate with the setup code: the join
 //                                       answers F1's choice (nothing sent), the same code redeems
 //                                       with it, the credential comes along; publish local tools,
-//                                       create P and Q with role `team`, grant both tools to
-//                                       `team`, the admin joins `team` too, sync
+//                                       create an invite for each of P and Q with role `team`,
+//                                       grant both tools to `team`, the admin joins `team` too, sync
 //                            B7/SP04 §2  a personal tool of the admin's own and its favorite, which
 //                                       the sync takes up to the host
 //                            K1/SP06 §2  this machine's own key pair, reported to the desk so the
@@ -315,10 +315,14 @@ interface Methods {
   publish: string | null;
   /** Whether the publish method takes SP03 §2's `BootstrapRequest` body instead of nothing. */
   publishBody: boolean;
-  /** "create person + access code" (SP05 §3), `invites.issue` in the same contract. */
-  personCreate: string | null;
-  /** Whether that method takes the person's email and name (the connected shape). */
-  personCreateEmail: boolean;
+  /**
+   * 0.4.5 (RF-59): the guild invite the admin creates — the way a person of the guild is created
+   * now that `POST /v1/admin/people` is gone. `invites.issue` still exists for the local invite and
+   * for the reissue of a code of a person who already has one; it is not this shape.
+   */
+  inviteCreate: string | null;
+  /** Whether that answer carries the `nod://join` link beside the code (RF-59 declares both). */
+  inviteCreateLink: boolean;
 }
 
 function resolveMethods(): Methods {
@@ -328,14 +332,14 @@ function resolveMethods(): Methods {
       (name) => entries[name] !== undefined,
     ) ?? null;
   const publishText = publish === null ? '' : entries[publish];
-  const personCreate =
-    ['people.create', 'invites.issue'].find((name) => entries[name] !== undefined) ?? null;
+  const inviteCreate =
+    ['guildInvites.create', 'people.create'].find((name) => entries[name] !== undefined) ?? null;
   return {
     publish,
     // A method that takes nothing declares `void`; one that mirrors the host route names its fields.
     publishBody: publish !== null && !/\bvoid\b/.test(publishText) && /\btools\b|\broles\b/.test(publishText),
-    personCreate,
-    personCreateEmail: personCreate !== null && /\bemail\b/.test(entries[personCreate]),
+    inviteCreate,
+    inviteCreateLink: inviteCreate !== null && /\blink\b/.test(entries[inviteCreate]),
   };
 }
 
@@ -459,7 +463,7 @@ async function runPhase(
 
 interface Desk {
   origin: string;
-  /** The access code one of the two members was handed, or null before that. Never printed. */
+  /** The invite code one of the two members was handed, or null before that. Never printed. */
   handedOver(who: 'person' | 'other'): string | null;
   stop(): void;
 }
@@ -473,7 +477,7 @@ function deskJson(value: unknown, status = 200): Response {
 
 /**
  * The out-of-band channel of the smoke, on loopback: the admin page's own terminal (the setup code)
- * and the admin's chat (the access code of each member), plus the network switch of SP05 §5.5 and
+ * and the admin's chat (the invite code of each member), plus the network switch of SP05 §5.5 and
  * the one note a machine leaves for another.
  *
  * The codes live in this process' memory and in the page's, and no request body is ever logged. The
@@ -943,7 +947,7 @@ async function main(): Promise<number> {
     console.log(
       `contract: publish=${methods.publish ?? '(none in ApiContract — B6/B8a not landed)'}` +
         `${methods.publish ? ` body=${methods.publishBody}` : ''}, ` +
-        `person=${methods.personCreate ?? '(none)'} email=${methods.personCreateEmail}`,
+        `invite=${methods.inviteCreate ?? '(none)'} link=${methods.inviteCreateLink}`,
     );
 
     const address = `http://127.0.0.1:${host.port}`;
@@ -1006,7 +1010,7 @@ async function main(): Promise<number> {
       if (phase.name === 'admin-publish') {
         for (const who of ['person', 'other'] as const) {
           if (desk.handedOver(who) === null) {
-            console.error(`the admin phase did not hand the access code of ${who} over`);
+            console.error(`the admin phase did not hand the invite code of ${who} over`);
             return 1;
           }
         }

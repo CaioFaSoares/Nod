@@ -56,7 +56,7 @@
       //   admin-revoke       SP05 §5.4  the admin revokes P
       //   person-signed-out  SP05 §5.4  P's next sync: `signed-out`, the org tools gone
       //
-      // No code, token or password is ever printed: the access codes arrive over the runner's desk
+      // No code, token or password is ever printed: the invite codes arrive over the runner's desk
       // (loopback) and the password is this page's own constant, never echoed. Every gated call
       // carries that password: the backend takes it because this run is a non-release dev one
       // (`tinyjs dev`), the only case where a typed password is a factor on a machine that also has
@@ -85,6 +85,14 @@
         /** B7: the personal tool the admin adds, which its own second machine must find. */
         const PERSONAL_TOOL_TITLE = 'Mine (smoke)';
 
+        /**
+         * 0.4.5 (RF-60): an unlock with no `target` is the Offline tile's session — the local
+         * catalog, no host call, the guild disconnected. Every unlock of this smoke is the guild
+         * person of this machine, so the target travels with all of them; 5.5's "offline" is the
+         * host process being down, which is not the same thing (the cache still serves the guild).
+         */
+        const GUILD_TARGET = { kind: 'guild', id: CONFIG.address };
+
         const TINY_WAIT_MS = 30000;
         const STATE_TIMEOUT_MS = 20000;
         const POLL_INTERVAL_MS = 200;
@@ -95,7 +103,7 @@
         /** What one phase carries from its own steps to the next one (never a code or a secret). */
         const shared = {
           fingerprint: null,
-          /** The setup code of the admin phase and the access codes of the person phases: held in
+          /** The setup code of the admin phase and the invite codes of the person phases: held in
            *  memory only, cleared as soon as the call that spends it returns. */
           setupCode: null,
           personCode: null,
@@ -201,8 +209,9 @@
 
         /**
          * The desk: the runner's loopback endpoint. It holds the host's setup code (the terminal
-         * that started the host), receives P's access code from this page (the admin's chat) and
-         * switches the host process off and on (SP05 §5.5). Nothing here goes through a file.
+         * that started the host), receives the invite code of each member from this page (the
+         * admin's chat) and switches the host process off and on (SP05 §5.5). Nothing here goes
+         * through a file.
          */
         async function desk(path, body) {
           const init =
@@ -485,76 +494,80 @@
           return 'role team saved (admin ' + JSON.stringify(role.admin) + ')';
         }
 
+        /**
+         * 0.4.5 (RF-59): a person of the guild is created by redeeming an invite — the admin hands
+         * one over, and whoever opens it creates the account they choose (the join of the person
+         * phase below). The step keeps its place and its meaning: it is what hands P a way in.
+         */
         async function stepCreatePerson() {
-          const method = CONFIG.methods.personCreate;
-          if (method === null) throw new Error('ApiContract declares no person-create method');
-          const params = CONFIG.methods.personCreateEmail
-            ? { email: CONFIG.personEmail, name: 'Smoke Person', roles: ['team'], days: 1 }
-            : { roles: ['team'], days: 1 };
-          const answer = await call(method, params);
+          const method = CONFIG.methods.inviteCreate;
+          if (method === null) throw new Error('ApiContract declares no guild-invite method');
+          const answer = await call(method, { roles: ['team'], maxUses: 1, expiresInMinutes: 1440 });
           expect(
             !!answer && typeof answer.code === 'string' && answer.code.length > 0,
             method + ' answered ' + summarize(answer),
           );
+          if (CONFIG.methods.inviteCreateLink) {
+            expect(
+              typeof answer.link === 'string' && answer.link.indexOf('nod://join?') === 0,
+              'the invite carries no nod://join link: ' + summarize(answer.link),
+            );
+          }
           shared.personCode = answer.code;
           return (
             method +
-            ' issued P\'s access code (' +
-            (CONFIG.methods.personCreateEmail ? 'email + name + roles' : 'roles only — the pre-B6 shape') +
-            ', code not printed)'
+            " issued P's invite (role team, one use, a day; " +
+            (CONFIG.methods.inviteCreateLink ? 'link + code not printed)' : 'code not printed)')
           );
         }
 
         /** The second member of `team`: the assignment seals to every member, and K9's revocation
-         *  needs somebody left to rotate to. */
+         *  needs somebody left to rotate to. Its own invite, because each one has a single use. */
         async function stepCreateOther() {
-          const method = CONFIG.methods.personCreate;
-          if (method === null) throw new Error('ApiContract declares no person-create method');
-          expect(CONFIG.methods.personCreateEmail, 'the pre-B6 shape cannot name the second member');
-          const answer = await call(method, {
-            email: CONFIG.otherEmail,
-            name: 'Smoke Other',
-            roles: ['team'],
-            days: 1,
-          });
+          const method = CONFIG.methods.inviteCreate;
+          if (method === null) throw new Error('ApiContract declares no guild-invite method');
+          const answer = await call(method, { roles: ['team'], maxUses: 1, expiresInMinutes: 1440 });
           expect(
             !!answer && typeof answer.code === 'string' && answer.code.length > 0,
             method + ' answered ' + summarize(answer),
           );
           shared.otherCode = answer.code;
-          return method + ' issued the second member\'s access code (not printed)';
+          return method + " issued the second member's invite (role team, one use; not printed)";
         }
 
         // The codes are handed over here, right after they exist: the person phases then fail for
         // their own reasons instead of for a missing hand-over.
         async function stepHandOver() {
-          expect(typeof shared.personCode === 'string', 'no access code was issued');
+          expect(typeof shared.personCode === 'string', 'no invite code was issued');
           await desk('/desk/handover', { code: shared.personCode, who: 'person' });
           shared.personCode = null;
-          expect(typeof shared.otherCode === 'string', 'no access code was issued for the second member');
+          expect(typeof shared.otherCode === 'string', 'no invite code was issued for the second member');
           await desk('/desk/handover', { code: shared.otherCode, who: 'other' });
           shared.otherCode = null;
-          return 'both access codes handed over through the desk (not printed)';
+          return 'both invite codes handed over through the desk (not printed)';
         }
 
+        /**
+         * 0.4.5 (RF-59): an invite is not a person. The admin's two invites are on the host, and the
+         * roster still holds nobody but the admin — P and Q come into being when each redeems their
+         * own invite in their own phase (which `adminIds` then reads back, roles included).
+         */
         async function stepPersonListed() {
           const people = await call('people.list');
           expect(Array.isArray(people), 'people.list returned ' + typeof people);
-          const person = people.find((item) => item.email === CONFIG.personEmail) || null;
+          const emails = people.map((item) => item.email);
+          const me = people.find((item) => item.email === CONFIG.adminEmail) || null;
+          expect(me !== null, 'the admin is not a person of the guild (' + summarize(emails) + ')');
           expect(
-            person !== null,
-            'P is not a person of the guild (' +
-              people.length +
-              ' listed: ' +
-              summarize(people.map((item) => item.email)) +
-              ')',
+            !people.some((item) => item.email === CONFIG.personEmail) &&
+              !people.some((item) => item.email === CONFIG.otherEmail),
+            'an invite already created a person: ' + summarize(emails),
           );
-          expect(
-            (person.roles || []).indexOf('team') !== -1,
-            'P.roles = ' + summarize(person.roles),
+          return (
+            'the roster holds only the admin (' +
+            people.length +
+            ' person): an invite is not a person until it is redeemed'
           );
-          shared.personId = person.id;
-          return 'P is a person of the guild with role team (' + (person.roles || []).length + ' role(s))';
         }
 
         async function stepGrant() {
@@ -668,9 +681,9 @@
         async function stepPersonCode() {
           const from = await desk('/desk/person?who=person');
           expect(from.guild === CONFIG.guild, 'the desk guild = ' + JSON.stringify(from.guild));
-          expect(typeof from.code === 'string' && from.code.length > 0, 'the desk carries no access code');
+          expect(typeof from.code === 'string' && from.code.length > 0, 'the desk carries no invite code');
           shared.personCode = from.code;
-          return "P's access code in memory (not printed)";
+          return "P's invite code in memory (not printed)";
         }
 
         async function stepPersonDiscover() {
@@ -685,6 +698,10 @@
             address: CONFIG.address,
             fingerprint: shared.fingerprint,
             email: CONFIG.personEmail,
+            // RF-59: an invite code creates the person the invite was redeemed by, so the join
+            // carries the name that person chose — `host.activate` routes a 24-character code to
+            // `/v1/auth/join` and needs it (an access code of an existing person needs none).
+            name: 'Smoke Person',
             code: shared.personCode,
             password: ACCOUNT_PASSWORD,
           });
@@ -696,7 +713,7 @@
           expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
           expect(state.person !== null, 'person = ' + summarize(state.person));
           expect(state.person.admin !== true, 'P came out as an admin');
-          return 'activated with the access code; the session is unlocked and P is not an admin';
+          return 'joined with the invite code; the session is unlocked and P is not an admin';
         }
 
         async function stepPersonSync() {
@@ -799,9 +816,11 @@
           const state = await call('session.unlock', {
             email: CONFIG.personEmail,
             password: ACCOUNT_PASSWORD,
+            target: GUILD_TARGET,
           });
           expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
-          return 'unlocked offline';
+          expect(state.mode === 'guild', 'mode = ' + JSON.stringify(state.mode));
+          return 'unlocked as the guild with the host down (the cache answers)';
         }
 
         async function stepCatalogAfterUnlock() {
@@ -931,9 +950,9 @@
         async function stepOtherCode() {
           const from = await desk('/desk/person?who=other');
           expect(from.guild === CONFIG.guild, 'the desk guild = ' + JSON.stringify(from.guild));
-          expect(typeof from.code === 'string' && from.code.length > 0, 'the desk carries no access code');
+          expect(typeof from.code === 'string' && from.code.length > 0, 'the desk carries no invite code');
           shared.otherCode = from.code;
-          return "the second member's access code in memory (not printed)";
+          return "the second member's invite code in memory (not printed)";
         }
 
         async function stepOtherActivate() {
@@ -943,6 +962,8 @@
             address: CONFIG.address,
             fingerprint: found.fingerprint,
             email: CONFIG.otherEmail,
+            // RF-59: this invite's own use creates this person, and the name comes with the join.
+            name: 'Smoke Other',
             code: shared.otherCode,
             password: ACCOUNT_PASSWORD,
           });
@@ -951,7 +972,7 @@
           const state = answer.session;
           expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
           expect(!!state.person && state.person.admin !== true, 'the second member came out as an admin');
-          return 'activated with the access code; the session is unlocked and this person is not an admin';
+          return 'joined with the invite code; the session is unlocked and this person is not an admin';
         }
 
         async function stepOtherGranted() {
@@ -974,9 +995,10 @@
           const state = await call('session.unlock', {
             email: CONFIG.otherEmail,
             password: ACCOUNT_PASSWORD,
+            target: GUILD_TARGET,
           });
           expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
-          return 'the second member unlocked from the cache';
+          return 'the second member unlocked from the cache, as the guild';
         }
 
         // ----------------------------------------------------------- K2/K4/K6/K8 — the admin shares
@@ -1474,9 +1496,10 @@
           const state = await call('session.unlock', {
             email: CONFIG.adminEmail,
             password: ACCOUNT_PASSWORD,
+            target: GUILD_TARGET,
           });
           expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
-          return 'admin unlocked';
+          return 'admin unlocked, as the guild';
         }
 
         async function stepAdminSync() {
@@ -1519,9 +1542,10 @@
           const state = await call('session.unlock', {
             email: CONFIG.personEmail,
             password: ACCOUNT_PASSWORD,
+            target: GUILD_TARGET,
           });
           expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
-          return 'P unlocked from the cache';
+          return 'P unlocked from the cache, as the guild';
         }
 
         async function stepSignedOut() {
@@ -1554,10 +1578,10 @@
             ['2.6 publish the local tools', stepPublish],
             ['2.7 catalog.list (published)', stepCatalogPublished],
             ['2.8 roles.save (team)', stepSaveTeam],
-            ['2.9 invites.issue (P, role team)', stepCreatePerson],
-            ['2.9b invites.issue (Q, role team)', stepCreateOther],
+            ['2.9 guildInvites.create (P, role team)', stepCreatePerson],
+            ['2.9b guildInvites.create (Q, role team)', stepCreateOther],
             ['2.10 hand both codes over', stepHandOver],
-            ['2.11 people.list (P of the guild)', stepPersonListed],
+            ['2.11 people.list (only the admin; the invite creates P at the join)', stepPersonListed],
             ['2.12 roles.grant (Tool A to team)', stepGrant],
             ['2.12b roles.grant (Tool B to team)', stepGrantToolB],
             ['2.12c people.setRoles (the admin joins team)', stepAdminJoinsTeam],
@@ -1571,9 +1595,9 @@
           ],
           'person-join': [
             ['3.1 session.state (no account yet)', stepPersonStateFresh],
-            ['3.2 desk: access code', stepPersonCode],
+            ['3.2 desk: invite code', stepPersonCode],
             ['3.3 host.discover', stepPersonDiscover],
-            ['3.4 host.activate (access code)', stepActivatePerson],
+            ['3.4 host.activate (invite code + name)', stepActivatePerson],
             ['3.5 host.syncNow', stepPersonSync],
             ['6.3 nod.appIcon (guildIconAvailable)', stepPersonGuildIconAvailable],
             ['6.4 nod.setAppIcon (guild)', stepPersonAppIconGuild],
@@ -1586,15 +1610,15 @@
             ['5.2 host.syncNow (offline)', stepOfflineSync],
             ['5.3 catalog.list (from the cache)', stepOfflineCatalog],
             ['5.4 session.lock', stepLock],
-            ['5.5 session.unlock (offline)', stepOfflineUnlock],
+            ['5.5 session.unlock (host down, guild target)', stepOfflineUnlock],
             ['5.6 catalog.list (after the unlock)', stepCatalogAfterUnlock],
             ['5.7 desk: start the host', stepHostUp],
             ['5.8 host.syncNow (back online)', stepOnlineSync],
           ],
           'person2-join': [
             ['3q.1 session.state (no account yet)', stepPersonStateFresh],
-            ['3q.2 desk: access code', stepOtherCode],
-            ['3q.3 host.activate (access code)', stepOtherActivate],
+            ['3q.2 desk: invite code', stepOtherCode],
+            ['3q.3 host.activate (invite code + name)', stepOtherActivate],
             ['3q.4 host.syncNow', stepPersonSync],
             ['3q.5 catalog.list (the granted tool)', stepOtherGranted],
             ['3q.6 keys.mine (this machine\'s pair, K1)', stepOtherKeys],

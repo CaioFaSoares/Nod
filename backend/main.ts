@@ -14,9 +14,10 @@ import {
 import { BUILD_MODE_STAMP, stampMode } from '../shared/build-mode';
 import { auditUrl, catalogMode, exportSeed, originOf, validateEntry, validateSeed, visibleEntries } from '../shared/catalog';
 import { fromBase64url, toBase64url } from '../shared/encoding';
-import { HOST_ROUTES, isPng } from '../shared/host-api';
+import { HOST_ROUTES, codeKindOf, isPng } from '../shared/host-api';
 import { leftoverLocalTools, parseSnapshot } from '../shared/host-merge';
-import { MAIN_WINDOW, toolOfWindow } from '../shared/types';
+import { joinLink, parseJoinLink } from '../shared/join-link';
+import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED, MAIN_WINDOW, toolOfWindow } from '../shared/types';
 import { tooOldFor } from '../shared/version';
 import type {
   AppIconChoice,
@@ -25,10 +26,14 @@ import type {
   CredentialHolders,
   Entry,
   EntryDetails,
+  EntryProfiles,
+  EntryTarget,
   EventFilter,
+  GuildProfile,
   HostState,
   Id,
   InviteSeed,
+  InviteView,
   JoinInvite,
   JoinResult,
   LoginResult,
@@ -49,8 +54,12 @@ import type {
 } from '../shared/types';
 import type {
   ActivateRequest,
+  CodeKind,
+  CreateInviteRequest,
   Device,
   DeviceSession,
+  GuildInvite,
+  InvitePreview,
   PresenceEntry,
   GuildIconRequest,
   GuildIconResponse,
@@ -64,14 +73,15 @@ import { createConnectedCatalog } from './connected-catalog';
 import { createGuildIcon, GUILD_ICON_FILE } from './guild-icon';
 import { buildCredentialHolders } from './holders';
 import { hostAdminFor, orgViewsOf } from './host-admin';
-import { createHostClient } from './host-client';
-import { createIcons } from './icons';
+import { createHostClient, HostError } from './host-client';
+import { bytesToBase64, createIcons } from './icons';
 import { createKeys } from './keys';
 import { createPersonal } from './personal';
 import { probe } from './probe-net';
 import { createRepo, LegacyDatabaseError } from './repo';
-import { applyBundledSeed, gateOrigins, importSeedFile, storedSeedVersion } from './seed';
-import { createSession } from './session';
+import { applyBundledSeed, applySeedFile, gateOrigins, importSeedFile, seedCountsDetail, storedSeedVersion } from './seed';
+import type { SeedApplied } from './seed';
+import { OFFLINE_SESSION_ERROR, createSession } from './session';
 import { createShares, GATE_REASON } from './shares';
 import { openSqlite } from './sqlite';
 import { createSync, UPDATE_REQUIRED_ERROR } from './sync';
@@ -146,6 +156,14 @@ let biometrics = false;
  * environment, the seed or the page say.
  */
 let devRun = false;
+/**
+ * K5/SP02 §9 fallback (`docs/canonico.md` §22, "Gate fallback when the system prompt fails"): the
+ * runtime reports `authenticate` per OS, not per enrollment — on Windows without Hello the prompt
+ * answers `false` every time (`~/.tinyjs/skill/references/platforms.md`, "false where not
+ * enrolled"). Once the system prompt did not confirm in this unlocked session, the person's typed
+ * password is a factor too. Cleared at every lock and unlock.
+ */
+let promptFailed = false;
 /**
  * SP04 §1.3's `nod://join` link, kept until the join flow picks it up (`host.discover`) or a host
  * is added. Not a secret — the address, the fingerprint and the code the person was given — and it
@@ -359,6 +377,9 @@ export async function init(app: TinyApp): Promise<void> {
     // count. A non-admin's keychain-person clears it, and the read never fails a run.
     refreshAssignments: () => shares?.refreshAssignments() ?? Promise.resolve(),
     missingCopies: () => shares?.missingCount() ?? 0,
+    // 0.4.5 (RF-60): `HostState.offlineSession`, and with it the sidebar's "not syncing" banner —
+    // the session is what knows, and it is created before this.
+    offlineSession: () => offlineSession(),
     setInterval: (run, ms) => setInterval(run, ms),
     // `Sync` keeps its handle opaque (`unknown`); the runtime's `clearInterval` takes back the id
     // its own `setInterval` answered.
@@ -504,7 +525,7 @@ function refreshConnectedCatalog(): boolean {
   // O2/SP04 §1 (owner decision 2026-10-17): too old for the guild, the row's snapshot is not the
   // catalog any more — the local tables are, as if no host existed. The row, the bearer and the
   // cached body stay on disk, and Settings → Hosts keeps showing the guild.
-  const updated = catalogMode(record !== null, requiresUpdate()) === 'connected';
+  const updated = catalogMode(record !== null, disconnected()) === 'connected';
   // A mode that moved is news to the page even when the snapshot did not (the transition into the
   // disconnected state, and the one back out of it once the host lowers its minimum or the app is
   // updated) — without this the sidebar would keep the catalog of the previous mode.
@@ -544,7 +565,7 @@ function catalogEntryOf(id: Id): Entry | null {
  * of this (the admin's holders list, M7) answers empty. The bytes stay in the row.
  */
 function snapshotBody(): Snapshot | null {
-  if (requiresUpdate()) return null;
+  if (disconnected()) return null;
   const record = repo === null ? null : repo.hostRecord();
   if (record === null || record.snapshot === null) return null;
   try {
@@ -657,7 +678,7 @@ function rolesOf(): Role[] {
  */
 function leftoverTools(): Entry[] {
   const r = repo;
-  if (requiresUpdate()) return [];
+  if (disconnected()) return [];
   const record = r === null ? null : r.hostRecord();
   if (r === null || record === null || record.snapshot === null) return [];
   let orgTools: Entry[];
@@ -787,6 +808,10 @@ const ADMIN_ONLY: Partial<Record<Method, true>> = {
   'people.sessions': true,
   'people.revokeSession': true,
   'invites.issue': true,
+  // 0.4.5 (RF-59): the guild's invites are the admin's — the host refuses a member the same way.
+  'guildInvites.list': true,
+  'guildInvites.create': true,
+  'guildInvites.revoke': true,
   'host.bootstrap': true,
   'host.setGuildIcon': true,
   'host.clearGuildIcon': true,
@@ -807,6 +832,11 @@ const ADMIN_ONLY: Partial<Record<Method, true>> = {
 /** The only methods that work with the session locked (§2); the rest require an unlock. */
 const WITHOUT_SESSION: Partial<Record<Method, true>> = {
   'session.state': true,
+  // 0.4.5 (RF-60): the tiles of the entry screen are what the locked window draws before a password.
+  'session.profiles': true,
+  // RF-61: the seed import belongs to the first run, which is unlocked by definition — no account
+  // exists yet, so there is no session to open.
+  'session.importSeed': true,
   'session.createAccount': true,
   'session.unlock': true,
   'session.unlockBiometric': true,
@@ -814,6 +844,9 @@ const WITHOUT_SESSION: Partial<Record<Method, true>> = {
   'host.discover': true,
   'host.activate': true,
   'host.signIn': true,
+  // 0.4.5 (RF-59): the invite card is shown before the account exists — someone with only a link has
+  // no session here yet, and the preview carries no secret but the code the person already holds.
+  'host.invitePreview': true,
   'nod.info': true,
   'nod.quit': true,
 };
@@ -854,6 +887,9 @@ const HOST_WRITES: Partial<Record<Method, true>> = {
   // as a security action; a disconnected guild reaches no route, so it is refused like the rest.
   'host.revokeSession': true,
   'invites.issue': true,
+  // 0.4.5 (RF-59): both invite writes are rows on the host's side.
+  'guildInvites.create': true,
+  'guildInvites.revoke': true,
   'host.bootstrap': true,
   // B8b: it writes the guild's personal half for this person (through the outbox), so an outdated
   // Nod refuses it like the other `host.*` writes.
@@ -892,20 +928,39 @@ const HOST_WRITES: Partial<Record<Method, true>> = {
 const HOST_READS: Partial<Record<Method, true>> = {
   'host.sessions': true,
   'people.sessions': true,
+  // 0.4.5 (RF-59): the guild's invites are only the host's to list.
+  'guildInvites.list': true,
 };
 
 /**
- * O2/SP04 §1: whether `method` is refused while this Nod is older than the host's `minAppVersion`.
- * The two tables are the one decision, and `requiresUpdate()` is the other; kept as pure predicates
- * so a test can pin both halves (a disconnected Nod refuses; a local one, with no `host` row, has
- * `updateRequired` false and is never stopped) without booting the runtime.
+ * O2 + 0.4.5 (RF-60): whether this Nod's guild is **disconnected** — it is older than the host's
+ * `minAppVersion`, or the session entered through the Offline tile. Both mean the same thing to
+ * every caller: no call leaves the machine, the local tables are the catalog and the reads that only
+ * the host can answer answer nothing. A Nod with no `host` row has no guild to disconnect: an Offline
+ * session there is the plain local Nod, whose admin writes go to the local tables as always. Pure,
+ * so a test pins the rule without the runtime.
  */
-export function hostWriteRefused(method: Method, updateRequired: boolean): boolean {
-  return HOST_WRITES[method] === true && updateRequired;
+export function disconnectedSession(
+  updateRequired: boolean,
+  mode: 'offline' | 'guild' | null,
+  hasHost: boolean,
+): boolean {
+  return hasHost && (updateRequired || mode === 'offline');
 }
 
-export function hostReadRefused(method: Method, updateRequired: boolean): boolean {
-  return HOST_READS[method] === true && updateRequired;
+/**
+ * O2/SP04 §1: whether `method` is refused while this Nod is older than the host's `minAppVersion`
+ * or while the session is offline. The two tables are the one decision, and `disconnected()` is the
+ * other; kept as pure predicates so a test can pin both halves (a disconnected Nod refuses; a local
+ * one, with no `host` row, has `updateRequired` false and is never stopped) without booting the
+ * runtime.
+ */
+export function hostWriteRefused(method: Method, disconnected: boolean): boolean {
+  return HOST_WRITES[method] === true && disconnected;
+}
+
+export function hostReadRefused(method: Method, disconnected: boolean): boolean {
+  return HOST_READS[method] === true && disconnected;
 }
 
 /**
@@ -929,11 +984,12 @@ function guarded<M extends Method>(method: M, handler: Handler<M>): TinyApiHandl
       const person = unlockedPerson(method);
       if (ADMIN_ONLY[method] === true && !person.admin) throw new Error('only an admin can do this');
     }
-    // O2: the guild is disconnected, and this method would reach the host — a write or a read only
-    // the host can answer. Anything else reaches no route and is answered below.
-    const outdated = requiresUpdate();
-    if (hostWriteRefused(method, outdated) || hostReadRefused(method, outdated)) {
-      throw new Error(UPDATE_REQUIRED_ERROR);
+    // O2 + 0.4.5 (RF-60): the guild is disconnected, and this method would reach the host — a write
+    // or a read only the host can answer. Anything else reaches no route and is answered below.
+    const offline = offlineSession();
+    const stopped = disconnectedSession(requiresUpdate(), offline ? 'offline' : null, hasHostRow());
+    if (hostWriteRefused(method, stopped) || hostReadRefused(method, stopped)) {
+      throw new Error(offline ? OFFLINE_SESSION_ERROR : UPDATE_REQUIRED_ERROR);
     }
     return handler(params, app, meta);
   };
@@ -943,6 +999,26 @@ function guarded<M extends Method>(method: M, handler: Handler<M>): TinyApiHandl
 function requiresUpdate(): boolean {
   const running = sync;
   return running !== null && running.state().updateRequired;
+}
+
+/** 0.4.5 (RF-60): the session entered through the Offline tile — the guild is disconnected for it. */
+function offlineSession(): boolean {
+  const s = session;
+  return s !== null && s.mode() === 'offline' && hasHostRow();
+}
+
+/** RF-30: a guild exists on this machine only while the `host` row does. */
+function hasHostRow(): boolean {
+  return repo !== null && repo.hostRecord() !== null;
+}
+
+/**
+ * O2 + 0.4.5 (RF-60): the one predicate every reader of the guild goes through — the sync gate, the
+ * RPC gate, `guildConnection()`, `snapshotBody()` and the catalog layer. `shared/catalog.ts`'s
+ * `catalogMode`, `backend/sync.ts`'s state and this file's reads all see the same answer.
+ */
+function disconnected(): boolean {
+  return disconnectedSession(requiresUpdate(), session === null ? null : session.mode(), hasHostRow());
 }
 
 function requireToolOrigin(toolId: Id, origin: string | undefined): void {
@@ -963,22 +1039,19 @@ function unlockedPerson(where: string): Person {
 
 // ---------------------------------------------------------------- the K5 gate
 
-/** K5/SP02 §9: no biometrics on this machine and no password in the call. */
-const AUTHENTICATION_REQUIRED = 'authentication required';
-/** K5: the person cancelled the biometric prompt — nothing is shown, copied, sent or accepted. */
-const AUTHENTICATION_CANCELLED = 'authentication cancelled';
-
 /** SP02 §9: which of the two factors one gated call uses, or none at all. */
 export type GateFactor = 'password' | 'biometrics' | 'unavailable';
 
 /**
  * SP02 §9's factor, pure. The machine decides first: where the runtime reports `authenticate`,
  * `app.authenticate` is the factor and the page sends no password at all. The typed password is the
- * factor only where that capability is absent (Linux — SP02 §9's classical fallback) or in a
- * non-release dev run (`devRun`, `docs/canonico.md` §22 "Gate in a dev run": the unattended smoke
- * passes the account password so no operating system prompt can block it). On a release build
- * `devRun` is always `false`, so a password a page sends there never becomes a factor. `unavailable`
- * is the refusal: neither capability nor password.
+ * factor where that capability is absent (Linux — SP02 §9's classical fallback), in a non-release
+ * dev run (`devRun`, `docs/canonico.md` §22 "Gate in a dev run": the unattended smoke passes the
+ * account password so no operating system prompt can block it), and after the system prompt did
+ * not confirm in this unlocked session (`promptFailed`, canonico §22 "Gate fallback when the system
+ * prompt fails": the capability is per OS, so a Windows machine without Hello reports it and then
+ * answers `false` to every prompt). Until a prompt fails, a release build never takes a password
+ * on a capable machine. `unavailable` is the refusal: neither capability nor password.
  *
  * Exported for the test that pins the rule without a runtime (`test/gate.test.ts`).
  */
@@ -986,9 +1059,10 @@ export function gateFactor(
   password: string | undefined,
   biometrics: boolean,
   devRun: boolean,
+  promptFailed: boolean,
 ): GateFactor {
   const typed = typeof password === 'string' && password !== '';
-  if (biometrics) return typed && devRun ? 'password' : 'biometrics';
+  if (biometrics) return typed && (devRun || promptFailed) ? 'password' : 'biometrics';
   return typed ? 'password' : 'unavailable';
 }
 
@@ -996,29 +1070,31 @@ export function gateFactor(
  * K5/SP06 §4: the one gate behind `vault.reveal`, `vault.copy`, `shares.send`, `shares.accept` and
  * the admin's `assignments.*` seals.
  *
- * Where the machine has `app.authenticate` this call is always the one that runs — the person is
- * present, and only a dev run lets `gateFactor` take a typed password instead (`docs/canonico.md`
- * §22). Without the capability a password the call carries is verified against the verifier of the
- * unlocked person's row (`verifyStoredPassword`, SP02 §6), exactly as it always was on Linux. A
- * machine with neither factor refuses: nothing is shown, copied, sent or accepted, and no message
- * carries a password or a secret.
+ * Where the machine has `app.authenticate` that prompt runs first — the person is present. When it
+ * does not confirm, the refusal is `GATE_PROMPT_FAILED` and the session remembers it, so the page's
+ * next call may carry the typed password instead (`gateFactor`). Without the capability, or after
+ * that failure, a password the call carries is verified against the verifier of the unlocked
+ * person's row (`verifyStoredPassword`, SP02 §6), exactly as it always was on Linux. A machine with
+ * neither factor refuses: nothing is shown, copied, sent or accepted, and no message carries a
+ * password or a secret.
  */
 async function authenticate(reason: string, password?: string): Promise<void> {
   const person = unlockedPerson('authentication');
-  const factor = gateFactor(password, biometrics, devRun);
-  if (factor === 'unavailable') throw new Error(AUTHENTICATION_REQUIRED);
+  const factor = gateFactor(password, biometrics, devRun, promptFailed);
+  if (factor === 'unavailable') throw new Error(GATE_PASSWORD_REQUIRED);
   if (factor === 'biometrics') {
     if (!(await required(runtime, 'authentication').authenticate(reason))) {
-      throw new Error(AUTHENTICATION_CANCELLED);
+      promptFailed = true;
+      throw new Error(GATE_PROMPT_FAILED);
     }
     return;
   }
   // `factor === 'password'` — `gateFactor` answers it only for a non-empty string.
   const typed = password ?? '';
   const found = required(repo, 'authentication').personAuthByEmail(person.email);
-  if (found === null || found.person.id !== person.id) throw new Error(AUTHENTICATION_REQUIRED);
+  if (found === null || found.person.id !== person.id) throw new Error(GATE_PASSWORD_REQUIRED);
   if (!(await verifyStoredPassword(typed, found.password))) {
-    throw new Error(AUTHENTICATION_REQUIRED);
+    throw new Error(GATE_PASSWORD_REQUIRED);
   }
 }
 
@@ -1057,6 +1133,14 @@ function textList(value: unknown, message: string): Id[] {
   if (!Array.isArray(value)) throw new Error(message);
   const items: unknown[] = value;
   return items.map((item) => text(item, message));
+}
+
+/** 0.4.5 (RF-60): one tile of the entry screen, as the page sends it back. */
+function entryTarget(value: unknown): EntryTarget {
+  const raw = object(value, 'invalid target');
+  if (raw.kind === 'offline') return { kind: 'offline' };
+  if (raw.kind !== 'guild') throw new Error('invalid target');
+  return { kind: 'guild', id: text(raw.id, 'invalid target') };
 }
 
 function orNull(value: unknown, message: string): string | null {
@@ -1246,6 +1330,8 @@ async function wipeResetVault(
 /** §4: unlocking or creating an account pushes session and tools, then restores the open tools. */
 async function afterUnlock(state: SessionState): Promise<SessionState> {
   const open = required(windows, 'session');
+  // K5: a fresh session starts on the system prompt again (canonico §22, gate fallback).
+  promptFailed = false;
   // SP02 §8/V1: the first unlock after the upgrade turns the person's legacy plaintext values into
   // `bv1.` ones, and a password unlock is when the key exists. A keychain that refuses leaves the
   // value as it was and the next unlock tries again; nothing about the unlock depends on it.
@@ -1273,7 +1359,11 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
   // activation hook does the same one step earlier for the activation itself; this is the unlock
   // that is not one, and the second call changes nothing. Only a connected account has a pair: a
   // local one never reaches SP06 §2.
-  const host = required(repo, 'host').hostRecord();
+  //
+  // 0.4.5 (RF-60): an offline session reaches no host at all — no pair is published and the loop
+  // does not start, so the entry by the Offline tile is the same disconnect as having no host. The
+  // O2 case is left as it was: there the run itself is what confirms the minimum.
+  const host = offlineSession() ? null : required(repo, 'host').hostRecord();
   if (host !== null) await ensureKeys(false);
   // SP04 §3: the unlock is the first trigger of a sync. RF-30: without a `host` row there is no
   // client and no call, so `start()` is only armed when there is something to sync with.
@@ -1286,6 +1376,7 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
 function lockSession(): SessionState {
   // SP04 §3: nothing is synced while locked — the state a locked Nod shows is the cache.
   sync?.stop();
+  promptFailed = false;
   const state = required(session, 'session.lock').lock();
   required(windows, 'session.lock').closeAll();
   push('session', state);
@@ -1329,28 +1420,6 @@ async function afterHostWrite(): Promise<void> {
 // ---------------------------------------------------------------- connected mode (SP05, SP04)
 
 /**
- * SP04 §1.3: `nod://join?host=<address>&fp=<fingerprint>[&code=<code>]`. Every other link — another
- * scheme, another host, a missing `host` or `fp` — answers null and the app ignores it.
- */
-function parseJoinLink(url: string): JoinInvite | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== 'nod:') return null;
-  // `nod://join` puts the action in the authority; a link typed as `nod:join` has it in the path.
-  const action = parsed.host !== '' ? parsed.host : parsed.pathname.replaceAll('/', '');
-  if (action.toLowerCase() !== 'join') return null;
-  const address = parsed.searchParams.get('host');
-  const fingerprint = parsed.searchParams.get('fp');
-  if (address === null || address.trim() === '') return null;
-  if (fingerprint === null || fingerprint.trim() === '') return null;
-  return { address, fingerprint, code: parsed.searchParams.get('code') };
-}
-
-/**
  * RF-30: a connection exists only while a `host` row exists. Every host call the backend makes past
  * the two auth calls of a join goes through this one builder, and the client holds the bearer in
  * the keychain (SP02 §5) — never in a parameter, a row or an event.
@@ -1377,7 +1446,7 @@ function connectionOf(): HostConnection | null {
  * screens that would read the guild answer from this machine instead.
  */
 function guildConnection(): HostConnection | null {
-  return requiresUpdate() ? null : connectionOf();
+  return disconnected() ? null : connectionOf();
 }
 
 /**
@@ -1416,45 +1485,110 @@ export interface AuthPrologue {
   connection: HostConnection;
 }
 
-/** What `beginAuth` needs, injected so a test drives it without a runtime. */
-export interface AuthPrologueDeps {
+/** What the discovery prologue of a join, a sign-in and an invite preview needs (SP04 §1, O2). */
+export interface DiscoveryDeps {
   /** SP04 §1: the discovery — the address, with the fingerprint the person confirmed or the pin. */
   discover: () => Promise<HostDiscovery>;
-  /** SP02 §4: the pre-auth connection built from that discovery (`preAuthConnection`). */
-  connect: (found: HostDiscovery) => HostConnection;
   /** SP04 §1: the minimum the discovery carries, kept in memory for `host.state`. */
   observe: (minAppVersion: string) => void;
   /** O2: the version of the running app (`app.info().version`), or `null`. */
   appVersion: () => string | null;
 }
 
+/** What `beginAuth` needs, injected so a test drives it without a runtime. */
+export interface AuthPrologueDeps extends DiscoveryDeps {
+  /** SP02 §4: the pre-auth connection built from that discovery (`preAuthConnection`). */
+  connect: (found: HostDiscovery) => HostConnection;
+}
+
 /**
- * The two host calls a join and a sign-in make before any credential leaves the machine: the
- * discovery of SP04 §1 and, only when the guild takes this Nod, the salt request of SP02 §4.
+ * SP04 §1 + O2/SP04 §1 (owner decision 2026-10-17): the discovery every sequence makes before
+ * anything of the guild leaves this machine — a join, a sign-in, and the invite preview of RF-59,
+ * which has no email and no salt to ask for.
  *
- * O2/SP04 §1 (owner decision 2026-10-17): the discovery document already carries the guild's
- * `minAppVersion`, so a Nod older than it stops right here — no access code, no `authKey` and no
- * password reaches the host — with the sentence the sync's gate and the RPC gate answer with. A
- * host that serves no minimum, or one `shared/version.ts` cannot read, refuses nothing. The check is
- * the discovery's answer and not the remembered one: a Nod that was offline when the host raised the
- * minimum must not spend a code on a join it cannot make.
+ * The discovery document already carries the guild's `minAppVersion`, so a Nod older than it stops
+ * right here — no access code, no `authKey` and no password reaches the host — with the sentence the
+ * sync's gate and the RPC gate answer with. A host that serves no minimum, or one
+ * `shared/version.ts` cannot read, refuses nothing. The check is the discovery's answer and not the
+ * remembered one: a Nod that was offline when the host raised the minimum must not spend a code on a
+ * join it cannot make.
  *
- * Exported, and free of `tjs`/`tiny`, so `bun test` pins it against a scripted discovery and
- * connection: the rule is that nothing but the discovery leaves the machine while this Nod is too
- * old.
+ * Exported, and free of `tjs`/`tiny`, so `bun test` pins it against a scripted discovery: the rule
+ * is that nothing but the discovery leaves the machine while this Nod is too old.
  */
-export async function beginAuth(deps: AuthPrologueDeps, email: string): Promise<AuthPrologue> {
+export async function discoverFor(deps: DiscoveryDeps): Promise<HostDiscovery> {
   const found = await deps.discover();
   deps.observe(found.document.minAppVersion);
   if (tooOldFor(deps.appVersion(), found.document.minAppVersion)) {
     throw new Error(UPDATE_REQUIRED_ERROR);
   }
+  return found;
+}
+
+/**
+ * The two host calls a join and a sign-in make before any credential leaves the machine: the
+ * discovery (`discoverFor`) and, only when the guild takes this Nod, the salt request of SP02 §4.
+ */
+export async function beginAuth(deps: AuthPrologueDeps, email: string): Promise<AuthPrologue> {
+  const found = await discoverFor(deps);
   const connection = deps.connect(found);
   const published = await connection.request<SaltResponse>('POST', HOST_ROUTES.authSalt, { email });
   return { found, published, connection };
 }
 
-/** SP03 §2's `device`: the host shows it in the session list (O1). None of it is a secret. */
+/**
+ * 0.4.5 (RF-59): which route a code takes, and whether the person's name travels with it. The kind
+ * is read from the code itself (SP02 §3's length rule) and never from what the screen was showing:
+ * a setup code creates the first admin, an invite creates the person who redeems it — both are named
+ * — and an access code redeems the row of somebody who already exists. `null` is not a code at all,
+ * which the caller refuses with the single `invalid code` sentence.
+ *
+ * Pure and exported, like `hostWriteRefused`, so `bun test` pins the routing without the runtime.
+ */
+export function activateRoute(code: string): { kind: CodeKind; route: string; needsName: boolean } | null {
+  const kind = codeKindOf(code);
+  if (kind === null) return null;
+  const route =
+    kind === 'setup'
+      ? HOST_ROUTES.authSetup
+      : kind === 'invite'
+        ? HOST_ROUTES.authJoin
+        : HOST_ROUTES.authActivate;
+  return { kind, route, needsName: kind !== 'access' };
+}
+
+/**
+ * 0.4.5 (RF-59): the invite card `host.invitePreview` answers — the guild of the invite, the names of
+ * the roles it grants, and the address and fingerprint the person just confirmed. The icon travels
+ * as a data URI; the host sends the PNG as base64url (the repo's rule for binary on the wire,
+ * `docs/specs/README.md`), which a `data:` URI cannot carry as it is.
+ *
+ * Pure, so `bun test` pins the mapping without a host.
+ */
+export function inviteView(found: HostDiscovery, preview: InvitePreview): InviteView {
+  return {
+    guild: preview.guild,
+    address: found.address,
+    fingerprint: found.fingerprint,
+    roles: preview.roles.map((role) => role.name),
+    expiresAt: preview.expiresAt,
+    usesLeft: preview.usesLeft,
+    icon: preview.icon === null ? null : `data:image/png;base64,${bytesToBase64(fromBase64url(preview.icon))}`,
+  };
+}
+
+/**
+ * 0.4.5 (RF-59): the two `404`s of the invite routes, as sentences this side writes. The host's own
+ * body never reaches a Nod (`backend/host-client.ts` reads none on a failure), so every refusal a
+ * screen has to explain is worded here — like F7's `invalid code or password`.
+ */
+const INVALID_INVITE = 'invalid invite';
+/** A role of the invite was deleted after the invite was created; the use is not spent. */
+const INVITE_ROLE_GONE = 'the invite names a role the guild no longer has';
+
+/**
+ * SP03 §2's `device`: the host shows it in the session list (O1). None of it is a secret.
+ */
 async function deviceOf(): Promise<Device> {
   const app = required(runtime, 'host');
   const info = await app.info();
@@ -1471,6 +1605,113 @@ async function deviceOf(): Promise<Device> {
 /** SP05 §3 `host.state`: the one guild, or the `none` of a Nod that was never connected. */
 function hostState(): HostState {
   return required(sync, 'host.state').state();
+}
+
+// ---------------------------------------------------------------- entry screen (0.4.5, RF-60/61)
+
+/** What `entryProfiles` reads, injected so a test drives the answer without a runtime. */
+export interface ProfilesDeps {
+  /** People on this machine, revoked included (`Repo.countPeople`). */
+  countPeople: () => number;
+  /** An unused local invite exists, so even the first account needs a code (canonico §9). */
+  hasOpenInvite: () => boolean;
+  /** The person of the last unlock, for the Offline tile's prefilled email. */
+  lastPerson: () => Promise<Person | null>;
+  /** The one `host` row, or `null` (`Repo.hostRecord`). */
+  hostRecord: () => { address: string; guild: string; personId: Id; snapshot: string | null } | null;
+  /** The local person of the guild's own account; `null` when their row is gone. */
+  personById: (id: Id) => Person | null;
+  /** The `guildIcon` of the cached body — `undefined` without a row (SP04 §2). */
+  snapshotIconHash: () => string | null | undefined;
+  /** That icon as a data URI, when the bytes on disk are the signed ones. */
+  guildIcon: (hash: string | null) => Promise<string | null>;
+  /** The guild as `host.state` reports it (status, updateRequired). */
+  hostState: () => HostState;
+  /** The tile of the last unlock (`Session.lastEntry`). */
+  lastEntry: () => Promise<EntryTarget | null>;
+  /** Biometrics enabled for the last person (`SessionState.biometric`). */
+  biometric: () => Promise<boolean>;
+}
+
+/**
+ * 0.4.5 (RF-60): the tiles of the entry screen, drawn before any password. The Offline profile is
+ * always there — it is this machine's own account, or the offer of one — and the guild(s) come from
+ * the `host` row; today that is at most one (canonico §22 "Guilds per install"), and the id of a
+ * tile is the guild's address so several can live here later. Nothing of this answer is a secret:
+ * names, an address, a fingerprint-derived icon, and no code, token or password.
+ *
+ * Exported, and free of `tjs`/`tiny`, so `bun test` drives the whole answer with a fake repository.
+ */
+export async function entryProfiles(deps: ProfilesDeps): Promise<EntryProfiles> {
+  const total = deps.countPeople();
+  const host = deps.hostRecord();
+  const guilds: GuildProfile[] = [];
+  if (host !== null) {
+    const person = deps.personById(host.personId);
+    const state = deps.hostState();
+    const hash = deps.snapshotIconHash();
+    guilds.push({
+      // 0.4.5: one guild, named by the address it is pinned to — the id `EntryTarget` carries.
+      id: host.address,
+      guild: host.guild,
+      address: host.address,
+      icon: await deps.guildIcon(hash === undefined ? null : hash),
+      // A guild account the local table lost (a revocation) leaves the tile with nothing to prefill.
+      email: person === null ? '' : person.email,
+      name: person === null ? '' : person.name,
+      status: state.status,
+      updateRequired: state.updateRequired,
+    });
+  }
+  const last = await deps.lastPerson();
+  const remembered = await deps.lastEntry();
+  return {
+    offline: {
+      // Revoked people included (P6): one of them already means this machine is not new.
+      hasAccount: total > 0,
+      requiresInvite: total > 0 || deps.hasOpenInvite(),
+      email: last === null ? null : last.email,
+      // RF-61: a seed is a first-run import — with any account here there is nothing to set up.
+      seedImportable: total === 0,
+    },
+    guilds,
+    // A remembered guild this Nod no longer holds (`host.remove`) preselects nothing: the entry
+    // screen must not open on a tile it has no way to draw.
+    last:
+      remembered !== null && remembered.kind === 'guild' && !guilds.some((tile) => tile.id === remembered.id)
+        ? null
+        : remembered,
+    biometric: await deps.biometric(),
+  };
+}
+
+/** What `importSeed` needs, injected so a test drives the refusal without a runtime. */
+export interface SeedImportDeps {
+  /** How many people this machine holds — any of them closes the window (RF-61). */
+  countPeople: () => number;
+  /** Applies the seed of `path` in boot mode; `null` when it did not advance (`applySeedFile`). */
+  apply: (path: string) => Promise<SeedApplied | null>;
+}
+
+/** RF-61: what `session.importSeed` answers when this machine already has an account. */
+export const SEED_IMPORT_REFUSED = 'this Nod already has an account — the seed is only imported at setup';
+
+/**
+ * 0.4.5 (RF-61): the optional seed import of the first run. It is the same core the release's own
+ * seed runs through at boot (`applySeedFile`, boot mode: only what is missing, only a newer
+ * version), so a seed imported here and one embedded in the release leave the same tables — and
+ * `null` means the file was already applied (or is not a seed this build can read).
+ *
+ * Only while this Nod has no account at all: the tables a seed writes are the catalog and the
+ * invites, and both belong to somebody once an account exists. The origins the runtime gate opens
+ * are the embedded seed's alone — `tinyjs.json` is built, not read at runtime (RF-61) — so a seed
+ * imported here can fill the catalog and never widen what a tool may call.
+ *
+ * Exported, and free of `tjs`/`tiny`, so `bun test` pins the refusal without the runtime.
+ */
+export async function importSeed(deps: SeedImportDeps, path: string): Promise<SeedApplied | null> {
+  if (deps.countPeople() > 0) throw new Error(SEED_IMPORT_REFUSED);
+  return await deps.apply(path);
 }
 
 // ---------------------------------------------------------------- guild icon (SP05 §6)
@@ -1639,18 +1880,96 @@ const methods: { [M in Method]: Handler<M> } = {
     );
   },
 
+  /**
+   * 0.4.5 (RF-60): the tiles the entry screen draws, before any password. Everything it needs is
+   * this machine's own — the people table, the `host` row, the cached body's icon hash — and no call
+   * leaves here, which is what lets a locked window show the guild it is disconnected from.
+   */
+  'session.profiles': async (): Promise<EntryProfiles> => {
+    const r = required(repo, 'session.profiles');
+    const s = required(session, 'session.profiles');
+    const state = await s.state();
+    return await entryProfiles({
+      countPeople: () => r.countPeople(),
+      hasOpenInvite: () => r.listInvites().some((invite) => invite.usedAt === null),
+      lastPerson: () => s.lastPerson(),
+      hostRecord: () => r.hostRecord(),
+      personById: (id) => r.personById(id),
+      snapshotIconHash: () => snapshotIconHash(),
+      guildIcon: (hash) => (guildIcon === null ? Promise.resolve(null) : guildIcon.dataUri(hash)),
+      hostState: () => hostState(),
+      lastEntry: () => s.lastEntry(),
+      // `state()` is already here: the answer is the same one `session.state` gives, so asking the
+      // keychain twice for it would be one read too many.
+      biometric: async () => state.biometric,
+    });
+  },
+
+  /**
+   * 0.4.5 (RF-61): the optional seed import of the first run — the page picks the file with
+   * `tiny.dialog` and hands the path over. The tables it writes are the local ones (the catalog,
+   * the roles and the invites), exactly as an embedded seed would at boot; the runtime origin gate
+   * is untouched (it is built, RF-61), so this never widens what a tool may call.
+   */
+  'session.importSeed': async (params): Promise<SessionState> => {
+    const r = required(repo, 'session.importSeed');
+    const s = required(session, 'session.importSeed');
+    const store = required(icons, 'session.importSeed');
+    const path = text(parameters(params, 'invalid file').path, 'invalid path');
+    const applied = await importSeed(
+      {
+        countPeople: () => r.countPeople(),
+        // A relative icon of an imported seed is ignored, like every seed read outside the bundle:
+        // the file the person picked is not a release's `resources/` (`backend/seed.ts`).
+        apply: (file) => applySeedFile(r, file, null, store, (target) => tjs.readFile(target)),
+      },
+      path,
+    );
+    if (applied !== null) {
+      // Like `catalog.importFromFile`: the counts go in the log, never a value of the file. No
+      // person is unlocked yet, so the event belongs to the machine.
+      r.addEvent({
+        personId: null,
+        toolId: null,
+        type: 'catalog_imported',
+        url: null,
+        result: 'seed',
+        detail: seedCountsDetail(applied.counts),
+      });
+    }
+    // The tiles of the entry screen follow the seed: the offers are the seed's (the roles and the
+    // invites it brought), and the page is told before it is answered.
+    const state = await s.state();
+    push('session', state);
+    return state;
+  },
+
+  /**
+   * 0.4.5 (RF-60): unlocking from a tile. `target` is that tile — absent means the Offline one —
+   * and `backend/session.ts` refuses a guild target that is not the guild's own person with the
+   * same `invalid credentials` a wrong password gets (a tile is never an oracle). The mode it
+   * records is what makes the whole guild side of this session disconnected; the tile is kept in
+   * `store` so the next entry screen preselects it.
+   */
   'session.unlock': async (params) => {
     const p = parameters(params, 'invalid credentials');
     return afterUnlock(
       await required(session, 'session.unlock').unlock({
         email: text(p.email, 'invalid credentials'),
         password: text(p.password, 'invalid credentials'),
+        target: optional(p.target, (value) => entryTarget(value)),
       }),
     );
   },
 
-  'session.unlockBiometric': async () =>
-    afterUnlock(await required(session, 'session.unlockBiometric').unlockBiometric()),
+  'session.unlockBiometric': async (params) => {
+    const p = parameters(params, 'invalid credentials');
+    return afterUnlock(
+      await required(session, 'session.unlockBiometric').unlockBiometric({
+        target: optional(p.target, (value) => entryTarget(value)),
+      }),
+    );
+  },
 
   'session.enableBiometric': (params) => {
     const p = parameters(params, 'invalid password');
@@ -1741,7 +2060,12 @@ const methods: { [M in Method]: Handler<M> } = {
       throw new Error('Nod is already connected to a host — remove it first');
     }
 
-    const setup = name !== undefined;
+    // 0.4.5 (RF-59): the code the person typed decides the route — a setup code creates the first
+    // admin, a guild invite creates the account the person just chose (both carry a name), and an
+    // access code redeems the row of somebody who already exists.
+    const opening = activateRoute(code);
+    if (opening === null) throw new Error('invalid code');
+    if (opening.needsName && name === undefined) throw new Error('invalid name');
     // F1/F3/F7: the local half of the join first — the collision with a local account of this Nod
     // and the choice it asks for, the unlocked session F3 demands, and the one sentence a wrong code
     // becomes. Nothing here has reached the host yet: a join the page has not decided does not spend
@@ -1778,12 +2102,23 @@ const methods: { [M in Method]: Handler<M> } = {
           authKey: toBase64url(keys.authKey),
           device: await deviceOf(),
         };
-        // SP02 §3: the setup code creates the first admin; an access code redeems one person's row.
-        const opened = await connection.request<TokenResponse>(
-          'POST',
-          setup ? HOST_ROUTES.authSetup : HOST_ROUTES.authActivate,
-          setup ? { ...body, name } : body,
-        );
+        // SP02 §3/RF-59: a setup code and an invite both create the person, so both carry the name.
+        let opened: TokenResponse;
+        try {
+          opened = await connection.request<TokenResponse>(
+            'POST',
+            opening.route,
+            opening.needsName ? { ...body, name } : body,
+          );
+        } catch (error) {
+          // 0.4.5 (RF-59): the host refuses a join whose invite names a role it has since deleted
+          // with `404 unknown role`, and it does not spend a use of the invite. F7's `401` (a wrong
+          // code) is `joinGate`'s own.
+          if (opening.kind === 'invite' && error instanceof HostError && error.status === 404) {
+            throw new Error(INVITE_ROLE_GONE);
+          }
+          throw error;
+        }
         return { found, published, salt, opened };
       },
     });
@@ -1814,7 +2149,8 @@ const methods: { [M in Method]: Handler<M> } = {
       salt,
       iterations: published.iterations,
       // An access-code activation says nothing about the roles: the snapshot fills them (B4/B5).
-      admin: setup,
+      // RF-59: an invite's person is a member — only the setup code creates the first admin.
+      admin: opening.kind === 'setup',
       // K1/SP02 §7: an activation (or the setup) always picks a fresh salt, so the account's
       // `vaultKey` moved and `onActivated` must regenerate the E02 pair — even a machine that never
       // held the account, where `wipeResetVault` found nothing to wipe.
@@ -1831,6 +2167,9 @@ const methods: { [M in Method]: Handler<M> } = {
       salt,
       addedAt: new Date().toISOString(),
     });
+    // 0.4.5 (RF-60): the join entered as the guild, and the tile of it — its address — is what the
+    // next entry screen preselects.
+    await s.rememberEntry({ kind: 'guild', id: found.address });
     pendingJoin = null;
     return { kind: 'session', session: await afterUnlock(state), wipedVault } satisfies JoinResult;
   },
@@ -1932,6 +2271,8 @@ const methods: { [M in Method]: Handler<M> } = {
       salt: published.salt,
       addedAt: same && row !== null ? row.addedAt : new Date().toISOString(),
     });
+    // 0.4.5 (RF-60): a sign-in is a guild entry too — the tile of that guild is preselected next.
+    await s.rememberEntry({ kind: 'guild', id: found.address });
     pendingJoin = null;
     // F2 (RF-48 finding 2 of `docs/handovers/k10-smoke.md`): a fresh machine has no local account,
     // so `admin` above is `false` until the first snapshot — the host's `me.admin` is the last word.
@@ -1947,6 +2288,102 @@ const methods: { [M in Method]: Handler<M> } = {
       throw new Error('Nod is not connected to a host');
     }
     return await required(sync, 'host.syncNow').syncNow();
+  },
+
+  /**
+   * 0.4.5 (RF-59): what a guild invite opens, before any account exists — the guild, its icon, the
+   * roles the invite grants and how long and how often it still works. Works locked: somebody with
+   * only a link has no session here.
+   *
+   * The discovery is the same one a join makes, so the `fp` of the link is checked against the key
+   * the host answers (SP04 §1.3) and a Nod the guild's `minAppVersion` is above stops before the
+   * code leaves this machine (`discoverFor`).
+   */
+  'host.invitePreview': async (params): Promise<InviteView> => {
+    const c = required(client, 'host.invitePreview');
+    const p = parameters(params, 'invalid invite');
+    const address = text(p.address, 'invalid address');
+    const fingerprint = text(p.fingerprint, 'invalid fingerprint');
+    const code = text(p.code, 'invalid code');
+    const found = await discoverFor({
+      discover: () => c.discover(address, { fingerprint }),
+      observe: (version) => sync?.observeMinVersion(version),
+      appVersion: () => appVersion,
+    });
+    let preview: InvitePreview;
+    try {
+      preview = await preAuthConnection(found).request<InvitePreview>(
+        'POST',
+        HOST_ROUTES.authInvite,
+        { code },
+      );
+    } catch (error) {
+      // SP03 §2: one `404` on this route means the code is invalid, used up, expired or revoked.
+      if (error instanceof HostError && error.status === 404) throw new Error(INVALID_INVITE);
+      throw error;
+    }
+    return inviteView(found, preview);
+  },
+
+  // -------------------------------------------------------------- guild invites (0.4.5, RF-59)
+  /** The guild's invites, revoked ones included — the admin screen shows their state. */
+  'guildInvites.list': async (): Promise<GuildInvite[]> => {
+    const admin = hostAdminFor(guildConnection());
+    if (admin === null) throw new Error('Nod is not connected to a host');
+    return await admin.listInvites();
+  },
+
+  /**
+   * An invite the admin hands over: the roles it grants, how many times it may be used and when it
+   * ends. The answer carries the code once and the `nod://join` link built from this machine's own
+   * row — the address and the fingerprint it pinned — so the invitee sees the guild before typing
+   * anything. The code never enters an event or a log.
+   */
+  'guildInvites.create': async (params) => {
+    const r = required(repo, 'guildInvites.create');
+    const actor = unlockedPerson('guildInvites.create');
+    const admin = hostAdminFor(guildConnection());
+    if (admin === null) throw new Error('Nod is not connected to a host');
+    // The link needs the address and the fingerprint of the `host` row, and `host.state` is the one
+    // reader of both (the fingerprint is derived from the pinned key).
+    const guild = hostState();
+    if (guild.address === null || guild.fingerprint === null) {
+      throw new Error('Nod is not connected to a host');
+    }
+    const p = parameters(params, 'invalid invite');
+    const input: CreateInviteRequest = {
+      roles: textList(p.roles, 'invalid roles'),
+      maxUses: optional(p.maxUses, (value) => integer(value, 'invalid max uses')) ?? null,
+      expiresInMinutes:
+        optional(p.expiresInMinutes, (value) => integer(value, 'invalid expiry')) ?? null,
+    };
+    const created = await admin.createInvite(input);
+    // Like `invites.issue`: what the log keeps is the roles and the terms, never the code.
+    r.addEvent({
+      personId: actor.id,
+      toolId: null,
+      type: 'invite_issued',
+      url: null,
+      result: null,
+      detail:
+        `roles: ${input.roles.length === 0 ? 'none' : input.roles.join(', ')} — ` +
+        `uses: ${input.maxUses === null ? 'no limit' : input.maxUses} — ` +
+        `expires: ${created.invite.expiresAt ?? 'never'}`,
+    });
+    return {
+      invite: created.invite,
+      code: created.code,
+      link: joinLink({ address: guild.address, fingerprint: guild.fingerprint, code: created.code }),
+    };
+  },
+
+  /** Revoking ends the invite; a person who already joined keeps the account it made (RF-59). */
+  'guildInvites.revoke': async (params): Promise<true> => {
+    const admin = hostAdminFor(guildConnection());
+    if (admin === null) throw new Error('Nod is not connected to a host');
+    unlockedPerson('guildInvites.revoke');
+    const id = text(parameters(params, 'invalid invite').id, 'invalid invite');
+    return await admin.revokeInvite(id);
   },
 
   'host.remove': async (params) => {
@@ -2138,7 +2575,7 @@ const methods: { [M in Method]: Handler<M> } = {
    * body, and nothing of the guild is shown while this build is too old for it.
    */
   'peers.list': (): Promise<PeerKey[]> =>
-    requiresUpdate() ? Promise.resolve([]) : required(keys, 'peers.list').peers(),
+    disconnected() ? Promise.resolve([]) : required(keys, 'peers.list').peers(),
 
   /**
    * K2/RF-45: the person confirmed that a changed key is really that colleague's. The pair whose
@@ -2644,38 +3081,28 @@ const methods: { [M in Method]: Handler<M> } = {
     const roles = textList(p.roles, 'invalid roles');
     const admin = hostAdminFor(guildConnection());
 
-    // SP05 §3: while connected the same question — "a code to hand over" — is the host's
-    // `POST /v1/admin/people` (create the person and their access code) or, for somebody who is
-    // already in the guild, `POST /v1/admin/people/:id/code` (reissue, revoking the previous one).
-    // `days` stays local: SP02 §3 fixes 72 h on the host's side.
+    // SP05 §3/0.4.5: while connected the same question — "a code to hand over" — is the host's, but
+    // only for somebody who already exists: `personId` reissues their access code
+    // (`POST /v1/admin/people/:id/code`, revoking the previous one). A person who does not exist yet
+    // joins through a guild invite, which carries their roles (`guildInvites.create`, RF-59) — the
+    // email-bound create route is gone with 0.4.5. `days` stays local: SP02 §3 fixes 72 h on the
+    // host's side.
     if (admin !== null) {
       const personId = optional(p.personId, (value) => text(value, 'invalid person'));
-      if (personId !== undefined) {
-        const issued = await admin.issueCode(personId);
-        r.addEvent({
-          personId: actor.id,
-          toolId: null,
-          type: 'invite_issued',
-          url: null,
-          result: null,
-          detail: `reissued for ${personId} — expires at ${issued.expiresAt}`,
-        });
-        // The list the People tab reloads is the host's; no sync is needed for a code.
-        return { code: issued.code, expiresAt: issued.expiresAt };
+      if (personId === undefined) {
+        throw new Error('this Nod is connected to a guild — create a guild invite instead');
       }
-
-      const email = text(p.email, 'invalid email');
-      const name = text(p.name, 'invalid name');
-      const created = await admin.createPerson({ email, name, roles });
+      const issued = await admin.issueCode(personId);
       r.addEvent({
         personId: actor.id,
         toolId: null,
         type: 'invite_issued',
         url: null,
         result: null,
-        detail: `roles: ${roles.length === 0 ? 'none' : roles.join(', ')} — expires at ${created.expiresAt}`,
+        detail: `reissued for ${personId} — expires at ${issued.expiresAt}`,
       });
-      return { code: created.code, expiresAt: created.expiresAt };
+      // The list the People tab reloads is the host's; no sync is needed for a code.
+      return { code: issued.code, expiresAt: issued.expiresAt };
     }
 
     const known = new Set(r.listRoles().map((item) => item.id));
@@ -2709,7 +3136,7 @@ const methods: { [M in Method]: Handler<M> } = {
    */
   'vault.list': () => {
     const items = required(vault, 'vault.list').list(unlockedPerson('vault.list').id);
-    return requiresUpdate() ? items : required(shares, 'vault.list').decorate(items);
+    return disconnected() ? items : required(shares, 'vault.list').decorate(items);
   },
 
   'vault.save': async (params) => {
@@ -2844,7 +3271,7 @@ const methods: { [M in Method]: Handler<M> } = {
    * 2026-10-17) has nobody to offer — the same answer a Nod with no host gives.
    */
   'shares.recipients': (params) => {
-    if (requiresUpdate()) return [];
+    if (disconnected()) return [];
     const toolId = text(parameters(params, 'invalid credential').toolId, 'invalid tool');
     return required(shares, 'shares.recipients').recipients(toolId);
   },
@@ -2863,7 +3290,7 @@ const methods: { [M in Method]: Handler<M> } = {
    * is the cached snapshot's, so a disconnected Nod (O2, owner 2026-10-17) shows none: the shares are
    * still in the body on disk and appear the moment the guild takes this Nod back.
    */
-  'shares.inbox': () => (requiresUpdate() ? [] : required(shares, 'shares.inbox').inbox()),
+  'shares.inbox': () => (disconnected() ? [] : required(shares, 'shares.inbox').inbox()),
 
   /**
    * K4/SP06 §4: opens the share, lands it in the vault bound to the tool's origin and accepts it on
@@ -2915,7 +3342,7 @@ const methods: { [M in Method]: Handler<M> } = {
    * The list is the host's answer, so a disconnected Nod (O2, owner 2026-10-17) has none to show —
    * the read itself does not run while the guild is disconnected.
    */
-  'assignments.missing': () => (requiresUpdate() ? [] : required(shares, 'assignments.missing').missing()),
+  'assignments.missing': () => (disconnected() ? [] : required(shares, 'assignments.missing').missing()),
 
   /**
    * K8/SP06 §4 (admin): seals a copy to every member of the list this Nod can reach, with the one

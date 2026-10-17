@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS tool (
   auth_json TEXT,
   probe_json TEXT,
   scope TEXT NOT NULL DEFAULT 'org',
-  owner_id TEXT
+  owner_id TEXT,
+  category TEXT
 );
 CREATE TABLE IF NOT EXISTS tool_view (
   tool_id TEXT NOT NULL REFERENCES tool (id) ON DELETE CASCADE,
@@ -176,8 +177,8 @@ CREATE TABLE IF NOT EXISTS peer_keys (
  * `3` is SP05 §2's connected schema: the two `host` tables, the event's client id and sent time,
  * the local password V2 columns and the tool's scope/owner. A `2` database gets them by presence
  * (`addColumns`), with its people, tools and vault rows untouched; `0` covers everything written
- * before the versioning, which is completed the same way. Only 0, 2, 3 and the current version are
- * known — anything else is a database from a build this one cannot reason about.
+ * before the versioning, which is completed the same way. Only 0 and the versions 2 to 5 are known
+ * beside the current one — anything else is a database from a build this one cannot reason about.
  *
  * `4` is K1–K2's `peer_keys` (SP06 §2): one more table and no other change, so a `3` database gets
  * it from the `CREATE … IF NOT EXISTS` above and is re-stamped; its rows are untouched.
@@ -186,11 +187,15 @@ CREATE TABLE IF NOT EXISTS peer_keys (
  * uuid that groups every holder of one credential, `NULL` until the item is first shared — and
  * `vault_item.scope`, the sharing scope (`role` by default). Two columns of an existing table, so a
  * `4` database gets them from `addColumns` and every item it holds becomes `role`/unshared.
+ *
+ * `6` is RF-62's tool category: `tool.category`, the display name the guild gave a local org row
+ * (a personal row keeps `NULL`). One column of an existing table, so a `5` database gets it from
+ * `addColumns` and every row it holds reads as uncategorized.
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
-/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2–v4, current. */
-const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, SCHEMA_VERSION];
+/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2–v5, current. */
+const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, 5, SCHEMA_VERSION];
 
 /**
  * The database was created by an older Nod (v1, in Portuguese). `migrate` throws this and touches
@@ -239,6 +244,8 @@ interface ToolRow {
   scope: string;
   /** The person a personal row belongs to; `null` for a catalog entry. */
   owner_id: Id | null;
+  /** RF-62: the display category of an org row; `null` while it has none (a personal row always). */
+  category: string | null;
 }
 
 interface ViewRow {
@@ -767,6 +774,9 @@ export function createRepo(db: SqlDb): Repo {
     // `4` database holds is unshared and `role`, which is the default of the new column.
     addColumn('vault_item', 'credential_id', 'TEXT');
     addColumn('vault_item', 'scope', "TEXT NOT NULL DEFAULT 'role'");
+    // RF-62 (0.4.5): the display category the guild gave a local org tool. Every row a `5` database
+    // holds is uncategorized, which is what `NULL` means; a personal row stays `NULL`.
+    addColumn('tool', 'category', 'TEXT');
   }
 
   /**
@@ -1228,6 +1238,8 @@ CREATE TABLE vault_item_rebuilt (
       scope: l.scope === 'personal' ? 'personal' : 'org',
       ownerId: l.owner_id,
       title: l.title,
+      // RF-62: the guild's category, `null` on a row written before the column and on a personal one.
+      category: l.category,
       url: l.url,
       // The icon does not leave here: the backend serves the bytes by `iconHash` (data URI, §4).
       icon: null,
@@ -1264,10 +1276,15 @@ CREATE TABLE vault_item_rebuilt (
     // personal tool into a catalog entry.
     const scope = (e.scope ?? previous?.scope) === 'personal' ? 'personal' : 'org';
     const ownerId = e.ownerId !== undefined ? e.ownerId : (previous?.owner_id ?? null);
+    // RF-62: a category is an org tool's, and it follows the same presence rule as the scope above —
+    // an entry that carries none keeps what the row has. A personal row is always uncategorized: it
+    // has its own group in the display, and the host ignores a category on a personal write.
+    const category =
+      scope === 'personal' ? null : (e.category !== undefined ? e.category : (previous?.category ?? null));
     transaction(() => {
       db.run(
-        `INSERT INTO tool (id, title, url, origin, icon_hash, sort_order, active, auth_json, probe_json, scope, owner_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO tool (id, title, url, origin, icon_hash, sort_order, active, auth_json, probe_json, scope, owner_id, category)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -1278,7 +1295,8 @@ CREATE TABLE vault_item_rebuilt (
            auth_json = excluded.auth_json,
            probe_json = excluded.probe_json,
            scope = excluded.scope,
-           owner_id = excluded.owner_id`,
+           owner_id = excluded.owner_id,
+           category = excluded.category`,
         [
           e.id,
           e.title,
@@ -1291,6 +1309,7 @@ CREATE TABLE vault_item_rebuilt (
           probeJson,
           scope,
           ownerId,
+          category,
         ],
       );
       // Views and grants are rewritten wholesale: whatever did not come in the entry is gone.

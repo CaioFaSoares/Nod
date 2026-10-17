@@ -12,13 +12,13 @@ still hold: secrets only in the keychain, the page only calls `src/api.ts`, the 
 | `shared/auth.ts` | `deriveKeys`, `PasswordHashV2` (SP02 §1, §6) |
 | `shared/host-api.ts` (new) | Types of SP03/SP04: `Discovery`, `Snapshot`, request/response bodies; **and** the code helpers — `CODE_ALPHABET`, `CODE_BYTES`, `CODE_LENGTH`, `generateCode`, `formatCode`, `normalizeCode`, `validateCode`, `normalizeEmail` (SP02 §3). They landed here, not in `shared/auth.ts` (c1); `shared/auth.ts` keeps the derivation. |
 | `shared/types.ts` | `Entry.scope/ownerId`, `View.id/scope/ownerId`, `HostState`, `AppIconChoice`/`AppIconState`, new `ApiContract` methods (§3) |
-| `shared/host-merge.ts` (new) | Pure: snapshot → local rows; sidebar order (favorites, org, personal); outbox replay decisions; `leftoverLocalTools` (RF-40) |
+| `shared/host-merge.ts` (new) | Pure: snapshot → local rows (RF-62's `Entry.category`); sidebar order (favorites, org grouped by category, personal); outbox replay decisions; `leftoverLocalTools` (RF-40) |
 | `shared/seal.ts` (new) | The E02 seal: X25519 + HKDF (over HMAC) + AES-256-GCM, Ed25519 sign/verify, `personFingerprint` (SP06 §1–§3) |
 | `shared/version.ts` (new) | `compareVersions`: the semver comparison of the O2 gate (SP04 §1) |
 | `shared/vault-crypto.ts` (new) | The `bv1.` envelope (AES-256-GCM, AAD = keychain key) for a vault value and for a key blob (SP02 §8) |
 | `backend/host-client.ts` (new) | `fetch` to the host; bearer from the keychain; discovery; signature check; error mapping; `getBytes`, the one route whose answer is bytes (§6) |
 | `backend/sync.ts` (new) | Timer, triggers, outbox flush, event push, snapshot apply, stale state, backoff (SP04 §3–§5) |
-| `backend/repo.ts` | Migrations to `user_version = 5` (§2): the block 1 schema, then `peer_keys` (K1–K2) and `vault_item.credential_id`/`scope` (K4/K6) |
+| `backend/repo.ts` | Migrations to `user_version = 6` (§2): the block 1 schema, then `peer_keys` (K1–K2), `vault_item.credential_id`/`scope` (K4/K6) and `tool.category` (RF-62) |
 | `backend/session.ts` | V2 local verifier and its migration; keys kept in memory while unlocked; biometric item holds `vaultKey` (SP02 §6, §9) |
 | `backend/vault.ts` | `origin` per item, fill only on that origin (B9); block 2: `bv1.` encryption (V1); `credentialId`/`scope` on an accepted share (K4/K6); the `afterSave` call-out (K9) |
 | `backend/keys.ts` (new) | The E02 key pairs (K1) and the pin table (K2): generation at activation/reset, the private halves sealed under `nod.keys.<person>` (and a `privateSealed` blob accepted from the host, canonico §22), the public halves in `meta`, `PUT /v1/keys` / `GET /v1/keys/private`, `observe`/`peers`/`peerKeyFor`/`confirm`, `reSeal` on a password change |
@@ -29,7 +29,7 @@ still hold: secrets only in the keychain, the page only calls `src/api.ts`, the 
 | `src/settings.ts` | Settings → Hosts tab; admin tabs read/write through the same RPC (the backend decides local or host); the App icon select and the admin's Guild icon card (§6) |
 | `src/app.ts` | Sidebar order; stale badge; favorites toggle; personal tool add |
 
-## 2. Local schema, `user_version = 5`
+## 2. Local schema, `user_version = 6`
 
 ```sql
 CREATE TABLE host (
@@ -63,6 +63,7 @@ ALTER TABLE person ADD COLUMN password_check TEXT;      -- PasswordHashV2.check;
 ALTER TABLE person ADD COLUMN password_algorithm TEXT NOT NULL DEFAULT 'PBKDF2-SHA256';
 ALTER TABLE tool ADD COLUMN scope TEXT NOT NULL DEFAULT 'org';
 ALTER TABLE tool ADD COLUMN owner_id TEXT;
+ALTER TABLE tool ADD COLUMN category TEXT;              -- RF-62: display category of a local org tool
 CREATE TABLE IF NOT EXISTS peer_keys (          -- migration 4 (K1–K2, SP06 §2)
   person_id           TEXT PRIMARY KEY,
   x25519              TEXT NOT NULL,            -- the pinned pair of this colleague
@@ -131,6 +132,20 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
 | `shares.recipients` / `shares.send` | `{ toolId }` / `{ toolId, to, password? }` | `ShareRecipient[]` / `{ sent: number }` | unlocked (K4, K6); `send` behind the gate |
 | `shares.inbox` / `shares.accept` / `shares.decline` / `shares.removeHolder` | `— / { id, password? } / { id } / { toolId, personId }` | `InboxShare[]` / `VaultItem` / `true` / `VaultItem` | unlocked (K4, K9); `accept` behind the gate (an `update` of a held credential skips it) | 
 | `assignments.set` / `assignments.missing` / `assignments.sealMissing` | `{ toolId, roleId?, personId?, assigned, password? }` / `—` / `{ password? }` | `{ … }` / `MissingCopyView[]` / `{ sent, skipped }` | unlocked, admin (K8); the two writes behind the gate |
+
+0.4.5 (RF-59/60/61) — the entry screen, the guild invites and the optional seed:
+
+| Method | Params | Result | Who |
+| --- | --- | --- | --- |
+| `session.profiles` | — | `EntryProfiles`: the `offline` profile (`hasAccount`, `requiresInvite`, `email`, `seedImportable`), the guild tile(s) (`id` = the pinned address, `guild`, `address`, `icon` as a data URI or `null`, the account's `email`/`name`, `status`, `updateRequired`), `last` and `biometric` | **no session needed**; every field is this machine's own (the people table, the `host` row, the cached body's icon digest) — no call leaves it |
+| `session.unlock` / `session.unlockBiometric` | `{ email, password, target? }` / `{ target? }` | `SessionState` (`mode: 'offline' \| 'guild'`) | no session needed; `target` absent means the Offline tile. A `guild` target opens only while this Nod holds that `host` row and only for the person of it — anything else is the same `invalid credentials` a wrong password gets (no oracle). The tile is stored as `last_entry` in `store.json` (a preference, never a secret) |
+| `session.importSeed` | `{ path }` | `SessionState` | **no session needed** (RF-61); refuses with `this Nod already has an account — the seed is only imported at setup` while any person exists. The file is applied in boot mode (`backend/seed.ts`), records `catalog_imported` with `result: 'seed'`, and never widens the runtime origin gate — that is the embedded seed's alone |
+| `host.activate` | `{ address, fingerprint, email, code, password, name?, adoptLocal? }` | `JoinResult` | no session needed; `codeKindOf(code)` decides the route: `setup` → `/v1/auth/setup` and `invite` → `/v1/auth/join` (both require `name`), `access` → `/v1/auth/activate`. A successful join enters in `guild` mode and stores `last_entry` = that guild |
+| `host.invitePreview` | `{ address, fingerprint, code }` | `InviteView` (guild, address, fingerprint, role **names**, `expiresAt`, `usesLeft`, icon as a data URI) | **no session needed** (RF-59); the discovery is the join's own (SP04 §1.3 fingerprint refusal, O2 minimum), then `POST /v1/auth/invite`. The host's `404` is `invalid invite` |
+| `guildInvites.list` | — | `GuildInvite[]` (newest first, revoked included) | unlocked, **admin**, connected; in `HOST_READS` |
+| `guildInvites.create` | `{ roles, maxUses, expiresInMinutes }` | `{ invite, code, link }` — `link` = `joinLink({ address, fingerprint, code })` from the `host` row | unlocked, **admin**, connected; in `HOST_WRITES`. The code is in the answer once and never in an event or a log |
+| `guildInvites.revoke` | `{ id }` | `true` | unlocked, **admin**, connected; in `HOST_WRITES`; a person who already joined keeps their account |
+| `invites.issue` (changed) | `{ roles, days?, personId? }` | `{ code, expiresAt }` | `email`/`name` are **gone** (0.4.5): while connected, `personId` reissues one existing person's access code (`POST /v1/admin/people/:id/code`); a person who does not exist yet joins through a guild invite. `POST /v1/admin/people` is no longer called (and no longer served) |
 - `vault.reveal` and `vault.copy` gain the K5 gate: biometrics where the machine has them, the
   person's `password` otherwise (SP02 §9); without either the call fails and nothing is shown or
   copied. The same `password?` is on `shares.send`, `shares.accept` and the two assignment writes.
@@ -148,12 +163,24 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
   runs on the local tables (`shared/catalog.ts`'s `catalogMode`): `catalog.list`, the sidebar, Home,
   the palette, the roles/people screens and the vault list (no holders, no `rotationPending`) are
   local, as if no host existed. The `host` row, the bearer and the cached body stay on disk.
+- **0.4.5 (RF-60), the offline session is the same disconnect**: a session unlocked through the
+  Offline tile carries `mode: 'offline'`, and the guild is as disconnected for it as it is for O2 —
+  one predicate (`backend/main.ts`'s `disconnectedSession`) reads both, so `catalogMode`,
+  `guildConnection()`, `snapshotBody()` and the two gate tables behave identically. `HostState` gains
+  `offlineSession: true` for the sidebar's "not syncing" banner, and the RPC that would reach the host
+  is refused with `offline session — lock and enter the guild to use it` (`OFFLINE_SESSION_ERROR`,
+  `backend/session.ts`) instead of the O2 sentence — so the screen can say which of the two it is.
+  `afterUnlock` reaches no host in this mode: no key pair is published and the sync loop is not
+  started. `host.activate` (any code kind), `host.signIn` and a `guild` unlock enter in `mode:
+  'guild'` and behave exactly as before.
 
 - Existing admin methods (`catalog.save`, `roles.*`, `people.*`, `invites.issue`) keep their names.
   When connected, the backend sends them to SP03 admin routes.
-- `invites.issue` becomes "create person + access code" (`POST /v1/admin/people`), or "reissue code"
-  for an existing person. It keeps its `{ code, expiresAt }` answer and gains optional `email` +
-  `name` (create) or `personId` (reissue); `days` stays local-only, since the host fixes 72 h (B6).
+- `invites.issue` is "an invite code for a new local account" (local mode) or "reissue the access
+  code of an existing person" (`POST /v1/admin/people/:id/code`, `personId`); `days` stays local-only,
+  since the host fixes 72 h (B6). 0.4.5 (RF-59) removed its `email` + `name` (the create-person path):
+  a person who does not exist yet joins through a **guild invite** (`guildInvites.create`), which
+  carries their roles — the host no longer serves `POST /v1/admin/people`.
 - `host.activate` and `host.signIn` receive the password once, derive the keys in the backend, and
   never store or log the password. `TINYJS_DEBUG=1` prints page→backend calls with their params, so
   the warning in `AGENTS.md` now covers these two methods too; add them to its list.
@@ -169,7 +196,11 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
     "Remove" (§6).
 - **First-run screen** gets a third path, "Join a guild", beside create account and invite.
 - **Sidebar**: favorites first in their order, then org tools, then personal tools. A small "offline"
-  badge while stale.
+  badge while stale. RF-62: the org tools read grouped by category — a thin divider with the category
+  name in small caps opens each group, the groups stand where their smallest `order` puts them and the
+  unfiled ones last; ⌘1…⌘9 follow that visual order.
+- **Home** (RF-62): the same order, one section per category with an `h2` and "Other tools" for the
+  unfiled org tools; with no category in the catalog it stays the single grid it always was.
 - **Admin tabs**, when connected:
   - People: email, name, roles; "New access code" shows the code once with a copy button.
   - Tools, Roles, Activity: same screens, host data.

@@ -1,6 +1,8 @@
-// Builds `tinyjs.json` from `tinyjs.base.json` + `resources/seed.json`.
+// Builds `tinyjs.json` from `tinyjs.base.json` + `resources/seed.json` (0.4.5, RF-61: the seed is
+// optional — a build without one releases the app's own pages and no tool origin, and the release
+// starts empty).
 // Contract: docs/arquitetura.md §2 (origin gate) and §6 (build and dev); requirements:
-// docs/canonico.md §19, RF-26, RF-27, RF-56.
+// docs/canonico.md §19, RF-26, RF-27, RF-56, RF-61.
 //
 // `generateConfig` is pure: it neither reads nor writes a file and never exits the process. The I/O
 // lives in the `import.meta.main` block, run with `bun scripts/gen-config.ts <dev|build>`.
@@ -24,8 +26,6 @@ import { originOf, validateSeed } from '../shared/catalog';
 /** Dev port when nobody chooses one: vite's default, the one `bun run app:dev` takes. */
 const DEFAULT_DEV_PORT = 5173;
 const FILE_ORIGIN = 'file://*';
-const MISSING_SEED_MESSAGE =
-  'private seed missing: resources/seed.json (see resources/seed.example.json)';
 const MISSING_PERMISSIONS_MESSAGE =
   'tinyjs.base.json must declare "permissions": { "camera": "...", "microphone": "..." }';
 
@@ -116,11 +116,13 @@ function hasMediaPermissions(base: Record<string, unknown>): boolean {
   return text('camera') && text('microphone');
 }
 
-/** Files the release always ships from `resources/`, before the relative entry icons. */
-const BUNDLED = ['seed.json', 'tray.png'];
+/** Files the release always ships from `resources/`, before the seed and the relative entry icons. */
+const BUNDLED = ['tray.png'];
 // `BUILD_MODE_STAMP` (`shared/build-mode.ts`, SP02 §9) must never join this list: the stamp is the
 // only thing that tells a dev run from a release at runtime, and a release that shipped it would be
 // shipping a claim about how it was built.
+// 0.4.5 (RF-61): neither does `seed.json` — the seed is an optional import now, so a release without
+// one ships no seed at all and starts empty. `buildResources` adds it back when the build had one.
 
 /**
  * Icon path of an entry, relative to `resources/`: no data URI, no `..` (the build refuses `..`),
@@ -133,10 +135,15 @@ function relativeIconPath(icon: string | null): string | null {
   return path;
 }
 
-/** `resources` list of the release: the seed, the tray icon and the relative icons, without repeats. */
-function buildResources(seed: Seed): string[] {
-  const seen = new Set<string>(BUNDLED);
-  const list = [...BUNDLED];
+/**
+ * `resources` list of the release: the seed it was built with (0.4.5, RF-61 — absent for a release
+ * that had none), the tray icon and the relative icons, without repeats.
+ */
+function buildResources(seed: Seed | null): string[] {
+  const bundled = seed === null ? [...BUNDLED] : ['seed.json', ...BUNDLED];
+  const seen = new Set<string>(bundled);
+  const list = [...bundled];
+  if (seed === null) return list;
   for (const entry of seed.entries) {
     const path = relativeIconPath(entry.icon);
     if (path === null || seen.has(path)) continue;
@@ -162,8 +169,11 @@ function toolOrigins(seed: Seed): string[] {
 /**
  * Builds `tinyjs.json`. Pure and deterministic: the same inputs return the same config.
  *
- * `build` requires the seed (RF-26); `dev` runs without it, releasing only the app's own pages. The
- * origin gate never gives `"all"` to a tool and never opens a key with `*` beyond `file://*`.
+ * 0.4.5 (RF-61): the seed is optional in both modes. `dev` has always run without it; a `build`
+ * without one releases the app's own pages and no tool origin, and the seed it did not have is not in
+ * `resources` — the release starts empty and the person may import one at setup
+ * (`session.importSeed`). The origin gate never gives `"all"` to a tool and never opens a key with
+ * `*` beyond `file://*`.
  *
  * `devPort` is the port the vite dev server takes (`NOD_DEV_PORT` in the entry block): in `dev`
  * both the page gate and `frontend.devUrl` name `http://127.0.0.1:<devPort>` — the smoke runs its
@@ -181,7 +191,6 @@ export function generateConfig(
   devPort: number = DEFAULT_DEV_PORT,
   icon: string | null = null,
 ): Record<string, unknown> {
-  if (mode === 'build' && seed === null) throw new Error(MISSING_SEED_MESSAGE);
   // macOS kills a packaged app whose page captures camera or microphone without the usage strings
   // (tinyjs docs, "Mic + camera"); a call tool would crash the release, so the build refuses it.
   if (mode === 'build' && !hasMediaPermissions(base)) throw new Error(MISSING_PERMISSIONS_MESSAGE);
@@ -217,7 +226,7 @@ export function generateConfig(
   if (seed !== null && seed.update !== null) {
     config.update = { url: seed.update.url, auto: 'daily' };
   }
-  if (mode === 'build' && seed !== null) config.resources = buildResources(seed);
+  if (mode === 'build') config.resources = buildResources(seed);
   if (appId !== undefined && appId !== '') config.id = appId;
   if (icon !== null) config.icon = icon;
   return config;

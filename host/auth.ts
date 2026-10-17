@@ -38,6 +38,17 @@ export const INVALID_CREDENTIALS = 'invalid credentials';
 export const INVALID_CODE = 'invalid code';
 export const TOO_MANY_ATTEMPTS = 'too many attempts';
 
+/** RF-59: one message for every dead guild invite — unknown, revoked, expired or used up. */
+export const INVALID_INVITE = 'invalid invite';
+
+/**
+ * RF-59: the join's one other refusal, when the email the person typed already has an account. The
+ * invite was valid, so it is no oracle; the account is theirs to sign in with, and the join spends
+ * no use.
+ */
+export const JOIN_EMAIL_TAKEN =
+  'this email already has an account in the guild — sign in instead';
+
 /** SP02 §5 is not the only place a message is fixed: SP03 §1 gives "authenticated but not allowed". */
 export const ADMIN_ONLY = 'admin only';
 

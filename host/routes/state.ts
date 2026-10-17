@@ -19,7 +19,7 @@ import {
   type AppMeta,
 } from '../../shared/host-api';
 import { callerOf, personAuth, type HostContext } from '../auth';
-import { appMetaOf, type HostConfig } from '../config';
+import { GUILD_NAME_ENV, appMetaOf, type HostConfig } from '../config';
 import { loadOrCreateSigningKey, type SigningKey } from '../keys';
 import {
   discoveryDocument,
@@ -36,13 +36,11 @@ import {
 /** SP04 §2 names the request header only in prose; the answer side is the shared constant. */
 const IF_NONE_MATCH_HEADER = 'If-None-Match';
 
-/** SP07 §2's deployment value of the discovery: `host/compose.yaml` sets it. */
-export const GUILD_NAME_ENV = 'NOD_GUILD_NAME';
-// The other deployment value of the discovery — the minimum app version and the update manifest URL
-// — is `host/config.ts`'s since O2: one resolved value (`loadAppMeta`) feeds both this route and
-// `GET /v1/meta/app`. Re-exported here because `host/state.test.ts` and `test/host-admin.test.ts`
-// read these two names from this module.
-export { DEFAULT_MIN_APP_VERSION, MIN_APP_VERSION_ENV } from '../config';
+// The two deployment values of the discovery and their environment names are `host/config.ts`'s
+// (O2: one resolved value — `loadAppMeta` — feeds both this route and `GET /v1/meta/app`; RF-59: the
+// invite preview reads the guild name too). Re-exported here because `host/state.test.ts` and
+// `test/host-admin.test.ts` read these names from this module.
+export { DEFAULT_MIN_APP_VERSION, GUILD_NAME_ENV, MIN_APP_VERSION_ENV } from '../config';
 
 /**
  * What this file reads off the request context. `host/app.ts` decorates `config`, `db`, `repo` and

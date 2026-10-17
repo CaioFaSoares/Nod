@@ -242,16 +242,52 @@ async function signIn(running: Running, email: string, authKey: string, device: 
   return { id: opened.personId, token: opened.token };
 }
 
-/** The admin creates the person, and the person redeems the code the answer carried. */
+/** Redeems a guild invite through the real join route: the account the person chose (0.4.5, RF-59). */
+async function joinViaInvite(
+  running: Running,
+  input: { email: string; name: string; code: string },
+): Promise<Activated> {
+  const authKey = randomAuthKey();
+  const response = await running.call('POST', HOST_ROUTES.authJoin, {
+    email: input.email,
+    name: input.name,
+    code: input.code,
+    salt: randomSalt(),
+    authKey,
+    device: DEVICE,
+  });
+  expect(response.status).toBe(200);
+  const opened = await body<TokenResponse>(response);
+  return { id: opened.personId, token: opened.token, authKey };
+}
+
+/**
+ * A person who joins the guild (0.4.5, RF-59): the admin creates an invite for these roles and the
+ * person redeems it with the account they choose — what the People tab asks for is an invite now,
+ * not the email-bound person `POST /v1/admin/people` created.
+ */
 async function member(
   running: Running,
   admin: HostAdmin,
   input: { email: string; name: string; roles: Id[] },
-): Promise<Activated & { code: string; expiresAt: string }> {
-  const created = await admin.createPerson(input);
-  const session = await activate(running, created.person.email, created.code);
-  expect(session.id).toBe(created.person.id);
-  return { ...session, code: created.code, expiresAt: created.expiresAt };
+): Promise<Activated> {
+  const created = await admin.createInvite({ roles: input.roles, maxUses: 1, expiresInMinutes: 60 });
+  return await joinViaInvite(running, { email: input.email, name: input.name, code: created.code });
+}
+
+/**
+ * A person of the guild and one access code for them, for the cases that need the access-code path:
+ * they join through an invite, and the code is the reissue `POST /v1/admin/people/:id/code` offers
+ * for somebody who already exists (SP02 §3).
+ */
+async function memberWithCode(
+  running: Running,
+  admin: HostAdmin,
+  input: { email: string; name: string; roles: Id[] },
+): Promise<{ id: string; code: string; expiresAt: string }> {
+  const person = await member(running, admin, input);
+  const issued = await admin.issueCode(person.id);
+  return { id: person.id, code: issued.code, expiresAt: issued.expiresAt };
 }
 
 /** What one person sees (`GET /v1/state`), verified by the client over the bytes received (SP04 §2). */
@@ -339,54 +375,64 @@ describe('the admin writes reach the host (SP05 §3, RF-34)', () => {
   });
 });
 
-// ---------------------------------------------------------------- people and codes (RF-33)
+// ---------------------------------------------------------------- people and invites (RF-33, RF-59)
 
-describe('the People tab (SP05 §4, RF-33)', () => {
-  test('a created person gets one code, shown once, and that code activates them', async () => {
+describe('the People tab and the guild invites (SP05 §4, 0.4.5 RF-59)', () => {
+  test('an invite joins a person, spends its use, and the reissued code activates them (RF-33)', async () => {
     const running = await startHost();
     const { admin, person: adminPerson } = await adminOf(running);
     await admin.saveRole({ id: 'team', name: 'Team', admin: false });
 
     const before = Date.now();
-    const created = await admin.createPerson({ email: ' bob@nod.test ', name: 'Bob', roles: ['team'] });
-    expect(created.person).toMatchObject({ email: 'bob@nod.test', name: 'Bob', roles: ['team'], admin: false });
-    expect(created.person.activatedAt).toBeNull();
-    expect(created.code).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/);
-    // SP02 §3: 72 h from the request.
-    const ttlHours = (Date.parse(created.expiresAt) - before) / HOUR_MS;
-    expect(ttlHours).toBeGreaterThan(71.9);
-    expect(ttlHours).toBeLessThan(72.1);
+    const invited = await admin.createInvite({ roles: ['team'], maxUses: 1, expiresInMinutes: 60 });
+    // The invite code is the long kind: six groups of four (SP02 §3).
+    expect(invited.code).toMatch(/^[0-9A-Z]{4}(-[0-9A-Z]{4}){5}$/);
+    expect(invited.invite).toMatchObject({ roles: ['team'], maxUses: 1, uses: 0, revokedAt: null });
+    const ttlMinutes = (Date.parse(invited.invite.expiresAt ?? '') - before) / 60_000;
+    expect(ttlMinutes).toBeGreaterThan(59.9);
+    expect(ttlMinutes).toBeLessThan(60.1);
 
-    // Shown once: the list the People tab renders carries no trace of the code or of a hash.
+    // The person joins with the account they chose, and the invite's roles are theirs (RF-59).
+    const bob = await joinViaInvite(running, { email: ' bob@nod.test ', name: 'Bob', code: invited.code });
     const listed = await admin.listPeople();
     expect(listed.map((item) => item.email)).toEqual([ADMIN_EMAIL, 'bob@nod.test']);
+    expect(listed[1]).toMatchObject({ name: 'Bob', roles: ['team'], activatedAt: expect.any(String) });
+    // Shown once: the list the People tab renders carries no trace of the code or of a hash.
     const wire = JSON.stringify(listed);
     for (const secret of ['code', 'salt', 'authHash', 'token']) expect(wire.includes(secret)).toBe(false);
-    expect(wire.includes(created.code)).toBe(false);
-    expect(listed[1]).toMatchObject({ disabledAt: null, activatedAt: null });
+    expect(wire.includes(invited.code)).toBe(false);
 
-    // The code activates: the person redeems it and their own session reads a snapshot.
-    const bob = await activate(running, 'bob@nod.test', created.code);
-    expect(bob.id).toBe(created.person.id);
-    expect((await snapshotOf(running, bob)).me.id).toBe(bob.id);
-
-    // A reissued code replaces the previous one (SP02 §3): the old one is dead, the new one works.
-    const reissued = await admin.issueCode(created.person.id);
-    expect(reissued.code).not.toBe(created.code);
-    const dead = await running.call('POST', HOST_ROUTES.authActivate, {
-      email: 'bob@nod.test',
-      code: created.code,
+    // The one use is spent: a second join with the same invite is dead, and so is a revoked one.
+    const spent = await running.call('POST', HOST_ROUTES.authJoin, {
+      email: 'carol@nod.test',
+      name: 'Carol',
+      code: invited.code,
       salt: randomSalt(),
       authKey: randomAuthKey(),
       device: DEVICE,
     });
-    expect(dead.status).toBe(401);
-    expect((await activate(running, 'bob@nod.test', reissued.code)).id).toBe(created.person.id);
+    expect(spent.status).toBe(401);
+    expect((await admin.listInvites()).find((invite) => invite.id === invited.invite.id)).toMatchObject({
+      uses: 1,
+      revokedAt: null,
+    });
 
-    // The roles toggle and the revoke the People tab sends.
-    const updated = await admin.setRoles(created.person.id, ['team']);
+    // The reissue the People tab offers for a person who already exists replaces their code.
+    const reissued = await admin.issueCode(bob.id);
+    expect(reissued.code).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/);
+    expect((await activate(running, 'bob@nod.test', reissued.code)).id).toBe(bob.id);
+    expect((await snapshotOf(running, bob)).me.id).toBe(bob.id);
+
+    // The roles toggle, the revoke, and the list that shows a revoked invite with its state.
+    const updated = await admin.setRoles(bob.id, ['team']);
     expect(updated.roles).toEqual(['team']);
-    const disabled = await admin.disable(created.person.id);
+    const created = await admin.createInvite({ roles: [], maxUses: null, expiresInMinutes: null });
+    expect(await admin.revokeInvite(created.invite.id)).toBe(true);
+    expect((await admin.listInvites()).find((invite) => invite.id === created.invite.id)).toMatchObject({
+      revokedAt: expect.any(String),
+    });
+
+    const disabled = await admin.disable(bob.id);
     expect(disabled.disabledAt).not.toBeNull();
     // SP03 §2: disabling revokes the sessions — the member's token is dead at once (RF-39).
     const ping = await running.call('POST', HOST_ROUTES.events, { events: [] }, bob.token);
@@ -396,19 +442,18 @@ describe('the People tab (SP05 §4, RF-33)', () => {
     await expect(admin.disable(adminPerson.id)).rejects.toThrow();
   });
 
-  test('a taken email and an unknown role answer the message of the screen, not of the host', async () => {
+  test('an unknown role and an unknown id answer the message of the screen, not of the host', async () => {
     const running = await startHost();
     const { admin } = await adminOf(running);
-    await admin.createPerson({ email: 'bob@nod.test', name: 'Bob', roles: [] });
 
-    await expect(admin.createPerson({ email: 'bob@nod.test', name: 'Other', roles: [] })).rejects.toThrow(
-      'email taken',
-    );
-    await expect(admin.createPerson({ email: 'carol@nod.test', name: 'Carol', roles: ['ghost'] })).rejects.toThrow(
+    await expect(admin.createInvite({ roles: ['ghost'], maxUses: null, expiresInMinutes: null })).rejects.toThrow(
       'the guild has no such role',
     );
+    await expect(admin.revokeInvite('nobody')).rejects.toThrow('not found on the host');
     await expect(admin.issueCode('nobody')).rejects.toThrow('not found on the host');
-    expect(await admin.listPeople()).toHaveLength(2);
+    // Nothing of the refused writes landed: the guild holds the one admin it started with.
+    expect(await admin.listPeople()).toHaveLength(1);
+    expect(await admin.listInvites()).toHaveLength(0);
   });
 });
 
@@ -769,7 +814,7 @@ describe('F1 — a join whose email is already an account of this Nod', () => {
   test('the choice is answered before any host call, and the code is still redeemable', async () => {
     const running = await startHost();
     const { admin } = await adminOf(running);
-    const created = await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
+    const created = await memberWithCode(running, admin, { email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
     const nod = newNod();
     const localId = (await nod.session.createAccount({ email: LOCAL_EMAIL, name: 'Bob Local', password: NOD_PASSWORD })).person?.id ?? '';
     const settled = running.requests.slice();
@@ -794,14 +839,14 @@ describe('F1 — a join whose email is already an account of this Nod', () => {
       password: NOD_PASSWORD,
       adoptLocal: true,
     });
-    expect(joined).toMatchObject({ kind: 'session', personId: created.person.id });
+    expect(joined).toMatchObject({ kind: 'session', personId: created.id });
     expect(joined.requests).toBeGreaterThan(0);
   });
 
   test('with the choice made and the account unlocked, the join adopts it and the credential comes along', async () => {
     const running = await startHost();
     const { admin } = await adminOf(running);
-    const created = await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
+    const created = await memberWithCode(running, admin, { email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
     const nod = newNod();
     const localId = (await nod.session.createAccount({ email: LOCAL_EMAIL, name: 'Bob Local', password: NOD_PASSWORD })).person?.id ?? '';
     // A local role of that account, and a credential saved before the join.
@@ -820,31 +865,31 @@ describe('F1 — a join whose email is already an account of this Nod', () => {
       adoptLocal: true,
     });
 
-    expect(joined).toMatchObject({ kind: 'session', personId: created.person.id, admin: false });
+    expect(joined).toMatchObject({ kind: 'session', personId: created.id, admin: false });
     // The row is the host's person, with the roles the local account had (the host decides only the
     // admin flag) and the name the person typed on this machine.
     expect(nod.repo.personById(localId)).toBeNull();
-    expect(nod.repo.personById(created.person.id)).toMatchObject({
+    expect(nod.repo.personById(created.id)).toMatchObject({
       email: LOCAL_EMAIL,
       name: 'Bob Local',
       roles: ['team'],
     });
-    expect(nod.session.current()?.id).toBe(created.person.id);
+    expect(nod.session.current()?.id).toBe(created.id);
     // The credential is readable under the new id, the index moved with it and the old keychain key
     // is gone: the item was renamed, not copied.
-    expect(await nod.vault.read(created.person.id, 'kanban')).toEqual({ username: 'bob', secret: 'kanban-secret' });
+    expect(await nod.vault.read(created.id, 'kanban')).toEqual({ username: 'bob', secret: 'kanban-secret' });
     expect(await nod.secrets.get(`nod.cred.${localId}.kanban`)).toBeNull();
-    expect(nod.repo.listVault(created.person.id).map((item) => item.keychainKey)).toEqual([
-      `nod.cred.${created.person.id}.kanban`,
+    expect(nod.repo.listVault(created.id).map((item) => item.keychainKey)).toEqual([
+      `nod.cred.${created.id}.kanban`,
     ]);
     // The host holds that person under the very id this machine now uses (SP05 §2).
-    expect(running.repo.personById(created.person.id)).toMatchObject({ email: LOCAL_EMAIL, name: 'Bob Guild' });
+    expect(running.repo.personById(created.id)).toMatchObject({ email: LOCAL_EMAIL, name: 'Bob Guild' });
   });
 
   test('a locked Nod that already has an account refuses the join, and no request leaves (F1, F3)', async () => {
     const running = await startHost();
     const { admin } = await adminOf(running);
-    const created = await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
+    const created = await memberWithCode(running, admin, { email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
     const nod = newNod();
     await nod.session.createAccount({ email: LOCAL_EMAIL, name: 'Bob Local', password: NOD_PASSWORD });
     nod.session.lock();
@@ -868,26 +913,25 @@ describe('F1 — a join whose email is already an account of this Nod', () => {
       password: NOD_PASSWORD,
       adoptLocal: true,
     });
-    expect(joined).toMatchObject({ kind: 'session', personId: created.person.id });
+    expect(joined).toMatchObject({ kind: 'session', personId: created.id });
   });
 
   test('the first run of a Nod with no account joins with no session (F3)', async () => {
     const running = await startHost();
     const { admin } = await adminOf(running);
-    const created = await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
+    const created = await memberWithCode(running, admin, { email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
     const nod = newNod();
     expect((await nod.session.state()).hasAccount).toBe(false);
 
     const joined = await activateAs(running, nod, { email: LOCAL_EMAIL, code: created.code, password: NOD_PASSWORD });
 
-    expect(joined).toMatchObject({ kind: 'session', personId: created.person.id, admin: false });
-    expect(nod.repo.personById(created.person.id)?.name).toBe(LOCAL_EMAIL);
+    expect(joined).toMatchObject({ kind: 'session', personId: created.id, admin: false });
+    expect(nod.repo.personById(created.id)?.name).toBe(LOCAL_EMAIL);
   });
 
   test('a wrong code is the join\'s one sentence, not a signed-out session (F7)', async () => {
     const running = await startHost();
-    const { admin } = await adminOf(running);
-    await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: [] });
+    await adminOf(running);
     const nod = newNod();
 
     // The cause, without the join around it: the host answers 401 (SP02 §5) and the client reads
@@ -924,25 +968,32 @@ describe('F2 — the snapshot decides the connected person\'s name and admin fla
   test('the first sync promotes the person the snapshot calls an admin, and a demotion takes it back', async () => {
     const running = await startHost();
     const { admin } = await adminOf(running);
-    const created = await admin.createPerson({ email: LOCAL_EMAIL, name: 'Bob Guild', roles: ['admin'] });
+    const created = await memberWithCode(running, admin, {
+      email: LOCAL_EMAIL,
+      name: 'Bob Guild',
+      // RF-59: an invite never grants an admin role, so the join carries none and the promotion is
+      // what the People tab does — `PATCH /v1/admin/people/:id` — before the first sync below.
+      roles: [],
+    });
+    await admin.setRoles(created.id, ['admin']);
     const nod = newNod();
     const joined = await activateAs(running, nod, { email: LOCAL_EMAIL, code: created.code, password: NOD_PASSWORD });
 
     // An access-code activation says nothing about the roles: the local row of a connected admin
     // starts without the flag, which is the state this finding is about.
-    expect(joined).toMatchObject({ kind: 'session', personId: created.person.id, admin: false });
+    expect(joined).toMatchObject({ kind: 'session', personId: created.id, admin: false });
     expect(nod.session.current()?.admin).toBe(false);
 
-    const state = await syncNod(running, nod, { id: created.person.id, token: joined.kind === 'session' ? joined.token : '' });
+    const state = await syncNod(running, nod, { id: created.id, token: joined.kind === 'session' ? joined.token : '' });
     expect(state.status).toBe('connected');
     // F2: the sync's own publish ran the reconcile — the admin screens are on.
-    expect(nod.session.current()).toMatchObject({ id: created.person.id, name: 'Bob Guild', admin: true });
+    expect(nod.session.current()).toMatchObject({ id: created.id, name: 'Bob Guild', admin: true });
 
     // Demoted on the host: the next snapshot takes the flag back.
-    await admin.setRoles(created.person.id, []);
-    const after = await syncNod(running, nod, { id: created.person.id, token: joined.kind === 'session' ? joined.token : '' });
+    await admin.setRoles(created.id, []);
+    const after = await syncNod(running, nod, { id: created.id, token: joined.kind === 'session' ? joined.token : '' });
     expect(after.status).toBe('connected');
-    expect(nod.session.current()).toMatchObject({ id: created.person.id, admin: false });
+    expect(nod.session.current()).toMatchObject({ id: created.id, admin: false });
   });
 });
 

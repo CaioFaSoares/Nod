@@ -34,15 +34,15 @@ stored in clear (`people.salt`).
 
 ## 3. Access and setup codes
 
-| | Access code | Setup code |
-| --- | --- | --- |
-| Purpose | `activate`: one person's first sign-in or reset | `setup`: creates the first admin |
-| Random | 5 bytes → 8 Crockford base32 chars | 10 bytes → 16 chars |
-| Shown as | `XXXX-XXXX` | `XXXX-XXXX-XXXX-XXXX` |
-| TTL | 72 h | 24 h |
-| Wrong tries | 5, then revoked | 5, then revoked |
-| Issued by | admin (`POST /v1/admin/people/:id/code`) | `bun run setup-code` in the container, only while no admin exists |
-| Bound to | the person's email | whoever redeems it gives email and name |
+| | Access code | Setup code | Invite code |
+| --- | --- | --- | --- |
+| Purpose | `activate`: one person's first sign-in or reset | `setup`: creates the first admin | `invite`: joins the guild — whoever holds it creates their own account (RF-59) |
+| Random | 5 bytes → 8 Crockford base32 chars | 10 bytes → 16 chars | 15 bytes → 24 chars (it opens accounts for anyone holding it, several times) |
+| Shown as | `XXXX-XXXX` | `XXXX-XXXX-XXXX-XXXX` | `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX` |
+| TTL | 72 h | 24 h | the admin's choice at creation, 1 minute to 30 days, or never |
+| Wrong tries | 5, then revoked | 5, then revoked | — the invite is bound to nobody, so a dead one is the one `invalid invite` (RF-59), not an attempt count |
+| Issued by | admin (`POST /v1/admin/people/:id/code`) | `bun run setup-code` in the container, only while no admin exists | admin (`POST /v1/admin/invites`), with the roles it grants (never an admin one), a max-use count and an expiry |
+| Bound to | the person's email | whoever redeems it gives email and name | nobody: the person gives email, name and password; the host creates them with the invite's roles |
 
 - Alphabet: Crockford base32 `0123456789ABCDEFGHJKMNPQRSTVWXYZ`.
 - Normalization before hashing: uppercase; drop spaces and hyphens; `O→0`, `I→1`, `L→1`. A `U` is
@@ -51,6 +51,23 @@ stored in clear (`people.salt`).
 - Issuing a new code for a person revokes their previous unused one.
 - `setup-code` prints only to the terminal that ran it. Running it again revokes the previous one.
   It refuses when an admin exists.
+- The kind is read from the length alone (`shared/host-api.ts`: `CODE_LENGTH`, `codeKindOf`), so
+  `POST /v1/auth/join` refuses an access or setup code with the same `invalid invite` an unknown
+  invite answers, and pays the argon2id hash before that branch (the F4 rule of §5; the invite kind
+  was added in 0.4.5, RF-59).
+- An invite is not a row of `access_codes`: `host/repo.ts` keeps it in `guild_invites` (SP01 §2,
+  migration 5) with its roles, `max_uses`, `uses`, `expires_at` and `revoked_at`. `uses` grows only
+  when the join created the person — a taken email (`409`) or a rolled-back join spends nothing.
+- **An invite never grants an admin role** (RF-59): it is a bearer code pasted into chats, so a role
+  with `admin = 1` in the create body is `400 { error: 'an invite cannot grant an admin role' }` and
+  stores nothing — and the join re-checks the roles it would grant, because a role can be promoted to
+  admin after the invite was made. That re-check answers the same `401 invalid invite` and spends no
+  use, and the invite works again if the role is demoted or removed. Making somebody an admin stays
+  `PATCH /v1/admin/people/:id`.
+- Redeeming an invite is public (`POST /v1/auth/join`): it takes the account's email, name, salt and
+  `authKey`, and `POST /v1/auth/invite` shows the guild, its icon (base64url PNG) and the roles the
+  invite grants before any account is typed. Both sit inside §5's address budget, and a failed join
+  spends that email's budget.
 
 ## 4. Salt lookup without an existence oracle
 
@@ -166,7 +183,17 @@ account's password (`test/smoke/connected.html`). The run's mode is read once at
 build-mode stamp `scripts/gen-config.ts <dev|build>` leaves beside the seed in `resources/`
 (`shared/build-mode.ts`, `nod.info.devRun`); it comes from no environment variable, no seed and no
 page, and a release's `"resources"` list never carries the stamp — so a release build answers
-`false` and never takes a password on a machine that has `authenticate`.
+`false` and never takes a password on a machine that has `authenticate` — until its system prompt
+fails.
+
+**Fallback when the system prompt fails (0.4.5, Proposto in `docs/canonico.md` §22).** The
+runtime reports `authenticate` per OS, not per enrollment: Windows without Hello enrolled reports
+it and then answers `false` to every prompt (`~/.tinyjs/skill/references/platforms.md`, "false
+where not enrolled"), which left such a person unable to accept a share, reveal, copy or send. Now a
+prompt that does not confirm answers `GATE_PROMPT_FAILED` (`shared/types.ts`), and for the rest of
+that unlocked session the backend also takes the typed password (`gateFactor`'s `promptFailed`,
+cleared at every lock and unlock). The page reopens the same action on the password prompt, and
+the password is verified against the unlocked person's verifier exactly as on Linux.
 
 Reveal shows a countdown (10 s) and then clears the value from the page. The deadline is a wall-clock
 instant, and the page drops the value the moment it is hidden, so a throttled background page cannot

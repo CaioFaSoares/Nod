@@ -7,7 +7,7 @@
 // No `tjs`, no `tiny`, no DOM, no `bun:*`: the language and type-only imports, as `shared/context.md`
 // requires of every module of this folder.
 
-import { auditUrl } from './catalog';
+import { auditUrl, byOrderAndTitle, groupByCategory } from './catalog';
 import { HOST_ROUTES } from './host-api';
 import type { PersonalView, Snapshot } from './host-api';
 import type { Entry, Id, Role, View } from './types';
@@ -124,7 +124,14 @@ function readEntry(v: unknown): Entry {
   if (typeof entry.order !== 'number') throw new SnapshotShapeError('entry.order');
   list(entry.roles, 'entry.roles');
   list(entry.views, 'entry.views');
-  return v as Entry;
+  // RF-62: an optional field, so a host of an older build answers none and the tool reads as
+  // uncategorized rather than as a shape this Nod refuses. The name itself is the host's business:
+  // `shared/catalog.ts`'s `validateEntry` is what a seed and an admin write go through.
+  const category = entry.category;
+  if (category !== undefined && category !== null && typeof category !== 'string') {
+    throw new SnapshotShapeError('entry.category');
+  }
+  return { ...(v as Entry), category: typeof category === 'string' ? category : null };
 }
 
 function readPersonalView(v: unknown): PersonalView {
@@ -239,6 +246,10 @@ export function attachPersonalViews(entries: Entry[], views: readonly PersonalVi
  * ones — inside each group in the order the local catalog already uses (`order`, then title, as in
  * `shared/catalog.ts`'s `visibleEntries`). An id that resolves to no entry is skipped, which is what
  * a favorite of an org tool looks like once a sign-out emptied the org half.
+ *
+ * RF-62 (0.4.5): the org half reads grouped by category — the guild's dividers, and the order the
+ * sidebar digits follow, since this is the one list both the sidebar and `tools.state` are built
+ * from. The favorites stay one block on top and are not split by category.
  */
 export function sidebarOrder(rows: {
   orgTools: Entry[];
@@ -257,9 +268,13 @@ export function sidebarOrder(rows: {
     placed.add(id);
     ordered.push(entry);
   }
-  for (const group of [rows.orgTools, rows.personalTools]) {
-    const sorted = group.slice().sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, 'en'));
-    for (const entry of sorted) {
+  // RF-62: the org tools as the category groups, flattened back into the one order.
+  const orgGrouped: Entry[] = [];
+  for (const group of groupByCategory(rows.orgTools.slice().sort(byOrderAndTitle))) {
+    for (const entry of group.entries) orgGrouped.push(entry);
+  }
+  for (const group of [orgGrouped, rows.personalTools.slice().sort(byOrderAndTitle)]) {
+    for (const entry of group) {
       if (placed.has(entry.id)) continue;
       placed.add(entry.id);
       ordered.push(entry);

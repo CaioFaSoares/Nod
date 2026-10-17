@@ -22,6 +22,12 @@ Os ícones referenciados pelas entradas ficam em `resources/` (caminho relativo,
 `tray.png`, o ícone da bandeja no Linux. O **ícone do app** (o do Dock/taskbar, outro assunto) tem
 a sua própria seção: §9.
 
+**From 0.4.5 o seed é opcional** (RF-61, `docs/canonico.md` §22 "Seed as optional import"): uma
+release pode sair sem `resources/seed.json`, e o app sai vazio; o tile Offline do primeiro uso
+oferece "Import a seed file" (`session.importSeed`) enquanto não houver conta. O gate de origins,
+camera/mic e a URL de atualização continuam vindo só de um seed embutido — uma release sem seed não
+tem esses extras.
+
 ## 2. Gerar o artefato
 
 ```
@@ -30,10 +36,11 @@ bun run app:build
 ```
 
 `app:build` roda `scripts/gen-config.ts build` (grava `tinyjs.json` com o gate de origin das
-entradas e a lista `resources`) e em seguida `tinyjs build`. Sem `resources/seed.json` o passo falha
-de propósito, com `private seed missing: resources/seed.json (see resources/seed.example.json)`
-(RF-26); com um seed que não valida, falha com `invalid seed: <motivo>`. O `tinyjs.json` é gerado e
-**gitignored**: o gate de origins sai do seed e não pode vazar.
+entradas e a lista `resources`) e em seguida `tinyjs build`. Desde 0.4.5 o build **não exige** mais
+`resources/seed.json` (RF-61): sem ele o `tinyjs.json` sai válido, sem `seed.json` na lista
+`resources`, e o app instalado abre vazio; com um seed que não valida, falha com
+`invalid seed: <motivo>`. O `tinyjs.json` é gerado e **gitignored**: o gate de origins sai do seed e
+não pode vazar.
 
 No desenvolvimento do app a partir do código (`bun run app:dev`), **não** rode com `TINYJS_DEBUG=1`
 usando credenciais reais: o trace do runtime imprime o EVAL do adaptador de login e cada chamada de
@@ -202,5 +209,5 @@ serves every OS: sips turns it into the macOS `.icns` (16…1024), Linux copies 
   build will wear and refuses the release when the secret carries `icon.png` and `tinyjs.json` says
   otherwise.
 
-Everything else of a custom build is the normal step (§2): the seed is still the private one and the
-build still fails without it.
+Everything else of a custom build is the normal step (§2): the seed is still the private one, and from
+0.4.5 a build without it is valid — it just starts empty (RF-61, §1).

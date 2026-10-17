@@ -1,21 +1,23 @@
-// The admin group of SP03 §2: people, their access codes and sessions, roles, grants, the org
-// catalog, the one-time bootstrap and the event log. `host/app.ts` mounts this plugin with one
-// `.use(...)` line, exactly like the auth, state and event groups (`host/context.md`).
+// The admin group of SP03 §2: people, their access codes and sessions, the guild invites of RF-59,
+// roles, grants, the org catalog, the one-time bootstrap and the event log. `host/app.ts` mounts this
+// plugin with one `.use(...)` line, exactly like the auth, state and event groups (`host/context.md`).
 //
 // `adminAuth` covers every route below it, so a caller who is not an admin person never reaches a
-// handler (SP03 §1). The bodies are the shapes of `shared/host-api.ts` — `PersonCreateRequest`,
-// `PersonUpdateRequest`, `RoleRequest`, `GrantRequest`, `OrgTool`, `PromoteRequest`,
+// handler (SP03 §1). The bodies are the shapes of `shared/host-api.ts` — `PersonUpdateRequest`,
+// `CreateInviteRequest`, `RoleRequest`, `GrantRequest`, `OrgTool`, `PromoteRequest`,
 // `BootstrapRequest`, `AdminEventsQuery` — so the Nod and the host validate the same fields; a body
 // that fails its schema is the 400 `app.ts` builds, naming the field.
 //
-// The repo owns every rule and every status (`host/repo.ts`, SP01 §2): a taken email, a stale
-// write, the last admin, a grant on a personal entry. This file only translates a validated body
-// into what the repo takes and answers with the row it wrote — no rule is repeated here.
+// The repo owns every rule and every status (`host/repo.ts`, SP01 §2): a stale write, the last admin,
+// a grant on a personal entry, a role the guild does not have. This file only translates a validated
+// body into what the repo takes and answers with the row it wrote — no rule is repeated here.
 //
-// No secret leaves here. The access code is generated once (SP02 §3), stored as the hex SHA-256 of
-// its normalized form, and returned only in the answer that created it: never listed, never logged,
-// and `GET /v1/admin/people` carries no salt and no hash (H2 decision 2). Admin tool writes pass the
-// host clock as `updatedAt`; only the personal writes of SP03 §2 carry the Nod's (SP04 §4).
+// No secret leaves here. Access and invite codes are generated once (SP02 §3, RF-59), stored as the
+// hex SHA-256 of their normalized form, and returned only in the answer that created them: never
+// listed, never logged, and `GET /v1/admin/people` carries no salt and no hash (H2 decision 2).
+// Creating a person no longer happens here — a guild invite is what does it (RF-59) — while the
+// reissue below stays, because it is how an existing person resets. Admin tool writes pass the host
+// clock as `updatedAt`; only the personal writes of SP03 §2 carry the Nod's (SP04 §4).
 
 import { Elysia, status, t } from 'elysia';
 
@@ -28,12 +30,13 @@ import {
   type AdminPerson,
   type BootstrapResponse,
   type CodeResponse,
+  type CreateInviteResponse,
   type DeviceOs,
   type DeviceSession,
   type GuildIconResponse,
+  type GuildInvite,
   type HostEvent,
   type OrgTool,
-  type PersonCreateResponse,
 } from '../../shared/host-api';
 import type { Entry, Role } from '../../shared/types';
 import { adminAuth, callerOf, hostOf, personAuth } from '../auth';
@@ -50,6 +53,10 @@ import {
 /** SP01 §2: an entry id is a slug, the same pattern `shared/catalog.ts` validates a catalog with. */
 const ENTRY_ID = '^[a-z0-9][a-z0-9-]{0,39}$';
 
+/** RF-59: `POST /v1/admin/invites` caps — 1000 redemptions, and 30 days of validity (SP03 §2). */
+const MAX_INVITE_USES = 1000;
+const MAX_INVITE_EXPIRY_MINUTES = 60 * 24 * 30;
+
 /** SP03 §2: the personal tool ids the Nod generates. */
 const PERSONAL_ID = '^p-[a-z0-9]{10}$';
 
@@ -61,7 +68,6 @@ const idParams = t.Object({ id: idSchema });
 const entryIdParams = t.Object({ id: entryIdSchema });
 
 /** Bounds as in `routes/auth.ts`: the shapes are SP01 §2's, the lengths only keep a body finite. */
-const emailSchema = t.String({ minLength: 1, maxLength: 320 });
 const nameSchema = t.String({ minLength: 1, maxLength: 200 });
 const textSchema = t.String({ minLength: 1, maxLength: 2048 });
 /** The org tool ids a write cites; a role id is a slug by SP01 §2 but nothing validates it there. */
@@ -86,6 +92,8 @@ const viewBody = t.Object({
 const toolBody = t.Object({
   id: entryIdSchema,
   title: nameSchema,
+  /** RF-62: the display category. `null` is "no category"; the length mirrors the validator's. */
+  category: t.Optional(t.Union([t.String({ maxLength: 40 }), t.Null()])),
   url: textSchema,
   icon: nullableText,
   order: t.Number(),
@@ -95,17 +103,21 @@ const toolBody = t.Object({
   active: t.Boolean(),
 });
 
-const personCreateBody = t.Object({
-  email: emailSchema,
-  name: nameSchema,
-  roles: roleIds,
-});
-
 /** SP03 §2: "only what the caller sends changes", so every field is optional. */
 const personUpdateBody = t.Object({
   name: t.Optional(nameSchema),
   roles: t.Optional(roleIds),
   disabled: t.Optional(t.Boolean()),
+});
+
+/**
+ * SP03 §2's `CreateInviteRequest` (RF-59): the roles the invite grants — all of them must exist —
+ * 1..1000 uses or no limit, and a validity of 1 minute to 30 days or none at all.
+ */
+const inviteBody = t.Object({
+  roles: roleIds,
+  maxUses: t.Union([t.Integer({ minimum: 1, maximum: MAX_INVITE_USES }), t.Null()]),
+  expiresInMinutes: t.Union([t.Integer({ minimum: 1, maximum: MAX_INVITE_EXPIRY_MINUTES }), t.Null()]),
 });
 
 const roleBody = t.Object({ name: nameSchema, admin: t.Boolean() });
@@ -166,9 +178,13 @@ async function storedCodeHash(code: string): Promise<string> {
  * id; the host always decides `scope`, `owner_id` and `updated_at` (SP01 §2).
  */
 function toToolInput(id: string, tool: Entry): ToolInput {
+  const category = tool.category ?? null;
   return {
     id,
     title: tool.title,
+    // RF-62: the same normalization the shared validator applies — trimmed, and nothing is `null` —
+    // so a write that reaches the host directly is filed exactly like one the Nod validated.
+    category: category === null || category.trim() === '' ? null : category.trim(),
     url: tool.url,
     icon: tool.icon ?? null,
     order: tool.order,
@@ -223,35 +239,6 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
   /** `AdminPerson[]`: the repo's rows carry no salt and no hash (H2 decision 2). */
   .get(HOST_ROUTES.adminPeople, (ctx): AdminPerson[] => hostOf(ctx).repo.listPeople())
 
-  /**
-   * Creates the person and their one access code as one unit of work (SP02 §3): the code is bound
-   * to the person's email, dies after 72 h, and is answered here and never again.
-   */
-  .post(HOST_ROUTES.adminPeople, { body: personCreateBody }, async (ctx): Promise<PersonCreateResponse> => {
-    const { repo, auth } = hostOf(ctx);
-    const code = generateCode('access');
-    // The hash is computed before the transaction: `repo.transaction` is synchronous (H2 decision 14).
-    const codeHash = await storedCodeHash(code);
-    const now = auth.now();
-    const { person, expiresAt } = repo.transaction(() => {
-      const created = repo.createPerson(
-        {
-          id: crypto.randomUUID(),
-          email: ctx.body.email,
-          name: ctx.body.name,
-          roles: ctx.body.roles,
-        },
-        now,
-      );
-      const record = repo.issueCode(
-        { id: crypto.randomUUID(), purpose: 'activate', personId: created.id, codeHash },
-        now,
-      );
-      return { person: created, expiresAt: record.expiresAt };
-    });
-    return { person, code, expiresAt };
-  })
-
   /** SP03 §2: only what the caller sends changes; disabling revokes every session of the person. */
   .patch(HOST_ROUTES.adminPerson, { params: idParams, body: personUpdateBody }, (ctx) => {
     const { repo, auth } = hostOf(ctx);
@@ -294,6 +281,61 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
     const { id } = ctx.params;
     if (repo.personById(id) === null) unknown('person');
     return repo.sessionsOfPerson(id, auth.now()).map(toDeviceSession);
+  })
+
+  // -------------------------------------------------------------- guild invites (0.4.5, RF-59)
+
+  /** SP03 §2: every invite the guild has, newest first — revoked ones included, never their codes. */
+  .get(HOST_ROUTES.adminInvites, (ctx): GuildInvite[] => hostOf(ctx).repo.listInvites())
+
+  /**
+   * SP03 §2: stores one invite and answers its code in this answer only (RF-59). The code is the one
+   * of SP02 §3 that carries the most entropy, and what is stored is the hex SHA-256 of its normalized
+   * form — never the code, exactly like an access code. A role the guild does not have is the repo's
+   * `404` and stores nothing.
+   */
+  .post(
+    HOST_ROUTES.adminInvites,
+    { body: inviteBody },
+    async (ctx): Promise<CreateInviteResponse> => {
+      const { repo, auth } = hostOf(ctx);
+      const { person, session } = callerOf(ctx);
+      const code = generateCode('invite');
+      const now = auth.now();
+      const invite = repo.createInvite(
+        {
+          id: crypto.randomUUID(),
+          // The hash is computed before the write, as every code of this file is (H2 decision 14).
+          codeHash: await storedCodeHash(code),
+          roles: ctx.body.roles,
+          maxUses: ctx.body.maxUses,
+          createdBy: person.id,
+          expiresInMinutes: ctx.body.expiresInMinutes,
+        },
+        now,
+      );
+      // The guild's own log records the invite without its code, the way the Nod's local one does:
+      // roles, the cap and the expiry, and nothing that could let a reader join (AGENTS.md).
+      const detail = [
+        `roles: ${invite.roles.length === 0 ? 'none' : invite.roles.join(', ')}`,
+        `uses: ${invite.maxUses === null ? 'unlimited' : invite.maxUses}`,
+        `expires: ${invite.expiresAt ?? 'never'}`,
+      ].join(' — ');
+      repo.addEvents(
+        person.id,
+        session.id,
+        [{ id: crypto.randomUUID(), at: now, kind: 'invite_issued', detail }],
+        now,
+      );
+      return { invite, code };
+    },
+  )
+
+  /** SP03 §2: revoking an invite, `204` — also for one that is already revoked. Unknown id: 404. */
+  .delete(HOST_ROUTES.adminInvite, { params: idParams }, (ctx) => {
+    const { repo, auth } = hostOf(ctx);
+    if (!repo.revokeInvite(ctx.params.id, auth.now())) unknown('invite');
+    return status(204);
   })
 
   // -------------------------------------------------------------- sessions
@@ -367,6 +409,9 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
     const copy: Entry = {
       id,
       title: personal.title,
+      // RF-62: a personal tool carries no category, so the copy starts uncategorized — the admin
+      // files it in the Tools tab like any other org tool.
+      category: null,
       url: personal.url,
       icon: personal.icon,
       order: personal.order,

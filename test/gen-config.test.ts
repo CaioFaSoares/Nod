@@ -1,6 +1,6 @@
 // Proves the observable behavior of `scripts/gen-config.ts` (v2 release config slice).
 // Contract: docs/arquitetura.md §2 (origin gate) and §6 (build and dev); requirements:
-// docs/canonico.md §19, RF-26, RF-27, RF-56.
+// docs/canonico.md §19, RF-26, RF-27, RF-56, RF-61.
 // Run with `bun test test/`.
 
 import { describe, expect, test } from 'bun:test';
@@ -115,10 +115,14 @@ describe('generateConfig', () => {
     expect(config.resources).toEqual(['seed.json', 'tray.png', 'icons/a.png']);
   });
 
-  test('build without a seed fails with the RF-26 message', () => {
-    expect(() => generateConfig(BASE, null, 'build')).toThrow(
-      'private seed missing: resources/seed.json (see resources/seed.example.json)',
-    );
+  test('build without a seed ships no seed and no tool origin (0.4.5, RF-61)', () => {
+    const config = generateConfig(BASE, null, 'build');
+
+    // The seed is an optional import now: a release without one starts empty, and the seed it did
+    // not have is not in the resources list.
+    expect(config.resources).toEqual(['tray.png']);
+    expect(origins(config)).toEqual({ 'file://*': 'all' });
+    expect(config.update).toBeUndefined();
   });
 
   test('build without camera and microphone usage strings fails (macOS kills the app)', async () => {

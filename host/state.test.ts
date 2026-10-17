@@ -447,6 +447,33 @@ describe('GET /v1/state (SP04 §2)', () => {
     expect(adaSnapshot.me.admin).toBe(true);
   });
 
+  test('the snapshot carries the category of an org tool, and none as null (RF-62)', async () => {
+    const host = await startHost();
+    const { ada } = seedGuild(host);
+    // The admin files one of the two tools; the other stays where the seed left it.
+    host.repo.saveOrgTool(
+      {
+        id: 'jitsi',
+        title: 'Jitsi',
+        url: 'https://jitsi.example',
+        icon: null,
+        order: 1,
+        category: 'Support',
+        auth: null,
+        active: true,
+        roles: ['team'],
+        views: [],
+      },
+      NOW,
+    );
+
+    const snapshot = await stateSnapshot(host, await openSession(host, ada.id));
+    expect(snapshot.orgTools.map((entry) => [entry.id, entry.category])).toEqual([
+      ['jitsi', 'Support'],
+      ['figma', null],
+    ]);
+  });
+
   test('a person sees their own personal data only, admin included', async () => {
     const host = await startHost();
     const { ada, bob, cara } = seedGuild(host);

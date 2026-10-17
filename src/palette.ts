@@ -4,7 +4,8 @@
 // tools or the catalog on its own. It talks to the backend only through `./api`.
 import { call, errorMessage } from './api';
 import { el, message } from './ui';
-import type { Entry, ToolStatus } from '../shared/types';
+import { categoryOf } from '../shared/catalog';
+import type { Entry, Id, ToolStatus } from '../shared/types';
 import type { SettingsTab } from './settings';
 
 const OVERLAY_ID = 'palette-overlay';
@@ -14,6 +15,8 @@ interface Item {
   label: string;
   /** match key: lowercase, without accents */
   key: string;
+  /** RF-62: the secondary text of the row — the category of a tool, when it has one. */
+  hint?: string;
   run: () => unknown;
 }
 
@@ -85,8 +88,17 @@ export function openPalette(ctx: {
   const previous = opener instanceof HTMLElement ? opener : null;
 
   const items: Item[] = [];
+  // RF-62: a tool row carries its category as the secondary text of the list.
+  const categoryOfId = new Map<Id, string | null>();
+  for (const entry of ctx.entries) categoryOfId.set(entry.id, categoryOf(entry));
   for (const tool of ctx.tools) {
-    items.push({ label: tool.title, key: matchKey(tool.title), run: () => call('tools.open', { id: tool.id }) });
+    const category = categoryOfId.get(tool.id) ?? null;
+    items.push({
+      label: tool.title,
+      key: matchKey(tool.title),
+      ...(category === null ? {} : { hint: category }),
+      run: () => call('tools.open', { id: tool.id }),
+    });
   }
   for (const entry of ctx.entries) {
     entry.views.forEach((entryView, index) => {
@@ -179,7 +191,8 @@ export function openPalette(ctx: {
           role: 'option',
           aria: { selected: active ? 'true' : 'false' },
         },
-        item.label,
+        el('span', { class: 'palette-item-label' }, item.label),
+        item.hint === undefined ? null : el('span', { class: 'palette-item-hint' }, item.hint),
       );
       option.addEventListener('click', () => {
         void runItem(item);

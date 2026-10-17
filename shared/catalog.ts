@@ -10,6 +10,10 @@ const IPV6_LOOPBACK = '[::1]';
 const HASH = /^[0-9a-f]{64}$/;
 const LOOPBACK_IPV4 = /^127(\.\d{1,3}){3}$/;
 const FORBIDDEN_KEY = /password|secret|token|senha|segredo/i;
+/** RF-62: the longest category name the guild may give a tool. */
+export const CATEGORY_MAX_LENGTH = 40;
+/** A control character in a category name: it is printed in the sidebar and in Home, so refused. */
+const CATEGORY_CONTROL = /[\u0000-\u001f\u007f]/;
 
 // ---------------------------------------------------------------- address
 
@@ -113,6 +117,21 @@ function validateView(v: unknown, origin: string): View {
   return { label, url, mode };
 }
 
+/**
+ * RF-62: the category a guild gives a tool. A name is trimmed, and one that is empty or only spaces
+ * is `null` — "no category" written down, never an empty group in the display. Longer than
+ * `CATEGORY_MAX_LENGTH` characters or carrying a control character is refused: the name is what the
+ * sidebar and Home print.
+ */
+function validateCategory(v: unknown): string | null {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== 'string') throw new Error('invalid category');
+  const name = v.trim();
+  if (name === '') return null;
+  if (name.length > CATEGORY_MAX_LENGTH || CATEGORY_CONTROL.test(name)) throw new Error('invalid category');
+  return name;
+}
+
 /** Normalizes a catalog entry, applying the defaults and refusing what does not serve. */
 export function validateEntry(e: unknown): Entry {
   const raw = record(e, 'invalid entry');
@@ -145,6 +164,7 @@ export function validateEntry(e: unknown): Entry {
   return {
     id,
     title,
+    category: validateCategory(raw.category),
     url,
     icon: raw.icon === undefined || raw.icon === null ? null : requiredText(raw.icon, 'invalid icon'),
     order,
@@ -244,12 +264,85 @@ export function validateSeed(s: unknown): Seed {
 
 // ---------------------------------------------------------------- visibility
 
+/**
+ * The catalog's own order: `order`, then title. `visibleEntries` sorts by it, and the display halves
+ * of `shared/host-merge.ts`'s `sidebarOrder` do too — before RF-62 splits the org half into
+ * categories, so every list of the app reads the same way.
+ */
+export function byOrderAndTitle(a: Entry, b: Entry): number {
+  return a.order - b.order || a.title.localeCompare(b.title, 'en');
+}
+
 /** Active entries the person sees, ordered by `order` and then by title. */
 export function visibleEntries(entries: Entry[], person: { roles: Id[]; admin: boolean }): Entry[] {
   const visible = entries.filter(
     (entry) => entry.active && (person.admin || entry.roles.some((role) => person.roles.includes(role))),
   );
-  return visible.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, 'en'));
+  return visible.sort(byOrderAndTitle);
+}
+
+// ---------------------------------------------------------------- categories (RF-62)
+
+/**
+ * `Entry.category` as every display reads it: the trimmed name, or `null` when the entry carries
+ * none — an old host's snapshot, a personal tool, a seed written before the field. The one place
+ * that decides it, so the validator, the sidebar and Home cannot disagree about what is empty.
+ */
+export function categoryOf(entry: Entry): string | null {
+  const name = entry.category;
+  if (typeof name !== 'string') return null;
+  const trimmed = name.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+/** One group of the display: a category name, or `null` for the tools the guild filed nowhere. */
+export interface CategoryGroup {
+  /** the trimmed category name; `null` is the uncategorized group */
+  category: string | null;
+  entries: Entry[];
+}
+
+/** The smallest `order` of a group: where the group stands among the others. */
+function groupOrder(group: CategoryGroup): number {
+  let min = Number.POSITIVE_INFINITY;
+  for (const entry of group.entries) {
+    if (entry.order < min) min = entry.order;
+  }
+  return min;
+}
+
+/**
+ * RF-62: org tools grouped by the category the guild gave them, in the order the display reads them.
+ * A group stands where its smallest `order` puts it — the tool the guild ordered first names the
+ * place — and a tie is decided by the category name. The uncategorized group comes last, always:
+ * the tools with no place of their own read after the ones the guild filed.
+ *
+ * The entries inside a group keep the order they arrived in, which is the catalog's own
+ * (`visibleEntries`: `order`, then title; `sidebarOrder` sorts the same way). A list with no
+ * category at all answers one `null` group carrying it unchanged, so a guild that files nothing
+ * sees exactly the catalog it saw before.
+ */
+export function groupByCategory(entries: readonly Entry[]): CategoryGroup[] {
+  const named = new Map<string, CategoryGroup>();
+  const uncategorized: Entry[] = [];
+  for (const entry of entries) {
+    const category = categoryOf(entry);
+    if (category === null) {
+      uncategorized.push(entry);
+      continue;
+    }
+    const group = named.get(category);
+    if (group === undefined) named.set(category, { category, entries: [entry] });
+    else group.entries.push(entry);
+  }
+  const groups = [...named.values()];
+  groups.sort((a, b) => {
+    const order = groupOrder(a) - groupOrder(b);
+    if (order !== 0) return order;
+    return (a.category as string).localeCompare(b.category as string, 'en');
+  });
+  if (uncategorized.length > 0) groups.push({ category: null, entries: uncategorized });
+  return groups;
 }
 
 // ---------------------------------------------------------------- which catalog is in force

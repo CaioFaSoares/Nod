@@ -31,11 +31,32 @@ import { keysKey } from './keys';
 import { reencryptVaultItems } from './vault';
 import type { DerivedKeys, PasswordHashV2 } from '../shared/auth';
 import type { PasswordChangeRequest } from '../shared/host-api';
-import type { EventType, Id, PasswordHash, Person, SecretStore, SessionState, VaultItem } from '../shared/types';
+import type {
+  EntryTarget,
+  EventType,
+  Id,
+  PasswordHash,
+  Person,
+  SecretStore,
+  SessionState,
+  VaultItem,
+} from '../shared/types';
 import type { Repo } from './repo';
 
 /** Last person used: only the id; it drives biometrics and the pre-filled sign-in screen. */
 const LAST_PERSON_KEY = 'last_person';
+/**
+ * 0.4.5 (RF-60): the entry-screen tile the last unlock used, `EntryTarget` as JSON. A preference of
+ * `store.json`, never a secret — it names the local machine or the guild's address, and no code,
+ * password or token ever goes in it.
+ */
+const LAST_ENTRY_KEY = 'last_entry';
+/**
+ * 0.4.5 (RF-60): what an RPC that reaches the host is refused with while the person entered through
+ * the Offline tile — the guild is disconnected exactly as it is for O2, with its own sentence so the
+ * screen can say which of the two it is. `backend/sync.ts` owns the O2 one.
+ */
+export const OFFLINE_SESSION_ERROR = 'offline session — lock and enter the guild to use it';
 /**
  * SP02 §9/V1: the person whose biometric item was dropped because it held the old marker (the
  * person id) instead of a `vaultKey`. The next password unlock writes the item again from the key
@@ -187,8 +208,27 @@ export interface Session {
     signIn: boolean;
     host: () => Promise<T>;
   }): Promise<JoinGate<T>>;
-  unlock(p: { email: string; password: string }): Promise<SessionState>;
-  unlockBiometric(): Promise<SessionState>;
+  unlock(p: { email: string; password: string; target?: EntryTarget }): Promise<SessionState>;
+  unlockBiometric(p?: { target?: EntryTarget }): Promise<SessionState>;
+  /**
+   * 0.4.5 (RF-60): how the unlocked session entered — `guild` (a join, or a guild tile) or
+   * `offline` (a local account, reached without the host) — and `null` while locked. Synchronous
+   * because the RPC gate reads it on the path of every call: an offline session makes no host call,
+   * exactly as the O2 disconnect does (`backend/main.ts`'s `disconnected`).
+   */
+  mode(): 'offline' | 'guild' | null;
+  /** 0.4.5 (RF-60): the tile the last unlock used, for `session.profiles` to preselect. */
+  lastEntry(): Promise<EntryTarget | null>;
+  /**
+   * 0.4.5 (RF-60): remembers the tile an unlock or a join used. The joins (`host.activate`,
+   * `host.signIn`) call it with their guild, which only they know the address of.
+   */
+  rememberEntry(target: EntryTarget): Promise<void>;
+  /**
+   * 0.4.5 (RF-60): the person of the last unlock — the Offline tile prefills their email. `null`
+   * on a machine that never unlocked (or whose person was revoked since).
+   */
+  lastPerson(): Promise<Person | null>;
   enableBiometric(password: string): Promise<SessionState>;
   /**
    * SP02 §9: removes `nod.bio.<person>` — no biometric item, no biometric unlock. The password
@@ -278,6 +318,9 @@ export function createSession(deps: SessionDeps): Session {
   let lastWiped: Id | null = null;
   // V1/K1: subscribers that need the new keys of an activation, in registration order.
   const activated: ((event: ActivationEvent) => void | Promise<void>)[] = [];
+  // 0.4.5 (RF-60): how the unlocked session entered. A local account is `offline` — the whole guild
+  // is disconnected for it — and a join, or a guild tile, is `guild`. `lock()` clears it.
+  let entryMode: 'offline' | 'guild' | null = null;
 
   function now(): Date {
     return deps.now === undefined ? new Date() : deps.now();
@@ -300,7 +343,7 @@ export function createSession(deps: SessionDeps): Session {
     return `${BIOMETRIC_PREFIX}${personId}`;
   }
 
-  async function lastPerson(): Promise<Id | null> {
+  async function lastPersonId(): Promise<Id | null> {
     const raw = await deps.store.get(LAST_PERSON_KEY);
     return typeof raw === 'string' && raw.length > 0 ? raw : null;
   }
@@ -447,13 +490,63 @@ export function createSession(deps: SessionDeps): Session {
       person: unlockedAs,
       biometric,
       waitMs: waitMs(),
+      // 0.4.5 (RF-60): the tile the session entered by, `null` while locked (the entry screen has no
+      // session at all).
+      mode: unlockedAs === null ? null : entryMode,
     };
   }
 
   async function state(): Promise<SessionState> {
-    const last = await lastPerson();
+    const last = await lastPersonId();
     knownBiometric = last !== null && (await hasBiometrics(last));
     return localState(current, knownBiometric);
+  }
+
+  /** 0.4.5 (RF-60): the person of the last unlock — the Offline tile's prefilled email. */
+  async function lastPerson(): Promise<Person | null> {
+    const id = await lastPersonId();
+    return id === null ? null : deps.repo.personById(id);
+  }
+
+  /** 0.4.5 (RF-60): the tile the last unlock used; a `store` value this build cannot read is none. */
+  async function lastEntry(): Promise<EntryTarget | null> {
+    const raw = await deps.store.get(LAST_ENTRY_KEY);
+    if (typeof raw !== 'string') return null;
+    let value: unknown;
+    try {
+      value = JSON.parse(raw) as unknown;
+    } catch {
+      return null;
+    }
+    if (typeof value !== 'object' || value === null) return null;
+    if (!('kind' in value)) return null;
+    if (value.kind === 'offline') return { kind: 'offline' };
+    if (value.kind !== 'guild' || !('id' in value)) return null;
+    const id = value.id;
+    return typeof id === 'string' && id !== '' ? { kind: 'guild', id } : null;
+  }
+
+  async function rememberEntry(target: EntryTarget): Promise<void> {
+    await deps.store.set(LAST_ENTRY_KEY, JSON.stringify(target));
+  }
+
+  /**
+   * 0.4.5 (RF-60): whether this unlock may enter through `target`. A guild tile opens only while
+   * this Nod still holds that `host` row and only for the person of it; every other answer is the
+   * `invalid credentials` the screen already shows for a wrong password, so a tile never says who
+   * the guild's account is (canonico §22 "Entry screen"). No target is the Offline tile (RF-60).
+   */
+  function entryAllowed(target: EntryTarget | undefined, personId: Id): boolean {
+    if (target === undefined || target.kind === 'offline') return true;
+    const row = deps.repo.hostRecord();
+    return row !== null && row.address === target.id && row.personId === personId;
+  }
+
+  /** 0.4.5 (RF-60): the mode and the remembered tile of an unlock that just succeeded. */
+  async function enterAs(target: EntryTarget | undefined): Promise<void> {
+    const used: EntryTarget = target === undefined ? { kind: 'offline' } : target;
+    entryMode = used.kind;
+    await rememberEntry(used);
   }
 
   // ---------------------------------------------------------------- account
@@ -513,6 +606,9 @@ export function createSession(deps: SessionDeps): Session {
     current = created;
     currentKeys = keys;
     currentVaultKey = keys.vaultKey;
+    // 0.4.5 (RF-60): the account of the Offline tile is the local one — this session reaches no
+    // guild, and the tile is what the next entry screen preselects.
+    await enterAs(undefined);
     return state();
   }
 
@@ -549,7 +645,7 @@ export function createSession(deps: SessionDeps): Session {
     knownBiometric = true;
   }
 
-  async function unlock(p: { email: string; password: string }): Promise<SessionState> {
+  async function unlock(p: { email: string; password: string; target?: EntryTarget }): Promise<SessionState> {
     if (waitMs() > 0) throw new Error(WAIT_BEFORE_RETRY);
 
     const found = deps.repo.personAuthByEmail(p.email.trim().toLowerCase());
@@ -574,6 +670,14 @@ export function createSession(deps: SessionDeps): Session {
       record('unlock_failed', null);
       throw new Error(INVALID_CREDENTIALS);
     }
+    // 0.4.5 (RF-60): the tile decides which way in, and a guild tile that is not this person's pays
+    // the same failure a wrong password does — the entry screen is not an oracle for the guild's
+    // account. The check is here, before anything of the session moves.
+    if (!entryAllowed(p.target, found.person.id)) {
+      registerFailure();
+      record('unlock_failed', null);
+      throw new Error(INVALID_CREDENTIALS);
+    }
 
     // SP02 §6 migration: a v1 account — one written before this format; a connected account is
     // created with V2 at activation — is verified against the old PBKDF2 hash once and rewritten as
@@ -588,21 +692,26 @@ export function createSession(deps: SessionDeps): Session {
     current = found.person;
     currentKeys = keys;
     currentVaultKey = keys === null ? null : keys.vaultKey;
+    // RF-60: the tile is what this session entered by, and the next entry screen preselects it.
+    await enterAs(p.target);
     // SP02 §8/§9: with the key in hand, the person's legacy values are sealed and the biometric
     // item that still holds the old marker becomes a key. Both are idempotent.
     if (keys !== null) await refreshBiometricItem(found.person.id, keys.vaultKey);
     return state();
   }
 
-  async function unlockBiometric(): Promise<SessionState> {
+  async function unlockBiometric(p: { target?: EntryTarget } = {}): Promise<SessionState> {
     if (!deps.biometricAvailable) throw new Error(NO_BIOMETRICS);
 
-    const last = await lastPerson();
+    const last = await lastPersonId();
     if (!(await deps.authenticate(BIOMETRIC_REASON))) throw new Error(BIOMETRICS_DECLINED);
 
     const stored = last === null ? null : await deps.keychain.get(biometricKey(last));
     const found = last === null ? null : deps.repo.personById(last);
     if (last === null || stored === null || found === null) throw new Error(BIOMETRICS_DISABLED);
+    // 0.4.5 (RF-60): a guild tile opens only for the guild's own person, like the password unlock
+    // above (the item belongs to the last person, who is the only one biometrics can unlock).
+    if (!entryAllowed(p.target, found.id)) throw new Error(INVALID_CREDENTIALS);
 
     const key = decodeVaultKey(stored);
     if (key === null) {
@@ -620,6 +729,7 @@ export function createSession(deps: SessionDeps): Session {
     // (SP02 §9), and the vault of this session is readable with it.
     currentKeys = null;
     currentVaultKey = key;
+    await enterAs(p.target);
     return state();
   }
 
@@ -750,6 +860,9 @@ export function createSession(deps: SessionDeps): Session {
     // SP02 §7/V1: the row and the session are the host person's now; a subscriber that had to wait
     // for the keys (K1 regenerates the E02 pairs here) runs before the caller is answered.
     await announceActivated(person.id, keys.vaultKey, adopt, p.activation === true);
+    // 0.4.5 (RF-60): a join is the guild session, whichever code opened it. `host.activate` and
+    // `host.signIn` remember the guild tile themselves — only they know the address of it.
+    entryMode = 'guild';
     return state();
   }
 
@@ -991,6 +1104,9 @@ export function createSession(deps: SessionDeps): Session {
     current = null;
     currentKeys = null;
     currentVaultKey = null;
+    // 0.4.5 (RF-60): the way the session entered goes with it; the mode is the session's, not the
+    // machine's (the tile of the *next* unlock is `last_entry`, which stays in `store`).
+    entryMode = null;
     if (id !== null) record('locked', id);
     return localState(null, knownBiometric);
   }
@@ -1009,6 +1125,9 @@ export function createSession(deps: SessionDeps): Session {
       current = null;
       currentKeys = null;
       currentVaultKey = null;
+      // 0.4.5 (RF-60): a person revoked on the host locks this session, and the way it entered
+      // goes with it, exactly as `lock()` does.
+      entryMode = null;
       return;
     }
     current = reloaded;
@@ -1021,6 +1140,10 @@ export function createSession(deps: SessionDeps): Session {
     joinGate,
     unlock,
     unlockBiometric,
+    mode: () => entryMode,
+    lastEntry,
+    rememberEntry,
+    lastPerson,
     enableBiometric,
     disableBiometric,
     keys,

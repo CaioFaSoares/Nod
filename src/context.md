@@ -1,7 +1,7 @@
 # src/ — Nod's page
 
-The single page of the main window: sign-in, sidebar, Home, palette and Settings. Module by module:
-`docs/arquitetura.md` §5; window model: `docs/canonico.md` §7.
+The single page of the main window: the entry screen, sidebar, Home, palette and Settings. Module by
+module: `docs/arquitetura.md` §5; window model: `docs/canonico.md` §7.
 
 ## Rules
 
@@ -12,6 +12,16 @@ The single page of the main window: sign-in, sidebar, Home, palette and Settings
   during its countdown (E02 §5). The page clears both right after.
 - **English everywhere**: text, identifiers, messages (`docs/canonico.md` RNF-08).
 - **Keyboard first**: every action reachable from the palette (`docs/canonico.md` RNF-07).
+- **0.4.5, RF-60 — the entry screen**: while locked, `app.ts` mounts the rail of tiles in
+  `entry.ts` (`session.profiles` answers the tiles; nothing there is a secret). Offline is this
+  machine's own profile, a guild tile is a guild this Nod joined, and `+` is the join flow of
+  `join.ts` — the same dialog Settings → Hosts mounts, which is why `mountJoinFlow` left
+  `settings.ts`. Every unlock carries its `target`, and the backend keeps the mode for the session:
+  an **offline session** (`session.mode === 'offline'`, `host.offlineSession`) reads nothing of the
+  guild, exactly as O2 disconnects it, and the window says so in a banner.
+- **0.4.5, RF-61 — the seed is an optional import**: the Offline tile of a machine with no account
+  offers "Import a seed file" (`session.importSeed`); a release without `resources/seed.json` starts
+  empty, and gate origins stay those of the embedded seed.
 - **O2 (owner decision 2026-10-17)**: while this Nod is older than the guild's `minAppVersion` the
   guild is disconnected. The banner says so at the top of the window; `hasHost()` and `sharing()`
   (`settings.ts`) are the page's half of the rule, so every screen that would read the guild — the
@@ -23,12 +33,12 @@ The single page of the main window: sign-in, sidebar, Home, palette and Settings
 
 | Screen | Change | Story | Spec |
 | --- | --- | --- | --- |
-| First run | Third path: "Join a guild"; a `nod://join` invite opens it | B2 | SP05 §4 |
-| Settings → Hosts (new) | Add (address → guild + fingerprint → email + code), activate, sign in, status, sync now, remove; the signed-out notice; a "Keep your local tools" step listing the join's leftovers, all checked, "Keep as personal tools" (B8b) | B2, B8a, B8b | SP05 §4 |
-| People/Tools/Roles/Activity | Same screens; data from the host when connected; "New access code"; Activity's sent vs pending; People: one person's devices with Revoke (O1) | B6, B10, O1 | SP05 §4 |
-| Sidebar | Order favorites → org → personal; "offline" badge; the count of shares waiting in the inbox on the Settings action | B4, K4 | SP05 §4 |
-| Main window | New-version notice with Install (admin), Details and dismiss; the O2 banner while this Nod is older than the guild's `minAppVersion` (persistent, no dismiss) | u1, O2 | RF-55, SP03 §3, `docs/distribuicao.md` §8 |
-| Home / sidebar | Favorite toggle; "Add personal tool" (a dialog, and a palette action); the personal card and the tool window of a tool that did not come from the org carry the canonico §22 warning | B7 | SP05 §3–§4, canonico §22 |
+| Entry screen (0.4.5) | The locked screen is the rail of tiles in `entry.ts`: Offline (this machine, "import a seed file" while no account exists — RF-61), the guild (icon or initials, a status dot, its account and password, "Sign in again" when signed out), and `+`, the join dialog of `join.ts` (invite link → card → create account; sign in, access code and "create a guild" beside it). The `nod://join` push opens `+` with the invite already looked up; a lock re-reads the tiles | RF-59, RF-60, RF-61 | SP05 §4 |
+| Settings → Hosts | Add (address → guild + fingerprint → email + code), activate, sign in, status, sync now, remove; the signed-out notice; a "Keep your local tools" step listing the join's leftovers, all checked, "Keep as personal tools" (B8b). The dialog is `join.ts`, the same one the entry screen mounts | B2, B8a, B8b, RF-59 | SP05 §4 |
+| People/Tools/Roles/Activity | Same screens; data from the host when connected; People (connected): the Invites card — roles, max uses, expiry, "Create invite" answering the link and the code once, the list with status and Revoke (RF-59) — and per person "New access code"; Activity's sent vs pending; People: one person's devices with Revoke (O1) | B6, B10, O1, RF-59 | SP05 §4 |
+| Sidebar | Order favorites → org → personal; the org half grouped by category with a divider per group (RF-62's `shared/catalog.ts` `groupByCategory`, through `sidebarOrder`), the digits ⌘1…⌘9 following that visual order; "offline" badge; the count of shares waiting in the inbox on the Settings action; the top mark is the guild's icon (or its initials) while a guild is the session's, and the Offline glyph in an offline session (RF-60) | B4, K4, RF-60, RF-62 | SP05 §4 |
+| Main window | New-version notice with Install (admin), Details and dismiss; the O2 banner while this Nod is older than the guild's `minAppVersion` (persistent, no dismiss); the offline-session banner with "Switch to <guild>" (RF-60) | u1, O2, RF-60 | RF-55, SP03 §3, `docs/distribuicao.md` §8 |
+| Home / sidebar | Cards in the sidebar's order: favorites, one section per category with an `h2` and "Other tools" for the unfiled org tools (RF-62), then the personal tools — one grid as before while no tool carries a category; favorite toggle; "Add personal tool" (a dialog, and a palette action); the personal card and the tool window of a tool that did not come from the org carry the canonico §22 warning | B7, RF-62 | SP05 §3–§4, canonico §22 |
 | Settings → Vault | Inbox (`shares.inbox`) with Accept/Decline, read again on the `host` push; per credential: the scope select (Role/Org/Blocked, owner only), Reveal behind the gate with a 10 s countdown, Copy behind the gate (the secret never reaches the page), Send (hidden when `blocked`) with the recipients dialog and its `key changed — confirm in Account` warning, holders with date and scope and a `Remove` for a live holder (owner or admin, K9), and the `rotation pending` chip (title "save a new secret to rotate"); saving a shared credential shows the update warning and the save itself fans the update out; for an admin, an `Assign` dialog per credential (to a role or to one person, with `Remove assignment`) and the "Members missing a copy" list with each member's key state and one gated "Send copies" | K4–K9 | SP06 §4–§5, SP02 §9 |
 | Palette | "Vault inbox" opens Settings → Vault on the inbox | K4 | RNF-07 |
 | Settings → Account | Devices (sessions) list and revoke — hidden without a host (O1); "Your key fingerprint" (K1), whose `keys.mine` answer is `MineKeys` — `ok`/`pending`/`unavailable` and the sentence to show; the Colleagues list with each pinned fingerprint, the `key changed — confirm` warning and its Confirm (K2) — both hidden without a host | O1, K1–K2 | SP03, SP06 §2 |

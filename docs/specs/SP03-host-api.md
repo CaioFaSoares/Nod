@@ -31,10 +31,10 @@ body with a `t.*` schema derived from them.
 | Status | When |
 | --- | --- |
 | 400 | body fails its schema; message names the field |
-| 401 | missing or invalid token; `invalid credentials`; `invalid code` |
+| 401 | missing or invalid token; `invalid credentials`; `invalid code`; `invalid invite` (RF-59: a dead, expired, revoked or used-up invite, or one whose role has since been made admin) |
 | 403 | authenticated but not allowed (`admin only`, `not yours`, `the credential is blocked`, `tool not visible to sender`) |
-| 404 | an id no query ever sees (`unknown person`, `unknown session`, `unknown tool`, `unknown credential`); an id that exists but belongs to someone else answers 403 |
-| 409 | conflict: email taken, last admin, stale `updatedAt`, `recipient has no keys`, `credential belongs to another tool`, `the owner cannot be removed`, `a shared credential keeps the tool` |
+| 404 | an id no query ever sees (`unknown person`, `unknown session`, `unknown tool`, `unknown credential`, `unknown invite`, `unknown role`); an id that exists but belongs to someone else answers 403. `POST /v1/auth/invite` answers `404 invalid invite` for a code that names no live invite |
+| 409 | conflict: email taken, `this email already has an account in the guild — sign in instead` (the join of RF-59), last admin, stale `updatedAt`, `recipient has no keys`, `credential belongs to another tool`, `the owner cannot be removed`, `a shared credential keeps the tool` |
 | 413 | body over the limit (see above) |
 | 429 | rate limit (SP02 §5) |
 
@@ -49,6 +49,8 @@ body with a `t.*` schema derived from them.
 | `POST /v1/auth/salt` | `{ email }` | `{ salt, iterations }` (SP02 §4) |
 | `POST /v1/auth/activate` | `{ email, code, salt, authKey, device }` | `{ token, personId }` |
 | `POST /v1/auth/setup` | `{ email, name, code, salt, authKey, device }` | `{ token, personId }`, first admin |
+| `POST /v1/auth/invite` | `{ code }` | `InvitePreview`: `{ guild, roles: [{ id, name }], expiresAt, usesLeft, icon }` (RF-59) |
+| `POST /v1/auth/join` | `{ email, name, code, salt, authKey, device }` | `{ token, personId }`; creates the person with the invite's roles (RF-59) |
 | `POST /v1/auth/login` | `{ email, authKey, device }` | `{ token, personId }` |
 
 `device = { name, os, appVersion }`.
@@ -56,6 +58,19 @@ body with a `t.*` schema derived from them.
 - `activate` redeems an `activate` code bound to that email.
 - `setup` redeems the setup code, creates the person and role `admin` (`admin = 1`), and
   assigns it.
+- `invite` is what a `nod://join` link opens: it shows the guild, its icon and the roles the invite
+  grants before any account is typed, and reads a **live** invite only — unknown, revoked, expired
+  and used-up all answer the same `404 { error: 'invalid invite' }`. `icon` is the stored guild PNG
+  as base64url, or `null`. Public: a valid invite is what shows a guild to someone outside it.
+- `join` redeems that invite: the caller chooses the account (name, email, password) and the host
+  creates it with the invite's roles and spends one use. An email the guild already holds answers
+  `409 { error: 'this email already has an account in the guild — sign in instead' }` and spends
+  none; every dead invite is `401 { error: 'invalid invite' }`, counted as a failure of SP02 §5's
+  email budget, and the argon2id hash is paid before that branch (SP02 §5, F4). An invite never
+  makes an admin: a role of it that carries `admin = 1` by the time of the join is that same `401`,
+  and spends none.
+- `roles` in `InvitePreview` names the roles that still exist, so an invite made before a role was
+  removed shows the rest.
 
 ### Person
 
@@ -91,21 +106,42 @@ the personal tool and view writes and the favorites write are B7. The Nod method
 | Route | Body | Response |
 | --- | --- | --- |
 | `GET /v1/admin/people` | — | `AdminPerson[]` (no salt or hash) |
-| `POST /v1/admin/people` | `{ email, name, roles }` | `{ person, code, expiresAt }`, the code shown once |
 | `PATCH /v1/admin/people/:id` | `{ name?, roles?, disabled? }` | `AdminPerson`; disabling revokes their sessions |
 | `POST /v1/admin/people/:id/code` | — | `{ code, expiresAt }`; revokes the previous code |
 | `GET /v1/admin/people/:id/sessions` | — | `DeviceSession[]` |
+| `POST /v1/admin/invites` | `{ roles, maxUses, expiresInMinutes }` | `{ invite, code }`, the code shown once; `400` when a role carries `admin = 1` (RF-59) |
+| `GET /v1/admin/invites` | — | `GuildInvite[]`, newest first, revoked ones included |
+| `DELETE /v1/admin/invites/:id` | — | `204`; sets `revokedAt` (`404` for an unknown id, `204` again for one already revoked) |
 | `DELETE /v1/admin/sessions/:id` | — | `204` |
 | `PUT /v1/admin/roles/:id` | `{ name, admin }` | `Role` |
 | `DELETE /v1/admin/roles/:id` | — | `204`; `409` if it would leave no admin |
 | `PUT /v1/admin/grants` | `{ roleId, entryId, granted }` | `204` |
-| `PUT /v1/admin/tools/:id` | `OrgTool` (Entry + views) | `OrgTool` |
+| `PUT /v1/admin/tools/:id` | `OrgTool` (Entry + views) | `OrgTool`; RF-62's `category` (a name of ≤ 40 characters, or `null`) travels in and out, and a body's name is trimmed |
 | `DELETE /v1/admin/tools/:id` | — | `204`; `409` while a share still names the tool (`a shared credential keeps the tool`) |
 | `POST /v1/admin/tools/:id/promote` | `{ personalId }` | `OrgTool`; copies a personal tool to org, owner keeps theirs |
 | `POST /v1/admin/bootstrap` | `{ tools: OrgTool[], roles: Role[] }` | `{ created }`; only while the host has no org tools (B8a) |
 | `PUT /v1/admin/guild/icon` | `{ png }` — base64url of the PNG bytes, ≤ 512 KB decoded | `{ sha256 }`, lowercase hex of those bytes; `400` when they are not a PNG |
 | `DELETE /v1/admin/guild/icon` | — | `204`, and the next snapshot carries `guildIcon: null` |
 | `GET /v1/admin/events` | `?person&tool&from&to&limit` | `HostEvent[]` |
+
+`POST /v1/admin/people` — the email-bound "create person + one access code" — is gone in 0.4.5: a
+guild invite creates a person (RF-59). `POST /v1/admin/people/:id/code` stays: it is the reissue for
+a person the guild already has, and it is what a reset uses.
+
+The guild invites of RF-59: the admin hands out a link — `nod://join?host=<address>&fp=<fingerprint>&code=<code>`,
+built by the Nod's `shared/join-link.ts` — and whoever opens it sees the guild and creates the
+account they choose. The code is the longest of SP02 §3 and only its SHA-256 is stored. Creating one
+records an `invite_issued` event for the creating admin, whose `detail` names the roles, the
+max-use count and the expiry and never the code. `roles` is a list of role ids that must all exist
+(`404` otherwise); **an invite never grants an admin role** — a role with `admin = 1` is
+`400 { error: 'an invite cannot grant an admin role' }` and stores nothing, because an invite is a
+bearer code pasted into chats, and the join re-checks the roles it would grant (a role promoted to
+admin after the invite was made answers the same `401 invalid invite` and spends no use, and the
+invite works again if that role is demoted or removed). Making somebody an admin is
+`PATCH /v1/admin/people/:id`. `maxUses` is 1..1000 or `null` (no limit); `expiresInMinutes` is
+1..43200 (30 days) or `null` (never). `GET /v1/admin/invites` never carries a code or a hash
+(`GuildInvite` has no such field), and a revoked invite stays in the list so the admin can see what
+was spent.
 
 The guild icon is the image the Nod shows as the app icon on a guild build. The host stores the bytes
 and their SHA-256 in two `meta` rows (`host/repo.ts`: `GUILD_ICON_HASH_KEY`, `GUILD_ICON_BYTES_KEY`);
@@ -150,6 +186,10 @@ the Nod reads and drops it (O2's limit, `docs/handovers/o1-o2-nod.md` finding 1)
 
 - An integration test file per route group runs the real Elysia app on a temp `/data` dir
   (`bun test`). It covers each status in the table of §1 at least once.
+- `host/invites.test.ts` (RF-59) covers the invite group end to end: create/list/revoke, the public
+  preview (with and without a guild icon), the join with the invite's roles, an exhausted max-use
+  count, an expired invite, a revoked invite, the email-taken `409` that spends no use, and the
+  email budget that answers `429` — see §2's public and admin tables.
 - `POST /v1/auth/login` with a wrong key and with an unknown email return byte-identical bodies.
 - No route logs a request body. A test captures the logger and asserts no `authKey`, code or token
   appears.

@@ -84,6 +84,12 @@ export interface SyncDeps {
    * wired without it — leaves the field out of the state altogether.
    */
   missingCopies?: () => number;
+  /**
+   * 0.4.5 (RF-60): whether the unlocked session entered through the Offline tile, so the guild is
+   * disconnected for it (`HostState.offlineSession`). Undefined — a sync wired without a session,
+   * like a test's — is `false`.
+   */
+  offlineSession?: () => boolean;
   setInterval: (run: () => void, ms: number) => unknown;
   clearInterval: (handle: unknown) => void;
 }
@@ -602,6 +608,9 @@ export function createSync(deps: SyncDeps): Sync {
       // O2: without a `host` row there is no guild to be too old for, and no minimum to show.
       updateRequired: updateRequiredNow(),
       minAppVersion: record === null ? null : minAppVersion,
+      // 0.4.5 (RF-60): the offline session is the session's own fact (`backend/session.ts`), read
+      // here because the state is what the sidebar and the Hosts tab draw the guild from.
+      offlineSession: deps.offlineSession === undefined ? false : deps.offlineSession(),
     };
   }
 

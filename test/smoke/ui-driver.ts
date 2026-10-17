@@ -1,10 +1,16 @@
-// Driver of the real-page UI smoke (`test/smoke/ui.ts`, story checks #24, #25, #27–#35).
+// Driver of the real-page UI smoke (`test/smoke/ui.ts`, story checks #24, #25, #27–#38).
 //
 // The generated page imports `src/app.ts` exactly as `index.html` does, then this module. It runs
 // after the app has booted and drives the real screens with DOM events: every acceptance check
 // below reads what the page shows and clicks or types on it. `call` is used only to set the world
 // up (create the account, publish tools, create people, save and share credentials, restart the
-// host); a check never asserts an RPC answer.
+// host) and to read the two states a screen cannot show by itself (the session's mode for #36/#37,
+// the seed version for #38); a check never asserts an RPC answer otherwise.
+//
+// Only the machines whose screens are checked run this page (the admin, P, #37's invite joiner and
+// #38's seed importer). The second member Q and P's second machine are headless Bun calls in the
+// runner (`test/smoke/headless.ts`): they had no check of their own, and a `tinyjs dev` launch each
+// was most of the smoke's time.
 //
 // Nothing here prints a code, a password or a credential value: the codes arrive through the
 // runner's desk and live in memory, and the driver's own throwaway values are never echoed. The
@@ -21,9 +27,17 @@ interface DriverConfig {
   adminEmail: string;
   personEmail: string;
   otherEmail: string;
+  thirdEmail: string;
   adminName: string;
   personName: string;
   otherName: string;
+  thirdName: string;
+  /** The guild's name on the host, as the invite card and the offline banner print it. */
+  guildName: string;
+  /** #37: the PNG the admin uploads (`resources/tray.png`), base64url, as `host.setGuildIcon` takes. */
+  iconPng: string;
+  /** #38: the fake seed file the runner wrote under `test/smoke/.gerado/`. */
+  seedPath: string;
 }
 
 const smokeWindow = window as unknown as {
@@ -52,6 +66,11 @@ const LOCAL_DESK_TITLE = 'Local Desk';
 const GUILD_ONLY_TITLE = 'Guild Only';
 /** The host's O2 minimum for the last check. Above `tinyjs.json`'s version. */
 const UPDATE_MIN_VERSION = '9.9.9';
+/** #37: the guild's non-admin role of the smoke (`setupAdmin` creates it), as the invite names it. */
+const TEAM_ROLE_NAME = 'Team';
+/** #38: the role and the tool the imported seed brings — the tool shows only with that role. */
+const IMPORT_ROLE_ID = 'imported';
+const IMPORT_TOOL_TITLE = 'Imported One';
 
 const POLL_MS = 100;
 const STATE_TIMEOUT_MS = 20_000;
@@ -262,7 +281,12 @@ async function desk(path: string, body?: unknown): Promise<Record<string, unknow
   return payload;
 }
 
-async function handover(who: 'person' | 'other' | 'person2'): Promise<string> {
+/**
+ * The desk's handover. `person`, `other` and `person2` carry a code; `third` (#37) carries the whole
+ * `nod://join` link of the invite the admin created — the joiner pastes a link, so the check must not
+ * rebuild one.
+ */
+async function handover(who: 'person' | 'other' | 'person2' | 'third' | 'import'): Promise<string> {
   const answer = await desk(`/desk/code?who=${who}`);
   const code = answer.code;
   if (typeof code !== 'string' || code.length === 0) {
@@ -292,11 +316,38 @@ async function personOfEmail(email: string): Promise<PersonLite> {
   return found;
 }
 
-/** A fresh session on the real shell: the app answers the push by building its sidebar and Home. */
+/**
+ * 0.4.5 (RF-60): the page opens on the entry screen, and its default entry is Offline. Every check
+ * below needs the **guild** session, so this drives the real screen: the guild tile of the rail, the
+ * password, "Enter <guild>".
+ */
 async function unlock(email: string): Promise<void> {
-  const state = await call('session.unlock', { email, password: PASSWORD });
-  expect(state.unlocked === true, `session.unlock answered unlocked=${JSON.stringify(state.unlocked)}`);
-  await waitForValue('the unlocked shell', () => document.querySelector('.shell'));
+  const tile = await waitForValue('the guild tile of the entry rail', () => {
+    const found = all<HTMLButtonElement>('.entry-rail .tile').find(
+      (node) => node.querySelector('.tile-dot') !== null,
+    );
+    return found ?? null;
+  });
+  tile.click();
+  // The pane names the account on this machine: the person the tile unlocks, prefilled by the
+  // backend's own answer (`session.profiles`).
+  const account = await waitForValue('the guild account line', () => {
+    const line = document.querySelector('.entry-pane .entry-signed-in');
+    return line !== null && text(line).includes(email) ? line : null;
+  });
+  expect(text(account).includes(email), `the guild pane says ${JSON.stringify(text(account))}`);
+  const password = await waitForValue('the guild password field', () =>
+    document.querySelector<HTMLInputElement>('.entry-pane input[name=password]'),
+  );
+  setValue(password, PASSWORD);
+  const enter = await waitForValue('the Enter button', () =>
+    document.querySelector<HTMLButtonElement>('.entry-pane [data-action=enter]'),
+  );
+  enter.click();
+  await waitForValue('the unlocked shell', () => document.querySelector('.shell')).catch((error: unknown) => {
+    const why = all<HTMLElement>('.entry-pane .message-error').map(text).join(' | ');
+    throw new Error(`${message(error)}; the entry pane says ${why || '(nothing)'}`);
+  });
   await waitForValue('the Home screen', () => {
     const title = document.querySelector('.content-title');
     return title !== null && text(title) === 'Tools' ? title : null;
@@ -308,6 +359,11 @@ async function synced(): Promise<void> {
   expect(state.status === 'connected', `host.state.status = ${JSON.stringify(state.status)}`);
 }
 
+/**
+ * Setup only — the join screens are driven by the checks themselves. `name` is required with a setup
+ * code (it creates the first admin) and with an invite code (RF-59: the host creates the person the
+ * invite was redeemed by); an access code carries none.
+ */
 async function activateWithCode(email: string, code: string, name?: string): Promise<void> {
   const found = await call('host.discover', { address: CONFIG.address });
   const answer = await call('host.activate', {
@@ -338,17 +394,42 @@ async function setupAdmin(): Promise<void> {
   await synced();
 
   await call('roles.save', { role: { id: 'team', name: 'Team', admin: false } });
-  for (const [email, name, who] of [
-    [CONFIG.personEmail, CONFIG.personName, 'person'],
-    [CONFIG.otherEmail, CONFIG.otherName, 'other'],
+  // 0.4.5 (RF-59): the way in for a member is a guild invite — the roles it grants, one use and a
+  // day to use it. The code travels through the desk; the join redeems it with the name the person
+  // chose, which `activateWithCode` carries.
+  for (const [name, who] of [
+    [CONFIG.personName, 'person'],
+    [CONFIG.otherName, 'other'],
   ] as const) {
-    const answer = await call('invites.issue', { email, name, roles: ['team'], days: 1 });
+    const answer = await call('guildInvites.create', {
+      roles: ['team'],
+      maxUses: 1,
+      expiresInMinutes: 1440,
+    });
     expect(
       typeof answer.code === 'string' && answer.code.length > 0,
-      `invites.issue answered no code for ${email}`,
+      `guildInvites.create answered no code for ${name}`,
     );
     await desk('/desk/code', { who, code: answer.code });
   }
+
+  // #37's guild icon: the invite card shows the icon of a guild the person has not joined yet, so the
+  // host must hold one. The digest comes back; the bytes are the runner's own PNG.
+  const icon = await call('host.setGuildIcon', { png: CONFIG.iconPng });
+  expect(typeof icon.sha256 === 'string' && icon.sha256.length === 64, 'the host did not store the icon');
+
+  // #37: one more invite, for the Nod that joins through the entry screen's `+` tile. The desk
+  // carries the whole link — the check pastes exactly what the admin's screen would hand over.
+  const third = await call('guildInvites.create', {
+    roles: ['team'],
+    maxUses: 1,
+    expiresInMinutes: 1440,
+  });
+  expect(
+    typeof third.link === 'string' && third.link.startsWith('nod://join?'),
+    `guildInvites.create answered no link: ${JSON.stringify(third.link)}`,
+  );
+  await desk('/desk/code', { who: 'third', code: third.link });
 
   // Both published tools are granted to team (the loop reads them by their origins).
   const list = (await call('catalog.list')) as unknown as EntryLite[];
@@ -450,22 +531,11 @@ async function joinPerson(): Promise<void> {
   const state = await call('session.state');
   expect(state.hasAccount === false, 'the person app id is not a fresh installation');
   const code = await handover('person');
-  await activateWithCode(CONFIG.personEmail, code);
+  await activateWithCode(CONFIG.personEmail, code, CONFIG.personName);
   await waitForValue('the person sidebar', () => document.querySelector('.sidebar'));
   await synced();
   const mine = await call('keys.mine');
   expect(mine.fingerprint !== null, 'the person machine has no key pair after the activation');
-}
-
-async function joinOther(): Promise<void> {
-  const state = await call('session.state');
-  expect(state.hasAccount === false, 'the second member app id is not a fresh installation');
-  const code = await handover('other');
-  await activateWithCode(CONFIG.otherEmail, code);
-  await waitForValue('the second member sidebar', () => document.querySelector('.sidebar'));
-  await synced();
-  const mine = await call('keys.mine');
-  expect(mine.fingerprint !== null, 'the second member machine has no key pair after the activation');
 }
 
 // ------------------------------------------------------------- phase: admin work
@@ -739,35 +809,6 @@ async function personInbox(): Promise<void> {
   await synced();
 }
 
-/**
- * #35 needs both people in the holders list, and a holder row is written when the recipient accepts
- * (the host only records the owner at send). Q's side is setup, not a check: the RPC path is the
- * same one the real page drives, and no screen of Q's is under test.
- */
-async function otherAccepts(): Promise<void> {
-  await unlock(CONFIG.otherEmail);
-  await synced();
-  const inbox = (await call('shares.inbox')) as unknown as { id: string }[];
-  expect(inbox.length >= 1, 'the second member has no share waiting');
-  for (const share of inbox) {
-    await call('shares.accept', { id: share.id, password: PASSWORD });
-  }
-  await synced();
-}
-
-// ------------------------------------------------------------- phase: second machine
-
-async function secondPersonMachine(): Promise<void> {
-  const state = await call('session.state');
-  expect(state.hasAccount === false, 'the second person app id is not a fresh installation');
-  const code = await handover('person2');
-  await activateWithCode(CONFIG.personEmail, code);
-  await waitForValue('the second machine sidebar', () => document.querySelector('.sidebar'));
-  await synced();
-  const mine = await call('keys.mine');
-  expect(mine.fingerprint !== null, 'the second machine has no key pair after the activation');
-}
-
 // ------------------------------------------------------------- phase: colleague key
 
 async function confirmChangedKey(): Promise<string> {
@@ -793,8 +834,22 @@ async function confirmChangedKey(): Promise<string> {
   return 'the changed key is shown, Confirmed and the warning clears';
 }
 
+/**
+ * The People tab carries the person's devices (#27) and, connected, the invites card of RF-59 — the
+ * two codes the setup created are spent by now, so the list shows them used up.
+ */
 async function checkAdminDevices(): Promise<string> {
   await openSettingsTab('People');
+  const invites = await waitForValue('the invites card', () => {
+    const card = cardHeading('Invites');
+    if (card === null) return null;
+    return controlByText('Create invite', card) === null ? null : card;
+  });
+  await waitForValue('the invite list', () => {
+    const rows = all<HTMLElement>('.invite-row');
+    return rows.length >= 1 ? rows : null;
+  });
+  const statuses = all<HTMLElement>('.invite-row > .row > strong').map(text);
   const personCard = () =>
     all<HTMLElement>('.card').find(
       (node) =>
@@ -829,7 +884,330 @@ async function checkAdminDevices(): Promise<string> {
       `${message(error)}; card: ${JSON.stringify(card === undefined ? '(none)' : text(card))}; status: ${status || '(none)'}`,
     );
   });
-  return `${rows.length} device row(s) with Revoke`;
+  return `${rows.length} device row(s) with Revoke; invites card "${text(invites.querySelector('h2'))}" with ${statuses.length} row(s): ${statuses.join(', ')}`;
+}
+
+/**
+ * #36 (RF-60): the Offline tile of the entry screen, on the real surface. Lock, enter through
+ * Offline, and the guild is disconnected for the session exactly as O2 disconnects it: the banner
+ * says so, the sidebar's top mark is the Offline glyph, and the guild's own tool (a row only the
+ * snapshot carries) is gone from the sidebar while this machine's local tools stay. "Switch to
+ * <guild>" locks again, and the guild tile brings the session back with that tool.
+ *
+ * `session.state().mode` and `host.state().offlineSession` are the backend's own answer to the same
+ * question — the two reads below are the world state; everything else here is what the page draws.
+ */
+async function offlineEntry(): Promise<string> {
+  const lockAction = all<HTMLButtonElement>('.sidebar-action').find((item) => text(item).includes('Lock'));
+  expect(lockAction !== undefined, 'the sidebar has no Lock action');
+  lockAction.click();
+  await waitForValue('the entry rail after the lock', () => document.querySelector('.entry-rail .tile'));
+
+  const offlineTile = await waitForValue('the Offline tile', () =>
+    document.querySelector<HTMLButtonElement>('.entry-rail [data-tile=offline]'),
+  );
+  offlineTile.click();
+  const password = await waitForValue('the offline password field', () =>
+    document.querySelector<HTMLInputElement>('.entry-pane input[name=password]'),
+  );
+  setValue(password, PASSWORD);
+  const enter = await waitForValue('the Enter offline button', () =>
+    document.querySelector<HTMLButtonElement>('.entry-pane [data-action=enter-offline]'),
+  );
+  enter.click();
+  await waitForValue('the offline shell', () => document.querySelector('.shell')).catch((error: unknown) => {
+    const why = all<HTMLElement>('.entry-pane .message-error').map(text).join(' | ');
+    throw new Error(`${message(error)}; the entry pane says ${why || '(nothing)'}`);
+  });
+
+  const state = (await call('session.state')) as unknown as { mode: string | null };
+  const host = (await call('host.state')) as unknown as { offlineSession: boolean };
+  expect(state.mode === 'offline', `session.state().mode = ${JSON.stringify(state.mode)}`);
+  expect(host.offlineSession === true, `host.state().offlineSession = ${JSON.stringify(host.offlineSession)}`);
+  const mark = text(document.querySelector('.sidebar .mark'));
+  expect(mark === '⌂', `the sidebar mark reads ${JSON.stringify(mark)}`);
+
+  const sentence = text(
+    await waitForValue('the offline banner', () => {
+      const line = all<HTMLElement>('.notice-text').find((node) => text(node).includes('is not syncing'));
+      return line ?? null;
+    }),
+  );
+  const switchTo = await waitForValue('the Switch to button', () =>
+    all<HTMLButtonElement>('.notice button').find((item) => text(item).startsWith('Switch to ')) ?? null,
+  );
+
+  // Local mode on the sidebar: this machine's own tools are the catalog, the guild's is not there.
+  const localTitles = await waitForValue('the local tools without the guild tool', () => {
+    const titles = sidebarTitles();
+    const local = titles.some((title) => title.startsWith('Tool A'));
+    const foreign = titles.some((title) => title.includes(GUILD_ONLY_TITLE));
+    return local && !foreign ? titles : null;
+  });
+
+  const label = text(switchTo);
+  switchTo.click();
+  await waitForValue('the entry rail after the switch', () => document.querySelector('.entry-rail .tile'));
+  await unlock(CONFIG.adminEmail);
+
+  const back = (await call('session.state')) as unknown as { mode: string | null };
+  const backHost = (await call('host.state')) as unknown as { offlineSession: boolean };
+  expect(back.mode === 'guild', `session.state().mode = ${JSON.stringify(back.mode)}`);
+  expect(backHost.offlineSession === false, `host.state().offlineSession = ${JSON.stringify(backHost.offlineSession)}`);
+  const backTitles = await waitForValue('the guild tool back in the sidebar', () => {
+    const titles = sidebarTitles();
+    return titles.some((title) => title.includes(GUILD_ONLY_TITLE)) ? titles : null;
+  });
+  return `banner "${sentence}" with "${label}"; offline sidebar ${localTitles.length} tool(s) without the guild's; back in guild mode with ${backTitles.length} tool(s)`;
+}
+
+// ------------------------------------------- phase: the invite and the seed (a Nod each)
+
+/**
+ * #37 (RF-59), on a Nod with no account and no host: the whole invite flow through the real entry
+ * screen. `setupAdmin` created this invite through `guildInvites.create` (the non-admin `team` role)
+ * and left its `nod://join` link on the desk with the guild icon stored; here the `+` tile takes the
+ * pasted link, the card is read (guild name, role chip, the guild's icon as a data URI, the
+ * fingerprint), and the account form that follows creates the person.
+ *
+ * `session.state().mode` and `people.list` are the backend's answer to what the join did; the
+ * sidebar's own tools are the page's — a tool the invite's role is granted shows only because the
+ * host gave this person that role.
+ */
+async function inviteJoinThroughUi(): Promise<string> {
+  await waitForValue('the entry rail of a fresh Nod', () => document.querySelector('.entry-rail .tile'));
+  expect(
+    all('.entry-rail .tile-dot').length === 0,
+    'a Nod with no host already shows a guild tile',
+  );
+  const joinTile = await waitForValue('the + tile', () =>
+    document.querySelector<HTMLButtonElement>('.entry-rail [data-tile=join]'),
+  );
+  joinTile.click();
+
+  const linkField = await waitForValue('the invite link field', () =>
+    document.querySelector<HTMLInputElement>('.entry-pane input[name=join-link]'),
+  );
+  setValue(linkField, await handover('third'));
+  (await waitForControl('Continue')).click();
+
+  const card = await waitForValue('the invite card', () => document.querySelector('.invite-card')).catch(
+    (error: unknown) => {
+      const why = all<HTMLElement>('.entry-pane .message-error').map(text).join(' | ');
+      throw new Error(`${message(error)}; the entry pane says ${why || '(nothing)'}`);
+    },
+  );
+  const head = text(card.querySelector('.invite-head h2'));
+  expect(head === CONFIG.guildName, `the card names ${JSON.stringify(head)}`);
+  const invited = text(card.querySelector('.invite-head .muted'));
+  expect(invited.includes("You've been invited"), `the card says ${JSON.stringify(invited)}`);
+  const roles = all<HTMLElement>('.invite-roles .chip').map(text);
+  expect(roles.includes(TEAM_ROLE_NAME), `the card lists roles ${JSON.stringify(roles)}`);
+  expect(
+    !roles.some((role) => role.toLowerCase() === 'admin'),
+    `the invite card offers an admin role: ${JSON.stringify(roles)}`,
+  );
+  const icon = card.querySelector<HTMLImageElement>('img.invite-icon');
+  expect(icon !== null, 'the invite card shows no guild icon');
+  const src = icon.getAttribute('src') ?? '';
+  expect(
+    src.startsWith('data:image/png;base64,') && src.length > 32,
+    `the guild icon src is ${JSON.stringify(src.slice(0, 32))}…`,
+  );
+  const fingerprint = text(card.querySelector('.fingerprint'));
+  expect(fingerprint.length >= 8 && fingerprint.includes('-'), `the card fingerprint is ${JSON.stringify(fingerprint)}`);
+
+  (await waitForControl('Accept invite', card)).click();
+  const name = await waitForValue('the name field of the account form', () =>
+    document.querySelector<HTMLInputElement>('.entry-pane input[name=name]'),
+  );
+  const email = document.querySelector<HTMLInputElement>('.entry-pane input[name=email]');
+  const password = document.querySelector<HTMLInputElement>('.entry-pane input[name=password]');
+  const confirm = document.querySelector<HTMLInputElement>('.entry-pane input[name=confirm]');
+  expect(email !== null && password !== null && confirm !== null, 'the account form is missing a field');
+  setValue(name, CONFIG.thirdName);
+  setValue(email, CONFIG.thirdEmail);
+  setValue(password, PASSWORD);
+  setValue(confirm, PASSWORD);
+  (await waitForControl('Join the guild')).click();
+  await waitForValue('the joined shell', () => document.querySelector('.shell')).catch((error: unknown) => {
+    const why = all<HTMLElement>('.entry-pane .message-error').map(text).join(' | ');
+    throw new Error(`${message(error)}; the entry pane says ${why || '(nothing)'}`);
+  });
+
+  // The same nudge every other join path of this smoke takes: the first snapshot is what fills the
+  // sidebar of this new member (its own catalog is empty), and `host.syncNow` is every person's call.
+  await synced();
+  const state = (await call('session.state')) as unknown as {
+    mode: string | null;
+    person: { email: string; roles: string[] } | null;
+  };
+  expect(state.mode === 'guild', `session.state().mode = ${JSON.stringify(state.mode)}`);
+  expect(
+    state.person !== null && state.person.email === CONFIG.thirdEmail,
+    `the joined person is ${JSON.stringify(state.person === null ? null : state.person.email)}`,
+  );
+  const host = (await call('host.state')) as unknown as { offlineSession: boolean };
+  expect(host.offlineSession === false, `host.state().offlineSession = ${JSON.stringify(host.offlineSession)}`);
+  // The role the invite granted, as its effect on the member's own screen: the guild's tools are
+  // granted to `team` alone (`setupAdmin`), so a sidebar that carries them is a person the host put
+  // in that role. The roster itself is read again on the admin's page (`admin-final`), because a
+  // member's local person row carries no roles while connected (the host is the one that holds them)
+  // and `people.list` is the admin's call.
+  const titles = await waitForValue("the team role's tools in the new member's sidebar", () => {
+    const list = sidebarTitles();
+    return list.some((title) => title.includes('Tool A')) ? list : null;
+  });
+  return `card "${head}" with role ${TEAM_ROLE_NAME} and the guild icon; joined in ${state.mode} mode as ${state.person?.email}; ${titles.length} tool(s) of the team role in the sidebar`;
+}
+
+/**
+ * #38 (RF-61), on a Nod with no account, no host and no tool of its own: the optional seed import of
+ * the first run. The check clicks "Import a seed file" on the Offline pane. **The file picker itself
+ * is not driven** — a native dialog cannot be answered headlessly, so `tiny.dialog.openFile` is
+ * answered here with the runner's fake seed file (`.gerado/import-seed.json`, version 2); the call,
+ * the re-read of `session.profiles`, the pane and the account that follows are the page's own.
+ *
+ * The imported seed carries an invite and a tool behind that invite's role, which is what makes the
+ * import observable on screen: the form gains the invite code the seed brought, and after the
+ * account is created with that code the imported tool is in the sidebar — it shows for that role
+ * alone. Nothing is restored on the dialog: the launch ends with this check.
+ */
+async function seedImport(): Promise<string> {
+  const title = await waitForValue('the first-run Offline pane', () => {
+    const head = document.querySelector('.entry-pane .entry-title');
+    return head !== null && text(head) === 'Set up Nod on this machine' ? head : null;
+  });
+  expect(
+    document.querySelector('.entry-pane input[name=code]') === null,
+    'a fresh Nod already asks for an invite code',
+  );
+  const importButton = await waitForControl('Import a seed file');
+
+  // The picker is the one thing this smoke cannot drive: a native dialog has no headless answer. The
+  // check answers `tiny.dialog.openFile` in place when the runtime lets it be replaced — so the
+  // button, its handler and everything after it are the real ones — and falls back to calling
+  // `session.importSeed` itself (the page still re-reads the tiles, which is what the backend's
+  // `session` push makes it do) when it does not. Either way the file picker is not driven, and the
+  // detail below says which of the two ran.
+  const dialog: unknown = smokeWindow.tiny?.dialog;
+  let picker = '`session.importSeed` called by the check (no `tiny.dialog` to answer; the picker is not driven)';
+  let pickerPatched = false;
+  if (
+    dialog !== null &&
+    dialog !== undefined &&
+    typeof dialog === 'object' &&
+    'openFile' in dialog &&
+    typeof dialog.openFile === 'function'
+  ) {
+    // The runtime's own bridge object: this named cast is where the file says what the one member it
+    // touches takes, and the guard above is what proved the member is there.
+    const bridge = dialog as { openFile: () => Promise<string | null> };
+    try {
+      bridge.openFile = async () => CONFIG.seedPath;
+      pickerPatched = true;
+      picker =
+        'the button clicked, `tiny.dialog.openFile` answered by the check (the picker itself is not driven)';
+    } catch {
+      picker =
+        '`session.importSeed` called by the check (the picker cannot be answered in place; it is not driven)';
+    }
+  }
+  if (pickerPatched) importButton.click();
+  else await call('session.importSeed', { path: CONFIG.seedPath });
+
+  // The pane read the tiles again: the seed's own open invite is what puts the code field there.
+  const code = await waitForValue('the account form of the imported seed', () =>
+    document.querySelector<HTMLInputElement>('.entry-pane input[name=code]'),
+  ).catch((error: unknown) => {
+    const why = all<HTMLElement>('.entry-pane .message-error').map(text).join(' | ');
+    throw new Error(`${message(error)}; the entry pane says ${why || '(nothing)'}`);
+  });
+  const fields = [...document.querySelectorAll('.entry-pane .field-label')].map((node) => text(node));
+  expect(fields.includes('Invite code'), `the form says ${JSON.stringify(fields)}`);
+
+  const name = document.querySelector<HTMLInputElement>('.entry-pane input[name=name]');
+  const email = document.querySelector<HTMLInputElement>('.entry-pane input[name=email]');
+  const password = document.querySelector<HTMLInputElement>('.entry-pane input[name=password]');
+  const confirm = document.querySelector<HTMLInputElement>('.entry-pane input[name=confirm]');
+  expect(
+    name !== null && email !== null && password !== null && confirm !== null,
+    'the create form is missing a field',
+  );
+  setValue(name, CONFIG.thirdName);
+  setValue(email, CONFIG.thirdEmail);
+  setValue(password, PASSWORD);
+  setValue(confirm, PASSWORD);
+  // The code of the seed's own invite, from the desk: the generated page carries it nowhere.
+  setValue(code, await handover('import'));
+  const create = await waitForValue('the Create account button', () =>
+    document.querySelector<HTMLButtonElement>('.entry-pane [data-action=create]'),
+  );
+  create.click();
+  await waitForValue('the shell of the created account', () => document.querySelector('.shell')).catch(
+    (error: unknown) => {
+      const why = all<HTMLElement>('.entry-pane .message-error').map(text).join(' | ');
+      throw new Error(`${message(error)}; the entry pane says ${why || '(nothing)'}`);
+    },
+  );
+
+  const titles = await waitForValue('the imported tool in the sidebar', () => {
+    const list = sidebarTitles();
+    return list.some((title) => title.includes(IMPORT_TOOL_TITLE)) ? list : null;
+  });
+  const state = (await call('session.state')) as unknown as {
+    mode: string | null;
+    person: { roles: string[] } | null;
+  };
+  expect(
+    state.person !== null && state.person.roles.includes(IMPORT_ROLE_ID),
+    `the created person's roles are ${JSON.stringify(state.person?.roles ?? null)}`,
+  );
+  const info = (await call('nod.info')) as unknown as { seedVersion: number | null };
+  expect(info.seedVersion === 2, `nod.info().seedVersion = ${JSON.stringify(info.seedVersion)}`);
+  return `pane "${text(title)}" → imported ${CONFIG.seedPath} (${picker}) → the form asked for the seed's invite code → account created in ${state.mode} mode with role ${IMPORT_ROLE_ID}, ${titles.length} tool(s) in the sidebar incl. ${IMPORT_TOOL_TITLE}; seedVersion ${info.seedVersion}`;
+}
+
+/**
+ * #37's other half, on the admin's own page: the roster holds the member the invite created, with the
+ * role the invite granted. The member's own sidebar (the check before this one) shows the effect; this
+ * shows the fact, on the screen that reads the host's people — the third member joined after the work
+ * of `admin-work` and before this stage, so the People tab lists them here.
+ */
+async function thirdMemberOnRoster(): Promise<string> {
+  await openSettingsTab('People');
+  const card = await waitForValue('the roster card of the invited member', () => {
+    const found = all<HTMLElement>('.card').find(
+      (node) => text(node.querySelector(':scope > .row > strong')) === CONFIG.thirdName,
+    );
+    return found ?? null;
+  });
+  const boxes = all<HTMLInputElement>('input[type=checkbox]', card).map((box) => ({
+    role: text(box.parentElement),
+    checked: box.checked,
+  }));
+  // The host's own answer for the same person, so a failure says which half disagreed.
+  const roster = (await call('people.list')) as unknown as {
+    name: string;
+    email: string;
+    roles: string[];
+    admin: boolean;
+  }[];
+  const invited = roster.find((person) => person.email === CONFIG.thirdEmail) ?? null;
+  const why = JSON.stringify({
+    boxes: boxes.map((box) => `${box.role}:${box.checked}`),
+    roster: invited,
+    card: text(card).slice(0, 160),
+  });
+  expect(
+    boxes.some((box) => box.role === TEAM_ROLE_NAME && box.checked),
+    `the invite's role is not ticked — ${why}`,
+  );
+  expect(
+    !boxes.some((box) => box.role === 'Admin' && box.checked),
+    `an invite granted the admin role — ${why}`,
+  );
+  return `${CONFIG.thirdName} is on the roster with ${TEAM_ROLE_NAME} ticked and Admin not`;
 }
 
 async function updateRequiredBanner(): Promise<string> {
@@ -940,10 +1318,6 @@ const PHASES: Record<string, { setup?: () => Promise<void>; checks: Steps }> = {
       ['#29 key fingerprint', checkFingerprint],
     ],
   },
-  'person2-join': {
-    setup: joinOther,
-    checks: [['setup: the second member joined', () => 'Q is a member with keys']],
-  },
   'admin-work': {
     setup: adminWork,
     checks: [
@@ -962,13 +1336,11 @@ const PHASES: Record<string, { setup?: () => Promise<void>; checks: Steps }> = {
       ['#33 reveal countdown and copy', revealAndCopy],
     ],
   },
-  'other-accept': {
-    setup: otherAccepts,
-    checks: [['setup: the second member accepted', () => 'Q holds the credential']],
+  'third-join': {
+    checks: [['#37 invite join through the entry screen', inviteJoinThroughUi]],
   },
-  'person-second-machine': {
-    setup: secondPersonMachine,
-    checks: [['setup: the second machine activated with a new code', () => 'P has a new key']],
+  'seed-import': {
+    checks: [['#38 seed import at first run', seedImport]],
   },
   'admin-final': {
     setup: adminFinal,
@@ -976,6 +1348,8 @@ const PHASES: Record<string, { setup?: () => Promise<void>; checks: Steps }> = {
       ['#35 holders list and admin card', checkHolders],
       ['#30 changed colleague key', confirmChangedKey],
       ['#27 admin sees the person devices', checkAdminDevices],
+      ["#37 the invite's role on the roster", thirdMemberOnRoster],
+      ['#36 offline tile entry', offlineEntry],
       ['#28 update-required banner', updateRequiredBanner],
     ],
   },

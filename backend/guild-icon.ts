@@ -16,6 +16,7 @@
 
 import { sha256Hex } from '../shared/encoding';
 import { HOST_ROUTES } from '../shared/host-api';
+import { bytesToBase64 } from './icons';
 import type { AppIconChoice, AppIconState } from '../shared/types';
 
 /** The one file this module owns, under the app's data dir (`app.paths().data`). */
@@ -74,6 +75,14 @@ export interface GuildIcon {
   sync(hash: string | null): Promise<void>;
   /** SP05 §6 `nod.appIcon`: the choice, and whether a verified guild icon is available right now. */
   state(): Promise<AppIconState>;
+  /**
+   * 0.4.5 (RF-60): the guild icon this machine holds, as the `data:image/png;base64,…` the entry
+   * screen's tile draws — the bytes on disk, and only when they are the ones `hash` signs (the
+   * `guildIcon` of the cached snapshot, SP04 §2). It reads the file and nothing else: no snapshot,
+   * no state and no call of the host's, so the locked screen can draw the tile before any unlock.
+   * `null` when the guild has no icon, when the file is gone, or while it is not that body's icon.
+   */
+  dataUri(hash: string | null): Promise<string | null>;
   /** SP05 §6 `nod.setAppIcon`: stores the choice and applies it to the app icon. */
   setChoice(choice: AppIconChoice): Promise<AppIconState>;
   /** The host was removed: the file goes and the bundle icon comes back. */
@@ -197,6 +206,21 @@ export function createGuildIcon(deps: GuildIconDeps): GuildIcon {
     return { choice: await currentChoice(), guildIconAvailable: available() };
   }
 
+  /**
+   * RF-60: the icon of the cached body, as a data URI. `available()` is the same rule a sync
+   * applies (`signed === cached`), read straight from the hash the caller passes, so the tile of the
+   * entry screen shows the icon on a fresh process — before any unlock has run a `sync`.
+   */
+  async function dataUri(hash: string | null): Promise<string | null> {
+    if (hash === null) return null;
+    if ((await diskHash()) !== hash) return null;
+    try {
+      return `data:image/png;base64,${bytesToBase64(await deps.files.read(deps.path))}`;
+    } catch {
+      return null; // the digest matched a file that went away between the two reads
+    }
+  }
+
   return {
     sync(hash: string | null): Promise<void> {
       // The calls are chained instead of racing: the unlock's own `sync` and the first run of the
@@ -208,6 +232,8 @@ export function createGuildIcon(deps: GuildIconDeps): GuildIcon {
     },
 
     state,
+
+    dataUri,
 
     async setChoice(wanted: AppIconChoice): Promise<AppIconState> {
       // SP05 §6: the Guild option exists only while the guild has an icon to show, and the screen

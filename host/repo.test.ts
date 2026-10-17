@@ -1,7 +1,8 @@
 // The host's data access against a real migrated database in a temp data dir — no database mock
 // (`host/context.md`, SP01 §5). What is proved here: the migrations hold every table of SP01 §2–§3
-// — `person_keys.private_sealed` of migration 3 and `credential_holders.rotated_at` of migration 4
-// — and report `schema_version = 4`, the rules
+// and every column they added — `person_keys.private_sealed` of migration 3,
+// `credential_holders.rotated_at` of migration 4 and `entries.category` of migration 6 — and report
+// `schema_version = 6`, the rules
 // SP01 §2 keeps out of SQL (grants, owners, favorites,
 // last admin), the atomic code redemption with its TTL and wrong tries, idempotent events, owner
 // filtering, and that no secret lands in the database.
@@ -113,7 +114,7 @@ function activatedAdmin(repo: Repo): HostPerson {
 }
 
 describe('schema', () => {
-  test('the migrations create every table and report schema_version = 4', () => {
+  test('the migrations create every table and report schema_version = 6', () => {
     const { db, repo } = newRepo();
 
     const tables = db
@@ -138,6 +139,8 @@ describe('schema', () => {
         'shares',
         'credential_holders',
         'assignments',
+        // Migration 5, guild invites (RF-59).
+        'guild_invites',
       ]),
     );
 
@@ -170,10 +173,17 @@ describe('schema', () => {
       .map((column) => column.name);
     expect(holderColumns).toContain('rotated_at');
 
-    expect(repo.meta('schema_version')).toBe('4');
+    // Migration 6 (RF-62): the display category a guild gives an org tool.
+    const entryColumns = db
+      .query<{ name: string }, []>('PRAGMA table_info(entries)')
+      .all()
+      .map((column) => column.name);
+    expect(entryColumns).toContain('category');
+
+    expect(repo.meta('schema_version')).toBe('6');
   });
 
-  test('migrations 2, 3 and 4 apply to a data dir that already holds block 1, keeping its rows', () => {
+  test('migrations 2 to 6 apply to a data dir that already holds block 1, keeping its rows', () => {
     const dir = mkdtempSync(join(tmpdir(), 'nod-host-migrate-'));
     const db = openDatabase(join(dir, 'host.db'));
     databases.push({ dir, close: () => db.close() });
@@ -188,13 +198,13 @@ describe('schema', () => {
       NOW,
     );
 
-    // SP01 §4: the boot applies only what is missing, and the version lands on 4.
-    expect(applyMigrations(db)).toBe(4);
+    // SP01 §4: the boot applies only what is missing, and the version lands on 6.
+    expect(applyMigrations(db)).toBe(6);
     expect(
       db
         .query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'schema_version'")
         .get()?.value,
-    ).toBe('4');
+    ).toBe('6');
     expect(db.query('SELECT id FROM people WHERE id = ?').get('p1')).not.toBeNull();
     expect(
       db
@@ -202,7 +212,13 @@ describe('schema', () => {
         .all()
         .map((row) => row.name),
     ).toEqual(
-      expect.arrayContaining(['person_keys', 'shares', 'credential_holders', 'assignments']),
+      expect.arrayContaining([
+        'person_keys',
+        'shares',
+        'credential_holders',
+        'assignments',
+        'guild_invites',
+      ]),
     );
   });
 
@@ -225,8 +241,8 @@ describe('schema', () => {
       'INSERT INTO person_keys (person_id, x25519_public, ed25519_public, created_at) VALUES (?, ?, ?, ?)',
     ).run('p1', 'X'.repeat(43), 'E'.repeat(43), NOW);
 
-    // Migrations 3 and 4 apply, and the database lands on the current version.
-    expect(applyMigrations(db)).toBe(4);
+    // Migrations 3 to 6 apply, and the database lands on the current version.
+    expect(applyMigrations(db)).toBe(6);
     // The published pair survives, with no blob: the owner's next unlock uploads one (`host/repo.ts`).
     const row = db
       .query<{ x25519: string; privateSealed: string | null }, []>(
@@ -235,6 +251,35 @@ describe('schema', () => {
       .get();
     expect(row?.x25519).toBe('X'.repeat(43));
     expect(row?.privateSealed).toBeNull();
+  });
+
+  test('migration 6 adds the category column to a database that already holds tools (RF-62)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nod-host-migrate-'));
+    const db = openDatabase(join(dir, 'host.db'));
+    databases.push({ dir, close: () => db.close() });
+
+    // A `/data` of 0.4.0: every migration but 6 applied, with a tool and a person in.
+    for (let version = 1; version < migrations.length; version++) db.exec(migrations[version - 1]);
+    db.query("INSERT INTO meta (key, value) VALUES ('schema_version', '5')").run();
+    db.query('INSERT INTO people (id, email, name, created_at) VALUES (?, ?, ?, ?)').run(
+      'p1',
+      'ada@nod.test',
+      'Ada',
+      NOW,
+    );
+    db.query(
+      `INSERT INTO entries (id, scope, owner_id, title, url, ord, active, updated_at)
+       VALUES ('kanban', 'org', NULL, 'Kanban', 'https://kanban.example.test/', 0, 1, ?)`,
+    ).run(NOW);
+
+    // The boot applies only migration 6, and the tool it holds reads as uncategorized.
+    expect(applyMigrations(db)).toBe(6);
+    const repo = createRepo(db);
+    const saved = repo.listOrgTools()[0];
+    expect(saved?.id).toBe('kanban');
+    expect(saved?.category).toBeNull();
+    // The column is live for the write that follows.
+    expect(repo.saveOrgTool(tool('kanban', { category: 'Support' }), NOW).category).toBe('Support');
   });
 
   test('the schema itself refuses an entry or a view whose scope and owner disagree', () => {
@@ -742,6 +787,25 @@ describe('org tools, grants and favorites', () => {
     expect(repo.listPersonalTools('p1')).toEqual([]);
   });
 
+  // RF-62: the display category of an org tool.
+  test('an org tool keeps the category written and drops it when the write says null', () => {
+    const { repo } = newRepo();
+
+    // The store keeps what it is given; trimming and the empty case are the shared validator's and
+    // the route's (`shared/catalog.ts`, `host/routes/admin.ts`'s `toToolInput`).
+    expect(repo.saveOrgTool(tool('kanban', { category: 'Support' }), NOW).category).toBe('Support');
+    expect(repo.listOrgTools()[0]?.category).toBe('Support');
+    // A rewrite that omits the field is uncategorized, exactly like an org write of SP01 §2.
+    expect(repo.saveOrgTool(tool('kanban'), NOW).category).toBeNull();
+
+    // And a personal tool never keeps one: a write that carries a name stores `NULL` (the personal
+    // route does not declare the field either — `host/routes/person.ts`).
+    activatedMember(repo, 'p1');
+    const mine = repo.savePersonalTool('p1', personal('p-abc1234567', { category: 'Support' }), NOW);
+    expect(mine.category).toBeNull();
+    expect(repo.listPersonalTools('p1')[0]?.category).toBeNull();
+  });
+
   test('a personal view hangs under an entry its owner can see', () => {
     const { repo } = newRepo();
     activatedMember(repo, 'p1');
@@ -925,7 +989,7 @@ describe('meta', () => {
     repo.setMeta('created_at', NOW);
     expect(repo.meta('created_at')).toBe(NOW);
     expect(() => repo.setMeta('schema_version', '9')).toThrow(ConflictError);
-    expect(repo.meta('schema_version')).toBe('4');
+    expect(repo.meta('schema_version')).toBe('6');
   });
 });
 

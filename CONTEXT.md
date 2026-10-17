@@ -39,6 +39,11 @@ _Evite_: sub-aba, rota, página
 O registro de uma ferramenta no catálogo: título, endereço, ícone, vistas, papéis.
 _Evite_: card, item, atalho, favorito
 
+**Categoria** — `category`:
+O nome que a guilda dá a uma ferramenta do catálogo, para a sidebar e a Home agruparem por ele (RF-62);
+vazio é "sem categoria", e uma ferramenta pessoal não tem.
+_Evite_: tag, grupo, pasta, seção
+
 **Catálogo** — `catalog`:
 O conjunto de entradas, com versão própria. É dado, não código.
 _Evite_: lista, menu, inventário
@@ -46,6 +51,15 @@ _Evite_: lista, menu, inventário
 **Paleta** — `palette`:
 A busca por teclado (`⌘K`) dentro da janela principal: ferramentas, vistas e ações.
 _Evite_: omnibox, launcher, janela de busca
+
+**Tela de entrada** — entry screen (`src/entry.ts`, `session.profiles`):
+A tela bloqueada: o trilho de tiles — Offline, a guilda e `+` — onde a pessoa escolhe por onde entrar
+e digita a senha (RF-60).
+_Evite_: tela de login, launcher
+
+**Tile** — tile:
+Cada alvo do trilho da tela de entrada (Offline, a guilda, `+`), com ícone ou iniciais e estado.
+_Evite_: botão, atalho
 
 **Aba**:
 Não existe no Nod. O que a pessoa chamaria de aba é uma **janela de ferramenta** ou uma **vista**.
@@ -63,6 +77,11 @@ _Evite_: login (como substantivo), perfil, cadastro
 **Convite** — `Invite` (`InviteSeed` no seed):
 O código de uso único que o administrador emite para uma pessoa criar conta. Só o hash fica guardado.
 _Evite_: senha temporária, token, link mágico
+
+**Convite da guilda** — guild invite (`GuildInvite`, `guildInvites.*`):
+O convite que o admin de uma guilda cria com papéis, limite de usos e validade; quem abre o link
+`nod://join?…` cria a própria conta com os papéis do convite (RF-59).
+_Evite_: link mágico, código de acesso
 
 **Papel** — `Role`:
 Um conjunto nomeado de ferramentas visíveis.
@@ -92,6 +111,11 @@ _Evite_: login (quando se fala do app)
 **Senha local** — password:
 A senha da conta no próprio Nod. Sem recuperação.
 _Evite_: master password, PIN
+
+**Sessão offline** — offline session (`SessionState.mode === 'offline'`, `HostState.offlineSession`):
+A sessão que só usa o catálogo local, sem sincronizar e sem chamar o host — o mesmo corte do O2
+(RF-60).
+_Evite_: modo local, desconectado (como sinônimo)
 
 ## Segredos e registro
 

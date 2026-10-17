@@ -4,10 +4,11 @@
 // `bun test host/admin.test.ts`.
 //
 // The flow of the fixture is the real one: `POST /v1/auth/setup` makes the first admin, the admin
-// group creates the people and the org catalog, and the person then redeems the code the route
-// answered through `POST /v1/auth/activate` — so a test only ever passes through a route that
-// exists. Only the fixtures no story has landed yet (a personal tool, an event batch, a code) are
-// seeded through the repo, and each one says so.
+// group mints the guild invites and builds the org catalog, and the person then redeems the code
+// `POST /v1/admin/people/:id/code` answered through `POST /v1/auth/activate` — so a test only ever
+// passes through a route that exists. A person is seeded through the repo (0.4.5, RF-59 removed the
+// route that created one), as are the fixtures no story has landed yet (a personal tool, an event
+// batch, a code), and each one says so.
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -151,25 +152,25 @@ async function setupAdmin(host: TestHost): Promise<{ token: string; personId: st
   return await body<{ token: string; personId: string }>(response);
 }
 
-/** One person created by the admin route, and the code that came with them (SP02 §3). */
+/**
+ * One person, and the code the `:id/code` route of SP02 §3 would issue them — seeded through the
+ * repo, because 0.4.5 (RF-59) removed the admin route that created a person with an email-bound
+ * code (a guild invite creates a person now), the way this file's `seedCode` does.
+ */
 async function createPerson(
   host: TestHost,
-  admin: string,
   input: { email?: string; name?: string; roles?: string[] } = {},
 ): Promise<{ personId: string; code: string; expiresAt: string }> {
-  const response = await post(
-    host,
-    HOST_ROUTES.adminPeople,
-    { email: MEMBER_EMAIL, name: 'Bob', roles: [], ...input },
-    admin,
+  const { email = MEMBER_EMAIL, name = 'Bob', roles = [] } = input;
+  const person = host.repo.createPerson({ id: crypto.randomUUID(), email, name, roles }, instant());
+  const code = generateCode('access');
+  const normalized = normalizeCode(code);
+  if (normalized === null) throw new Error('the generated code is not Crockford base32');
+  const record = host.repo.issueCode(
+    { id: crypto.randomUUID(), purpose: 'activate', personId: person.id, codeHash: await sha256Hex(normalized) },
+    instant(),
   );
-  expect(response.status).toBe(200);
-  const created = await body<{
-    person: { id: string };
-    code: string;
-    expiresAt: string;
-  }>(response);
-  return { personId: created.person.id, code: created.code, expiresAt: created.expiresAt };
+  return { personId: person.id, code, expiresAt: record.expiresAt };
 }
 
 /** Redeems the code the admin route answered, through the real activation route (SP02 §3). */
@@ -235,7 +236,7 @@ describe('people', () => {
   test('lists every person without a salt or a hash', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    await createPerson(host, admin.token, { roles: [] });
+    await createPerson(host, { roles: [] });
 
     const response = await get(host, HOST_ROUTES.adminPeople, admin.token);
     expect(response.status).toBe(200);
@@ -250,26 +251,21 @@ describe('people', () => {
     expect(people[1]).toMatchObject({ name: 'Bob', kind: 'member', activatedAt: null, disabledAt: null });
   });
 
-  test('creates a person and answers the access code once, and that code activates them', async () => {
+  test('the reissue route answers one access code with the SP02 §3 TTL, and that code activates the person', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
+    const person = await createPerson(host, {});
     const before = instant();
     const response = await post(
       host,
-      HOST_ROUTES.adminPeople,
-      { email: `  ${MEMBER_EMAIL.toUpperCase()} `, name: 'Bob', roles: [] },
+      `${HOST_ROUTES.adminPeople}/${person.personId}/code`,
+      undefined,
       admin.token,
     );
     expect(response.status).toBe(200);
-    const created = await body<{
-      person: { id: string; email: string; roles: string[]; admin: boolean; activatedAt: string | null };
-      code: string;
-      expiresAt: string;
-    }>(response);
+    const created = await body<{ code: string; expiresAt: string }>(response);
 
-    // SP01 §2: the email is stored lowercased and trimmed; the code is the `XXXX-XXXX` of SP02 §3.
-    expect(created.person.email).toBe(MEMBER_EMAIL);
-    expect(created.person).toMatchObject({ roles: [], admin: false, activatedAt: null });
+    // The code is the `XXXX-XXXX` of SP02 §3.
     expect(created.code).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/);
     // SP02 §3: an access code lives 72 h.
     const ttlHours = (Date.parse(created.expiresAt) - Date.parse(before)) / HOUR_MS;
@@ -282,42 +278,14 @@ describe('people', () => {
 
     // And it works: the person redeems it and gets a session (RF-33).
     const session = await activate(host, MEMBER_EMAIL, created.code);
-    expect(session.personId).toBe(created.person.id);
+    expect(session.personId).toBe(person.personId);
     expect((await personPing(host, session.token)).status).toBe(200);
-  });
-
-  test('a taken email is 409 and an unknown role is 404, and neither creates a person', async () => {
-    const host = await startHost();
-    const admin = await setupAdmin(host);
-    await createPerson(host, admin.token, {});
-
-    const taken = await post(
-      host,
-      HOST_ROUTES.adminPeople,
-      { email: MEMBER_EMAIL, name: 'Someone else', roles: [] },
-      admin.token,
-    );
-    expect(taken.status).toBe(409);
-    expect(await body<ErrorResponse>(taken)).toEqual({ error: 'email taken' });
-
-    const unknownRole = await post(
-      host,
-      HOST_ROUTES.adminPeople,
-      { email: 'carol@nod.test', name: 'Carol', roles: ['ghost'] },
-      admin.token,
-    );
-    expect(unknownRole.status).toBe(404);
-
-    const people = await body<Array<{ email: string }>>(
-      await get(host, HOST_ROUTES.adminPeople, admin.token),
-    );
-    expect(people.map((person) => person.email)).toEqual([ADMIN_EMAIL, MEMBER_EMAIL]);
   });
 
   test('a reissued code revokes the previous one', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    const first = await createPerson(host, admin.token, {});
+    const first = await createPerson(host, {});
 
     const reissued = await post(
       host,
@@ -364,7 +332,7 @@ describe('people', () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
     await put(host, '/v1/admin/roles/team', { name: 'Team', admin: false }, admin.token);
-    const person = await createPerson(host, admin.token, {});
+    const person = await createPerson(host, {});
 
     const response = await patch(
       host,
@@ -397,7 +365,7 @@ describe('people', () => {
   test('disabling a person revokes every session of theirs', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    const person = await createPerson(host, admin.token, {});
+    const person = await createPerson(host, {});
     const member = await activate(host, MEMBER_EMAIL, person.code);
     expect((await personPing(host, member.token)).status).toBe(200);
 
@@ -461,7 +429,7 @@ describe('sessions', () => {
   test('lists a person`s live sessions and ends one by id', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    const person = await createPerson(host, admin.token, {});
+    const person = await createPerson(host, {});
     const member = await activate(host, MEMBER_EMAIL, person.code);
 
     const listed = await get(
@@ -553,7 +521,7 @@ describe('roles and grants', () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
     await put(host, '/v1/admin/roles/team', { name: 'Team', admin: false }, admin.token);
-    const person = await createPerson(host, admin.token, { roles: ['team'] });
+    const person = await createPerson(host, { roles: ['team'] });
     await put(host, HOST_ROUTES.adminTool.replace(':id', 'kanban'), tool('kanban'), admin.token);
 
     const granted = await put(
@@ -677,6 +645,42 @@ describe('org tools', () => {
     expect(failure.error).toContain('id');
   });
 
+  test('PUT files an org tool under a trimmed category, and refuses one longer than 40 (RF-62)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+
+    const created = await put(
+      host,
+      HOST_ROUTES.adminTool.replace(':id', 'jitsi'),
+      tool('jitsi', { category: '  Support  ' }),
+      admin.token,
+    );
+    expect(created.status).toBe(200);
+    expect(await body<{ category: string | null }>(created)).toEqual(
+      expect.objectContaining({ category: 'Support' }),
+    );
+    expect(host.repo.listOrgTools()[0]?.category).toBe('Support');
+
+    // An empty name is no category, and the schema bounds the length of one that is sent.
+    const cleared = await put(
+      host,
+      HOST_ROUTES.adminTool.replace(':id', 'jitsi'),
+      tool('jitsi', { category: '   ' }),
+      admin.token,
+    );
+    expect(await body<{ category: string | null }>(cleared)).toEqual(
+      expect.objectContaining({ category: null }),
+    );
+    const tooLong = await put(
+      host,
+      HOST_ROUTES.adminTool.replace(':id', 'jitsi'),
+      tool('jitsi', { category: 'c'.repeat(41) }),
+      admin.token,
+    );
+    expect(tooLong.status).toBe(400);
+    expect(host.repo.listOrgTools()[0]?.category).toBeNull();
+  });
+
   test('DELETE removes an org tool and answers 404 when it is not there', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
@@ -708,7 +712,7 @@ describe('org tools', () => {
     );
     // A member of the granted role with keys, and one real share over the real route: that row is
     // what keeps the tool alive for the child reference of `shares.tool_id`.
-    const person = await createPerson(host, admin.token, { roles: ['team'] });
+    const person = await createPerson(host, { roles: ['team'] });
     const member = await activate(host, MEMBER_EMAIL, person.code);
     expect(
       (
@@ -754,7 +758,7 @@ describe('org tools', () => {
   test('promote copies the admin`s personal tool to the org, and the owner keeps theirs', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    const person = await createPerson(host, admin.token, {});
+    const person = await createPerson(host, {});
     const viewId = crypto.randomUUID();
     host.repo.savePersonalTool(
       admin.personId,
@@ -870,7 +874,7 @@ describe('events', () => {
   test('lists the host`s events with the four filters and a limit', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    const person = await createPerson(host, admin.token, {});
+    const person = await createPerson(host, {});
     const member = await activate(host, MEMBER_EMAIL, person.code);
     const adminSession = host.repo.sessionsOfPerson(admin.personId, instant())[0].id;
     const memberSession = host.repo.sessionsOfPerson(person.personId, instant())[0].id;
@@ -935,17 +939,36 @@ describe('access, validation and logs', () => {
   test('every admin route answers 401 without a token and 403 for a member', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    const person = await createPerson(host, admin.token, {});
+    const person = await createPerson(host, {});
     const member = await activate(host, MEMBER_EMAIL, person.code);
     const session = host.repo.sessionsOfPerson(person.personId, instant())[0].id;
     const toolId = 'kanban';
     await put(host, HOST_ROUTES.adminTool.replace(':id', toolId), tool(toolId), admin.token);
 
+    // One real invite, so the DELETE row below has an id to hand (0.4.5, RF-59).
+    const invite = await body<{ invite: { id: string } }>(
+      await post(
+        host,
+        HOST_ROUTES.adminInvites,
+        { roles: [], maxUses: null, expiresInMinutes: null },
+        admin.token,
+      ),
+    );
+
     const routes: Array<[string, (token: string | null) => Promise<Response>]> = [
       ['GET /v1/admin/people', (token) => get(host, HOST_ROUTES.adminPeople, token)],
       [
-        'POST /v1/admin/people',
-        (token) => post(host, HOST_ROUTES.adminPeople, { email: 'zed@nod.test', name: 'Zed', roles: [] }, token),
+        'GET /v1/admin/invites',
+        (token) => get(host, HOST_ROUTES.adminInvites, token),
+      ],
+      [
+        'POST /v1/admin/invites',
+        (token) =>
+          post(host, HOST_ROUTES.adminInvites, { roles: [], maxUses: null, expiresInMinutes: null }, token),
+      ],
+      [
+        'DELETE /v1/admin/invites/:id',
+        (token) => remove(host, `${HOST_ROUTES.adminInvites}/${invite.invite.id}`, token),
       ],
       [
         'PATCH /v1/admin/people/:id',
@@ -1000,8 +1023,8 @@ describe('access, validation and logs', () => {
 
   test('the admin guard does not cover the groups mounted after it', async () => {
     const host = await startHost();
-    const admin = await setupAdmin(host);
-    const person = await createPerson(host, admin.token, {});
+    await setupAdmin(host);
+    const person = await createPerson(host, {});
     const member = await activate(host, MEMBER_EMAIL, person.code);
 
     // The event group of H8 answers a member on its own level; a leaked admin guard would be 403.
@@ -1014,11 +1037,16 @@ describe('access, validation and logs', () => {
   test('a body that fails its schema is a 400 that names the field', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
-    const person = await createPerson(host, admin.token, {});
+    const person = await createPerson(host, {});
 
-    const missing = await post(host, HOST_ROUTES.adminPeople, {}, admin.token);
+    const missing = await post(
+      host,
+      HOST_ROUTES.adminInvites,
+      { roles: [], maxUses: null, expiresInMinutes: 'soon' },
+      admin.token,
+    );
     expect(missing.status).toBe(400);
-    expect((await body<ErrorResponse>(missing)).error).toContain('email');
+    expect((await body<ErrorResponse>(missing)).error).toContain('expiresInMinutes');
 
     const wrongRoles = await patch(
       host,
@@ -1061,7 +1089,7 @@ describe('access, validation and logs', () => {
     expect((await body<ErrorResponse>(wrongPromote)).error).toContain('personalId');
 
     // A body the parser cannot turn into an object answers the 400 of SP03 §1 with no field to name.
-    const malformed = await call(host, 'POST', HOST_ROUTES.adminPeople, '{', admin.token);
+    const malformed = await call(host, 'POST', HOST_ROUTES.adminInvites, '{', admin.token);
     expect(malformed.status).toBe(400);
     expect((await body<ErrorResponse>(malformed)).error).toContain('invalid body');
   });
@@ -1088,7 +1116,7 @@ describe('access, validation and logs', () => {
       }),
     );
 
-    const person = await createPerson(host, admin.token, {});
+    const person = await createPerson(host, {});
     const reissued = await body<{ code: string }>(
       await post(host, `${HOST_ROUTES.adminPeople}/${person.personId}/code`, undefined, admin.token),
     );

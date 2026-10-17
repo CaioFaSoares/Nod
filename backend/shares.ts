@@ -222,9 +222,9 @@ export interface SharesDeps {
   /** The pinned host connection, `null` when disconnected — or when the O2 gate is up. */
   connection: () => HostConnection | null;
   /**
-   * K5: the biometric-or-password gate. It throws `authentication required` when this machine has
-   * no biometrics and no password came in, and `authentication cancelled` when the person declined;
-   * in both cases nothing is shown, copied, sent or accepted.
+   * K5: the biometric-or-password gate. It throws `authentication required` when no usable factor
+   * came in, and `GATE_PROMPT_FAILED` when the system prompt did not confirm (the page then asks for
+   * the password); in every refusal nothing is shown, copied, sent or accepted.
    */
   gate: (reason: string, password?: string) => Promise<void>;
   /** Called after an accepted share or a send, so the sync loop picks up the new holders. */

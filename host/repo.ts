@@ -104,6 +104,23 @@ export interface CodeRecord {
   revokedAt: string | null;
 }
 
+/**
+ * One guild invite (0.4.5, RF-59; SP01 §2): the roles it grants, how many redemptions it allows
+ * (`maxUses` null = no limit), how many it has had, and until when it works (`expiresAt` null =
+ * never). The code is not a field by construction — only its hash is stored, and no read hands a
+ * hash back (`shared/host-api.ts`'s `GuildInvite` is this row on the wire).
+ */
+export interface GuildInviteRecord {
+  id: string;
+  roles: string[];
+  maxUses: number | null;
+  uses: number;
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+
 /** A view row: the fields `View` carries plus the columns SP01 §2 adds. */
 export interface HostView {
   id: string;
@@ -124,6 +141,8 @@ export interface HostEntry {
   scope: EntryScope;
   ownerId: string | null;
   title: string;
+  /** RF-62: the display category the guild gave the tool; `null` while it filed it nowhere. */
+  category: string | null;
   url: string;
   icon: string | null;
   /** `Entry.order`; the column is `ord`. */
@@ -152,6 +171,12 @@ export interface PersonalViewInput extends ViewInput {
 export interface EntryInput {
   id: string;
   title: string;
+  /**
+   * RF-62: the display category. Optional because a personal entry never carries one: the personal
+   * routes do not declare the field and `savePersonalTool` writes `NULL`, so a value here is
+   * ignored for a personal tool.
+   */
+  category?: string | null;
   url: string;
   icon: string | null;
   order: number;
@@ -393,6 +418,46 @@ export interface Repo {
     now: string,
   ): CodeRecord | null;
 
+  // guild invites (0.4.5, RF-59)
+  /**
+   * Stores one invite. `roles` must all exist (`404` when one does not, SP03 §1) and
+   * `expiresInMinutes` — null for never — becomes `expires_at` off the caller's clock. `now` is
+   * both `created_at` and the base of that TTL.
+   */
+  createInvite(
+    input: {
+      id: string;
+      codeHash: string;
+      roles: string[];
+      maxUses: number | null;
+      createdBy: string;
+      expiresInMinutes: number | null;
+    },
+    now: string,
+  ): GuildInviteRecord;
+  /** Every invite, newest first — revoked ones included (SP03 §2). */
+  listInvites(): GuildInviteRecord[];
+  /** The row behind a normalized code's hash, in any state, or null: what a preview or a join reads. */
+  inviteByCodeHash(codeHash: string): GuildInviteRecord | null;
+  /**
+   * Sets `revoked_at` once (a second revoke is a no-op). False when no invite holds that id — the
+   * route's `404` (SP03 §1).
+   */
+  revokeInvite(id: string, now: string): boolean;
+  /**
+   * Spends one use, or none: the update carries the whole rule of RF-59 (not revoked, not expired,
+   * a use left) in its predicate, so two joins of the last use cannot both win. Called inside the
+   * join transaction, so a failure later rolls the spend back and `uses` only counts accounts that
+   * were actually created.
+   */
+  spendInviteUse(id: string, now: string): boolean;
+  /**
+   * RF-59: whether any of these role ids carries an admin role. An invite is a bearer code pasted
+   * into chats, so it may never make an admin: `createInvite` refuses one, and the join re-reads
+   * this because a role can be promoted to admin after the invite was created.
+   */
+  includesAdminRole(roleIds: string[]): boolean;
+
   // sessions
   createSession(
     input: { id: string; personId: string; tokenHash: string; device: Device },
@@ -592,14 +657,15 @@ interface PersonRow {
 }
 
 const ENTRY_COLUMNS = `e.id AS id, e.scope AS scope, e.owner_id AS ownerId, e.title AS title,
-  e.url AS url, e.icon AS icon, e.ord AS "order", e.auth AS auth, e.active AS active,
-  e.updated_at AS updatedAt, g.role_id AS roleId`;
+  e.category AS category, e.url AS url, e.icon AS icon, e.ord AS "order", e.auth AS auth,
+  e.active AS active, e.updated_at AS updatedAt, g.role_id AS roleId`;
 
 interface EntryRow {
   id: string;
   scope: string;
   ownerId: string | null;
   title: string;
+  category: string | null;
   url: string;
   icon: string | null;
   order: number;
@@ -651,6 +717,21 @@ interface CodeRow {
   createdAt: string;
   expiresAt: string;
   usedAt: string | null;
+  revokedAt: string | null;
+}
+
+/** `guild_invites` (migration 5): `roles` is the JSON array of role ids, read and written whole. */
+const INVITE_COLUMNS = `id, roles, max_uses AS maxUses, uses, created_by AS createdBy,
+  created_at AS createdAt, expires_at AS expiresAt, revoked_at AS revokedAt`;
+
+interface InviteRow {
+  id: string;
+  roles: string;
+  maxUses: number | null;
+  uses: number;
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string | null;
   revokedAt: string | null;
 }
 
@@ -715,6 +796,19 @@ function addMs(iso: string, ms: number): string {
 /** `?` placeholders for a list of binds. */
 function marks(count: number): string {
   return new Array(count).fill('?').join(', ');
+}
+
+/**
+ * RF-59: whether an invite still redeems — not revoked, not expired, a use left. It is the read side
+ * of the rule `spendInviteUse` carries in its SQL predicate (the one that decides two joins racing
+ * for the last use), kept beside it so the host's answer to a preview and to a join cannot drift.
+ */
+export function inviteRedeemable(invite: GuildInviteRecord, now: string): boolean {
+  return (
+    invite.revokedAt === null &&
+    (invite.expiresAt === null || invite.expiresAt > now) &&
+    (invite.maxUses === null || invite.uses < invite.maxUses)
+  );
 }
 
 // ---------------------------------------------------------------- implementation
@@ -792,6 +886,17 @@ export function createRepo(db: Database): Repo {
         throw new NotFoundError('unknown role');
       }
     }
+  }
+
+  /** RF-59: one query for "would these roles make an admin" — read by `createInvite` and the join. */
+  function includesAdminRole(roleIds: string[]): boolean {
+    if (roleIds.length === 0) return false;
+    const row = db
+      .query<{ n: number }, Bind[]>(
+        `SELECT COUNT(*) AS n FROM roles WHERE admin = 1 AND id IN (${marks(roleIds.length)})`,
+      )
+      .get(...roleIds);
+    return (row?.n ?? 0) > 0;
   }
 
   /** Activated, non-disabled people holding an admin role (SP01 §2). */
@@ -905,6 +1010,7 @@ export function createRepo(db: Database): Repo {
           scope: row.scope as EntryScope,
           ownerId: row.ownerId,
           title: row.title,
+          category: row.category,
           url: row.url,
           icon: row.icon,
           order: row.order,
@@ -1170,6 +1276,110 @@ export function createRepo(db: Database): Repo {
     });
   }
 
+  // ---------------------------------------------------------------- guild invites (0.4.5, RF-59)
+
+  function toInvite(row: InviteRow): GuildInviteRecord {
+    return {
+      id: row.id,
+      roles: JSON.parse(row.roles) as string[],
+      maxUses: row.maxUses,
+      uses: row.uses,
+      createdBy: row.createdBy,
+      createdAt: row.createdAt,
+      expiresAt: row.expiresAt,
+      revokedAt: row.revokedAt,
+    };
+  }
+
+  /** Any state, exactly like `shareById`: a route that must tell 404 from 401 reads it and decides. */
+  function inviteByCodeHash(codeHash: string): GuildInviteRecord | null {
+    const row = db
+      .query<InviteRow, [string]>(`SELECT ${INVITE_COLUMNS} FROM guild_invites WHERE code_hash = ?`)
+      .get(codeHash);
+    return row === null ? null : toInvite(row);
+  }
+
+  function createInvite(
+    input: {
+      id: string;
+      codeHash: string;
+      roles: string[];
+      maxUses: number | null;
+      createdBy: string;
+      expiresInMinutes: number | null;
+    },
+    now: string,
+  ): GuildInviteRecord {
+    // SP03 §2: a role the guild does not have is the 404 of the whole write, and no invite is
+    // stored — one transaction, as every code and person write of this file is. `roles` keeps the
+    // order the admin chose: it is the order the person's roles will have.
+    const roles = [...new Set(input.roles)];
+    const expiresAt =
+      input.expiresInMinutes === null ? null : addMs(now, input.expiresInMinutes * 60_000);
+    return runInTransaction(() => {
+      assertRolesExist(roles);
+      // RF-59: an invite is a bearer code pasted into chats, so it never makes an admin — the role
+      // list an invite carries is member material, and promoting a person stays
+      // `PATCH /v1/admin/people/:id` (SP03 §2).
+      if (includesAdminRole(roles)) {
+        throw new RepoError('an invite cannot grant an admin role', 400);
+      }
+      db.query(
+        `INSERT INTO guild_invites
+           (id, code_hash, roles, max_uses, created_by, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        input.id,
+        input.codeHash,
+        JSON.stringify(roles),
+        input.maxUses,
+        input.createdBy,
+        now,
+        expiresAt,
+      );
+      const created = db
+        .query<InviteRow, [string]>(`SELECT ${INVITE_COLUMNS} FROM guild_invites WHERE id = ?`)
+        .get(input.id);
+      return toInvite(created as InviteRow);
+    });
+  }
+
+  function listInvites(): GuildInviteRecord[] {
+    return db
+      .query<InviteRow, []>(
+        `SELECT ${INVITE_COLUMNS} FROM guild_invites ORDER BY created_at DESC, id DESC`,
+      )
+      .all()
+      .map(toInvite);
+  }
+
+  function revokeInvite(id: string, now: string): boolean {
+    // The first revoke stamps the instant; a later one leaves it. Either way the row exists, and an
+    // id nobody holds changes nothing and answers false (the route's 404, SP03 §1).
+    return (
+      db
+        .query('UPDATE guild_invites SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?')
+        .run(now, id).changes === 1
+    );
+  }
+
+  function spendInviteUse(id: string, now: string): boolean {
+    // RF-59: the three rules live in the predicate, so the check and the spend are one statement —
+    // two joins racing for the last use cannot both read "one left" and both write (SP01 §1's one
+    // writer, plus this guard, is what makes the last use go to exactly one of them). The read side
+    // of the same rule is `inviteRedeemable`.
+    return (
+      db
+        .query(
+          `UPDATE guild_invites SET uses = uses + 1
+            WHERE id = ? AND revoked_at IS NULL
+              AND (expires_at IS NULL OR expires_at > ?)
+              AND (max_uses IS NULL OR uses < max_uses)`,
+        )
+        .run(id, now).changes === 1
+    );
+  }
+
   function createSession(
     input: { id: string; personId: string; tokenHash: string; device: Device },
     now: string,
@@ -1331,13 +1541,15 @@ export function createRepo(db: Database): Repo {
       if (existing !== null && existing.scope !== 'org') throw new ForbiddenError('not yours');
 
       db.query(
-        `INSERT INTO entries (id, scope, owner_id, title, url, icon, ord, auth, active, updated_at)
-         VALUES (?, 'org', NULL, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET title = excluded.title, url = excluded.url, icon = excluded.icon,
+        `INSERT INTO entries (id, scope, owner_id, title, category, url, icon, ord, auth, active, updated_at)
+         VALUES (?, 'org', NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET title = excluded.title, category = excluded.category,
+           url = excluded.url, icon = excluded.icon,
            ord = excluded.ord, auth = excluded.auth, active = excluded.active, updated_at = excluded.updated_at`,
       ).run(
         tool.id,
         tool.title,
+        tool.category ?? null,
         tool.url,
         tool.icon,
         tool.order,
@@ -1412,6 +1624,9 @@ export function createRepo(db: Database): Repo {
       }
       if (existing !== null && existing.updatedAt > updatedAt) throw new ConflictError('stale updatedAt');
 
+      // RF-62: a personal tool carries no category — it has its own group in the display — and a
+      // category a body declares is ignored here: the statement names no `category` column, so the
+      // row keeps `NULL`. The personal route does not declare the field either (`routes/person.ts`).
       db.query(
         `INSERT INTO entries (id, scope, owner_id, title, url, icon, ord, auth, active, updated_at)
          VALUES (?, 'personal', ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2325,6 +2540,13 @@ export function createRepo(db: Database): Repo {
 
     issueCode,
     redeemCode,
+
+    createInvite,
+    listInvites,
+    inviteByCodeHash,
+    revokeInvite,
+    spendInviteUse,
+    includesAdminRole,
 
     createSession,
     sessionByTokenHash,
