@@ -190,9 +190,9 @@ describe('schema versioning', () => {
   });
 
   test('a version this build does not know is refused by name', () => {
-    // The versioning started at 2, so `1` was never written by any build; `7` is a build from the
+    // The versioning started at 2, so `1` was never written by any build; `8` is a build from the
     // future. Neither is completed — the database is refused whole.
-    for (const version of [1, 7]) {
+    for (const version of [1, 8]) {
       const db = memorySqlite();
       db.exec(`PRAGMA user_version = ${version}`);
       expect(() => createRepo(db).migrate()).toThrow(`unsupported database version: ${version}`);
@@ -893,13 +893,13 @@ const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['event', 'sent_at'],
 ];
 
-describe('schema version 6 — tool categories (RF-62) over the connected and shared schema (SP05 §2, SP06)', () => {
-  test('a fresh database is v6, with the two host tables, `peer_keys` and every column of SP05 §2 and K4', () => {
+describe('schema version 7 — the sealed `secret` table (RF-63) over the connected and shared schema (SP05 §2, SP06)', () => {
+  test('a fresh database is v7, with the two host tables, `peer_keys`, `secret` and every column of SP05 §2 and K4', () => {
     const db = memorySqlite();
     createRepo(db).migrate();
 
-    expect(SCHEMA_VERSION).toBe(6);
-    expect(userVersion(db)).toBe(6);
+    expect(SCHEMA_VERSION).toBe(7);
+    expect(userVersion(db)).toBe(7);
     expect(tableNames(db)).toEqual([
       'event',
       'host',
@@ -910,6 +910,7 @@ describe('schema version 6 — tool categories (RF-62) over the connected and sh
       'person',
       'person_role',
       'role',
+      'secret',
       'tool',
       'tool_grant',
       'tool_view',
@@ -959,7 +960,7 @@ describe('schema version 6 — tool categories (RF-62) over the connected and sh
     repo.migrate();
 
     // Stamped, completed, and every row of local mode still there, value for value.
-    expect(userVersion(db)).toBe(6);
+    expect(userVersion(db)).toBe(7);
     expect(tableNames(db)).toContain('host');
     expect(tableNames(db)).toContain('host_outbox');
     expect(repo.listPeople().map((p) => p.email)).toEqual(['ana@example.test']);
@@ -986,7 +987,7 @@ describe('schema version 6 — tool categories (RF-62) over the connected and sh
 
     // And migrate stays idempotent on the migrated database.
     repo.migrate();
-    expect(userVersion(db)).toBe(6);
+    expect(userVersion(db)).toBe(7);
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
   });
 
@@ -997,11 +998,11 @@ describe('schema version 6 — tool categories (RF-62) over the connected and sh
 
     createRepo(db).migrate();
 
-    expect(userVersion(db)).toBe(6);
+    expect(userVersion(db)).toBe(7);
     expect(tableNames(db)).toContain('host_outbox');
   });
 
-  test('a v3 database gains `peer_keys` and is stamped 6, keeping its rows (SP06 §2, K1–K2)', () => {
+  test('a v3 database gains `peer_keys` and is stamped 7, keeping its rows (SP06 §2, K1–K2)', () => {
     const db = memorySqlite();
     const v3 = createRepo(db);
     v3.migrate();
@@ -1014,7 +1015,7 @@ describe('schema version 6 — tool categories (RF-62) over the connected and sh
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(6);
+    expect(userVersion(db)).toBe(7);
     expect(tableNames(db)).toContain('peer_keys');
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
     expect(repo.meta('seed_version')).toBe('2');
@@ -1049,7 +1050,7 @@ describe('schema version 6 — tool categories (RF-62) over the connected and sh
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(6);
+    expect(userVersion(db)).toBe(7);
     const item = repo.vaultItem(person.id, 'alpha');
     expect(item).not.toBeNull();
     // SP06 §3–§5: an item that never travelled has no credential group and the default scope.
@@ -1089,7 +1090,7 @@ describe('schema version 6 — tool categories (RF-62) over the connected and sh
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(6);
+    expect(userVersion(db)).toBe(7);
     // Every row written before the column is uncategorized, and both scopes survive.
     expect(repo.listEntries().map((e) => [e.id, e.category])).toEqual([
       ['alpha', null],
@@ -1107,6 +1108,28 @@ describe('schema version 6 — tool categories (RF-62) over the connected and sh
     );
     expect(repo.entry('alpha')?.category).toBe('Support');
     expect(repo.entry('p-mine00000')?.category).toBeNull();
+  });
+
+  test('a v6 database gains the `secret` table and keeps its rows (RF-63)', () => {
+    const db = memorySqlite();
+    const v6 = createRepo(db);
+    v6.migrate();
+    v6.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app' }));
+    // What a v6 build left behind: this schema without `secret`, `user_version = 6`.
+    db.exec('DROP TABLE secret');
+    db.exec('PRAGMA user_version = 6');
+
+    const repo = createRepo(db);
+    repo.migrate();
+
+    expect(userVersion(db)).toBe(7);
+    expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
+    expect(repo.secret('nod.cred.p-ana.alpha')).toBeNull();
+    repo.setSecret('nod.cred.p-ana.alpha', 'bv1.first');
+    repo.setSecret('nod.cred.p-ana.alpha', 'bv1.second');
+    expect(repo.secret('nod.cred.p-ana.alpha')).toBe('bv1.second');
+    repo.deleteSecret('nod.cred.p-ana.alpha');
+    expect(repo.secret('nod.cred.p-ana.alpha')).toBeNull();
   });
 
   test('`saveEntry` writes and clears the category of an org row (RF-62)', () => {

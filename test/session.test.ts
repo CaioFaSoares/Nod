@@ -35,8 +35,10 @@ const GUILD_PASSWORD = 'guild-password';
 
 function memoryKeychain() {
   const items = new Map<string, string>();
+  const reads: string[] = [];
   const keychain: SecretStore = {
     async get(key) {
+      reads.push(key);
       return items.get(key) ?? null;
     },
     async set(key, value) {
@@ -47,7 +49,7 @@ function memoryKeychain() {
       return items.delete(key);
     },
   };
-  return { keychain, items };
+  return { keychain, items, reads };
 }
 
 function memoryStore() {
@@ -83,6 +85,8 @@ interface SessionScene {
   session: Session;
   keychain: SecretStore;
   secrets: Map<string, string>;
+  /** Every key the keychain was asked for, in order. */
+  keychainReads: string[];
   saved: Map<string, unknown>;
   clock: { now(): Date; advance(ms: number): void };
   /** Reason the OS biometric dialog was asked with, in order. */
@@ -90,13 +94,13 @@ interface SessionScene {
   setAuthentication(answer: boolean): void;
 }
 
-function scene(options: { biometricAvailable?: boolean } = {}): SessionScene {
+function scene(options: { biometricAvailable?: boolean; sealedExtras?: (personId: string) => string[] } = {}): SessionScene {
   const db = memorySqlite();
   const repo = createRepo(db);
   repo.migrate();
   repo.ensureAdminRole();
 
-  const { keychain, items: secrets } = memoryKeychain();
+  const { keychain, items: secrets, reads: keychainReads } = memoryKeychain();
   const { store, items: saved } = memoryStore();
   const clock = fixedClock(NOW);
   const reasons: string[] = [];
@@ -111,6 +115,7 @@ function scene(options: { biometricAvailable?: boolean } = {}): SessionScene {
       return authenticationAnswer;
     },
     biometricAvailable: options.biometricAvailable ?? false,
+    sealedExtras: options.sealedExtras,
     iterations: ITERATIONS,
     now: clock.now,
   });
@@ -121,6 +126,7 @@ function scene(options: { biometricAvailable?: boolean } = {}): SessionScene {
     session,
     keychain,
     secrets,
+    keychainReads,
     saved,
     clock,
     reasons,
@@ -851,6 +857,53 @@ describe('biometrics', () => {
     expect(await messageOf(() => s.session.unlockBiometric())).toBe('biometrics are not enabled');
     expect((await s.session.state()).unlocked).toBe(false);
   });
+
+  test('the entry screen and a password unlock never read the keychain; a biometric unlock reads it once (RF-63)', async () => {
+    const s = scene({ biometricAvailable: true });
+    const id = await firstAccount(s);
+    await s.session.unlock({ email: EMAIL, password: PASSWORD });
+    await s.session.enableBiometric(PASSWORD);
+    s.session.lock();
+    s.keychainReads.length = 0;
+
+    // Every state the entry screen asks for answers `biometric` from `store`, not from the item.
+    expect((await s.session.state()).biometric).toBe(true);
+    expect((await s.session.state()).biometric).toBe(true);
+    await s.session.unlock({ email: EMAIL, password: PASSWORD });
+    s.session.lock();
+    expect(s.keychainReads).toEqual([]);
+
+    // The fingerprint is the one prompt, and the item behind it the one read.
+    await s.session.unlockBiometric();
+    expect(s.keychainReads).toEqual([`nod.bio.${id}`]);
+  });
+
+  test('a person an older Nod enabled is asked of the keychain once, then answered from store (RF-63)', async () => {
+    const s = scene({ biometricAvailable: true });
+    const id = await firstAccount(s);
+    await s.session.unlock({ email: EMAIL, password: PASSWORD });
+    await s.session.enableBiometric(PASSWORD);
+    s.session.lock();
+    // What 0.5.0 left: the item, and no flag beside it.
+    s.saved.delete('biometric_people');
+    s.keychainReads.length = 0;
+
+    expect((await s.session.state()).biometric).toBe(true);
+    expect((await s.session.state()).biometric).toBe(true);
+    expect(s.keychainReads).toEqual([`nod.bio.${id}`]);
+  });
+
+  test('an item removed from the keychain by hand stops being offered after the attempt (RF-63)', async () => {
+    const s = scene({ biometricAvailable: true });
+    const id = await firstAccount(s);
+    await s.session.enableBiometric(PASSWORD);
+    s.session.lock();
+    s.secrets.delete(`nod.bio.${id}`);
+
+    expect((await s.session.state()).biometric).toBe(true);
+    expect(await messageOf(() => s.session.unlockBiometric())).toBe('biometrics are not enabled');
+    expect((await s.session.state()).biometric).toBe(false);
+  });
 });
 
 describe('lock', () => {
@@ -1286,6 +1339,21 @@ describe('changePassword against the host (SP02 §7)', () => {
     expect(await messageOf(() => s.session.unlock({ email: EMAIL, password: PASSWORD }))).toBe(
       'invalid credentials',
     );
+  });
+
+  test('the sealed extras of the person (the guild bearer, RF-63) move to the new vaultKey in the same batch', async () => {
+    const bearer = 'nod.host.kid-1.p';
+    const s = scene({ sealedExtras: () => [bearer] });
+    await firstAccount(s);
+    const oldKey = fromBase64url(keysOf(s).vaultKey);
+    s.secrets.set(bearer, await encryptVaultBytes(oldKey, bearer, new TextEncoder().encode('token-1')));
+
+    await s.session.changePassword(PASSWORD, NEW_PASSWORD);
+
+    const newKey = fromBase64url(keysOf(s).vaultKey);
+    const raw = s.secrets.get(bearer) ?? '';
+    expect(await decryptVaultBytes(oldKey, bearer, raw)).toBeNull();
+    expect(new TextDecoder().decode((await decryptVaultBytes(newKey, bearer, raw)) ?? new Uint8Array())).toBe('token-1');
   });
 
   test('the biometric item follows the new vaultKey, so biometrics keeps opening the vault', async () => {

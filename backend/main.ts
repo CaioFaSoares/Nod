@@ -48,6 +48,7 @@ import type {
   Result,
   Role,
   Seed,
+  SecretStore,
   SessionState,
   ToolsState,
   UpdateInfo,
@@ -73,14 +74,15 @@ import { createConnectedCatalog } from './connected-catalog';
 import { createGuildIcon, GUILD_ICON_FILE } from './guild-icon';
 import { buildCredentialHolders } from './holders';
 import { hostAdminFor, orgViewsOf } from './host-admin';
-import { createHostClient, HostError } from './host-client';
+import { createHostClient, HostError, hostTokenKey } from './host-client';
 import { bytesToBase64, createIcons } from './icons';
-import { createKeys } from './keys';
+import { createKeys, keysKey } from './keys';
 import { createPersonal } from './personal';
 import { probe } from './probe-net';
 import { createRepo, LegacyDatabaseError } from './repo';
 import { applyBundledSeed, applySeedFile, gateOrigins, importSeedFile, seedCountsDetail, storedSeedVersion } from './seed';
 import type { SeedApplied } from './seed';
+import { createSecretStore, sealedSecrets } from './secret-store';
 import { OFFLINE_SESSION_ERROR, createSession } from './session';
 import { createShares, GATE_REASON } from './shares';
 import { openSqlite } from './sqlite';
@@ -142,6 +144,13 @@ let keys: Keys | null = null;
  * holders of a credential — over the vault, the key pairs and the cached snapshot.
  */
 let shares: Shares | null = null;
+/**
+ * 0.5.1 (RF-63): the one `SecretStore` of the backend (`backend/secret-store.ts`) — the biometric
+ * item in the system keychain, every `bv1.` value in the `secret` table — and the view of it that
+ * seals the guild bearer under the session's `vaultKey`. Built in `init`.
+ */
+let secrets: SecretStore | null = null;
+let bearers: SecretStore | null = null;
 /**
  * K5/SP02 §9: whether this machine has biometrics. The gate of `vault.reveal`, `vault.copy`,
  * `shares.send` and `shares.accept` uses `app.authenticate` when it does, and the person's password
@@ -275,12 +284,22 @@ export async function init(app: TinyApp): Promise<void> {
     store: { get: (key) => app.store.get(key), set: (key, value) => app.store.set(key, value) },
   });
 
+  // 0.5.1 (RF-63): the keychain keeps the biometric item only; the `bv1.` values live in the
+  // `secret` table, and what an older Nod left in the keychain moves there on its first read.
+  const sealed = createSecretStore({ rows: database, keychain: app.secrets });
+  secrets = sealed;
+  bearers = sealedSecrets(sealed, () => (session === null ? null : session.vaultKey()));
   session = createSession({
     repo: database,
-    keychain: app.secrets,
+    keychain: sealed,
     store: app.store,
     authenticate: (request: string) => app.authenticate(request),
     biometricAvailable: biometrics,
+    // SP02 §7, RF-63: the bearer is sealed under the `vaultKey` a password change moves.
+    sealedExtras: (personId) => {
+      const host = database.hostRecord();
+      return host !== null && host.personId === personId ? [hostTokenKey(host.kid, personId)] : [];
+    },
   });
   // SP02 §8/RF-38: the vault reads the entry of a credential through the effective catalog, so the
   // origin it records is the entry's own url at save time — the host entry's, while connected.
@@ -288,7 +307,7 @@ export async function init(app: TinyApp): Promise<void> {
   // there is no key and the vault refuses to read or write one.
   vault = createVault({
     repo: { ...database, entry: (id) => catalogEntryOf(id) },
-    keychain: app.secrets,
+    keychain: sealed,
     vaultKey: () => (session === null ? null : session.vaultKey()),
     // K9/SP06 §4: the one sharing call-out of the vault. A save of a credential the owner already
     // shared re-seals the new value to the holders through `backend/shares.ts`; the call-out is
@@ -299,7 +318,7 @@ export async function init(app: TinyApp): Promise<void> {
   // fed by three moments — an activation, an unlock and an applied snapshot (`onState` below).
   keys = createKeys({
     repo: database,
-    keychain: app.secrets,
+    keychain: sealed,
     session: {
       current: () => (session === null ? null : session.current()),
       vaultKey: () => (session === null ? null : session.vaultKey()),
@@ -331,7 +350,7 @@ export async function init(app: TinyApp): Promise<void> {
   });
   // Connected mode (SP05 §1): the host client holds no state and makes no call of its own, and the
   // sync loop only ever asks it for a connection built from the `host` row (RF-30).
-  client = createHostClient({ fetch, keychain: app.secrets });
+  client = createHostClient({ fetch, keychain: bearers });
   sync = createSync({
     repo: database,
     connection: () => connectionOf(),
@@ -1332,6 +1351,11 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
   const open = required(windows, 'session');
   // K5: a fresh session starts on the system prompt again (canonico §22, gate fallback).
   promptFailed = false;
+  // RF-63: whatever an older Nod left in the system keychain for this person moves to the `secret`
+  // table now, in one pass right after the unlock — so the operating system's prompts for those
+  // items (macOS asks again whenever the app's signature changed) come together, once, instead of
+  // one by one whenever a credential, the key pair or the bearer is first needed.
+  if (state.person !== null) await moveLegacySecrets(state.person.id);
   // SP02 §8/V1: the first unlock after the upgrade turns the person's legacy plaintext values into
   // `bv1.` ones, and a password unlock is when the key exists. A keychain that refuses leaves the
   // value as it was and the next unlock tries again; nothing about the unlock depends on it.
@@ -1370,6 +1394,25 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
   const running = sync;
   if (running !== null && host !== null) running.start();
   return state;
+}
+
+/**
+ * RF-63: reads every secret of `personId` once through the store, which is what moves an item an
+ * older Nod left in the keychain into the `secret` table (`backend/secret-store.ts`): the vault
+ * items, the E02 pair and the guild bearer. A refused item (the person denied the system prompt)
+ * stays where it is and is tried again on its next read; nothing about the unlock depends on it.
+ */
+async function moveLegacySecrets(personId: Id): Promise<void> {
+  const r = repo;
+  const store = secrets;
+  const bearer = bearers;
+  if (r === null || store === null || bearer === null) return;
+  const items = [...r.listVault(personId).map((item) => item.keychainKey), keysKey(personId)];
+  for (const key of items) await store.get(key).catch(() => null);
+  const host = r.hostRecord();
+  if (host !== null && host.personId === personId) {
+    await bearer.get(hostTokenKey(host.kid, personId)).catch(() => null);
+  }
 }
 
 /** §4: locking closes every tool window and the popups they opened. */
