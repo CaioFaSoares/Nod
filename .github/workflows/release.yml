@@ -146,8 +146,10 @@ jobs:
           MESSAGE: ${{ github.event.head_commit.message }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          pattern="^Release ${VERSION//./\\.}[: ]"
-          notes=$(git log -1 --extended-regexp --grep="$pattern" --format=%B)
+          # `--no-merges`: a merge commit's body is the PR title (`Release X — …`), which would match
+          # first and publish one line instead of the notes (it did, on release-0.5.0).
+          pattern="^Release ${VERSION//./\\.}:"
+          notes=$(git log -1 --no-merges --extended-regexp --grep="$pattern" --format=%B)
           [ -n "$notes" ] || notes="$MESSAGE"
           [ -n "$notes" ] || notes=$(git log -1 --format=%B)
           # GitHub's merge header (and the blank line after it) is not news for anyone.
