@@ -41,6 +41,51 @@ const FILL_CHECK_MS = 4000;
 /** Key of the persisted list of open windows in the store. */
 const STORE_KEY = 'open_tools';
 
+/** What the window of a link that did not come from the org is titled (canonico §22, B7). */
+const FOREIGN_TITLE = 'Not from your org';
+
+/** The id of the banner `warningScript` puts in the page: it is how the script stays idempotent. */
+const WARNING_BANNER_ID = 'nod-not-from-org';
+
+/**
+ * canonico §22, owner 2026-10-16: "Org tools — the entries of the release seed — get camera and
+ * microphone without a prompt. Any other origin keeps the engine's own prompt … and the Nod warns
+ * when a link didn't come from the org."
+ *
+ * The warning is the banner above: a bar the window shows once it has loaded, in the tool window
+ * itself, which is where the person is about to grant a camera. It is the only thing this module
+ * injects into a tool page besides the login adapter, and it follows the same rules
+ * (`docs/arquitetura.md` §2): the top frame only, nothing read from the page, nothing thrown out,
+ * and the text is this side's — the page's own strings never enter it.
+ *
+ * The camera/microphone half is not a runtime call: `tinyjs.json`'s origin gate opens `media.camera`
+ * and `media.microphone` for the origins of the release seed's entries alone (`scripts/gen-config.ts`)
+ * and a personal tool is not one of them, so its window keeps the engine's own prompt. This banner is
+ * what the person sees beside it.
+ */
+export function warningScript(): string {
+  const data = { id: WARNING_BANNER_ID, title: FOREIGN_TITLE, text: 'This link was not added by your organization. Camera and microphone need your permission.', close: 'Dismiss' };
+  return `(() => { try {
+  if (window.top !== window) return;
+  if (document.getElementById(${JSON.stringify(data.id)}) !== null) return;
+  const bar = document.createElement('div');
+  bar.id = ${JSON.stringify(data.id)};
+  bar.setAttribute('role', 'status');
+  bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;box-sizing:border-box;display:flex;gap:8px;align-items:center;justify-content:center;padding:6px 10px;background:#7a1d1d;color:#fff;font:13px/1.4 system-ui,sans-serif;';
+  const text = document.createElement('span');
+  const strong = document.createElement('strong');
+  strong.textContent = ${JSON.stringify(data.title)};
+  text.append(strong, document.createTextNode(' — ' + ${JSON.stringify(data.text)}));
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.textContent = ${JSON.stringify(data.close)};
+  close.style.cssText = 'all:unset;cursor:pointer;padding:2px 8px;border:1px solid rgba(255,255,255,0.6);border-radius:4px;';
+  close.addEventListener('click', () => bar.remove());
+  bar.append(text, close);
+  (document.body || document.documentElement).appendChild(bar);
+} catch { /* the warning is best effort: the window keeps working without it */ } })();`;
+}
+
 export interface ToolWindowsDeps {
   /** entries visible to the current person (empty when locked) */
   entries(): Entry[];
@@ -104,6 +149,11 @@ interface ToolWindow {
   seenOrigins: Set<string>;
   /** cancels the pending re-check of a fill the page never reported (A7); null when none is armed */
   cancelFillCheck: (() => void) | null;
+  /**
+   * canonico §22, B7: neither the entry nor the view is the org's own (a personal tool, or a personal
+   * view), so the window says so and never gets the org's camera/microphone grant.
+   */
+  foreign: boolean;
 }
 
 /** One window of the persisted list (`open_tools` in the store). */
@@ -325,8 +375,12 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     title: string,
     view: number | null,
   ): Promise<boolean> {
+    // canonico §22: a personal tool — or a personal view hung under any entry — is not from the org.
+    // The title says so before the page loads, and the banner says it again inside the window.
+    const foreign =
+      entry.scope === 'personal' || (view !== null && entry.views[view]?.scope === 'personal');
     const rect = await geometry();
-    const options: TinyOpenWindowOptions = { page: address, title };
+    const options: TinyOpenWindowOptions = { page: address, title: foreign ? `${FOREIGN_TITLE} — ${title}` : title };
     if (rect !== null) {
       options.x = rect.x;
       options.y = rect.y;
@@ -351,6 +405,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       error: null,
       seenOrigins: new Set(),
       cancelFillCheck: null,
+      foreign,
     });
     // The launcher ignored `x`/`size` of `win.open` in the v1 (observed by execution): the geometry
     // goes onto the handle right after the window exists.
@@ -521,6 +576,20 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     return window.origin !== '' && urlOrigin(window.url) === window.origin;
   }
 
+  /**
+   * canonico §22 (owner, 2026-10-16), B7: the window of a link that did not come from the org shows
+   * the warning. It is injected into the page once per navigation and only in the top frame of the
+   * entry origin, the rule `eval` follows everywhere else in this module (D3) — a redirect to the
+   * identity provider is the provider's page, not the tool's.
+   *
+   * A refused `eval` is not a failure of the window: the title already carries the warning
+   * (`createWindow`), and the sidebar and Home mark the entry too.
+   */
+  function warnForeign(window: ToolWindow): void {
+    if (!window.foreign || !atEntryOrigin(window)) return;
+    evaluate(window.windowId, warningScript());
+  }
+
   /** A7: a fill that the page never reported (an XHR login) gets a `finished` re-check later. */
   function armFillCheck(window: ToolWindow): void {
     clearFillCheck(window);
@@ -622,6 +691,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     window.error = null;
     window.loading = false;
     signal(window, { type: 'finished', url });
+    warnForeign(window);
     publish();
   }
 

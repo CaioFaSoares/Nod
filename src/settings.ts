@@ -8,24 +8,32 @@ import { button, clear, el, field, input, message } from './ui';
 import { originOf, slug } from '../shared/catalog';
 import { toBase64url } from '../shared/encoding';
 import { CODE_LENGTH, normalizeCode } from '../shared/host-api';
+import type { DeviceSession, ShareKind, ShareScope } from '../shared/host-api';
 import type {
   AppIconChoice,
   AppIconState,
   AppInfo,
   AuditEvent,
+  CredentialHolders,
   Entry,
   EntryDetails,
   EventFilter,
   EventSyncStatus,
   HostState,
   Id,
+  InboxShare,
   JoinInvite,
   LoginResult,
+  MineKeys,
+  MissingCopyView,
+  Params,
+  PeerKey,
   Person,
   Probe,
   RawIcon,
   Role,
   SessionState,
+  ShareRecipient,
   UpdateInfo,
   View,
   VaultItem,
@@ -61,8 +69,36 @@ const ICON_TYPES: ReadonlyArray<{ mime: string; type: RawIcon['type'] }> = [
   { mime: 'image/webp', type: 'webp' },
 ];
 
-/** Milliseconds a revealed credential stays on screen (canonico §11). */
-const REVEAL_MS = 10_000;
+/**
+ * K5/SP02 §9, canonico §11: how long a revealed credential stays on screen. The card counts these
+ * seconds down and clears the secret from the DOM and from the state at zero.
+ */
+const REVEAL_SECONDS = 10;
+
+/** SP06 §5: the three scopes of a credential. */
+const SCOPE_LABEL: Record<ShareScope, string> = { role: 'Role', org: 'Org', blocked: 'Blocked' };
+
+/** SP06 §5: the order the scope select lists them in. */
+const SCOPE_ORDER: ReadonlyArray<ShareScope> = ['role', 'org', 'blocked'];
+
+/** SP06 §5: what each scope offers as recipients, under the select. */
+const SCOPE_HINT: Record<ShareScope, string> = {
+  role: 'People who share a role with you and can reach the tool.',
+  org: 'Every guild member who can reach the tool — never a client.',
+  blocked: 'Nobody: this credential has no send action.',
+};
+
+/** K4/SP06 §4: why a share exists, as the inbox row names it. */
+const KIND_LABEL: Record<ShareKind, string> = {
+  send: 'shared with you',
+  assign: 'assigned by an admin',
+  update: 'update',
+};
+
+/** The date part of an ISO timestamp: what a holder row and an expiry show. */
+function isoDay(iso: string): string {
+  return iso.slice(0, 10);
+}
 
 function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
@@ -182,8 +218,9 @@ export interface JoinFlowOptions {
   pinned?: boolean;
   /** an account exists on this machine: the email starts filled, in the password mode */
   email?: string | null;
-  /** the join went through: the backend has already pushed the new session */
-  onJoined: () => void;
+  /** the join went through: the backend has already pushed the new session (`vaultWiped`: the
+   *  reset removed this machine's saved logins, SP02 §7) */
+  onJoined: (result: { vaultWiped: boolean }) => void;
 }
 
 /**
@@ -460,6 +497,7 @@ export function mountJoinFlow(
     // F1: with the choice on screen this submit is the person's decision, and it is what the backend
     // reads as `adoptLocal`.
     const adoptLocal = draft.collision === null ? {} : { adoptLocal: true };
+    let vaultWiped = false;
     try {
       const answer = draft.usePassword
         ? await call('host.signIn', { address: draft.address, fingerprint, email, password, ...adoptLocal })
@@ -484,6 +522,9 @@ export function mountJoinFlow(
         render();
         return;
       }
+      // SP02 §7/RF-43: the reset (or the activation over a local account with another `vaultKey`)
+      // removed this machine's saved logins; the screen that replaces this one tells the person.
+      vaultWiped = answer.wipedVault === true;
     } catch (e) {
       // A failed join keeps neither the password nor a half-written host.
       draft.password = '';
@@ -494,7 +535,7 @@ export function mountJoinFlow(
     }
     draft.password = '';
     draft.confirm = '';
-    ctx.onJoined();
+    ctx.onJoined({ vaultWiped });
   }
 
   render();
@@ -535,6 +576,21 @@ export function mountSettings(
     kind: StatusKind;
     text: string;
   }
+
+  /**
+   * K5/SP02 §9: an action the backend only runs behind a gate, waiting for the person's password
+   * because this machine has no biometrics. Each one names what it acts on, so the card that asked
+   * is the one that shows the prompt.
+   */
+  type GateWait =
+    | { kind: 'reveal'; toolId: Id }
+    | { kind: 'copy'; toolId: Id }
+    | { kind: 'send'; toolId: Id }
+    | { kind: 'accept'; shareId: Id }
+    /** K8/SP06 §4: the admin assigns one credential — one card, one wait. */
+    | { kind: 'assign'; toolId: Id }
+    /** K8/SP06 §4: the admin seals the copies of the whole missing list (no single card owns it). */
+    | { kind: 'sealMissing' };
 
   /** Form of one tool, new or being edited. Holds no secret. */
   interface ToolEditor {
@@ -582,7 +638,51 @@ export function mountSettings(
     personName: '',
     /** B8a: set once the publish offer was answered — it is offered at most one time */
     publishClosed: false,
-    revealed: null as { toolId: Id; username: string; secret: string } | null,
+    /**
+     * B8b/RF-40: the local tools the guild does not carry, as `host.localLeftovers` read them. Shown
+     * as the "keep as personal tools" step of a join; empty once none is left.
+     */
+    leftovers: [] as Entry[],
+    /** B8b: set by "Not now" — the step is dismissed for this session, the rows are not touched. */
+    leftoversClosed: false,
+    /**
+     * K5/SP02 §9: the secret on screen and the instant it leaves it. `expiresAt` is a wall-clock
+     * deadline, not a tick counter: a page whose timer was throttled while hidden still compares
+     * the same clock when it wakes, and the countdown text is derived from it.
+     */
+    revealed: null as { toolId: Id; username: string; secret: string; expiresAt: number } | null,
+    /**
+     * K5/SP02 §9: the action waiting for the person's password, because this machine has no
+     * biometrics for the backend to ask itself. Nothing of that action runs until it is typed.
+     */
+    gate: null as GateWait | null,
+    /**
+     * K4/SP06 §4: the shares addressed to this Nod, as `shares.inbox` read them; empty without a
+     * guild. Read again on every `host` push, which is what a new share arrives as.
+     */
+    inbox: [] as InboxShare[],
+    /** K4: the credential whose send dialog is open, or null. */
+    sendFor: null as Id | null,
+    /** K4: the people of that dialog, as `shares.recipients` answered; null while they are read. */
+    recipients: null as ShareRecipient[] | null,
+    /** K4: the recipients ticked in the dialog, kept across the render a gate makes. */
+    sendTo: [] as Id[],
+    /**
+     * K8/RF-47: the members of the assigned roles still without a copy, as `assignments.missing`
+     * read them. Read with the Vault tab by an admin; empty for a member and without a host.
+     */
+    missing: [] as MissingCopyView[],
+    /**
+     * M7/RF-54: the holders of every credential of the guild, as `holders.list` read them. Read
+     * with the Vault tab by an admin, and again on every `host` push (the snapshot is where the
+     * host's holder rows arrive); empty for a member and without a host.
+     */
+    credentialHolders: [] as CredentialHolders[],
+    /** K8: the credential whose assign dialog is open, or null. */
+    assignFor: null as Id | null,
+    /** K8: the role and the person picked in that dialog (`''` for none). */
+    assignRole: '' as Id | '',
+    assignPerson: '' as Id | '',
     filterTool: '',
     filterResult: '',
     seedMode: 'merge' as 'merge' | 'overwrite',
@@ -592,6 +692,25 @@ export function mountSettings(
     vaultLabel: '',
     /** SP05 §3: the one host, as `host.state` or the push `host` last answered. */
     host: ctx.host ?? null,
+    /**
+     * O1: this person's devices, as the Account tab read them (`host.sessions`). Empty while the
+     * guild is not connected, and after a read that failed (the screen shows the reason).
+     */
+    sessions: [] as DeviceSession[],
+    /**
+     * K1: this machine's own key state, as `keys.mine` read it; `null` without a guild, and while
+     * the read failed. The card shows the fingerprint when there is one and the `message` when the
+     * pair is pending or unavailable.
+     */
+    keys: null as MineKeys | null,
+    /**
+     * K2: the guild's colleagues and the state of their keys (`peers.list`), read with the Account
+     * tab. A `changed` entry is what the Confirm button on that card acts on (RF-45).
+     */
+    peers: [] as PeerKey[],
+    /** O1, admin side: the person whose devices are open on the People tab, and their rows. */
+    devicesFor: null as Id | null,
+    personDevices: [] as DeviceSession[],
     /** SP04 §5: sent vs pending of the Activity tab, read while a host is known; null without one. */
     eventSync: null as EventSyncStatus | null,
     /** SP04 §1.3: the invite a `nod://join` link carried, spent by the join flow on mount. */
@@ -607,7 +726,13 @@ export function mountSettings(
   };
 
   let alive = true;
+  /** `window.setInterval` of the reveal countdown; null while no secret is on screen. */
   let revealTimer: number | null = null;
+  /**
+   * The countdown node of the revealed card. Only its text changes each second: the seconds do not
+   * rebuild the view, so a half-typed field elsewhere keeps its focus and its content.
+   */
+  let revealCount: HTMLElement | null = null;
   /**
    * The join flow owns its DOM and its half-typed form, so the Hosts tab re-attaches this element
    * instead of building a new one on every render.
@@ -794,7 +919,11 @@ export function mountSettings(
     state.inviteFor = null;
     state.editor = null;
     state.guildIcon = null;
+    // K5: leaving the tab takes the secret, the half-typed password and the open dialog with it.
     hideRevealed();
+    state.gate = null;
+    closeSend();
+    closeAssign();
     render();
     await load();
   }
@@ -811,6 +940,14 @@ export function mountSettings(
           state.roles = await call('roles.list');
           // SP05 §6: every person chooses the icon of this machine, admin or not.
           state.appIcon = await call('nod.appIcon');
+          // O1: the devices card needs the host state (the card is hidden without a guild) and the
+          // list itself. A local-account Nod reads neither.
+          state.host = await call('host.state');
+          state.sessions = await readOwnSessions();
+          // K1–K2: the two cards above the devices need the same guild, and nothing of either is
+          // read without one (a local account holds no key pair, SP06 §2).
+          state.keys = hasHost() ? await readOwnFingerprint() : null;
+          state.peers = hasHost() ? await readPeers() : [];
           break;
         case 'hosts':
           // SP05 §3: the tab reads the state itself instead of waiting for a push.
@@ -818,6 +955,9 @@ export function mountSettings(
           // B8a: whether the publish offer still applies is a question about the entries the
           // snapshot carries (RF-40), so the tab reads the same list the sidebar shows.
           state.entries = await call('catalog.list');
+          // B8b: the same question for the local tools the guild does not carry — what the join's
+          // "keep as personal tools" step lists, and empty without a host.
+          state.leftovers = await call('host.localLeftovers');
           // SP05 §6: only the admin's card asks for the icon, and only a connected guild has one.
           state.appIcon =
             isAdmin() && state.host !== null && state.host.status !== 'none'
@@ -827,6 +967,14 @@ export function mountSettings(
         case 'vault':
           state.vault = await call('vault.list');
           state.entries = await call('catalog.list');
+          // K4: the inbox is the host's. Reading it only when a guild answers keeps a local Nod
+          // from asking a route that has nobody to answer it.
+          state.inbox = sharing() ? await call('shares.inbox') : [];
+          // K8/RF-47: the missing-copy list is the admin's, and it needs a guild to ask.
+          state.missing = sharing() && isAdmin() ? await call('assignments.missing') : [];
+          // M7/RF-54: the holders of every guild credential are the admin's too, and the host
+          // answers them inside the snapshot — read with the same guild test as the cards above.
+          state.credentialHolders = sharing() && isAdmin() ? await call('holders.list') : [];
           break;
         case 'tools':
           state.entries = await call('catalog.list');
@@ -897,7 +1045,17 @@ export function mountSettings(
       hostLine('Last sync', host.lastSyncAt ?? 'never'),
       hostLine('Pending writes', String(host.pendingWrites)),
     );
-    if (host.status === 'signed-out') {
+    if (host.updateRequired) {
+      // O2/SP04 §1 (owner, 2026-10-17): the guild answered the version check and asked for a newer
+      // Nod — it is disconnected until then. This card is the one screen that still shows it.
+      card.append(
+        el(
+          'p',
+          { class: 'message message-error' },
+          `${host.guild ?? 'This guild'} needs a newer Nod${host.minAppVersion === null ? '' : ` (${host.minAppVersion} or newer)`} — disconnected until you update.`,
+        ),
+      );
+    } else if (host.status === 'signed-out') {
       card.append(
         el('p', { class: 'message message-info' }, 'Signed out — sign in again to keep syncing this guild.'),
       );
@@ -963,10 +1121,19 @@ export function mountSettings(
             : state.join,
         pinned: mode === 'signin',
         email: mode === 'signin' ? (owner === null ? null : owner.email) : null,
-        onJoined: () => {
-          state.status = { kind: 'ok', text: 'Connected' };
+        onJoined: ({ vaultWiped }) => {
+          state.status = vaultWiped
+            ? {
+                kind: 'info',
+                text: 'Connected — your saved logins on this machine were removed because the account was reset.',
+              }
+            : { kind: 'ok', text: 'Connected' };
           // B8a: a host just joined — the offer belongs to its own snapshot, not to the last one.
           state.publishClosed = false;
+          // B8b: the leftovers of the join (and the snapshot's entries) are this host's own, so the
+          // tab reads them again instead of keeping the local catalog the join started from.
+          state.leftoversClosed = false;
+          void load();
         },
       });
       joinBox = box;
@@ -983,7 +1150,9 @@ export function mountSettings(
   function publishOffer(): HTMLElement | null {
     const host = state.host;
     if (host === null || !isAdmin() || state.publishClosed) return null;
-    if (host.status === 'none' || host.status === 'signed-out') return null;
+    // O2/SP04 §1 (owner, 2026-10-17): the publish is a write to the host, so a disconnected Nod
+    // offers it nowhere — `host.bootstrap` would be refused.
+    if (host.status === 'none' || host.status === 'signed-out' || host.updateRequired) return null;
     if (state.entries.some((entry) => (entry.scope ?? 'org') === 'org')) return null;
     return el(
       'section',
@@ -998,6 +1167,65 @@ export function mountSettings(
         'div',
         { class: 'row' },
         button('Publish local tools', () => void publishLocalTools(), { kind: 'primary' }),
+      ),
+    );
+  }
+
+  /**
+   * B8b (RF-40, SP05 §4): the tools this Nod had before the join that the guild does not carry. A
+   * local tool the guild already serves is that tool (matched by address), so only the rest are
+   * listed here — all checked, because the point of the step is that no local tool disappears. Kept
+   * ones become this person's personal tools: visible only to them and on every machine signed in to
+   * the guild. "Not now" only hides the step; the local rows stay.
+   */
+  function leftoverCard(): HTMLElement | null {
+    const host = state.host;
+    // Nothing without a host, and nothing while signed out: RF-39 empties the snapshot's org half on
+    // a `401`, and the leftovers would then list every local tool as if the guild did not serve it.
+    // Nothing while the guild is disconnected either (O2, owner 2026-10-17): the local tables are the
+    // catalog again, so nothing is a leftover, and keeping one would be a write to the host.
+    if (
+      host === null ||
+      host.status === 'none' ||
+      host.status === 'signed-out' ||
+      host.updateRequired ||
+      state.leftoversClosed
+    ) {
+      return null;
+    }
+    if (state.leftovers.length === 0) return null;
+    const chosen = new Set<Id>();
+    const rows = state.leftovers.map((entry) => {
+      chosen.add(entry.id);
+      const box = checkbox(
+        entry.id,
+        true,
+        (on) => {
+          if (on) chosen.add(entry.id);
+          else chosen.delete(entry.id);
+        },
+        entry.title,
+      );
+      return checkboxField(entry.title, box);
+    });
+    return el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'Keep your local tools'),
+      el(
+        'p',
+        { class: 'muted' },
+        `These local tools of this machine — the personal ones you added here included — are not in ${host.guild ?? 'the guild'}. Keeping one makes it your personal tool: visible only to you, on every machine signed in to this guild.`,
+      ),
+      el('div', { class: 'stack' }, ...rows),
+      el(
+        'div',
+        { class: 'row' },
+        button('Keep as personal tools', () => void keepLocalTools([...chosen]), { kind: 'primary' }),
+        button('Not now', () => {
+          state.leftoversClosed = true;
+          render();
+        }, { kind: 'ghost' }),
       ),
     );
   }
@@ -1021,10 +1249,14 @@ export function mountSettings(
       return box;
     }
     box.append(hostCard(host));
-    // SP05 §6: the guild's icon is the admin's, and it belongs to the guild's own card.
-    if (isAdmin()) box.append(guildIconCard());
+    // SP05 §6: the guild's icon is the admin's, and it belongs to the guild's own card. Both this
+    // card and the two offers below reach the host, so a disconnected Nod (O2, owner 2026-10-17)
+    // offers none of them: its Hosts tab is the guild's card, and the way back is an update.
+    if (isAdmin() && !host.updateRequired) box.append(guildIconCard());
     const offer = publishOffer();
     if (offer !== null) box.append(offer);
+    const leftovers = leftoverCard();
+    if (leftovers !== null) box.append(leftovers);
     // SP04 §3: signed out asks for a sign-in; on the same screen, the host can also be removed.
     if (host.status === 'signed-out') box.append(joinSection('signin'));
     box.append(removeCard(host));
@@ -1045,8 +1277,32 @@ export function mountSettings(
           };
       state.entries = await call('catalog.list');
       state.host = await call('host.state');
+      // B8b: a published tool is an org tool of the guild now, so it is no longer a leftover; the
+      // step lists whatever the publish did not cover.
+      state.leftovers = await call('host.localLeftovers');
     } catch (e) {
       // A host that could not be reached keeps the offer: nothing was published.
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /**
+   * B8b: keeps the chosen leftovers as this person's personal tools. The backend turns each into a
+   * `personal.saveTool` write and removes the local row, so the answered list is the leftovers that
+   * are left — the ones the person unchecked, and any the guild still does not carry.
+   */
+  async function keepLocalTools(ids: Id[]): Promise<void> {
+    state.status = null;
+    try {
+      const answer = await call('host.adoptLocalAsPersonal', { ids });
+      state.leftovers = await call('host.localLeftovers');
+      state.entries = await call('catalog.list');
+      state.status =
+        answer.created === 0
+          ? { kind: 'info', text: 'Nothing was kept' }
+          : { kind: 'ok', text: `Kept ${plural(answer.created, 'tool', 'tools')} as personal` };
+    } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
     }
     render();
@@ -1069,6 +1325,9 @@ export function mountSettings(
       state.host = await call('host.remove', { keepPersonal });
       // A host that left takes the offer's history with it: another host starts from its own state.
       state.publishClosed = false;
+      // B8b: the leftovers were that host's; without one there is nothing to offer.
+      state.leftovers = [];
+      state.leftoversClosed = false;
       // A PNG picked for that guild is not the next one's (SP05 §6).
       state.guildIcon = null;
       state.appIcon = null;
@@ -1273,6 +1532,13 @@ export function mountSettings(
   function biometricCard(): HTMLElement {
     const enabled = state.session.biometric;
     const password = input('password', { type: 'password', autocomplete: 'current-password' });
+    const row = el(
+      'div',
+      { class: 'row' },
+      field('Local password', password),
+      button('Enable biometrics', () => void enableBiometric(password), { kind: 'primary' }),
+    );
+    if (enabled) row.append(button('Disable biometrics', () => void disableBiometrics(), { kind: 'ghost' }));
     return el(
       'section',
       { class: 'card stack' },
@@ -1283,12 +1549,7 @@ export function mountSettings(
         enabled ? 'Biometrics enabled on this machine.' : 'Biometrics not enabled.',
       ),
       el('p', { class: 'muted' }, 'The local password confirms who enables the unlock shortcut.'),
-      el(
-        'div',
-        { class: 'row' },
-        field('Local password', password),
-        button('Enable biometrics', () => void enableBiometric(password), { kind: 'primary' }),
-      ),
+      row,
     );
   }
 
@@ -1336,6 +1597,213 @@ export function mountSettings(
     return card;
   }
 
+  /**
+   * O1: this person's devices, read from the host (`GET /v1/sessions`). A guild that cannot be read
+   * — signed out, offline, a host that does not answer the route — leaves the card empty and says
+   * why in the status line, instead of taking the whole Account tab down with it.
+   */
+  async function readOwnSessions(): Promise<DeviceSession[]> {
+    // `hasHost()` is the same test the devices card is drawn with, the disconnected guild included:
+    // there is nothing to ask for while this Nod is older than the guild's minimum (O2).
+    if (!hasHost()) return [];
+    try {
+      return await call('host.sessions');
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+      return [];
+    }
+  }
+
+  /**
+   * K1: the state of this machine's own key pair (`keys.mine`) — a fingerprint of the two public
+   * keys, safe to show, plus whether it is still waiting to be published and the sentence to show
+   * when it cannot be used. `null` while the read failed, which the card says.
+   */
+  async function readOwnFingerprint(): Promise<MineKeys | null> {
+    try {
+      return await call('keys.mine');
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+      return null;
+    }
+  }
+
+  /**
+   * K2: the guild's colleagues as the backend pinned them (`peers.list`) — names, fingerprints and
+   * the `changed` state. The same tolerance as the devices card: a guild that cannot be read leaves
+   * the card empty and says why in the status line.
+   */
+  async function readPeers(): Promise<PeerKey[]> {
+    try {
+      return await call('peers.list');
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+      return [];
+    }
+  }
+
+  /**
+   * K1/SP06 §2: Settings → Account's own fingerprint. It is what the person reads out to check that
+   * a colleague's copy of it is the same string; the private halves never leave the machine.
+   */
+  function keyFingerprintCard(): HTMLElement {
+    const card = el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'Your key fingerprint'),
+      el(
+        'p',
+        { class: 'muted' },
+        'Read this out to a colleague so they can check it is really you. It changes only if your ' +
+          'account is activated again.',
+      ),
+    );
+    const keys = state.keys;
+    if (keys === null || keys.status === 'unavailable') {
+      // K1/SP02 §7: the sentence is the instruction the person needs — `keys unavailable — sign in
+      // again` after a reset left the stored value sealed under the old `vaultKey`. Without a read
+      // (no guild, a failed call) there is nothing to say.
+      card.append(el('p', { class: 'empty' }, keys?.message ?? 'No key pair on this machine yet.'));
+      return card;
+    }
+    if (keys.fingerprint !== null) {
+      card.append(el('span', { class: 'mono fingerprint' }, keys.fingerprint));
+    }
+    // K1/SP06 §2: the status of the pair this machine reads out — `ok` when the host holds it,
+    // `pending` until the next publish, `unavailable` when the stored value cannot be opened.
+    card.append(
+      el(
+        'span',
+        { class: 'chip key-status' },
+        keys.status === 'ok'
+          ? 'on this guild'
+          : keys.status === 'pending'
+            ? 'not on this guild yet'
+            : 'unavailable',
+      ),
+    );
+    if (keys.status === 'pending') {
+      // K1: this machine holds a pair the host has not taken yet — it goes out at the next `ensure`.
+      card.append(
+        el('p', { class: 'muted' }, keys.message ?? 'This key is not on the guild yet.'),
+      );
+    }
+    return card;
+  }
+
+  /**
+   * K2/RF-45: one colleague, with the fingerprint of the key this machine pinned for them. A key
+   * that changed under it is a loud line with the new fingerprint and the Confirm that accepts it —
+   * until then nothing can be sent to that person (SP06 §2).
+   */
+  function peerRow(peer: PeerKey): HTMLElement {
+    const row = el('div', { class: 'row' }, el('strong', {}, peer.name));
+    if (peer.fingerprint !== null) {
+      row.append(el('span', { class: 'mono fingerprint' }, peer.fingerprint));
+    }
+    if (peer.status === 'changed') {
+      row.append(
+        el('span', { class: 'chip chip-warn' }, 'key changed — confirm'),
+        button('Confirm', () => void confirmPeer(peer), { kind: 'danger' }),
+      );
+    } else if (peer.status === 'unknown') {
+      row.append(el('span', { class: 'muted' }, 'no keys yet'));
+    }
+    return row;
+  }
+
+  /** K2: the colleagues of the guild and the state of each of their keys. */
+  function colleaguesCard(): HTMLElement {
+    const card = el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'Colleagues'),
+      el(
+        'p',
+        { class: 'muted' },
+        'The keys of the people of your guild. A key that changed is confirmed before anything is ' +
+          'shared with them.',
+      ),
+    );
+    if (state.peers.length === 0) {
+      card.append(el('p', { class: 'empty' }, 'Nobody else has keys in this guild yet.'));
+      return card;
+    }
+    for (const peer of state.peers) card.append(peerRow(peer));
+    return card;
+  }
+
+  /**
+   * K2/RF-45: the person confirmed that the changed key is really that colleague's. The pair the
+   * list showed — its fingerprint, read out of the row and sent back as it was displayed (L2) — is
+   * the one the backend promotes; the list is read again.
+   */
+  async function confirmPeer(peer: PeerKey): Promise<void> {
+    if (!confirm(`Confirm the new key of ${peer.name}? Only do it if they read it out to you.`)) return;
+    state.status = null;
+    try {
+      await call('peers.confirm', { personId: peer.personId, fingerprint: peer.fingerprint ?? '' });
+      state.status = { kind: 'ok', text: `${peer.name}'s key confirmed` };
+      state.peers = await readPeers();
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /**
+   * One device line, shared by the person's card and the admin's (O1): what the machine is, what it
+   * runs, when it was last seen, and the revoke. No session id is shown — it is the host's row, not
+   * the person's business.
+   */
+  function deviceRow(session: DeviceSession, onRevoke: () => void): HTMLElement {
+    return el(
+      'div',
+      { class: 'row' },
+      el('strong', {}, session.device.name),
+      el('span', { class: 'muted' }, session.device.os),
+      el('span', { class: 'mono' }, session.device.appVersion),
+      el('span', { class: 'muted' }, `Last seen ${session.lastSeenAt}`),
+      button('Revoke', onRevoke, { kind: 'danger' }),
+    );
+  }
+
+  /**
+   * O1/SP05 §4: the devices card of Settings → Account. Hidden without a guild (SP05 §3: a local
+   * account has no session anywhere), and the list is the host's own answer, never a local cache:
+   * the screen is about the sessions that exist right now.
+   */
+  function devicesCard(): HTMLElement {
+    const card = el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'Devices'),
+      el(
+        'p',
+        { class: 'muted' },
+        'Every device signed in to your guild account. Revoking one signs it out at its next sync.',
+      ),
+    );
+    if (state.sessions.length === 0) card.append(el('p', { class: 'empty' }, 'No devices.'));
+    for (const session of state.sessions) {
+      card.append(deviceRow(session, () => void revokeOwnSession(session)));
+    }
+    return card;
+  }
+
+  async function revokeOwnSession(session: DeviceSession): Promise<void> {
+    if (!confirm(`Sign ${session.device.name} out of your account?`)) return;
+    state.status = null;
+    try {
+      await call('host.revokeSession', { id: session.id });
+      state.status = { kind: 'ok', text: `${session.device.name} signed out` };
+      state.sessions = await readOwnSessions();
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
   function viewAccount(owner: Person): HTMLElement {
     const box = el('section', { class: 'stack' });
     box.append(
@@ -1352,11 +1820,18 @@ export function mountSettings(
         ),
       ),
     );
+    // K1–K2/SP06 §2: the guild account's own fingerprint and the keys of its colleagues, above the
+    // machine's devices. Only a guild has either (a local account holds no pair, SP06 §2).
+    if (hasHost()) box.append(keyFingerprintCard(), colleaguesCard());
+    // O1: the devices of this account, above the machine's own settings. Only a guild has them.
+    if (hasHost()) box.append(devicesCard());
     // SP05 §6: the icon of this machine, before the account's own cards.
     box.append(appIconCard());
     box.append(changePasswordCard());
-    // There is no biometrics on Linux (canonico §9): the shortcut is not even offered.
-    if (state.info.os !== 'linux') box.append(biometricCard());
+    // SP02 §9/canonico §9: the shortcut is offered only where the machine reports `authenticate`
+    // (the same answer the gate reads), so a machine without it is not offered a shortcut that
+    // could not work.
+    if (state.info.biometricAvailable) box.append(biometricCard());
     box.append(versionCard());
     return box;
   }
@@ -1375,8 +1850,11 @@ export function mountSettings(
     }
     try {
       await call('session.changePassword', { current: current.value, next: next.value });
-      // The card is rebuilt, so the three fields come back empty.
+      // The card is rebuilt, so the three fields come back empty. K1/M1: the host's blob is
+      // re-sealed under the new key by that same call, and a re-seal that could not reach the host
+      // leaves it marked — the card reads `keys.mine` again so it says `pending` right away.
       state.status = { kind: 'ok', text: 'Password changed' };
+      if (hasHost()) state.keys = await readOwnFingerprint();
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
     }
@@ -1391,6 +1869,18 @@ export function mountSettings(
       state.status = updated.biometric
         ? { kind: 'ok', text: 'Biometrics enabled' }
         : { kind: 'info', text: 'Biometrics could not be enabled on this platform' };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** SP02 §9: the keychain item that holds the `vaultKey` goes; the password stays as the way in. */
+  async function disableBiometrics(): Promise<void> {
+    state.status = null;
+    try {
+      state.session = await call('session.disableBiometric');
+      state.status = { kind: 'ok', text: 'Biometrics disabled' };
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
     }
@@ -1495,6 +1985,433 @@ export function mountSettings(
     );
   }
 
+  /**
+   * K6/SP06 §4: the holder marked owner is the one who can set the scope. Without that mark the
+   * credential never left this machine, so it counts as this person's own.
+   */
+  function isOwner(item: VaultItem): boolean {
+    const owner = item.holders.find((holder) => holder.owner);
+    const me = person();
+    return owner === undefined || (me !== null && owner.personId === me.id);
+  }
+
+  /**
+   * Whether the guild answers the sharing screens at all — the vault's inbox, holders and scope rows,
+   * the send and assign dialogs, the missing list and the admin's Credential holders card. A
+   * signed-out session and a Nod that is older than the guild's minimum (`hasHost`) both answer no:
+   * the second is O2's disconnected guild, and it shows the same screen a Nod with no host shows.
+   */
+  function sharing(): boolean {
+    const host = state.host;
+    if (host === null || host.status === 'none' || host.status === 'signed-out') return false;
+    return !host.updateRequired;
+  }
+
+  /** True while this action is the one on screen waiting for the password. */
+  function waiting(wait: GateWait): boolean {
+    const current = state.gate;
+    if (current === null || current.kind !== wait.kind) return false;
+    if (current.kind === 'accept') return wait.kind === 'accept' && current.shareId === wait.shareId;
+    // K8: the missing-copy list is one card, so every wait of it is that same wait.
+    if (current.kind === 'sealMissing') return true;
+    return wait.kind === 'reveal' || wait.kind === 'copy' || wait.kind === 'send' || wait.kind === 'assign'
+      ? current.toolId === wait.toolId
+      : false;
+  }
+
+  /**
+   * K5/SP02 §9: the machine decides. A person who enabled the shortcut gets the operating system's
+   * prompt, and so does anybody on a machine that reports `authenticate` — there the backend runs
+   * the prompt itself and the page sends no password at all (`docs/canonico.md` §22, "gate where
+   * biometrics exist"). The typed password is what the page offers where the capability is absent
+   * (Linux) and, in a non-release dev run, where it exists too: `nod.info.devRun` is the backend
+   * saying a password is accepted, and a release build never says it. A cancel, an empty field or a
+   * wrong password leaves the action undone.
+   */
+  function gate(wait: GateWait, run: (password?: string) => Promise<void>): void {
+    if (state.session.biometric) {
+      void run(undefined);
+      return;
+    }
+    if (state.info.biometricAvailable && !state.info.devRun) {
+      void run(undefined);
+      return;
+    }
+    state.gate = wait;
+    state.status = null;
+    render();
+    // Keyboard first (RNF-07): the typing goes to the prompt that just appeared.
+    root.querySelector<HTMLInputElement>('input.gate-password')?.focus();
+  }
+
+  /** The inline password prompt of one waiting action. Its field is cleared the moment it is read. */
+  function gatePrompt(
+    nothing: string,
+    run: (password?: string) => Promise<void>,
+  ): HTMLElement {
+    const password = input('gate-password', { type: 'password', autocomplete: 'current-password' });
+    password.classList.add('gate-password');
+    const confirm = button(
+      'Confirm',
+      () => {
+        const typed = password.value;
+        // Read once and cleared right away: neither the field nor this window keeps it.
+        password.value = '';
+        state.gate = null;
+        return run(typed === '' ? undefined : typed);
+      },
+      { kind: 'primary' },
+    );
+    // Keyboard first (RNF-07): Enter in the field is the Confirm button.
+    password.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') confirm.click();
+    });
+    return el(
+      'div',
+      { class: 'row gate' },
+      field(
+        'Password',
+        password,
+        state.info.biometricAvailable
+          ? // SP02 §9/canonico §22: reachable only in a dev run — the backend said a typed
+            // password is accepted here, so the card says which run this is instead of claiming
+            // the machine has no biometrics.
+            'This is a development run: the action takes your password.'
+          : 'This machine has no biometrics: the action asks for your password.',
+      ),
+      confirm,
+      button(
+        'Cancel',
+        () => {
+          state.gate = null;
+          state.status = { kind: 'info', text: `Nothing was ${nothing}` };
+          render();
+        },
+        { kind: 'ghost' },
+      ),
+    );
+  }
+
+  /** K7/RF-54: who holds a copy of this credential, with the date and the scope of each row. */
+  function holdersCard(item: VaultItem): HTMLElement {
+    const box = el('div', { class: 'stack holders' }, el('span', { class: 'muted' }, 'Holders'));
+    if (item.holders.length === 0) {
+      box.append(
+        el(
+          'p',
+          { class: 'muted' },
+          sharing()
+            ? 'Only you hold this credential.'
+            : 'Holders come from the guild; none is connected.',
+        ),
+      );
+      return box;
+    }
+    const list = el('ul', { class: 'holders-list' });
+    for (const holder of item.holders) {
+      list.append(
+        el(
+          'li',
+          { class: 'row holder' },
+          el('span', {}, holder.name),
+          holder.owner ? el('span', { class: 'chip' }, 'owner') : null,
+          el('span', { class: 'muted' }, `${SCOPE_LABEL[holder.scope]} · since ${isoDay(holder.since)}`),
+          // SP06 §4: a revoked holder keeps the row and its date.
+          holder.removedAt !== null ? el('span', { class: 'chip chip-warn' }, 'revoked') : null,
+          // K9/SP06 §4: the owner (or an admin) revokes a live holder; the host then marks the
+          // credential rotation pending until a new secret is saved.
+          !holder.owner && holder.removedAt === null && (isOwner(item) || isAdmin())
+            ? button('Remove', () => void revokeHolder(item, holder), {
+                kind: 'danger',
+                title: `Revoke ${holder.name}`,
+              })
+            : null,
+        ),
+      );
+    }
+    box.append(list);
+    return box;
+  }
+
+  /**
+   * M7/RF-54 (admin): the holders of every credential of the guild, including the ones this Nod
+   * does not hold. Read-only — the per-credential card above is where an owner revokes a holder —
+   * so every value is a text node and the card needs no keyboard handling of its own.
+   */
+  function credentialHoldersCard(): HTMLElement | null {
+    if (!isAdmin()) return null;
+    const box = el(
+      'section',
+      {
+        id: 'credential-holders',
+        class: 'card stack',
+        role: 'region',
+        aria: { label: 'Credential holders' },
+      },
+      el('h2', {}, 'Credential holders'),
+    );
+    if (!sharing()) {
+      box.append(el('p', { class: 'muted' }, 'Holders come from the guild; none is connected.'));
+      return box;
+    }
+    if (state.credentialHolders.length === 0) {
+      box.append(el('p', { class: 'empty' }, 'No credential of the guild has a holder yet.'));
+      return box;
+    }
+    box.append(
+      el(
+        'p',
+        { class: 'muted' },
+        `${plural(state.credentialHolders.length, 'credential', 'credentials')} the guild knows about.`,
+      ),
+    );
+    for (const row of state.credentialHolders) {
+      const credential = el('div', { class: 'stack credential-holders' });
+      credential.append(
+        el(
+          'div',
+          { class: 'row' },
+          el('strong', {}, row.toolTitle ?? row.toolId),
+          // A credential this Nod cannot name a tool for stands under its own id: the chip says so
+          // instead of passing the id off as a catalog title (`backend/holders.ts`).
+          row.toolTitle === null ? el('span', { class: 'chip' }, 'credential') : null,
+        ),
+      );
+      const list = el('ul', { class: 'holders-list' });
+      for (const holder of row.holders) {
+        list.append(
+          el(
+            'li',
+            { class: 'row holder' },
+            el('span', {}, holder.name),
+            holder.owner ? el('span', { class: 'chip' }, 'owner') : null,
+            el('span', { class: 'muted' }, `${SCOPE_LABEL[holder.scope]} · since ${isoDay(holder.since)}`),
+            // SP06 §4: a revoked holder keeps the row and its date, with the marker of a removed one.
+            holder.removedAt !== null ? el('span', { class: 'chip chip-warn' }, 'revoked') : null,
+          ),
+        );
+      }
+      credential.append(list);
+      box.append(credential);
+    }
+    return box;
+  }
+
+  /** K6/SP06 §5: the scope select, which only the owner of the credential has. */
+  function scopeRow(item: VaultItem): HTMLElement {
+    if (!isOwner(item)) {
+      return el(
+        'div',
+        { class: 'row' },
+        el('span', { class: 'muted' }, `Sharing scope: ${SCOPE_LABEL[item.scope]}`),
+        el('span', { class: 'muted' }, 'set by the owner'),
+      );
+    }
+    const scope = select(
+      'scope',
+      SCOPE_ORDER.map((value) => ({ value, label: SCOPE_LABEL[value] })),
+      item.scope,
+      (value) => void setScope(item, value as ShareScope),
+    );
+    return el(
+      'div',
+      { class: 'row' },
+      field('Sharing scope', scope),
+      el('span', { class: 'muted' }, SCOPE_HINT[item.scope]),
+    );
+  }
+
+  /** K4/SP06 §5: the people the scope allows, each with the state of their key on this machine. */
+  function sendDialog(item: VaultItem): HTMLElement {
+    const box = el('div', { class: 'card stack send-dialog', role: 'group', aria: { label: 'Send' } });
+    box.append(el('h3', {}, `Send ${toolTitle(item.toolId)}`));
+    const rows = state.recipients;
+    if (rows === null) {
+      box.append(el('p', { class: 'muted' }, 'Reading the people…'));
+      return box;
+    }
+    if (rows.length === 0) {
+      box.append(el('p', { class: 'empty' }, 'Nobody can receive it with this scope.'));
+    }
+    const send = button(
+      'Send',
+      () =>
+        gate({ kind: 'send', toolId: item.toolId }, (password) =>
+          sendCredential(item.toolId, password),
+        ),
+      { kind: 'primary' },
+    );
+    send.disabled = state.sendTo.length === 0;
+    const list = el('div', { class: 'stack' });
+    for (const recipient of rows) {
+      const pick = checkbox(
+        `to-${recipient.personId}`,
+        state.sendTo.includes(recipient.personId),
+        (on) => {
+          toggleIn(state.sendTo, recipient.personId, on);
+          // The button follows the ticks without a render, which would drop the keyboard's place.
+          send.disabled = state.sendTo.length === 0;
+        },
+      );
+      pick.disabled = !recipient.allowed;
+      const line = el('label', { class: 'row recipient' }, pick, el('span', {}, recipient.name));
+      if (recipient.fingerprint !== null) {
+        line.append(el('span', { class: 'mono fingerprint' }, recipient.fingerprint));
+      }
+      if (recipient.keyStatus === 'changed') {
+        // K2/RF-45: nothing is sent to a person whose key changed until it is confirmed.
+        line.append(el('span', { class: 'chip chip-warn' }, 'key changed — confirm in Account'));
+      }
+      if (!recipient.allowed) {
+        line.append(el('span', { class: 'muted' }, recipient.reason ?? 'not allowed'));
+      }
+      list.append(line);
+    }
+    box.append(list);
+    const footer = el('div', { class: 'row' });
+    if (waiting({ kind: 'send', toolId: item.toolId })) {
+      footer.append(
+        gatePrompt('sent', (password) =>
+          sendCredential(item.toolId, password),
+        ),
+      );
+    } else {
+      footer.append(send);
+    }
+    footer.append(button('Close', () => closeSend(), { kind: 'ghost' }));
+    box.append(footer);
+    return box;
+  }
+
+  /**
+   * K8/SP06 §4: the admin assigns one credential to a role or to a single person. The role is the
+   * guild's list; the person is the guild's roster. The copies of the members without one travel in
+   * the same gated call (`assignments.set`), so nothing else has to be pressed afterwards.
+   */
+  function assignDialog(item: VaultItem): HTMLElement {
+    const box = el('div', { class: 'card stack assign-dialog', role: 'group', aria: { label: 'Assign' } });
+    box.append(el('h3', {}, `Assign ${toolTitle(item.toolId)}`));
+    const role = select(
+      'assign-role',
+      [
+        { value: '', label: '— a role —' },
+        ...state.roles.map((entry) => ({ value: entry.id, label: entry.name })),
+      ],
+      state.assignRole,
+      (value) => {
+        // The two targets are exclusive, and the button follows the pick: the dialog is rebuilt
+        // with the choice in the state, which is also what the call reads.
+        state.assignRole = value;
+        if (value !== '') state.assignPerson = '';
+        render();
+      },
+    );
+    const target = select(
+      'assign-person',
+      [
+        { value: '', label: '— a person —' },
+        ...state.people.map((entry) => ({ value: entry.id, label: entry.name })),
+      ],
+      state.assignPerson,
+      (value) => {
+        state.assignPerson = value;
+        if (value !== '') state.assignRole = '';
+        render();
+      },
+    );
+    box.append(
+      el('div', { class: 'row' }, field('Role', role), field('Person', target)),
+      el(
+        'p',
+        { class: 'muted' },
+        'A role reaches every member without a copy; a person gets one copy directly.',
+      ),
+    );
+    const footer = el('div', { class: 'row' });
+    if (waiting({ kind: 'assign', toolId: item.toolId })) {
+      footer.append(gatePrompt('assigned', (password) => assignCredential(item.toolId, password)));
+    } else {
+      const assign = button(
+        'Assign',
+        () =>
+          gate({ kind: 'assign', toolId: item.toolId }, (password) =>
+            assignCredential(item.toolId, password),
+          ),
+        { kind: 'primary' },
+      );
+      assign.disabled = state.assignRole === '' && state.assignPerson === '';
+      footer.append(assign);
+      if (state.assignRole !== '') {
+        footer.append(
+          button('Remove assignment', () => void removeAssignment(item.toolId, state.assignRole), {
+            kind: 'danger',
+          }),
+        );
+      }
+    }
+    footer.append(button('Close', () => closeAssign(), { kind: 'ghost' }));
+    box.append(footer);
+    return box;
+  }
+
+  /**
+   * K8/RF-47: the members of the assigned roles still without a copy, with the state of their key on
+   * this machine. One gated action seals a copy to every one of them: the host is the source of the
+   * list, this Nod is the one that has the secret.
+   */
+  function missingCard(): HTMLElement | null {
+    if (!sharing() || !isAdmin()) return null;
+    const box = el('section', {
+      id: 'vault-missing',
+      class: 'card stack',
+      role: 'region',
+      aria: { label: 'Missing copies' },
+    });
+    const count = state.host?.missingCopies ?? state.missing.length;
+    box.append(
+      el('h2', {}, 'Members missing a copy'),
+      el(
+        'p',
+        { class: 'muted' },
+        count === 0
+          ? 'Every member of an assigned role holds a copy.'
+          : `${plural(count, 'member is', 'members are')} missing a copy of an assigned credential.`,
+      ),
+    );
+    for (const row of state.missing) {
+      const line = el(
+        'div',
+        { class: 'row' },
+        el('strong', {}, row.personName),
+        el('span', { class: 'muted' }, `${row.toolTitle ?? row.toolId} · ${row.roleId}`),
+      );
+      if (row.keyStatus !== 'pinned') {
+        // K2/RF-45: the seal has to skip a member whose key is not the pinned one.
+        line.append(
+          el(
+            'span',
+            { class: 'chip chip-warn' },
+            row.keyStatus === 'changed' ? 'key changed' : 'no key yet',
+          ),
+        );
+      }
+      box.append(line);
+    }
+    if (state.missing.length === 0) return box;
+    const footer = el('div', { class: 'row' });
+    if (waiting({ kind: 'sealMissing' })) {
+      footer.append(gatePrompt('sealed', (password) => sealMissing(password)));
+    } else {
+      footer.append(
+        button('Send copies', () => gate({ kind: 'sealMissing' }, (password) => sealMissing(password)), {
+          kind: 'primary',
+        }),
+      );
+    }
+    box.append(footer);
+    return box;
+  }
+
   function vaultItem(item: VaultItem): HTMLElement {
     const revealed =
       state.revealed !== null && state.revealed.toolId === item.toolId ? state.revealed : null;
@@ -1507,40 +2424,171 @@ export function mountSettings(
         el('strong', {}, toolTitle(item.toolId)),
         el('span', { class: 'muted' }, item.username),
         item.label !== '' ? el('span', { class: 'chip' }, item.label) : null,
+        // K9/SP06 §4: a holder was revoked and the value was not rotated yet.
+        item.rotationPending
+          ? el(
+              'span',
+              { class: 'chip chip-warn', title: 'save a new secret to rotate' },
+              'rotation pending',
+            )
+          : null,
       ),
     );
     if (revealed !== null) {
-      // On screen for 10 s; the timer hides it and nothing else keeps the value.
+      // K5: on screen for ten seconds with its countdown; at zero the node, the state and the local
+      // that read it are all gone. The seconds come from the deadline, never from a tick count.
+      const count = el(
+        'span',
+        { class: 'chip reveal-count', role: 'timer' },
+        `hides in ${Math.max(0, Math.ceil((revealed.expiresAt - Date.now()) / 1000))} s`,
+      );
+      revealCount = count;
       card.append(
         el(
           'div',
-          { class: 'row' },
+          { class: 'row reveal' },
           el('span', { class: 'muted' }, `user ${revealed.username}`),
-          el('span', {}, revealed.secret),
+          el('span', { class: 'secret' }, revealed.secret),
+          count,
         ),
       );
     }
-    card.append(
+    if (sharing()) {
+      card.append(scopeRow(item));
+      card.append(holdersCard(item));
+    }
+    const actions = el('div', { class: 'row' });
+    if (revealed !== null) {
+      actions.append(
+        button('Hide', () => {
+          hideRevealed();
+          render();
+        }),
+      );
+    } else if (waiting({ kind: 'reveal', toolId: item.toolId })) {
+      actions.append(
+        gatePrompt('shown', (password) =>
+          reveal(item.toolId, password),
+        ),
+      );
+    } else {
+      actions.append(
+        button('Reveal', () =>
+          gate({ kind: 'reveal', toolId: item.toolId }, (password) => reveal(item.toolId, password)),
+        ),
+      );
+    }
+    if (waiting({ kind: 'copy', toolId: item.toolId })) {
+      actions.append(
+        gatePrompt('copied', (password) =>
+          copySecret(item.toolId, password),
+        ),
+      );
+    } else {
+      actions.append(
+        button('Copy', () =>
+          gate({ kind: 'copy', toolId: item.toolId }, (password) => copySecret(item.toolId, password)),
+        ),
+      );
+    }
+    // K6/SP06 §5: a blocked credential has no send action at all.
+    if (sharing() && item.scope !== 'blocked') {
+      actions.append(
+        state.sendFor === item.toolId
+          ? button('Close', () => closeSend(), { kind: 'ghost' })
+          : button('Send', () => void openSend(item)),
+      );
+    }
+    // K8/SP06 §4: an admin assigns a credential to a role or to one person; the members still
+    // without a copy are reached in the same gated action.
+    if (sharing() && isAdmin()) {
+      actions.append(
+        state.assignFor === item.toolId
+          ? button('Close', () => closeAssign(), { kind: 'ghost' })
+          : button('Assign', () => void openAssign(item)),
+      );
+    }
+    actions.append(button('Remove', () => void removeCredential(item), { kind: 'danger' }));
+    card.append(actions);
+    if (state.sendFor === item.toolId) card.append(sendDialog(item));
+    if (state.assignFor === item.toolId) card.append(assignDialog(item));
+    return card;
+  }
+
+  /** K4/SP06 §4: the shares addressed to this Nod, read again on every `host` push. */
+  function inboxCard(): HTMLElement {
+    const box = el('section', {
+      id: 'vault-inbox',
+      class: 'card stack',
+      role: 'region',
+      aria: { label: 'Vault inbox' },
+      attrs: { tabindex: '-1' },
+    });
+    box.append(el('h2', {}, 'Inbox'));
+    if (!sharing()) {
+      box.append(el('p', { class: 'muted' }, 'Shares arrive from a guild; none is connected.'));
+      return box;
+    }
+    if (state.inbox.length === 0) {
+      box.append(el('p', { class: 'empty' }, 'No share is waiting.'));
+      return box;
+    }
+    for (const share of state.inbox) box.append(inboxRow(share));
+    return box;
+  }
+
+  function inboxRow(share: InboxShare): HTMLElement {
+    const row = el(
+      'div',
+      { class: 'card stack inbox-row' },
       el(
         'div',
         { class: 'row' },
-        button(revealed !== null ? 'Hide' : 'Reveal', () => {
-          if (revealed !== null) {
-            hideRevealed();
-            render();
-          } else {
-            void reveal(item.toolId);
-          }
-        }),
-        button('Remove', () => void removeCredential(item), { kind: 'danger' }),
+        el('strong', {}, share.toolTitle ?? share.toolId),
+        el('span', { class: 'chip' }, KIND_LABEL[share.kind]),
+        el('span', { class: 'muted' }, `from ${share.fromName}`),
+        el('span', { class: 'muted' }, `${SCOPE_LABEL[share.scope]} · expires ${isoDay(share.expiresAt)}`),
       ),
     );
-    return card;
+    const actions = el('div', { class: 'row' });
+    if (waiting({ kind: 'accept', shareId: share.id })) {
+      actions.append(
+        gatePrompt('accepted', (password) =>
+          acceptShare(share, password),
+        ),
+      );
+    } else {
+      actions.append(
+        // K4/SP06 §4: an update lands on a credential already held and shows nothing, so the
+        // backend asks for no gate there either.
+        button(
+          'Accept',
+          share.kind === 'update'
+            ? () => acceptShare(share, undefined)
+            : () =>
+                gate({ kind: 'accept', shareId: share.id }, (password) =>
+                  acceptShare(share, password),
+                ),
+          { kind: 'primary' },
+        ),
+      );
+    }
+    actions.append(button('Decline', () => void declineShare(share)));
+    row.append(actions);
+    return row;
   }
 
   function viewVault(): HTMLElement {
     const box = el('section', { class: 'stack' });
     box.append(el('p', { class: 'muted' }, 'Your credentials for the tools of the catalog.'));
+    // K4: the inbox first — a share waiting for an answer is the thing that cannot wait.
+    box.append(inboxCard());
+    // K8/RF-47: the admin's missing-copy list, above the vault it assigns from.
+    const missing = missingCard();
+    if (missing !== null) box.append(missing);
+    // M7/RF-54: the admin's view of every guild credential's holders, above the vault itself.
+    const holders = credentialHoldersCard();
+    if (holders !== null) box.append(holders);
     box.append(saveCredentialCard());
     box.append(vaultTransferCard());
     if (state.vault.length === 0) {
@@ -1553,25 +2601,288 @@ export function mountSettings(
     return box;
   }
 
+  /** K5: takes the secret off the screen and out of the state; the node goes with the next render. */
   function hideRevealed(): void {
     if (revealTimer !== null) {
-      window.clearTimeout(revealTimer);
+      window.clearInterval(revealTimer);
       revealTimer = null;
     }
+    revealCount = null;
     state.revealed = null;
   }
 
-  async function reveal(toolId: Id): Promise<void> {
+  /** K5/SP02 §9: shows the secret with its ten-second countdown. */
+  function showRevealed(toolId: Id, open: { username: string; secret: string }): void {
+    hideRevealed();
+    state.revealed = {
+      toolId,
+      username: open.username,
+      secret: open.secret,
+      expiresAt: Date.now() + REVEAL_SECONDS * 1000,
+    };
+    revealTimer = window.setInterval(() => {
+      const current = state.revealed;
+      if (current === null) {
+        hideRevealed();
+        return;
+      }
+      // L5 of the Block 2 review: the deadline is the wall clock, not the number of ticks. A page
+      // whose timer was throttled while hidden still compares the same clock, so a secret cannot
+      // outlive its ten seconds by counting slowly.
+      const remaining = current.expiresAt - Date.now();
+      if (remaining <= 0) {
+        hideRevealed();
+        render();
+        return;
+      }
+      // Only the counter is rewritten: the seconds must not rebuild a card being typed on.
+      if (revealCount !== null && revealCount.isConnected) {
+        revealCount.textContent = `hides in ${Math.ceil(remaining / 1000)} s`;
+      }
+    }, 1000);
+  }
+
+  async function reveal(toolId: Id, password?: string): Promise<void> {
     state.status = null;
     try {
-      const open = await call('vault.reveal', { toolId });
-      hideRevealed();
-      state.revealed = { toolId, username: open.username, secret: open.secret };
-      revealTimer = window.setTimeout(() => {
-        revealTimer = null;
-        state.revealed = null;
-        render();
-      }, REVEAL_MS);
+      const open = await call(
+        'vault.reveal',
+        password === undefined ? { toolId } : { toolId, password },
+      );
+      showRevealed(toolId, open);
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /**
+   * K5: the same gate as reveal, with the secret going to the clipboard through the runtime. Nothing
+   * of it comes back, so a copy can never leave it in the DOM or in a variable of this window.
+   */
+  async function copySecret(toolId: Id, password?: string): Promise<void> {
+    state.status = null;
+    try {
+      await call('vault.copy', password === undefined ? { toolId } : { toolId, password });
+      state.status = { kind: 'ok', text: 'Copied — paste it now: this page never held it' };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** K6/SP06 §5: the owner changes the scope; the host refuses a share the new one does not allow. */
+  async function setScope(item: VaultItem, scope: ShareScope): Promise<void> {
+    state.status = null;
+    try {
+      const updated = await call('vault.setScope', { toolId: item.toolId, scope });
+      state.vault = state.vault.map((row) => (row.toolId === updated.toolId ? updated : row));
+      state.status = {
+        kind: 'ok',
+        text:
+          scope === 'blocked'
+            ? 'Sharing blocked for this credential'
+            : `Sharing scope: ${SCOPE_LABEL[scope]}`,
+      };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /**
+   * K9/SP06 §4: the owner (or an admin) revokes one holder. The host is the one that decides who
+   * may; the local effect is the next snapshot's `rotationPending`, which the chip on the card
+   * shows until a new secret is saved (which fans the update out).
+   */
+  async function revokeHolder(item: VaultItem, holder: VaultItem['holders'][number]): Promise<void> {
+    if (!confirm(`Revoke ${holder.name}'s copy of ${toolTitle(item.toolId)}?`)) return;
+    state.status = null;
+    try {
+      await call('shares.removeHolder', { toolId: item.toolId, personId: holder.personId });
+      // The removal is the host's; a sync is what brings `rotationPending` back in the snapshot.
+      if (sharing()) await call('host.syncNow');
+      state.vault = await call('vault.list');
+      state.status = {
+        kind: 'ok',
+        text: `${holder.name} no longer holds it — save a new secret to rotate`,
+      };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** K4: opens the send dialog of one credential and reads who its scope allows. */
+  async function openSend(item: VaultItem): Promise<void> {
+    state.status = null;
+    state.sendFor = item.toolId;
+    state.recipients = null;
+    state.sendTo = [];
+    render();
+    try {
+      state.recipients = await call('shares.recipients', { toolId: item.toolId });
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+      closeSend();
+    }
+    render();
+  }
+
+  function closeSend(): void {
+    state.sendFor = null;
+    state.recipients = null;
+    state.sendTo = [];
+  }
+
+  /** K4/SP06 §4: seals one copy per ticked recipient and sends them; gated, as `vault.reveal` is. */
+  async function sendCredential(toolId: Id, password?: string): Promise<void> {
+    const to = [...state.sendTo];
+    if (to.length === 0) return;
+    state.status = null;
+    try {
+      const answer = await call(
+        'shares.send',
+        password === undefined ? { toolId, to } : { toolId, to, password },
+      );
+      state.status = { kind: 'ok', text: `${plural(answer.sent, 'copy', 'copies')} sent` };
+      closeSend();
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /**
+   * K8/SP06 §4: opens the assign dialog of one credential and reads the guild's roles and people,
+   * which are what the two selects list. Both are admin reads while a host answers.
+   */
+  async function openAssign(item: VaultItem): Promise<void> {
+    state.status = null;
+    state.assignFor = item.toolId;
+    state.assignRole = '';
+    state.assignPerson = '';
+    render();
+    try {
+      const [roles, people] = await Promise.all([call('roles.list'), call('people.list')]);
+      state.roles = roles;
+      state.people = people;
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+      closeAssign();
+    }
+    render();
+  }
+
+  function closeAssign(): void {
+    state.assignFor = null;
+    state.assignRole = '';
+    state.assignPerson = '';
+  }
+
+  /**
+   * K8/SP06 §4, RF-47: the one gated action. With a role picked it writes the assignment and seals a
+   * copy to every member the host lists as missing; with a person picked it seals that one copy
+   * directly. The list and the vault are read again, so the card shows what is left.
+   */
+  async function assignCredential(toolId: Id, password?: string): Promise<void> {
+    const roleId = state.assignRole;
+    const personId = state.assignPerson;
+    if (roleId === '' && personId === '') {
+      state.status = { kind: 'error', text: 'Pick a role or a person' };
+      render();
+      return;
+    }
+    state.status = null;
+    try {
+      const params: Params<'assignments.set'> = { toolId, assigned: true };
+      if (roleId !== '') params.roleId = roleId;
+      if (personId !== '') params.personId = personId;
+      if (password !== undefined) params.password = password;
+      const result = await call('assignments.set', params);
+      state.status = {
+        kind: 'ok',
+        // M6: the dialog reports what the action actually sealed; a person assignment that reached
+        // nobody throws above, so a person answer with `sent === 0` never lands here. F5: a role
+        // whose every current member already holds a copy seals nothing and says so, instead of
+        // reporting copies that never went.
+        text:
+          roleId === ''
+            ? 'Assigned — the copy is sealed to them'
+            : result.sent === 0
+              ? result.skipped > 0
+                ? `Assigned — no copy was sealed, ${result.skipped} skipped`
+                : 'Assigned — no member needed a copy'
+              : result.skipped > 0
+                ? `Assigned — ${result.sent} copies sealed, ${result.skipped} skipped`
+                : 'Assigned — copies sealed to the members',
+      };
+      state.vault = await call('vault.list');
+      state.missing = await call('assignments.missing');
+      closeAssign();
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** K8/SP06 §4: takes the role's assignment away. Nothing secret is involved, so there is no gate. */
+  async function removeAssignment(toolId: Id, roleId: Id): Promise<void> {
+    state.status = null;
+    try {
+      await call('assignments.set', { toolId, roleId, assigned: false });
+      state.status = { kind: 'ok', text: 'Assignment removed — the holders keep their copies' };
+      state.missing = await call('assignments.missing');
+      closeAssign();
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** K8/SP06 §4, RF-47: seals one copy to every member of the missing list; gated once. */
+  async function sealMissing(password?: string): Promise<void> {
+    state.status = null;
+    try {
+      const answer = await call(
+        'assignments.sealMissing',
+        password === undefined ? {} : { password },
+      );
+      const skipped = answer.skipped === 0 ? '' : `; ${plural(answer.skipped, 'was', 'were')} skipped`;
+      state.status = {
+        kind: 'ok',
+        text: `${plural(answer.sent, 'copy', 'copies')} sent${skipped}`,
+      };
+      state.missing = await call('assignments.missing');
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** K4/SP06 §4: accepting lands the value in the vault, bound to the tool's origin. */
+  async function acceptShare(share: InboxShare, password?: string): Promise<void> {
+    state.status = null;
+    try {
+      const item = await call(
+        'shares.accept',
+        password === undefined ? { id: share.id } : { id: share.id, password },
+      );
+      state.status = { kind: 'ok', text: `${toolTitle(item.toolId)} is now in your vault` };
+      state.vault = await call('vault.list');
+      state.inbox = await call('shares.inbox');
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  async function declineShare(share: InboxShare): Promise<void> {
+    state.status = null;
+    try {
+      await call('shares.decline', { id: share.id });
+      state.status = { kind: 'ok', text: 'Share declined' };
+      state.inbox = await call('shares.inbox');
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
     }
@@ -1598,9 +2909,14 @@ export function mountSettings(
     const trimmed = label.trim();
     if (trimmed !== '') params.label = trimmed;
     try {
-      await call('vault.save', params);
+      const saved = await call('vault.save', params);
+      // K9/SP06 §4: a save of a shared credential may warn (a skipped holder, or an update that
+      // waits for the next sync) without failing the save.
+      state.status =
+        saved.updateWarning === undefined || saved.updateWarning === null
+          ? { kind: 'ok', text: 'Credential saved in the keychain' }
+          : { kind: 'info', text: saved.updateWarning };
       // The card is rebuilt, so the password field comes back empty.
-      state.status = { kind: 'ok', text: 'Credential saved in the keychain' };
       state.vault = await call('vault.list');
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
@@ -2356,6 +3672,24 @@ export function mountSettings(
         ),
       );
     }
+    // O1: the devices of one person of the guild, opened on demand — the list is the host's, read
+    // when the button is used, not part of the `people.list` the tab already holds.
+    if (hasHost()) {
+      const open = state.devicesFor === target.id;
+      card.append(
+        el(
+          'div',
+          { class: 'row' },
+          button(open ? 'Hide devices' : 'Devices', () => void togglePersonDevices(target)),
+        ),
+      );
+      if (open) {
+        if (state.personDevices.length === 0) card.append(el('p', { class: 'empty' }, 'No devices.'));
+        for (const session of state.personDevices) {
+          card.append(deviceRow(session, () => void revokePersonSession(target, session)));
+        }
+      }
+    }
     if (state.invite !== null && state.inviteFor === target.id) card.append(inviteCodeBlock(state.invite));
     return card;
   }
@@ -2465,15 +3799,58 @@ export function mountSettings(
     render();
   }
 
+  /**
+   * O1, admin side: opens (or closes) one person's devices. The read is `people.sessions` — the
+   * host's answer for that person, admin only — and it happens here rather than in `load()` so the
+   * People tab does not pay one request per person on every render.
+   */
+  async function togglePersonDevices(target: Person): Promise<void> {
+    if (state.devicesFor === target.id) {
+      state.devicesFor = null;
+      state.personDevices = [];
+      render();
+      return;
+    }
+    state.devicesFor = target.id;
+    state.personDevices = [];
+    state.status = null;
+    render();
+    try {
+      state.personDevices = await call('people.sessions', { personId: target.id });
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** O1, admin side: ends one session of a person of the guild (SP03 §2). */
+  async function revokePersonSession(target: Person, session: DeviceSession): Promise<void> {
+    if (!confirm(`Sign ${session.device.name} out of ${target.name}'s account?`)) return;
+    state.status = null;
+    try {
+      await call('people.revokeSession', { id: session.id });
+      state.status = { kind: 'ok', text: `${session.device.name} signed out` };
+      state.personDevices = await call('people.sessions', { personId: target.id });
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
   // ---------------------------------------------------------------- tab: activity
 
   /**
-   * Whether the Nod knows a host at all. `host.state` answers `none` rather than `null` for a Nod
-   * that was never connected — and `host.remove` leaves the same shape — so the absence of a host is
-   * this status, not a missing object (SP05 §3).
+   * Whether the Nod knows a guild it can work with. `host.state` answers `none` rather than `null`
+   * for a Nod that was never connected — and `host.remove` leaves the same shape — so the absence of
+   * a host is this status, not a missing object (SP05 §3).
+   *
+   * O2/SP04 §1 (owner decision 2026-10-17): a Nod older than the guild's `minAppVersion` is in the
+   * same place as far as every screen is concerned — the guild is disconnected, so the org tools, the
+   * devices, the colleagues, the leftovers and the sharing screens are the local ones. Settings →
+   * Hosts does not come through here: it shows the guild and its reason on the host's own card.
    */
   function hasHost(): boolean {
-    return state.host !== null && state.host.status !== 'none';
+    return state.host !== null && state.host.status !== 'none' && !state.host.updateRequired;
   }
 
   /**
@@ -2685,6 +4062,9 @@ export function mountSettings(
     if (person() === null) {
       // A locked session keeps neither a revealed credential nor half-finished screen state.
       hideRevealed();
+      state.gate = null;
+      closeSend();
+      closeAssign();
       state.invite = null;
       state.inviteRoles = [];
       state.editor = null;
@@ -2703,6 +4083,18 @@ export function mountSettings(
     void load();
   });
 
+  /**
+   * L5 of the Block 2 review: a revealed credential leaves the page the moment the page is hidden.
+   * A background window's timers are throttled, so waiting for the next tick could leave the secret
+   * in the DOM past its ten seconds; the event fires regardless of the timer.
+   */
+  const onVisibilityChange = (): void => {
+    if (document.visibilityState !== 'hidden' || state.revealed === null) return;
+    hideRevealed();
+    render();
+  };
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
   // SP05 §3: the sync pushed a new host state — the tab shows it without a refresh of its own.
   let knownStatus: HostState['status'] | null = state.host === null ? null : state.host.status;
   const offHost = on('host', (next) => {
@@ -2718,6 +4110,9 @@ export function mountSettings(
     // SP04 §5: a run that pushed events moved rows from pending to sent, so an open Activity tab
     // reads the list and the counters again — the same thing a catalog change makes it do.
     else if (state.tab === 'activity') void load();
+    // K4: a share arrives as a host push, so an open Vault tab reads its inbox again and the new
+    // one is there without a refresh of the person's own.
+    else if (state.tab === 'vault') void load();
   });
 
   state.tab = ctx.tab !== undefined && canShow(ctx.tab) ? ctx.tab : defaultTab();
@@ -2735,6 +4130,7 @@ export function mountSettings(
       alive = false;
       offCatalog();
       offHost();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       hideRevealed();
       clear(root);
       // The join flow is a child of this tree: it is rebuilt from `ctx` on the next mount.

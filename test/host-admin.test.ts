@@ -55,6 +55,11 @@ interface Session {
   token: string;
 }
 
+/** An activated person: the session plus the `authKey` their sign-ins are checked against (SP02 §1). */
+interface Activated extends Session {
+  authKey: string;
+}
+
 interface Running {
   address: string;
   repo: Repo;
@@ -208,14 +213,30 @@ async function adminOf(running: Running): Promise<{ admin: HostAdmin; person: Se
 }
 
 /** Redeems an access code through the real activation route (SP02 §3, RF-33). */
-async function activate(running: Running, email: string, code: string): Promise<Session> {
+async function activate(
+  running: Running,
+  email: string,
+  code: string,
+  authKey = randomAuthKey(),
+): Promise<Activated> {
   const response = await running.call('POST', HOST_ROUTES.authActivate, {
     email,
     code,
     salt: randomSalt(),
-    authKey: randomAuthKey(),
+    authKey,
     device: DEVICE,
   });
+  expect(response.status).toBe(200);
+  const opened = await body<TokenResponse>(response);
+  return { id: opened.personId, token: opened.token, authKey };
+}
+
+/**
+ * A second sign-in of an activated person through the real login route (SP02 §4): the same
+ * `authKey`, another device. This is how a person ends up with more than one session row (O1).
+ */
+async function signIn(running: Running, email: string, authKey: string, device: Device): Promise<Session> {
+  const response = await running.call('POST', HOST_ROUTES.authLogin, { email, authKey, device });
   expect(response.status).toBe(200);
   const opened = await body<TokenResponse>(response);
   return { id: opened.personId, token: opened.token };
@@ -226,7 +247,7 @@ async function member(
   running: Running,
   admin: HostAdmin,
   input: { email: string; name: string; roles: Id[] },
-): Promise<Session & { code: string; expiresAt: string }> {
+): Promise<Activated & { code: string; expiresAt: string }> {
   const created = await admin.createPerson(input);
   const session = await activate(running, created.person.email, created.code);
   expect(session.id).toBe(created.person.id);
@@ -503,6 +524,8 @@ describe('B8a — the first admin publishes the local catalog once', () => {
           personId: ana.id,
         }),
       now: () => Date.parse(AT),
+      // O2's gate is not this test's subject: this fake build is above any minimum a test host sets.
+      appVersion: () => '99.0.0',
       onState: () => {},
       onSignedOut: () => {},
       setInterval: () => 0,
@@ -595,7 +618,18 @@ function newNod(): Nod {
     biometricAvailable: false,
     iterations: ITERATIONS,
   });
-  return { repo, session, vault: createVault({ repo, keychain: secrets, iterations: ITERATIONS }), secrets };
+  // SP02 §8: the vault seals with the key of the session it belongs to, exactly as `main.ts` wires it.
+  return {
+    repo,
+    session,
+    vault: createVault({
+      repo,
+      keychain: secrets,
+      iterations: ITERATIONS,
+      vaultKey: () => session.vaultKey(),
+    }),
+    secrets,
+  };
 }
 
 async function messageOf(action: () => Promise<unknown>): Promise<string> {
@@ -714,6 +748,8 @@ async function syncNod(running: Running, nod: Nod, person: { id: string; token: 
     repo: nod.repo,
     connection,
     now: () => Date.parse(AT),
+    // O2's gate is not this test's subject: this fake build is above any minimum a test host sets.
+    appVersion: () => '99.0.0',
     onState: () => {
       // `backend/main.ts`: the catalog follows the snapshot, and so does the connected person (F2).
       catalog.refresh(nod.repo.hostRecord());
@@ -772,6 +808,8 @@ describe('F1 — a join whose email is already an account of this Nod', () => {
     nod.repo.saveRole({ id: 'team', name: 'Team', admin: false });
     nod.repo.setRoles(localId, ['admin', 'team']);
     nod.repo.saveEntry(tool('kanban'));
+    // A local account is written as v1; its `vaultKey` arrives at the first unlock (SP02 §6).
+    await nod.session.unlock({ email: LOCAL_EMAIL, password: NOD_PASSWORD });
     await nod.vault.save(localId, { toolId: 'kanban', username: 'bob', secret: 'kanban-secret' });
     expect(await nod.vault.read(localId, 'kanban')).toEqual({ username: 'bob', secret: 'kanban-secret' });
 
@@ -905,5 +943,94 @@ describe('F2 — the snapshot decides the connected person\'s name and admin fla
     const after = await syncNod(running, nod, { id: created.person.id, token: joined.kind === 'session' ? joined.token : '' });
     expect(after.status).toBe('connected');
     expect(nod.session.current()).toMatchObject({ id: created.person.id, admin: false });
+  });
+});
+
+/**
+ * O1/SP03 §2 — the device sessions, against the real host: `GET`/`DELETE /v1/sessions` for the
+ * person, `GET /v1/admin/people/:id/sessions` and `DELETE /v1/admin/sessions/:id` for the admin. The
+ * row carries no token and no hash of one (SP02 §5), and a revoked session is a bearer the host no
+ * longer resolves — which is exactly what the sync sees as the `401` of RF-39.
+ */
+describe('device sessions (O1, SP03 §2)', () => {
+  test('the person lists their own devices and revoking one ends that device', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+    const ana = await member(running, admin, { email: 'ana@nod.test', name: 'Ana', roles: [] });
+    // A second device of the same person: another sign-in, another row (SP02 §5).
+    const laptop = await signIn(running, 'ana@nod.test', ana.authKey, {
+      name: 'ana-laptop',
+      os: 'linux',
+      appVersion: '0.3.4',
+    });
+
+    const device = await connectionFor(running, ana);
+    const sessions = await device.sessions();
+
+    expect(sessions.map((row) => row.device.name).sort()).toEqual([DEVICE.name, 'ana-laptop'].sort());
+    expect(sessions.every((row) => row.personId === ana.id)).toBe(true);
+    expect(sessions.every((row) => row.createdAt !== '' && row.expiresAt !== '')).toBe(true);
+    // SP02 §5: the row never carries the bearer, nor anything derived from it.
+    expect(JSON.stringify(sessions)).not.toContain(ana.token);
+    expect(JSON.stringify(sessions)).not.toContain(laptop.token);
+
+    // The device to revoke is picked from the list — ids are the host's own rows.
+    const target = sessions.find((row) => row.device.name === 'ana-laptop');
+    expect(target).toBeDefined();
+    await device.revokeSession(target === undefined ? '' : target.id);
+
+    // The laptop's bearer no longer resolves: that is the sign-out the device sees at its next sync.
+    const after = await running.call('GET', HOST_ROUTES.state, undefined, laptop.token);
+    expect(after.status).toBe(401);
+    // The caller's own session is untouched, and the list is one row shorter.
+    expect((await device.sessions()).map((row) => row.device.name)).toEqual([DEVICE.name]);
+    expect((await running.call('GET', HOST_ROUTES.state, undefined, ana.token)).status).toBe(200);
+  });
+
+  test('a person cannot revoke a session of somebody else', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+    const ana = await member(running, admin, { email: 'ana@nod.test', name: 'Ana', roles: [] });
+    const bob = await member(running, admin, { email: 'bob@nod.test', name: 'Bob', roles: [] });
+
+    // Bob's row, read by the admin; Ana tries to revoke it over her own bearer.
+    const bobRows = await admin.sessions(bob.id);
+    expect(bobRows).toHaveLength(1);
+    const bobSession = bobRows[0];
+    expect(bobSession).toBeDefined();
+
+    const response = await running.call(
+      'DELETE',
+      HOST_ROUTES.session.replace(':id', bobSession === undefined ? '' : bobSession.id),
+      undefined,
+      ana.token,
+    );
+    expect(response.status).toBe(403);
+    // Bob is still signed in.
+    expect((await running.call('GET', HOST_ROUTES.state, undefined, bob.token)).status).toBe(200);
+  });
+
+  test('the admin lists any person\'s devices and revokes one of them', async () => {
+    const running = await startHost();
+    const { admin, person: adminPerson } = await adminOf(running);
+    const ana = await member(running, admin, { email: 'ana@nod.test', name: 'Ana', roles: [] });
+    const tablet = await signIn(running, 'ana@nod.test', ana.authKey, {
+      name: 'ana-tablet',
+      os: 'macos',
+      appVersion: '0.3.4',
+    });
+
+    const listed = await admin.sessions(ana.id);
+    expect(listed.map((row) => row.device.name).sort()).toEqual([DEVICE.name, 'ana-tablet'].sort());
+    // Another person's list is not the admin's own.
+    expect((await admin.sessions(adminPerson.id)).map((row) => row.device.name)).toEqual([DEVICE.name]);
+
+    const target = listed.find((row) => row.device.name === 'ana-tablet');
+    expect(target).toBeDefined();
+    await admin.revokeSession(target === undefined ? '' : target.id);
+
+    expect((await admin.sessions(ana.id)).map((row) => row.device.name)).toEqual([DEVICE.name]);
+    expect((await running.call('GET', HOST_ROUTES.state, undefined, tablet.token)).status).toBe(401);
+    expect((await running.call('GET', HOST_ROUTES.state, undefined, ana.token)).status).toBe(200);
   });
 });

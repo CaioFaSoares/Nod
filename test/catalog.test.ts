@@ -4,6 +4,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   auditUrl,
+  catalogMode,
   exportSeed,
   originOf,
   planSeed,
@@ -542,5 +543,45 @@ describe('exportSeed', () => {
     const seed = exportSeed({ entries: [entry()], roles: ROLES, invites: [], update: null, version: 1 }, new Date(0));
     expect(seed.update).toBeNull();
     expect(seed.invites).toEqual([]);
+  });
+});
+
+/**
+ * O2/SP04 §1, owner decision of 2026-10-17: a Nod older than the guild's `minAppVersion` serves the
+ * local catalog. The two halves below are the catalogs the switch chooses between — the `tool` table's
+ * rows and what the verified snapshot answers — and `served` is what `backend/main.ts` does with the
+ * verdict (`visibleEntriesOf`). The smoke (`test/smoke/ui-driver.ts` #28) proves the wiring.
+ */
+describe('the catalog a Nod older than its guild serves (O2)', () => {
+  const local = [entry({ id: 'local-a', title: 'Local A', roles: [] })];
+  const connected = [entry({ id: 'guild-only', title: 'Guild Only', scope: 'org', ownerId: null })];
+
+  function served(hasHostRow: boolean, updateRequired: boolean): Entry[] {
+    return catalogMode(hasHostRow, updateRequired) === 'connected' ? connected : local;
+  }
+
+  test('at or above the minimum the snapshot is the catalog', () => {
+    expect(catalogMode(true, false)).toBe('connected');
+    expect(served(true, false)).toBe(connected);
+    expect(served(true, false)[0]?.id).toBe('guild-only');
+  });
+
+  test('below it the local tables are, while the `host` row stays', () => {
+    expect(catalogMode(true, true)).toBe('local');
+    expect(served(true, true)).toBe(local);
+    expect(served(true, true)[0]?.id).toBe('local-a');
+  });
+
+  test('a Nod that never connected serves the local catalog either way', () => {
+    expect(catalogMode(false, false)).toBe('local');
+    expect(catalogMode(false, true)).toBe('local');
+    expect(served(false, true)).toBe(local);
+  });
+
+  test('the hosts minimum moving is the only input besides the row', () => {
+    // The same row, the same app: the host lowering its minimum (or the app being updated) is the
+    // whole of what restores the connected catalog — and the run re-reads it every time.
+    expect(catalogMode(true, true)).toBe('local');
+    expect(catalogMode(true, false)).toBe('connected');
   });
 });

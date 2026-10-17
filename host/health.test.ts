@@ -70,7 +70,10 @@ describe('boot', () => {
     const version = host.db
       .query<{ value: string }, [string]>('SELECT value FROM meta WHERE key = ?')
       .get(SCHEMA_VERSION_KEY);
-    expect(version?.value).toBe('1');
+    // Migration 4 landed with the owner's rotation signal (RF-48), on top of migration 3's
+    // one-pair-per-person rule (`docs/canonico.md` §22) and migration 2's block 2 tables (SP01
+    // §3–§4): a fresh `/data` now reports 4.
+    expect(version?.value).toBe('4');
 
     host.close();
   });

@@ -67,9 +67,20 @@ volumes:
 - TLS ends at Coolify's proxy; the container serves plain HTTP on 8080 inside its network.
 - The host refuses to start when `NOD_PUBLIC_URL` isn't `https://`, except in dev.
 - `GET /.well-known/nod` serves `guild` = `NOD_GUILD_NAME` (may be empty when the deployment
-  leaves it unset) and `minAppVersion` = `NOD_MIN_APP_VERSION` (default `0.3.0`), read from the
-  environment. `meta.guild_name` (SP01 §2) still has no writer; the moment boot writes that row the
-  route should read it instead (h6).
+  leaves it unset) and `minAppVersion`; `GET /v1/meta/app` (SP03 §3) serves the same `minAppVersion`
+  plus `update.url`. Both values come from the environment, read once at boot (`host/config.ts`,
+  `loadAppMeta`), so the two documents cannot disagree.
+  - `NOD_MIN_APP_VERSION`: the compose file passes `${NOD_MIN_APP_VERSION:-0.3.0}`, so a deployment
+    through it serves `0.3.0` unless overridden; the code's own default when the variable is unset is
+    `0.0.0` ("older than every Nod", `DEFAULT_MIN_APP_VERSION`). The two disagree only because the
+    compose variable is always set (packaging's and this spec's to settle,
+    `docs/handovers/h7-o1-o2-host.md` decision 1). The boot refuses a value that is not a semver
+    (`invalid NOD_MIN_APP_VERSION: …`, one line, exit 1).
+  - `NOD_UPDATE_URL`: neither compose file sets it, so `update` is `null`; when set it must be an
+    `https://` address or the boot refuses it (`NOD_UPDATE_URL must be https://: …`, exit 1). It is
+    served for the deployment's tooling, not fetched by the running Nod (SP03 §3, O2's limit).
+  - `meta.guild_name` (SP01 §2) still has no writer; the moment boot writes that row the route should
+    read it instead (h6).
 
 ## 3. Commands
 

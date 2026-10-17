@@ -192,8 +192,9 @@ vaultKey = HMAC-SHA256(master, "bond/vault/v1")           → never leaves the m
      that email, `HMAC(hostSecret, email)`, so the reply doesn't reveal who exists.
   2. The Nod derives the keys and sends `POST /v1/auth/login {email, authKey}`.
 - PBKDF2, HMAC and AES-GCM are native in the Nod runtime (`docs/tinyjs.md` §5). The iteration
-  count is the same as the local password's (`PBKDF2_ITERATIONS` in `shared/auth.ts`). Its cost is
-  still to be measured (`docs/canonico.md` §23 q6).
+  count is the same as the local password's (`PBKDF2_ITERATIONS` in `shared/auth.ts`). Its cost was
+  measured in the Nod runtime (H3): one `deriveKeys` at 600 000 iterations takes 383–427 ms, median
+  390 ms (`docs/tinyjs.md` §5).
 - **One password per person.** In connected mode the local password **is** the host password. The
   Nod keeps its local verifier (`docs/canonico.md` §9), so unlocking works offline.
 - **Changing the password** (online, from Nod Settings):

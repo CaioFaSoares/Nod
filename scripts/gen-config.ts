@@ -18,6 +18,7 @@
 // tracked is ever written: `docs/distribuicao.md` §9 is the owner's step by step.
 
 import type { Seed } from '../shared/types';
+import { BUILD_MODE_STAMP } from '../shared/build-mode';
 import { originOf, validateSeed } from '../shared/catalog';
 
 /** Dev port when nobody chooses one: vite's default, the one `bun run app:dev` takes. */
@@ -117,6 +118,9 @@ function hasMediaPermissions(base: Record<string, unknown>): boolean {
 
 /** Files the release always ships from `resources/`, before the relative entry icons. */
 const BUNDLED = ['seed.json', 'tray.png'];
+// `BUILD_MODE_STAMP` (`shared/build-mode.ts`, SP02 §9) must never join this list: the stamp is the
+// only thing that tells a dev run from a release at runtime, and a release that shipped it would be
+// shipping a claim about how it was built.
 
 /**
  * Icon path of an entry, relative to `resources/`: no data URI, no `..` (the build refuses `..`),
@@ -298,4 +302,8 @@ if (import.meta.main) {
   }
 
   await Bun.write(`${root}/tinyjs.json`, `${JSON.stringify(config, null, 2)}\n`);
+  // SP02 §9: the stamp `backend/main.ts` reads to tell a dev run from a release build. Written in
+  // both modes, and deliberately absent from the `"resources"` list `buildResources` builds — so a
+  // release stages neither it nor any other trace of a dev run, and finds no stamp at all.
+  await Bun.write(`${root}/resources/${BUILD_MODE_STAMP}`, `${mode}\n`);
 }

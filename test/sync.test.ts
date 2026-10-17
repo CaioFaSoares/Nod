@@ -10,13 +10,15 @@ import type { OutboxMethod, Repo } from '../backend/repo';
 import { AFTER_WRITE_MS, BACKOFF_MS, createSync, SIGNED_OUT_ERROR, SYNC_INTERVAL_MS } from '../backend/sync';
 import type { Sync, SyncDeps } from '../backend/sync';
 import { HOST_ROUTES } from '../shared/host-api';
-import type { ClientEvent, EventsRequest, EventsResponse, Snapshot } from '../shared/host-api';
+import type { AppMeta, ClientEvent, EventsRequest, EventsResponse, Snapshot } from '../shared/host-api';
 import type { AuditEvent, Entry, HostState } from '../shared/types';
 import { memorySqlite } from './helpers/sqlite-bun';
 
 const START = Date.parse('2026-10-15T12:00:00.000Z');
 const EARLIER = new Date(START - 60_000).toISOString();
 const PUBLIC_KEY = 'A'.repeat(43);
+/** The version of the fake running app (O2) and, by default, the minimum the fake host serves. */
+const APP_VERSION = '0.3.5';
 const HOST: PinnedHost = {
   address: 'https://guild.example.test',
   kid: 'kid-1',
@@ -67,6 +69,11 @@ interface Script {
   snapshot: () => SnapshotResult;
   /** What one replayed write does; `undefined` is the host taking it. */
   request?: (method: string, path: string, body: unknown) => unknown;
+  /**
+   * What `GET /v1/meta/app` answers (O2). The default is this build's own version, so no test that
+   * is not about the minimum version ever meets the gate.
+   */
+  meta?: () => AppMeta;
 }
 
 interface Harness {
@@ -74,7 +81,7 @@ interface Harness {
   sync: Sync;
   connection: HostConnection;
   script: Script;
-  calls: { snapshot: number; options: ({ version?: string | null; notOlderThan?: string | null } | undefined)[]; request: { method: string; path: string; body: unknown }[] };
+  calls: { snapshot: number; meta: number; options: ({ version?: string | null; notOlderThan?: string | null } | undefined)[]; request: { method: string; path: string; body: unknown }[] };
   /** One line per call the run made, in order: the outbox, the events, then the state (SP04 §3). */
   order: string[];
   keychain: Map<string, string>;
@@ -84,6 +91,8 @@ interface Harness {
   /** The delay of the one armed timer, or null when nothing is armed. */
   delay: () => number | null;
   armed: () => number;
+  /** O2: the version the fake `app.info()` reports, for the tests that move it. */
+  setAppVersion: (version: string | null) => void;
   /**
    * Waits for the run already in flight — `start()`'s or a timer's — and answers the state it
    * published. F5 gave `syncNow()` another meaning while a run is going (it asks for a run of its
@@ -109,9 +118,9 @@ function harness(script: Partial<Script> = {}): Harness {
   });
 
   const keychain = new Map<string, string>([[TOKEN_KEY, 'a-token-value']]);
-  const calls: Harness['calls'] = { snapshot: 0, options: [], request: [] };
+  const calls: Harness['calls'] = { snapshot: 0, meta: 0, options: [], request: [] };
   const order: string[] = [];
-  const live: Script = { snapshot: fullBody, ...script };
+  const live: Script = { snapshot: fullBody, meta: () => ({ minAppVersion: APP_VERSION, update: null }), ...script };
 
   const connection: HostConnection = {
     host: HOST,
@@ -133,6 +142,25 @@ function harness(script: Partial<Script> = {}): Harness {
       order.push(`GET ${HOST_ROUTES.state}`);
       return live.snapshot();
     },
+    // O1: the list and the revoke are separate stories; nothing in this file asks for them.
+    sessions: async () => [],
+    revokeSession: async () => true,
+    // K1: `PUT /v1/keys` belongs to the key-pin story (`backend/keys.ts`); nothing here publishes a
+    // pair, and the sync never calls it.
+    putKeys: async () => undefined,
+    // K1/`docs/canonico.md` §22: the caller's own pair; nothing here publishes or adopts one.
+    getOwnKeys: async () => null,
+    // K4: the share flows are `backend/shares.ts`; the sync never sends, accepts or declines one.
+    sendShares: async () => ({ ids: [] }),
+    acceptShare: async () => true,
+    declineShare: async () => true,
+    removeHolder: async () => true,
+    markRotated: async () => true,
+    // O2: not part of SP04 §3's order, so it is counted in `calls` and not in `order`.
+    appMeta: async () => {
+      calls.meta += 1;
+      return (live.meta ?? ((): AppMeta => ({ minAppVersion: APP_VERSION, update: null })))();
+    },
   };
 
   let clock = START;
@@ -142,11 +170,14 @@ function harness(script: Partial<Script> = {}): Harness {
   /** Resolves when a run publishes its state, oldest waiter first: the signal `settle` waits on. */
   const published: (() => void)[] = [];
   let signedOuts = 0;
+  /** O2: the running app's version, as `app.info()` would answer it. */
+  let app = APP_VERSION;
 
   const deps: SyncDeps = {
     repo,
     connection: () => connection,
     now: () => clock,
+    appVersion: () => app,
     onState: (state) => {
       states.push(state);
       published.shift()?.();
@@ -193,6 +224,9 @@ function harness(script: Partial<Script> = {}): Harness {
     },
     delay: () => [...timers.values()][0]?.ms ?? null,
     armed: () => timers.size,
+    setAppVersion: (version) => {
+      app = version;
+    },
     settle,
     fire: async () => {
       const [id, timer] = [...timers.entries()][0] ?? [];
@@ -367,6 +401,9 @@ describe('triggers', () => {
       lastSyncAt: null,
       lastError: null,
       pendingWrites: 0,
+      // O2: without a guild there is nothing to be out of date for.
+      updateRequired: false,
+      minAppVersion: null,
     });
   });
 });
@@ -860,5 +897,134 @@ describe('a run that outlives its host (F8)', () => {
     expect(h.repo.hostRecord()?.lastError).toBeNull();
     expect(h.repo.hostRecord()?.snapshot).toBeNull();
     expect(h.signedOutCount()).toBe(0);
+  });
+});
+
+/**
+ * O2/SP04 §1: the host's `minAppVersion` against the running app. Older than it, the guild is
+ * disconnected (owner decision 2026-10-17): the run makes no other call but the version check —
+ * outbox, events and snapshot all stay where they are — the state says why (`updateRequired`,
+ * `status` still `connected`, because the host did answer), and the local catalog takes over
+ * (`shared/catalog.ts`'s `catalogMode`, `test/catalog.test.ts`). The minimum is re-read on every run,
+ * so a host that lowers it (or an upgraded app) resumes by itself.
+ */
+describe('minimum app version (O2)', () => {
+  test('every run reads the minimum once', async () => {
+    const h = harness();
+
+    await h.sync.syncNow();
+    await h.sync.syncNow();
+
+    expect(h.calls.meta).toBe(2);
+  });
+
+  test('a host that needs a newer Nod pushes nothing and keeps the row and the cache', async () => {
+    const h = harness({ meta: () => ({ minAppVersion: '0.4.0', update: null }) });
+    enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, EARLIER);
+    recordEvent(h, EARLIER);
+    const before = h.repo.hostRecord();
+
+    const state = await h.sync.syncNow();
+
+    // Nothing reached the host but the version check itself: no write, no event batch, no state read.
+    expect(h.calls.meta).toBe(1);
+    expect(h.calls.request).toEqual([]);
+    expect(h.calls.snapshot).toBe(0);
+    expect(state.updateRequired).toBe(true);
+    expect(state.minAppVersion).toBe('0.4.0');
+    // The person's writes and events are still here, waiting for the update.
+    expect(h.repo.listOutbox()).toHaveLength(1);
+    expect(h.repo.eventSyncCounts()).toEqual({ sent: 0, pending: 1 });
+    // The host's row and the cached body are untouched by the state: the guild is still there for
+    // Settings → Hosts, and updating is the whole of what brings it back.
+    expect(h.repo.hostRecord()).toEqual(before);
+    // The host answered: this is not the stale state of a host that could not be reached.
+    expect(state.status).toBe('connected');
+    expect(state.lastError).toBeNull();
+  });
+
+  test('the same version, or a newer Nod, syncs as always', async () => {
+    for (const [app, min] of [
+      [APP_VERSION, APP_VERSION],
+      [APP_VERSION, '0.3.4'],
+      ['0.4.0', APP_VERSION],
+    ] as const) {
+      const h = harness({ meta: () => ({ minAppVersion: min, update: null }) });
+      h.setAppVersion(app);
+      enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, EARLIER);
+
+      const state = await h.sync.syncNow();
+
+      expect(state.updateRequired).toBe(false);
+      expect(h.repo.listOutbox()).toHaveLength(0);
+      expect(h.calls.snapshot).toBe(1);
+    }
+  });
+
+  test('a version this Nod cannot read leaves it syncing', async () => {
+    const h = harness({ meta: () => ({ minAppVersion: 'whenever', update: null }) });
+
+    const state = await h.sync.syncNow();
+
+    expect(state.updateRequired).toBe(false);
+    expect(h.calls.snapshot).toBe(1);
+  });
+
+  test('a discovery carries the minimum before the first sync ever runs', async () => {
+    const h = harness();
+
+    h.sync.observeMinVersion('9.9.9');
+    expect(h.sync.state().updateRequired).toBe(true);
+    expect(h.sync.state().minAppVersion).toBe('9.9.9');
+
+    // A host that lowers it — the same host, reconfigured — restores the writes.
+    h.sync.observeMinVersion('0.1.0');
+    expect(h.sync.state().updateRequired).toBe(false);
+  });
+
+  test('the minimum re-read on every run restores the pushes without a restart', async () => {
+    let min = '0.4.0';
+    const h = harness({ meta: () => ({ minAppVersion: min, update: null }) });
+    enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, EARLIER);
+
+    expect((await h.sync.syncNow()).updateRequired).toBe(true);
+    expect(h.repo.listOutbox()).toHaveLength(1);
+
+    min = '0.3.0';
+    const state = await h.sync.syncNow();
+
+    expect(state.updateRequired).toBe(false);
+    expect(h.repo.listOutbox()).toHaveLength(0);
+    expect(h.calls.request).toEqual([
+      { method: 'PUT', path: '/v1/personal/tools/mine', body: { id: 'mine' } },
+    ]);
+  });
+
+  test('a meta route the host does not answer does not fail the run', async () => {
+    const h = harness({
+      meta: () => {
+        throw new HostError('refused', 'the host refused the request', 404);
+      },
+    });
+    enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, EARLIER);
+
+    const state = await h.sync.syncNow();
+
+    expect(state.status).toBe('connected');
+    expect(state.lastError).toBeNull();
+    expect(h.repo.listOutbox()).toHaveLength(0);
+    expect(h.calls.snapshot).toBe(1);
+  });
+
+  test('without a host row nothing is reported and nothing is refused', async () => {
+    const h = harness();
+    h.repo.clearHost();
+    h.sync.observeMinVersion('9.9.9');
+
+    const state = h.sync.state();
+
+    expect(state.status).toBe('none');
+    expect(state.updateRequired).toBe(false);
+    expect(state.minAppVersion).toBeNull();
   });
 });

@@ -8,6 +8,7 @@
 import { PASSWORD_V2_ALGORITHM } from '../shared/auth';
 import { originOf } from '../shared/catalog';
 import type { PasswordHashV2, StoredPassword } from '../shared/auth';
+import type { ShareScope } from '../shared/host-api';
 import type {
   AuditEvent,
   AuthOverride,
@@ -100,6 +101,8 @@ CREATE TABLE IF NOT EXISTS vault_item (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   origin TEXT,
+  credential_id TEXT,
+  scope TEXT NOT NULL DEFAULT 'role',
   UNIQUE (person_id, tool_id)
 );
 CREATE TABLE IF NOT EXISTS invite (
@@ -150,6 +153,18 @@ CREATE TABLE IF NOT EXISTS host_outbox (
   attempts    INTEGER NOT NULL DEFAULT 0,
   last_error  TEXT
 );
+CREATE TABLE IF NOT EXISTS peer_keys (
+  person_id       TEXT PRIMARY KEY,
+  x25519          TEXT NOT NULL,
+  ed25519         TEXT NOT NULL,
+  fingerprint     TEXT NOT NULL,
+  first_seen      TEXT NOT NULL,
+  confirmed_at    TEXT,
+  pending_x25519      TEXT,
+  pending_ed25519     TEXT,
+  pending_fingerprint TEXT,
+  pending_since       TEXT
+);
 `;
 
 /**
@@ -161,13 +176,21 @@ CREATE TABLE IF NOT EXISTS host_outbox (
  * `3` is SP05 §2's connected schema: the two `host` tables, the event's client id and sent time,
  * the local password V2 columns and the tool's scope/owner. A `2` database gets them by presence
  * (`addColumns`), with its people, tools and vault rows untouched; `0` covers everything written
- * before the versioning, which is completed the same way. Only 0, 2 and the current version are
+ * before the versioning, which is completed the same way. Only 0, 2, 3 and the current version are
  * known — anything else is a database from a build this one cannot reason about.
+ *
+ * `4` is K1–K2's `peer_keys` (SP06 §2): one more table and no other change, so a `3` database gets
+ * it from the `CREATE … IF NOT EXISTS` above and is re-stamped; its rows are untouched.
+ *
+ * `5` is K4's vault index of a shared credential (SP06 §3–§5): `vault_item.credential_id` — the
+ * uuid that groups every holder of one credential, `NULL` until the item is first shared — and
+ * `vault_item.scope`, the sharing scope (`role` by default). Two columns of an existing table, so a
+ * `4` database gets them from `addColumns` and every item it holds becomes `role`/unshared.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 5;
 
-/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2, and current. */
-const KNOWN_VERSIONS: readonly number[] = [0, 2, SCHEMA_VERSION];
+/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2–v4, current. */
+const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, SCHEMA_VERSION];
 
 /**
  * The database was created by an older Nod (v1, in Portuguese). `migrate` throws this and touches
@@ -212,6 +235,10 @@ interface ToolRow {
   active: number;
   auth_json: string | null;
   probe_json: string | null;
+  /** `'org'` or `'personal'` (SP05 §2): a local personal tool is a `tool` row of its owner's. */
+  scope: string;
+  /** The person a personal row belongs to; `null` for a catalog entry. */
+  owner_id: Id | null;
 }
 
 interface ViewRow {
@@ -232,6 +259,10 @@ interface VaultRow {
   created_at: string;
   updated_at: string;
   origin: string | null;
+  /** K4: the credential this copy belongs to, or `NULL` when it never travelled. */
+  credential_id: string | null;
+  /** K6: the sharing scope (`role`, `blocked` or `org`). */
+  scope: string;
 }
 
 interface InviteRow {
@@ -282,6 +313,19 @@ interface OutboxRowSql {
   last_error: string | null;
 }
 
+interface PeerKeyRow {
+  person_id: Id;
+  x25519: string;
+  ed25519: string;
+  fingerprint: string;
+  first_seen: string;
+  confirmed_at: string | null;
+  pending_x25519: string | null;
+  pending_ed25519: string | null;
+  pending_fingerprint: string | null;
+  pending_since: string | null;
+}
+
 /**
  * The one `host` row of SP05 §2 as the rest of the backend reads it: the pinned host (address, key,
  * person id, salt) and the cache of the last verified snapshot. No token field exists, on purpose
@@ -318,6 +362,33 @@ export interface OutboxEntry {
   createdAt: string;
   attempts: number;
   lastError: string | null;
+}
+
+/**
+ * One row of SP06 §2's `peer_keys` (K2), as the pinning logic reads and writes it: the pair this
+ * machine pinned for a colleague, and — while the host publishes a different one — the pair that
+ * would replace it. Neither side is a secret: both are public keys, base64url of the raw 32 bytes,
+ * and the fingerprint is SP06 §2's 16 Crockford characters.
+ *
+ * The table is SP06 §2's six columns plus the four of the `changed` state (`pending_x25519`,
+ * `pending_ed25519`, `pending_fingerprint`, `pending_since`); the spec's `changed` is a state, and a
+ * Nod that did not keep the pair it saw could not show the new fingerprint to confirm (RF-45).
+ */
+export interface PeerKeyRecord {
+  personId: Id;
+  x25519: string;
+  ed25519: string;
+  fingerprint: string;
+  /** When this machine first pinned a pair of that person's (ISO 8601 UTC). */
+  firstSeen: string;
+  /** When the person confirmed the pinned pair; `null` while it was never confirmed by hand. */
+  confirmedAt: string | null;
+  /** The unconfirmed replacement, all three set together while the peer is `changed`. */
+  pendingX25519: string | null;
+  pendingEd25519: string | null;
+  pendingFingerprint: string | null;
+  /** When that unconfirmed pair first appeared in a snapshot (ISO 8601 UTC). */
+  pendingSince: string | null;
 }
 
 /** The only login results a `login` event may carry (`docs/arquitetura.md` §4). */
@@ -469,8 +540,33 @@ export interface Repo {
     keychainKey: string;
     /** Canonical origin of the tool entry at save time; the fill is bound to it (B9, RF-38). */
     origin: string;
+    /** K4: the credential group of a shared item; omitted or `null` leaves the stored one in place. */
+    credentialId?: string | null;
+    /** K6: the sharing scope; omitted leaves the stored one in place. */
+    scope?: ShareScope;
   }): VaultItem;
+  /** K4/SP06 §4: writes the credential group of an item the moment it is first shared. */
+  setVaultCredential(personId: Id, toolId: Id, credentialId: string): void;
+  /** K6/SP06 §5: stores a new sharing scope for one item (the owner's choice, or an accept). */
+  setVaultScope(personId: Id, toolId: Id, scope: ShareScope): void;
+  /**
+   * K4: both sharing fields at once, `null` included — the rollback of a failed accept restores the
+   * item exactly as it was, credential group and scope alike.
+   */
+  setVaultSharing(
+    personId: Id,
+    toolId: Id,
+    p: { credentialId: string | null; scope: ShareScope },
+  ): void;
   removeVaultItem(personId: Id, toolId: Id): void;
+  /**
+   * B8b/RF-40: re-points the vault index rows of one tool id to another — what a local tool turned
+   * into a personal tool needs, so a credential saved for the old id stays usable under the new one.
+   * `keychain_key` is left untouched on purpose: the value in the keychain is sealed with that string
+   * as AAD and `backend/vault.ts` reads by the stored key, so the credential opens unchanged without
+   * the `vaultKey` on hand. Answers how many rows moved.
+   */
+  rekeyVaultTool(fromToolId: Id, toToolId: Id): number;
   /** Returns what it removed: the caller needs the keys to clean the keychain. */
   removeVaultOf(personId: Id): VaultItem[];
   // events
@@ -549,6 +645,44 @@ export interface Repo {
   markOutboxAttempt(id: number, error: string | null): void;
   /** Drops one row: the write is done, or the host refused it for good (SP04 §4). Unknown id: no-op. */
   deleteOutbox(id: number): void;
+  // peer keys (K1–K2, SP06 §2)
+  /** The pair this machine pinned for one colleague, or `null` when it never saw one. */
+  peerKey(personId: Id): PeerKeyRecord | null;
+  /**
+   * SP06 §2's first sight: writes the pinned pair. A person who already has a row is left exactly
+   * as it is — a pair that differs from a pinned one is a `changed` (K2), never a re-pin — and the
+   * answer says whether a row was written.
+   */
+  pinPeerKey(p: {
+    personId: Id;
+    x25519: string;
+    ed25519: string;
+    fingerprint: string;
+    firstSeen: string;
+    confirmedAt: string | null;
+  }): boolean;
+  /**
+   * SP06 §2's change: keeps the pinned pair and records the pair the host now publishes as the
+   * pending one, which is what makes a peer `changed` until `confirmPeerKey`. Unknown person: no-op.
+   */
+  markPeerKeyChanged(p: {
+    personId: Id;
+    x25519: string;
+    ed25519: string;
+    fingerprint: string;
+    since: string;
+  }): boolean;
+  /**
+   * Forgets the pending pair without touching the pinned one: the host went back to the pair this
+   * machine had pinned, so there is nothing left to confirm. Answers whether a change was pending.
+   */
+  clearPeerKeyChange(personId: Id): boolean;
+  /**
+   * K2/RF-45: the person confirmed the pending pair — it becomes the pinned one, `confirmed_at` is
+   * `at` and `first_seen` becomes when that pair was first seen (`pending_since`), because that is
+   * when this machine met the key it now trusts. Answers whether a change was waiting.
+   */
+  confirmPeerKey(personId: Id, at: string): boolean;
 }
 
 export function createRepo(db: SqlDb): Repo {
@@ -629,6 +763,10 @@ export function createRepo(db: SqlDb): Repo {
     // B10: the stable client id of an event and when the host acked it (SP04 §5).
     addColumn('event', 'client_id', 'TEXT');
     addColumn('event', 'sent_at', 'TEXT');
+    // K4/K6: the credential group of a shared item and its sharing scope (SP06 §3–§5). Every item a
+    // `4` database holds is unshared and `role`, which is the default of the new column.
+    addColumn('vault_item', 'credential_id', 'TEXT');
+    addColumn('vault_item', 'scope', "TEXT NOT NULL DEFAULT 'role'");
   }
 
   /**
@@ -672,12 +810,16 @@ CREATE TABLE vault_item_rebuilt (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   origin TEXT,
+  credential_id TEXT,
+  scope TEXT NOT NULL DEFAULT 'role',
   UNIQUE (person_id, tool_id)
 );`);
         db.run(
           `INSERT INTO vault_item_rebuilt
-             (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin)
-           SELECT id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin
+             (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin,
+              credential_id, scope)
+           SELECT id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin,
+                  credential_id, scope
              FROM vault_item`,
         );
         db.exec('DROP TABLE vault_item');
@@ -1082,6 +1224,9 @@ CREATE TABLE vault_item_rebuilt (
   function buildEntry(l: ToolRow, roles: Map<Id, Id[]>, views: Map<Id, View[]>): Entry {
     return {
       id: l.id,
+      // SP04 §2: local mode fills both — a catalog row is `'org'`, a personal tool names its owner.
+      scope: l.scope === 'personal' ? 'personal' : 'org',
+      ownerId: l.owner_id,
       title: l.title,
       url: l.url,
       // The icon does not leave here: the backend serves the bytes by `iconHash` (data URI, §4).
@@ -1113,10 +1258,16 @@ CREATE TABLE vault_item_rebuilt (
     const iconHash = extras !== undefined && 'iconHash' in extras ? (extras.iconHash ?? null) : (previous?.icon_hash ?? null);
     const probeJson =
       extras !== undefined && 'probe' in extras ? JSON.stringify(extras.probe ?? null) : (previous?.probe_json ?? null);
+    // SP05 §2: a personal tool is a `tool` row with its scope and its owner. Both are decided by
+    // presence, like `extras` above: an entry that carries neither — every `validateEntry` answer —
+    // keeps what the row has, so editing a tool from the admin screens cannot turn one person's
+    // personal tool into a catalog entry.
+    const scope = (e.scope ?? previous?.scope) === 'personal' ? 'personal' : 'org';
+    const ownerId = e.ownerId !== undefined ? e.ownerId : (previous?.owner_id ?? null);
     transaction(() => {
       db.run(
-        `INSERT INTO tool (id, title, url, origin, icon_hash, sort_order, active, auth_json, probe_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO tool (id, title, url, origin, icon_hash, sort_order, active, auth_json, probe_json, scope, owner_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -1125,7 +1276,9 @@ CREATE TABLE vault_item_rebuilt (
            sort_order = excluded.sort_order,
            active = excluded.active,
            auth_json = excluded.auth_json,
-           probe_json = excluded.probe_json`,
+           probe_json = excluded.probe_json,
+           scope = excluded.scope,
+           owner_id = excluded.owner_id`,
         [
           e.id,
           e.title,
@@ -1136,6 +1289,8 @@ CREATE TABLE vault_item_rebuilt (
           e.active ? 1 : 0,
           e.auth === null ? null : JSON.stringify(e.auth),
           probeJson,
+          scope,
+          ownerId,
         ],
       );
       // Views and grants are rewritten wholesale: whatever did not come in the entry is gone.
@@ -1235,6 +1390,12 @@ CREATE TABLE vault_item_rebuilt (
       keychainKey: l.keychain_key,
       createdAt: l.created_at,
       updatedAt: l.updated_at,
+      // K4: `NULL` until the item is first shared; the snapshot decorates `holders` and
+      // `rotationPending` over it (`backend/shares.ts`).
+      credentialId: l.credential_id,
+      scope: l.scope as ShareScope,
+      rotationPending: false,
+      holders: [],
     };
   }
 
@@ -1272,20 +1433,30 @@ CREATE TABLE vault_item_rebuilt (
     username: string;
     keychainKey: string;
     origin: string;
+    /** K4: the credential group, when the caller knows it; a plain save leaves it as it was. */
+    credentialId?: string | null;
+    /** K6: the sharing scope; a plain save leaves the stored one as it was. */
+    scope?: ShareScope;
   }): VaultItem {
     const at = nowIso();
     // One item per (person, tool) pair: saving again updates in place and keeps the same id. The
     // origin is rewritten with the rest: it belongs to the credential as it is now, and it is what
-    // the fill compares the window's entry origin against (B9, RF-38).
+    // the fill compares the window's entry origin against (B9, RF-38). `credential_id` and `scope`
+    // (K4/K6) are only overwritten by a caller that knows them: a later plain `vault.save` must not
+    // forget that this copy belongs to a shared credential. `scope` is `NOT NULL`, so a plain save
+    // inserts the default `role` and the `CASE` leaves the stored value untouched on a conflict.
+    const hasScope = i.scope === undefined ? 0 : 1;
     db.run(
-      `INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin, credential_id, scope)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN ? ELSE 'role' END)
        ON CONFLICT (person_id, tool_id) DO UPDATE SET
          label = excluded.label,
          username = excluded.username,
          keychain_key = excluded.keychain_key,
          updated_at = excluded.updated_at,
-         origin = excluded.origin`,
+         origin = excluded.origin,
+         credential_id = COALESCE(excluded.credential_id, vault_item.credential_id),
+         scope = CASE WHEN ? = 1 THEN excluded.scope ELSE vault_item.scope END`,
       [
         crypto.randomUUID(),
         i.personId,
@@ -1296,13 +1467,56 @@ CREATE TABLE vault_item_rebuilt (
         at,
         at,
         i.origin,
+        i.credentialId ?? null,
+        hasScope,
+        i.scope ?? 'role',
+        hasScope,
       ],
     );
     return orFail(vaultItem(i.personId, i.toolId), 'vault item not found');
   }
 
+  /** K4/SP06 §4: stores the credential group of an item the moment it is first shared. */
+  function setVaultCredential(personId: Id, toolId: Id, credentialId: string): void {
+    db.run('UPDATE vault_item SET credential_id = ? WHERE person_id = ? AND tool_id = ?', [
+      credentialId,
+      personId,
+      toolId,
+    ]);
+  }
+
+  /** K6/SP06 §5: stores a new sharing scope for one item (the owner's choice, or an accept). */
+  function setVaultScope(personId: Id, toolId: Id, scope: ShareScope): void {
+    db.run('UPDATE vault_item SET scope = ? WHERE person_id = ? AND tool_id = ?', [
+      scope,
+      personId,
+      toolId,
+    ]);
+  }
+
+  /** K4: the pair of sharing fields in one write, `NULL` included (the accept rollback). */
+  function setVaultSharing(
+    personId: Id,
+    toolId: Id,
+    p: { credentialId: string | null; scope: ShareScope },
+  ): void {
+    db.run(
+      'UPDATE vault_item SET credential_id = ?, scope = ? WHERE person_id = ? AND tool_id = ?',
+      [p.credentialId, p.scope, personId, toolId],
+    );
+  }
+
   function removeVaultItem(personId: Id, toolId: Id): void {
     db.run('DELETE FROM vault_item WHERE person_id = ? AND tool_id = ?', [personId, toolId]);
+  }
+
+  function rekeyVaultTool(fromToolId: Id, toToolId: Id): number {
+    // Only `tool_id` moves: `keychain_key` names the sealed value, which the vault reads back by
+    // that stored key (its AAD is the same string), so the credential opens unchanged without the
+    // `vaultKey` on hand. A row already at `toToolId` is left alone: `UNIQUE (person_id, tool_id)`
+    // would otherwise fail the whole update.
+    db.run('UPDATE OR IGNORE vault_item SET tool_id = ? WHERE tool_id = ?', [toToolId, fromToolId]);
+    return rowsChanged();
   }
 
   function removeVaultOf(personId: Id): VaultItem[] {
@@ -1589,6 +1803,101 @@ CREATE TABLE vault_item_rebuilt (
     db.run('DELETE FROM host_outbox WHERE id = ?', [id]);
   }
 
+  // ---------------------------------------------------------------- peer keys (K1–K2, SP06 §2)
+
+  function buildPeerKey(l: PeerKeyRow): PeerKeyRecord {
+    return {
+      personId: l.person_id,
+      x25519: l.x25519,
+      ed25519: l.ed25519,
+      fingerprint: l.fingerprint,
+      firstSeen: l.first_seen,
+      confirmedAt: l.confirmed_at,
+      pendingX25519: l.pending_x25519,
+      pendingEd25519: l.pending_ed25519,
+      pendingFingerprint: l.pending_fingerprint,
+      pendingSince: l.pending_since,
+    };
+  }
+
+  function peerKey(personId: Id): PeerKeyRecord | null {
+    const row = singleRow<PeerKeyRow>('SELECT * FROM peer_keys WHERE person_id = ?', [personId]);
+    return row === null ? null : buildPeerKey(row);
+  }
+
+  function pinPeerKey(p: {
+    personId: Id;
+    x25519: string;
+    ed25519: string;
+    fingerprint: string;
+    firstSeen: string;
+    confirmedAt: string | null;
+  }): boolean {
+    // `DO NOTHING` is the rule of SP06 §2 written in SQL: the first sight pins, and every later
+    // sight of a different pair is the caller's `changed` — never a silent re-pin.
+    db.run(
+      `INSERT INTO peer_keys
+         (person_id, x25519, ed25519, fingerprint, first_seen, confirmed_at,
+          pending_x25519, pending_ed25519, pending_fingerprint, pending_since)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+       ON CONFLICT (person_id) DO NOTHING`,
+      [p.personId, p.x25519, p.ed25519, p.fingerprint, p.firstSeen, p.confirmedAt],
+    );
+    return rowsChanged() > 0;
+  }
+
+  function markPeerKeyChanged(p: {
+    personId: Id;
+    x25519: string;
+    ed25519: string;
+    fingerprint: string;
+    since: string;
+  }): boolean {
+    // The pinned pair is untouched on purpose: it is what verifies an incoming share's signature
+    // (SP06 §3) until the person confirms the new one.
+    db.run(
+      `UPDATE peer_keys
+          SET pending_x25519 = ?, pending_ed25519 = ?, pending_fingerprint = ?, pending_since = ?
+        WHERE person_id = ?`,
+      [p.x25519, p.ed25519, p.fingerprint, p.since, p.personId],
+    );
+    return rowsChanged() > 0;
+  }
+
+  function clearPeerKeyChange(personId: Id): boolean {
+    db.run(
+      `UPDATE peer_keys
+          SET pending_x25519 = NULL, pending_ed25519 = NULL, pending_fingerprint = NULL,
+              pending_since = NULL
+        WHERE person_id = ? AND pending_x25519 IS NOT NULL`,
+      [personId],
+    );
+    return rowsChanged() > 0;
+  }
+
+  function confirmPeerKey(personId: Id, at: string): boolean {
+    // Every right-hand side reads the row as it was before the update, so the pending pair is
+    // promoted in one statement and the cleared columns cannot shadow it.
+    db.run(
+      `UPDATE peer_keys
+          SET x25519 = pending_x25519,
+              ed25519 = pending_ed25519,
+              fingerprint = pending_fingerprint,
+              first_seen = COALESCE(pending_since, first_seen),
+              confirmed_at = ?,
+              pending_x25519 = NULL,
+              pending_ed25519 = NULL,
+              pending_fingerprint = NULL,
+              pending_since = NULL
+        WHERE person_id = ?
+          AND pending_x25519 IS NOT NULL
+          AND pending_ed25519 IS NOT NULL
+          AND pending_fingerprint IS NOT NULL`,
+      [at, personId],
+    );
+    return rowsChanged() > 0;
+  }
+
   return {
     migrate,
     countPeople,
@@ -1626,7 +1935,11 @@ CREATE TABLE vault_item_rebuilt (
     vaultOrigin,
     vaultItemsByTool,
     saveVaultItem,
+    setVaultCredential,
+    setVaultScope,
+    setVaultSharing,
     removeVaultItem,
+    rekeyVaultTool,
     removeVaultOf,
     addEvent,
     listEvents,
@@ -1647,5 +1960,10 @@ CREATE TABLE vault_item_rebuilt (
     listOutbox,
     markOutboxAttempt,
     deleteOutbox,
+    peerKey,
+    pinPeerKey,
+    markPeerKeyChanged,
+    clearPeerKeyChange,
+    confirmPeerKey,
   };
 }

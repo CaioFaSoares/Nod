@@ -1,14 +1,15 @@
-// The host API contract: the wire shape of every block 1 route and of the two signed documents
-// (SP03 §2, SP04 §1–§2, §5). The Nod and the host compile against this one file, so a field renamed
-// here breaks both sides in the same commit (`shared/context.md`).
+// The host API contract: the wire shape of every host route and of the two signed documents
+// (SP03 §2–§3, SP04 §1–§2, §5). The Nod and the host compile against this one file, so a field
+// renamed here breaks both sides in the same commit (`shared/context.md`).
 //
 // Pure, like every other module of `shared/`: types, path and format constants, and pure helpers —
 // no `tjs`, no `tiny`, no DOM, no `bun:*`, and no import beyond `shared/types.ts` and the language.
 // The host's SQL rows are `host/repo.ts`'s business; they carry these field names on purpose, so a
 // snapshot can hand a row over without a rename (H2 decision 17).
 //
-// Scope: block 1. The block 2 routes of SP03 §3 (`/v1/keys`, `/v1/shares`, holders, assignments,
-// `/v1/meta/app`) and the block 2 members of `Snapshot` are out of this file until their story lands.
+// Scope: block 1 and block 2's credential sharing (SP06): every route of SP03 §2–§3 (including
+// `/v1/meta/app`, O2) and the block 2 members of `Snapshot`. Sealed shares travel as opaque base64url
+// strings — the seal itself is `shared/seal.ts`, and no key material is a field of this file.
 //
 // Nothing here is secret-bearing by construction: a body carries `authKey` (never the password,
 // canonico §11) and its own salt, and the helpers below cover only the code and email formats of
@@ -37,6 +38,8 @@ export const HOST_ROUTES = {
   state: '/v1/state',
   sessions: '/v1/sessions',
   session: '/v1/sessions/:id',
+  /** `PresenceEntry[]`, person (`kind = member`): who in the guild is online now (RF-58). */
+  presence: '/v1/presence',
   /** `:id` matches `^p-[a-z0-9]{10}$`; the Nod generates it (SP03 §2). */
   personalTool: '/v1/personal/tools/:id',
   personalView: '/v1/personal/views/:id',
@@ -57,6 +60,39 @@ export const HOST_ROUTES = {
   /** `PUT` stores a PNG and answers its digest; `DELETE` clears it with `204` (SP03 §2). */
   adminGuildIcon: '/v1/admin/guild/icon',
   adminEvents: '/v1/admin/events',
+  // block 2 (SP03 §3)
+  /** `204`; replaces the caller's public keys, which is what a reset does (SP06 §2). */
+  keys: '/v1/keys',
+  /**
+   * `OwnKeys` to its owner only, `404` when that person has no pair: the sealed private halves a
+   * second machine of the same person adopts instead of generating a pair (`docs/canonico.md` §22).
+   */
+  keysPrivate: '/v1/keys/private',
+  /** Answers `{ ids }`; the host checks every recipient against the credential's scope (SP06 §5). */
+  shares: '/v1/shares',
+  /** `204`; the recipient accepts: the host purges `sealed` and records the holder (SP06 §4). */
+  shareAccept: '/v1/shares/:id/accept',
+  shareDecline: '/v1/shares/:id/decline',
+  /** `Holder[]` to a holder or an admin, `403` to anyone else (SP03 §3). */
+  holders: '/v1/credentials/:id/holders',
+  /** `204`; the owner holder or an admin revokes one holder (SP06 §4). */
+  holder: '/v1/credentials/:id/holders/:personId',
+  /**
+   * `204`; the owner holder (or an admin) records that a new secret was saved, which is the
+   * explicit signal that clears `rotationPending` when no live holder is left to receive an
+   * `update` share (RF-48).
+   */
+  credentialRotated: '/v1/credentials/:id/rotated',
+  /**
+   * `204`; the credential's owner holder (or an admin) sets the scope of every holder row
+   * (SP06 §5). Every later share derives its allowed scope from the owner row.
+   */
+  credentialScope: '/v1/credentials/:id/scope',
+  adminAssignments: '/v1/admin/assignments',
+  /** The members of an assigned role still without a copy (SP03 §3, RF-47). */
+  adminAssignmentsMissing: '/v1/admin/assignments/missing',
+  /** `AppMeta`, public: what a Nod reads before it uses the host (SP03 §3, O2). */
+  appMeta: '/v1/meta/app',
 } as const;
 
 // ---------------------------------------------------------------- errors
@@ -91,6 +127,24 @@ export interface DeviceSession {
   /** Touched on every authenticated request: the sliding expiry (SP02 §5). */
   lastSeenAt: string;
   expiresAt: string;
+}
+
+/**
+ * RF-58: a person is online while one of their live sessions was seen inside this window. The Nod
+ * syncs every 5 minutes and every authenticated request touches `last_seen_at` (SP02 §5), so six
+ * minutes covers one missed tick without a heartbeat. Kept out of the signed snapshot: presence
+ * would move its `version` on every poll (SP04 §2).
+ */
+export const PRESENCE_WINDOW_MS = 6 * 60_000;
+
+/** `GET /v1/presence` (RF-58): a member with a live session — never device, OS or address. */
+export interface PresenceEntry {
+  personId: Id;
+  name: string;
+  /** ISO 8601 UTC: the newest `last_seen_at` among their live sessions. */
+  lastSeenAt: string;
+  /** `lastSeenAt` is inside `PRESENCE_WINDOW_MS` of the host clock. */
+  online: boolean;
 }
 
 // ---------------------------------------------------------------- auth (SP02)
@@ -376,6 +430,17 @@ export interface Discovery {
 }
 
 /**
+ * `GET /v1/meta/app` (SP03 §3, O2): the public document a Nod reads to learn which version this host
+ * serves — the same value `Discovery.minAppVersion` carries, from the one configuration (SP07 §2) —
+ * and where the tinyjs update manifest lives (`update.check`, canonico §19 F5). `update` is null
+ * while the deployment sets no manifest, and a Nod then has no newer build to offer.
+ */
+export interface AppMeta {
+  minAppVersion: string;
+  update: { url: string } | null;
+}
+
+/**
  * `GET /v1/state` (SP04 §2): the whole state one person sees, filtered to the person, signed as one
  * body. The Nod verifies the signature over the bytes as received and refuses an `issuedAt` older
  * than the last accepted one.
@@ -403,6 +468,19 @@ export interface Snapshot {
    * downloaded against; the bytes themselves never travel in the snapshot.
    */
   guildIcon: string | null;
+  /**
+   * The block 2 fields of SP04 §2. They are optional so a Nod still reads a snapshot from a host of
+   * an older build, and they are inside the signed bytes like every other field — the Nod refuses an
+   * unsigned one whatever it carries.
+   */
+  /** Every non-disabled person of the guild, with the public keys of those who have them (SP06 §2). */
+  people?: SnapshotPerson[];
+  /** The open, unexpired shares addressed to me, `sealed` included (SP06 §4). */
+  incomingShares?: IncomingShare[];
+  /** The holders of every credential I hold — every credential, if I am admin (RF-54). */
+  holders?: Record<string, Holder[]>;
+  /** Credential ids I own with a revoked holder and no update since: the value must rotate (SP06 §4). */
+  rotationPending?: Id[];
 }
 
 /** SP04 §2: the name of the `ETag` header of `GET /v1/state`. */
@@ -508,4 +586,141 @@ export function validateCode(code: string, kind: CodeKind): boolean {
  */
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+// ---------------------------------------------------------------- credential sharing (SP06, block 2)
+
+/**
+ * `PUT /v1/keys` (SP03 §3): the two raw 32-byte public keys of SP06 §2, base64url without padding.
+ * The private halves never travel in clear — they ride `privateSealed`, an opaque `bv1.` value the
+ * host stores and never opens (`docs/canonico.md` §22).
+ */
+export interface PublicKeys {
+  /** The receiving key of SP06 §2. */
+  x25519Public: string;
+  /** The signing key of SP06 §2. */
+  ed25519Public: string;
+  /**
+   * `docs/canonico.md` §22, SP06 §2: the private halves of this pair as a `bv1.` value sealed under
+   * the person's `vaultKey` (AAD `nod.keys.private/v1|<person>`), so every other machine of that
+   * person opens the same pair instead of generating a competing one. Absent means "keep what the
+   * host already holds"; the two public keys above always travel together with it.
+   */
+  privateSealed?: string;
+}
+
+/**
+ * `GET /v1/keys/private` (SP03 §3): the caller's own row — the public keys and the sealed private
+ * halves as published. `404` while the person has no pair. Nobody else's row is ever in an answer.
+ */
+export interface OwnKeys {
+  x25519Public: string;
+  ed25519Public: string;
+  /** The `bv1.` blob `PUT /v1/keys` stored, or `null` for a pair published before the column. */
+  privateSealed: string | null;
+}
+
+/**
+ * The sharing scope of a credential (SP06 §5, SP01 §3 `shares.scope`): who the host accepts as a
+ * recipient. `blocked` is a state, never a share: one carrying it is refused whole (SP03 §3).
+ */
+export type ShareScope = 'role' | 'blocked' | 'org';
+
+/** Why a share exists (SP06 §4): a person's send, an admin's assignment, or the owner's update. */
+export type ShareKind = 'send' | 'assign' | 'update';
+
+/** One recipient of a share and the copy sealed to them (`shared/seal.ts`, SP06 §3). */
+export interface ShareItem {
+  /** The recipient's person id; the host ids the row it creates itself. */
+  to: Id;
+  /** base64url of SP06 §3's `body || sig`, opaque to the host. */
+  sealed: string;
+}
+
+/** `POST /v1/shares` (SP03 §3): one sealed copy per item, all of them of one credential. */
+export interface ShareRequest {
+  /** The owner's uuid, which groups every holder of the credential (SP01 §3). */
+  credentialId: Id;
+  /** An org entry: only a tool the recipient can reach may be shared (SP06 §5). */
+  toolId: Id;
+  scope: ShareScope;
+  kind: ShareKind;
+  items: ShareItem[];
+}
+
+/** The ids of the rows this request created, in the order of `items` (SP03 §3). */
+export interface ShareResponse {
+  ids: Id[];
+}
+
+/**
+ * `PUT /v1/credentials/:id/scope` (SP03 §3): sets the scope of every holder row of the credential.
+ * A later share may narrow it, never widen it; `blocked` refuses every share (SP06 §5).
+ */
+export interface CredentialScopeRequest {
+  scope: ShareScope;
+}
+
+/** One open share addressed to the caller, as `Snapshot.incomingShares` carries it (SP04 §2). */
+export interface IncomingShare {
+  id: Id;
+  credentialId: Id;
+  toolId: Id;
+  /** The sender — the share's `from`, and whose Ed25519 key signs the sealed body (SP06 §3). */
+  from: Id;
+  scope: ShareScope;
+  kind: ShareKind;
+  /** The sealed copy, until accept, decline or expiry purges it (SP06 §4). */
+  sealed: string;
+  /** ISO 8601 UTC; `expiresAt` is `createdAt` + 14 days (SP01 §3). */
+  createdAt: string;
+  expiresAt: string;
+}
+
+/**
+ * One holder of a credential (SP03 §3 `GET /v1/credentials/:id/holders`, `Snapshot.holders`): who
+ * has a copy, from when, with which scope. The host knows the metadata and never the content (E02 §2).
+ */
+export interface Holder {
+  personId: Id;
+  name: string;
+  /** The org entry the credential is for; every holder row of one credential carries it (H1). */
+  toolId: Id;
+  /** The credential's owner: the one holder who can re-share it (SP06 §4). */
+  owner: boolean;
+  scope: ShareScope;
+  /** ISO 8601 UTC: when the row was created, or the last accept of an update. */
+  since: string;
+  /** Set when the owner revoked this holder (SP06 §4, RF-48); the row stays, with its date. */
+  removedAt: string | null;
+}
+
+/** `PUT /v1/admin/assignments` (SP03 §3): `assigned: false` removes the assignment. */
+export interface AssignmentRequest {
+  credentialId: Id;
+  roleId: Id;
+  toolId: Id;
+  assigned: boolean;
+}
+
+/** One row of `GET /v1/admin/assignments/missing` (SP03 §3): a member of an assigned role without a copy. */
+export interface MissingCopy {
+  credentialId: Id;
+  toolId: Id;
+  roleId: Id;
+  personId: Id;
+}
+
+/**
+ * One person of `Snapshot.people` (SP04 §2): the roster a sender picks recipients from. The public
+ * keys are absent while the person has not activated (or after a reset, before the new pair lands).
+ */
+export interface SnapshotPerson {
+  id: Id;
+  name: string;
+  roles: Id[];
+  /** `PersonKind` on the wire: a string, so a newer host may add a kind this Nod does not know. */
+  kind: string;
+  x25519Public?: string;
+  ed25519Public?: string;
 }

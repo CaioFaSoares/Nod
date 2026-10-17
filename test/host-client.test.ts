@@ -17,12 +17,33 @@ import {
 import { createRepo } from '../backend/repo';
 import { toBase64url } from '../shared/encoding';
 import { HOST_ROUTES } from '../shared/host-api';
+import type { DeviceSession } from '../shared/host-api';
 import { generateEd25519KeyPair, sign } from '../shared/seal';
 import { memorySqlite } from './helpers/sqlite-bun';
 import type { SecretStore, SqlDb } from '../shared/types';
 
 const ISSUED = '2026-10-16T10:00:00.000Z';
 const PERSON = 'uuid-person-1';
+
+/** O1: the rows `GET /v1/sessions` answers — SP03 §2's `DeviceSession`, token hash never. */
+const SESSIONS: DeviceSession[] = [
+  {
+    id: 's-1',
+    personId: PERSON,
+    device: { name: 'macos arm64', os: 'macos', appVersion: '0.3.5' },
+    createdAt: ISSUED,
+    lastSeenAt: ISSUED,
+    expiresAt: ISSUED,
+  },
+  {
+    id: 's-2',
+    personId: PERSON,
+    device: { name: 'linux x86_64', os: 'linux', appVersion: '0.3.4' },
+    createdAt: ISSUED,
+    lastSeenAt: ISSUED,
+    expiresAt: ISSUED,
+  },
+];
 
 /** The body of SP04 §2, small but complete: the client reads `api`, `version` and `issuedAt`. */
 function snapshotBody(version: string, issuedAt = ISSUED): string {
@@ -88,6 +109,8 @@ interface TestHost {
   redirect(url: string | null): void;
   /** What `GET /v1/guild/icon` answers, or `null` for the `404` of a guild with no icon (SP03 §2). */
   guildIcon(bytes: Uint8Array | null): void;
+  /** What `GET /v1/meta/app` answers from now on (SP03 §3, O2). */
+  meta(value: unknown): void;
   /** Back to the key it started with and a fresh `v1` body. */
   reset(): void;
   /** Closes the loopback server. */
@@ -111,6 +134,8 @@ async function startHost(): Promise<TestHost> {
   let redirectsTo: string | null = null;
   /** The PNG `GET /v1/guild/icon` answers, or `null` for a guild with no icon (SP03 §2). */
   let icon: Uint8Array | null = null;
+  /** What `GET /v1/meta/app` answers (SP03 §3, O2): a document, or anything a test wants to send. */
+  let meta: unknown = { minAppVersion: '0.1.0', update: null };
   const fresh = (): Answer => ({
     body: snapshotBody('v1'),
     signed: snapshotBody('v1'),
@@ -168,6 +193,18 @@ async function startHost(): Promise<TestHost> {
         return new Response(icon, { status: 200, headers: { 'content-type': 'image/png' } });
       }
 
+      // SP03 §3's `AppMeta`: public, so a caller that sends no bearer is served like any other.
+      if (url.pathname === HOST_ROUTES.appMeta) return Response.json(meta);
+
+      // O1: the caller's own sessions, behind the bearer like every other person route (SP03 §2).
+      if (url.pathname === HOST_ROUTES.sessions) {
+        if (request.headers.get('authorization') === null) {
+          return new Response(JSON.stringify({ error: 'invalid credentials' }), { status: 401 });
+        }
+        return Response.json(SESSIONS);
+      }
+      if (url.pathname.startsWith(`${HOST_ROUTES.sessions}/`)) return new Response(null, { status: 204 });
+
       if (url.pathname === '/v1/redirect') {
         if (redirectsTo === null) return new Response('not found', { status: 404 });
         return new Response(null, { status: 302, headers: { location: redirectsTo } });
@@ -206,6 +243,9 @@ async function startHost(): Promise<TestHost> {
     },
     guildIcon: (bytes) => {
       icon = bytes;
+    },
+    meta: (value) => {
+      meta = value;
     },
     reset: () => {
       advertises = { kid, rawPublicKey: pair.publicKey };
@@ -626,5 +666,69 @@ describe('the client writes no row', () => {
     const answer = await connection.request<{ ok: boolean }>('GET', '/v1/ping');
     expect(answer).toEqual({ ok: true });
     expect(allRowsText(db)).toBe(before);
+  });
+});
+
+/**
+ * O2/SP03 §3: `GET /v1/meta/app` — the public document the sync's version gate reads. Public is the
+ * point: the call carries no bearer, so a Nod whose session ended still learns it must update.
+ */
+describe('the app meta (O2)', () => {
+  test('the document comes back and no bearer is sent', async () => {
+    host.meta({ minAppVersion: '1.4.2', update: { url: 'https://guild.example.test/manifest.json' } });
+    const connection = createHostClient({ fetch, keychain: memoryKeychain() }).connect(pinned);
+    await connection.saveToken('a-token-of-this-test');
+
+    const meta = await connection.appMeta();
+
+    expect(meta).toEqual({
+      minAppVersion: '1.4.2',
+      update: { url: 'https://guild.example.test/manifest.json' },
+    });
+    const call = host.calls.filter((item) => item.path === HOST_ROUTES.appMeta).at(-1);
+    expect(call?.method).toBe('GET');
+    // SP03 §3: the route is public, so not even a bearer this Nod holds may be attached.
+    expect(call?.authorization).toBeNull();
+  });
+
+  test('a deployment with no manifest answers null, and a body that is not the document is refused', async () => {
+    host.meta({ minAppVersion: '0.0.0', update: null });
+    const connection = createHostClient({ fetch, keychain: memoryKeychain() }).connect(pinned);
+
+    expect((await connection.appMeta()).update).toBeNull();
+
+    host.meta({ minAppVersion: '', update: null });
+    const refused = await failureOfCall(connection.appMeta());
+    expect(refused.failure).toBe('invalid');
+    host.meta({ minAppVersion: '0.1.0', update: null });
+  });
+});
+
+/**
+ * O1/SP03 §2: the client's half of the device routes — the bearer goes out, the rows come back as
+ * SP03 §2's `DeviceSession`, and a revoke is the `204` every delete of the API answers with.
+ */
+describe('device sessions (O1)', () => {
+  test('the list comes back with the bearer, and a revoke is a 204', async () => {
+    const store = memoryKeychain();
+    const connection = createHostClient({ fetch, keychain: store }).connect(pinned);
+    await connection.saveToken('a-token-of-this-test');
+
+    const sessions = await connection.sessions();
+    expect(sessions).toEqual(SESSIONS);
+    expect(host.calls.at(-1)?.authorization).toBe('Bearer a-token-of-this-test');
+
+    expect(await connection.revokeSession('s-2')).toBe(true);
+    const revoke = host.calls.at(-1);
+    expect(revoke?.method).toBe('DELETE');
+    expect(revoke?.path).toBe(`${HOST_ROUTES.sessions}/s-2`);
+  });
+
+  test('a session list with no bearer behind it is the signed-out failure', async () => {
+    const connection = createHostClient({ fetch, keychain: memoryKeychain() }).connect(pinned);
+
+    const refused = await failureOfCall(connection.sessions());
+
+    expect(refused.failure).toBe('signed-out');
   });
 });

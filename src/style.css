@@ -560,6 +560,7 @@ button {
 }
 
 .sidebar-action {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -772,9 +773,29 @@ button {
   border-color: var(--info);
 }
 
+/* K4: the count of shares waiting in the vault inbox, on the Settings action of the sidebar. */
+.sidebar-action-badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  color: var(--info);
+  border-color: var(--info);
+}
+
 /* SP04 §3: the signed-out notice, next to the update one. */
 .notice-warn {
   border-left-color: var(--info);
+}
+
+/* O2: the out-of-date Nod — a state, not a notice to dismiss, so it is the loudest of the three. */
+.notice-danger {
+  border-left-color: var(--danger);
+}
+
+/* K2/RF-45: a colleague's key changed — a chip that has to read as a warning, not as a label. */
+.chip-warn {
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 /* SP05 §4: one labelled line of the host card. */
@@ -806,6 +827,182 @@ button {
   padding: 0;
   background: transparent;
   border: 0;
+}
+
+/* --------------------------------------------------------- vault and sharing (K4-K7) */
+
+/* K5: the revealed value and its countdown, on one line of the credential's card. */
+.reveal {
+  gap: 10px;
+}
+
+.reveal .secret {
+  padding: 2px 8px;
+  font-family: var(--font);
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  user-select: all;
+}
+
+.reveal-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* K5: the inline password prompt of an action that waits for its gate. */
+.gate {
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+/* K7/RF-54: the holders of one credential — 'Alice, Bob' with the date and the scope of each. */
+.holders-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.holder {
+  gap: 8px;
+  padding: 2px 0;
+}
+
+/* K4: the send dialog hangs under the credential it sends, so it reads as part of it. */
+.send-dialog {
+  gap: 8px;
+  background: var(--bg);
+}
+
+.send-dialog h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.recipient {
+  gap: 8px;
+}
+
+/* K4: one share in the inbox — a card of its own, with its own answer. */
+.inbox-row {
+  gap: 8px;
+}
+
+.inbox-row h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+/* ------------------------------------------------------------------ personal (B7) */
+
+/* SP05 §4: the star of a favorite, on the card's head. */
+.favorite {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.favorite:hover {
+  background: var(--bg-hover);
+  border-color: var(--line-strong);
+}
+
+.favorite-on {
+  color: var(--info);
+}
+
+/* RF-58: Home's "Online now" card. */
+.presence-card {
+  margin-top: 16px;
+}
+
+.presence-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.presence-subtitle {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.presence-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.presence-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.presence-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+/* canonico §22: the warning a tool that did not come from the org carries. */
+.tool-warning {
+  margin: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--fg);
+  background: rgb(255 107 107 / 12%);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+}
+
+.tool-card-personal {
+  border-color: var(--line-strong);
+}
+
+/* The sidebar marks the same tools: a personal one, and a favorite. */
+.tool-icon.personal::after {
+  content: '!';
+  position: absolute;
+  margin: -22px 0 0 22px;
+  width: 12px;
+  height: 12px;
+  font-size: 9px;
+  line-height: 12px;
+  text-align: center;
+  color: var(--danger);
+  background: var(--bg-sidebar);
+  border: 1px solid var(--danger);
+  border-radius: 50%;
+}
+
+.tool-icon.favorite {
+  border-color: var(--info);
+}
+
+/* The dialog of `personal.saveTool`: the palette's box, a form's width. */
+.dialog-title {
+  margin: 0;
+  font-size: 14px;
+}
+
+#personal-tool-dialog .palette {
+  width: min(440px, 100%);
+}
+
+#personal-tool-dialog .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 /* ------------------------------------------------------------ small window */

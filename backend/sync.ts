@@ -15,6 +15,7 @@ import { fromBase64url } from '../shared/encoding';
 import { HOST_ROUTES } from '../shared/host-api';
 import type { ClientEvent, EventsResponse } from '../shared/host-api';
 import { clearOrgData, outboxVerdict } from '../shared/host-merge';
+import { tooOldFor } from '../shared/version';
 import type { HostState } from '../shared/types';
 import { fingerprintOf, HostError } from './host-client';
 import type { HostConnection } from './host-client';
@@ -47,6 +48,14 @@ export const AFTER_WRITE_MS = 1_000;
  */
 export const SIGNED_OUT_ERROR = 'signed out — sign in again';
 
+/**
+ * O2/SP04 §1: what a write to the host is refused with while this Nod is older than the host's
+ * `minAppVersion`. The sync pushes nothing in that state (`runOnce`), and the RPC gate of
+ * `backend/main.ts` answers every method that reaches the host with this sentence, so the screen
+ * shows why the call did not land instead of a status from a host that never saw it.
+ */
+export const UPDATE_REQUIRED_ERROR = 'update required — this guild needs a newer Nod';
+
 /** What `createSync` needs from its runtime. */
 export interface SyncDeps {
   repo: Repo;
@@ -54,10 +63,27 @@ export interface SyncDeps {
   connection: () => HostConnection | null;
   /** Milliseconds since the epoch: the backoff, `syncedAt` and the state's clock. */
   now: () => number;
+  /**
+   * The version of the running app (`app.info().version`), which the O2 gate compares against the
+   * host's `minAppVersion`. `null` while the runtime has not answered it: with nothing to compare,
+   * nothing is refused.
+   */
+  appVersion: () => string | null;
   /** Every state the loop observes, for `host.state` and the sidebar badge (SP05 §3–§4). */
   onState: (state: HostState) => void;
   /** Once per session that ends on a `401`: the app asks for sign-in (SP04 §3, RF-39). */
   onSignedOut: () => void;
+  /**
+   * K8/SP06 §4, RF-47: one read per run that reached the host — the admin's missing-copy list,
+   * which `backend/shares.ts` keeps in memory. Best effort by contract: it never throws, and a Nod
+   * that is not an admin leaves it undefined so no call is made.
+   */
+  refreshAssignments?: () => Promise<void>;
+  /**
+   * K8: how many members that read found, for `host.state`. Undefined — a member's Nod, or a build
+   * wired without it — leaves the field out of the state altogether.
+   */
+  missingCopies?: () => number;
   setInterval: (run: () => void, ms: number) => unknown;
   clearInterval: (handle: unknown) => void;
 }
@@ -69,6 +95,12 @@ export interface Sync {
   syncNow(): Promise<HostState>;
   state(): HostState;
   afterWrite(): void;
+  /**
+   * O2/SP04 §1: the `minAppVersion` a host just told this Nod — from the discovery of a join (the
+   * document already carries it) or from `GET /v1/meta/app` on a sync. The gate is derived from it
+   * on every read, so a host that lowers its minimum restores the writes without a restart.
+   */
+  observeMinVersion(version: string): void;
 }
 
 export function createSync(deps: SyncDeps): Sync {
@@ -94,6 +126,42 @@ export function createSync(deps: SyncDeps): Sync {
   let refusedBatch: string | null = null;
   /** The pinned key's fingerprint, computed once per key (`fingerprintOf` is async). */
   let fingerprint: { kid: string; publicKey: string; value: string } | null = null;
+  /**
+   * O2/SP04 §1: the oldest version the host told this Nod it serves — the discovery of a join or
+   * `GET /v1/meta/app`. Kept in memory only: it is the host's fact, re-read on every sync, and
+   * nothing local is decided by a stale copy of it.
+   */
+  let minAppVersion: string | null = null;
+
+  /**
+   * O2/SP04 §1: whether this Nod is too old for the host — and so, by the owner's decision of
+   * 2026-10-17, disconnected from it: no write, no event, no snapshot, no other call than the two
+   * below, and the local catalog instead of the cached one (`shared/catalog.ts`'s `catalogMode`).
+   * A host that answered a `minAppVersion` no one can parse (or none at all) never sets this. False
+   * while this Nod has no `host` row: the flag is about a guild, and `host.remove` leaves nothing
+   * behind.
+   */
+  function updateRequiredNow(): boolean {
+    return repo.hostRecord() !== null && tooOldFor(deps.appVersion(), minAppVersion);
+  }
+
+  /**
+   * SP04 §1/SP03 §3: the meta of the run. Best-effort on purpose — the route is public, and a host
+   * that does not answer it (offline, an older host without the route) leaves the last known minimum
+   * in place instead of failing the run: O2's gate must never be the reason a Nod stops syncing.
+   */
+  async function refreshMinVersion(connection: HostConnection): Promise<void> {
+    try {
+      observeMinVersion((await connection.appMeta()).minAppVersion);
+    } catch {
+      // The value of the last answer stands; the run goes on to the outbox and the snapshot.
+    }
+  }
+
+  function observeMinVersion(version: string): void {
+    if (version.trim() === '') return;
+    minAppVersion = version;
+  }
 
   // ---------------------------------------------------------------- timers
 
@@ -223,6 +291,13 @@ export function createSync(deps: SyncDeps): Sync {
     if (connection === null || record === null) return state();
     await rememberFingerprint(record);
     const at = new Date(deps.now()).toISOString();
+    // O2: the minimum version first, before a byte of the person's own data leaves the machine — the
+    // host's answer decides whether this run does anything else at all. Too old, the run is over: the
+    // guild is disconnected, so no outbox flush, no events and no snapshot, and the catalog layer
+    // serves the local tables (`shared/catalog.ts`'s `catalogMode`). The next run re-reads the
+    // minimum, which is the whole of what restores the connection.
+    await refreshMinVersion(connection);
+    if (updateRequiredNow()) return publish();
     try {
       // SP04 §3's order: the outbox, then the events, then the state.
       await flushOutbox(connection);
@@ -247,6 +322,10 @@ export function createSync(deps: SyncDeps): Sync {
     } catch (error) {
       return failed(connection, record, error);
     }
+    // K8/RF-47: an admin's Nod reads the members still without an assigned copy on every run that
+    // reached the host, so the next `host.state` carries a fresh count. Best effort: the read never
+    // fails the run (`refreshAssignments` swallows its own failure).
+    await deps.refreshAssignments?.();
     // The state of a run whose events did not go up is the stale one of SP04 §3, after the snapshot
     // it did receive: the person sees that their activity is behind without losing the catalog.
     if (refused !== null) return failed(connection, record, refused);
@@ -517,6 +596,12 @@ export function createSync(deps: SyncDeps): Sync {
       lastSyncAt: record === null ? null : record.lastSyncAt,
       lastError: record === null ? null : record.lastError,
       pendingWrites: repo.listOutbox().length,
+      // K8/RF-47: the count of the last missing-copy read. The field is absent for a Nod wired
+      // without the read (a member, or the sync of a test), which the page reads as zero.
+      ...(deps.missingCopies === undefined ? {} : { missingCopies: deps.missingCopies() }),
+      // O2: without a `host` row there is no guild to be too old for, and no minimum to show.
+      updateRequired: updateRequiredNow(),
+      minAppVersion: record === null ? null : minAppVersion,
     };
   }
 
@@ -526,5 +611,5 @@ export function createSync(deps: SyncDeps): Sync {
     return published;
   }
 
-  return { start, stop, syncNow, state, afterWrite };
+  return { start, stop, syncNow, state, afterWrite, observeMinVersion };
 }

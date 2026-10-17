@@ -92,6 +92,18 @@ exactly that value; a `null` deletes the cached file and the icon falls back to 
   - "Sync now";
   - after any admin write.
 - **Order**: flush the outbox (§4), push events (§5), then `GET /v1/state`.
+- **Version gate (O2)**: the run reads `GET /v1/meta/app` first; while this Nod is older than
+  `minAppVersion` the guild is **disconnected** and the run ends there — no outbox, no events and no
+  snapshot read, and no other route of the host is reached (owner decision of 2026-10-17). Every RPC
+  that would reach the host — a write (`HOST_WRITES`) or a read only the host can answer
+  (`HOST_READS`) — is refused with `update required — this guild needs a newer Nod`, `host.activate`
+  and `host.signIn` refuse themselves over the discovery's `minAppVersion` before any credential is
+  sent, the reads of the cached snapshot answer empty, and the catalog layer serves the local tables
+  (`shared/catalog.ts`'s `catalogMode`) — the sidebar, Home, `catalog.list`, the roles/people screens
+  and the vault's decorations all as if no host existed. The `host` row, the bearer and the cached
+  body stay on disk untouched, and `host.state` still reports the guild with `updateRequired: true`
+  (Settings → Hosts shows it and the banner says why). A host that lowers its minimum, or an upgraded
+  and restarted app, restores the connection at the next run.
 - **Network failure**: the state goes **stale**; the cache stays in use; Settings → Hosts shows the
   last success time. Retry with backoff of 30 s, 1 min, 2 min, then the normal 5 min.
 - **401 on a valid-looking token** (revoked or expired): clear the token, drop org data from the

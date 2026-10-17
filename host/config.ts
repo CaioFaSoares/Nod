@@ -1,6 +1,8 @@
 // The host's environment (SP07 §1–§2). Everything here is data: no address, guild name or product
 // name is written into code (`AGENTS.md`).
 
+import type { AppMeta } from '../shared/host-api';
+
 export type HostConfig = {
   /** Directory holding `host.db`, the key files and `backups/` (SP01 §1). */
   dataDir: string;
@@ -54,4 +56,69 @@ export function loadConfig(env: Record<string, string | undefined>): HostConfig 
     port: parsePort(env.PORT?.trim()),
     dev,
   };
+}
+
+// ---------------------------------------------------------------- app metadata (SP03 §3, O2)
+
+/** SP07 §2: the semver the discovery and `/v1/meta/app` serve. */
+export const MIN_APP_VERSION_ENV = 'NOD_MIN_APP_VERSION';
+/** SP03 §3: the `https` address of the tinyjs update manifest; unset means the host offers none. */
+export const UPDATE_URL_ENV = 'NOD_UPDATE_URL';
+
+/**
+ * Applied when the deployment sets no `NOD_MIN_APP_VERSION`: `0.0.0` is older than every Nod, so a
+ * host that was given no minimum refuses none. (SP07 §2 and the two compose files still spell the
+ * older `0.3.0`; that is the finding of `docs/handovers/h7-o1-o2-host.md`, packaging's and the
+ * spec's to settle.)
+ */
+export const DEFAULT_MIN_APP_VERSION = '0.0.0';
+
+/** semver 2.0.0's grammar (semver.org §9): three numbers, an optional pre-release and build. */
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+function parseMinAppVersion(raw: string | undefined): string {
+  const value = raw?.trim();
+  if (value === undefined || value === '') return DEFAULT_MIN_APP_VERSION;
+  // SP04 §1 puts a semver in the discovery: a deployment that mistypes it stops the boot here, the
+  // way a mistyped PORT or public URL does, instead of serving a document no Nod can compare.
+  if (!SEMVER.test(value)) throw new ConfigError(`invalid NOD_MIN_APP_VERSION: ${value}`);
+  return value;
+}
+
+function parseUpdateUrl(raw: string | undefined): { url: string } | null {
+  const value = raw?.trim();
+  if (value === undefined || value === '') return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new ConfigError(`invalid NOD_UPDATE_URL: ${value}`);
+  }
+  // The manifest is what the tinyjs updater fetches (canonico §19 F5); no deployment of ours serves
+  // it over plain http, so only https is accepted, exactly as SP07 §2 refuses a non-https address.
+  if (parsed.protocol !== 'https:') {
+    throw new ConfigError(`NOD_UPDATE_URL must be https://: ${value}`);
+  }
+  return { url: value };
+}
+
+/**
+ * SP03 §3's `AppMeta`, resolved from the environment once at boot (`host/main.ts`): the minimum app
+ * version the discovery repeats and the update manifest address. Both documents read this one value,
+ * so they cannot disagree.
+ */
+export function loadAppMeta(env: Record<string, string | undefined>): AppMeta {
+  return {
+    minAppVersion: parseMinAppVersion(env[MIN_APP_VERSION_ENV]),
+    update: parseUpdateUrl(env[UPDATE_URL_ENV]),
+  };
+}
+
+/**
+ * The app metadata of one request: what the boot resolved and `host/app.ts` decorated, or — for an
+ * app a harness built by hand, with no resolved value — the environment read now. One definition for
+ * both routes that answer it, never two.
+ */
+export function appMetaOf(deps: { appMeta?: AppMeta }): AppMeta {
+  return deps.appMeta ?? loadAppMeta(process.env);
 }

@@ -12,18 +12,24 @@ still hold: secrets only in the keychain, the page only calls `src/api.ts`, the 
 | `shared/auth.ts` | `deriveKeys`, `PasswordHashV2` (SP02 §1, §6) |
 | `shared/host-api.ts` (new) | Types of SP03/SP04: `Discovery`, `Snapshot`, request/response bodies; **and** the code helpers — `CODE_ALPHABET`, `CODE_BYTES`, `CODE_LENGTH`, `generateCode`, `formatCode`, `normalizeCode`, `validateCode`, `normalizeEmail` (SP02 §3). They landed here, not in `shared/auth.ts` (c1); `shared/auth.ts` keeps the derivation. |
 | `shared/types.ts` | `Entry.scope/ownerId`, `View.id/scope/ownerId`, `HostState`, `AppIconChoice`/`AppIconState`, new `ApiContract` methods (§3) |
-| `shared/host-merge.ts` (new) | Pure: snapshot → local rows; sidebar order (favorites, org, personal); outbox replay decisions |
+| `shared/host-merge.ts` (new) | Pure: snapshot → local rows; sidebar order (favorites, org, personal); outbox replay decisions; `leftoverLocalTools` (RF-40) |
+| `shared/seal.ts` (new) | The E02 seal: X25519 + HKDF (over HMAC) + AES-256-GCM, Ed25519 sign/verify, `personFingerprint` (SP06 §1–§3) |
+| `shared/version.ts` (new) | `compareVersions`: the semver comparison of the O2 gate (SP04 §1) |
+| `shared/vault-crypto.ts` (new) | The `bv1.` envelope (AES-256-GCM, AAD = keychain key) for a vault value and for a key blob (SP02 §8) |
 | `backend/host-client.ts` (new) | `fetch` to the host; bearer from the keychain; discovery; signature check; error mapping; `getBytes`, the one route whose answer is bytes (§6) |
 | `backend/sync.ts` (new) | Timer, triggers, outbox flush, event push, snapshot apply, stale state, backoff (SP04 §3–§5) |
-| `backend/repo.ts` | Migration to `user_version = 3` (§2) |
+| `backend/repo.ts` | Migrations to `user_version = 5` (§2): the block 1 schema, then `peer_keys` (K1–K2) and `vault_item.credential_id`/`scope` (K4/K6) |
 | `backend/session.ts` | V2 local verifier and its migration; keys kept in memory while unlocked; biometric item holds `vaultKey` (SP02 §6, §9) |
-| `backend/vault.ts` | `origin` per item, fill only on that origin (B9); block 2: `bv1.` encryption (V1) |
+| `backend/vault.ts` | `origin` per item, fill only on that origin (B9); block 2: `bv1.` encryption (V1); `credentialId`/`scope` on an accepted share (K4/K6); the `afterSave` call-out (K9) |
+| `backend/keys.ts` (new) | The E02 key pairs (K1) and the pin table (K2): generation at activation/reset, the private halves sealed under `nod.keys.<person>` (and a `privateSealed` blob accepted from the host, canonico §22), the public halves in `meta`, `PUT /v1/keys` / `GET /v1/keys/private`, `observe`/`peers`/`peerKeyFor`/`confirm`, `reSeal` on a password change |
+| `backend/shares.ts` (new) | SP06 §3–§5: `recipients`, `send`, `inbox`, `accept`, `decline`, `setScope`, `decorate`; K9's `update`/`retryPending`/`applyUpdates`/`removeHolder`; K8's `assign`/`missing`/`sealMissing`/`refreshAssignments` |
+| `backend/personal.ts` (new) | The person's own tools, views and favorites: a write queues one `host_outbox` row while connected and hits the local tables otherwise; `p-…` ids; `adoptLocalTool` (RF-40) |
 | `backend/guild-icon.ts` (new) | The guild's PNG on this machine and the app-icon choice: fetch on a moved hash, verify the digest, cache in `<data>/guild-icon.png`, apply through `app.icon` (§6) |
 | `backend/main.ts` | New RPC methods; admin methods routed to the host when connected (§3); the guild icon of every applied snapshot and of the host's removal (§6) |
 | `src/settings.ts` | Settings → Hosts tab; admin tabs read/write through the same RPC (the backend decides local or host); the App icon select and the admin's Guild icon card (§6) |
 | `src/app.ts` | Sidebar order; stale badge; favorites toggle; personal tool add |
 
-## 2. Local schema, `user_version = 3` (block 1)
+## 2. Local schema, `user_version = 5`
 
 ```sql
 CREATE TABLE host (
@@ -57,6 +63,20 @@ ALTER TABLE person ADD COLUMN password_check TEXT;      -- PasswordHashV2.check;
 ALTER TABLE person ADD COLUMN password_algorithm TEXT NOT NULL DEFAULT 'PBKDF2-SHA256';
 ALTER TABLE tool ADD COLUMN scope TEXT NOT NULL DEFAULT 'org';
 ALTER TABLE tool ADD COLUMN owner_id TEXT;
+CREATE TABLE IF NOT EXISTS peer_keys (          -- migration 4 (K1–K2, SP06 §2)
+  person_id           TEXT PRIMARY KEY,
+  x25519              TEXT NOT NULL,            -- the pinned pair of this colleague
+  ed25519             TEXT NOT NULL,
+  fingerprint         TEXT NOT NULL,
+  first_seen          TEXT NOT NULL,
+  confirmed_at        TEXT,
+  pending_x25519      TEXT,                     -- the pair that differs while the peer is `changed`
+  pending_ed25519     TEXT,
+  pending_fingerprint TEXT,
+  pending_since       TEXT
+);
+ALTER TABLE vault_item ADD COLUMN credential_id TEXT;                        -- migration 5 (K4/K6)
+ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
 ```
 
 - **The sign-out state is the marker in `host.last_error`** — `SIGNED_OUT_ERROR` = "signed out —
@@ -70,7 +90,8 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
   `tool(id)` is gone — a constraint written twice, like the added columns, with a rebuild instead of
   an `ALTER`: `migrate()` rebuilds an existing table (`rebuildVaultItem`, the SQLite 12-step recipe)
   when `PRAGMA foreign_key_list(vault_item)` still names `tool`, so the guard is the constraint, not
-  `user_version`, which stays **3**. Removing a local tool still deletes its vault rows only through
+  `user_version` (`migrate()` brings any known version to 5, `SCHEMA_VERSION`). Removing a local tool
+  still deletes its vault rows only through
   `removeEntry`'s explicit `DELETE FROM vault_item WHERE tool_id = ?`. `vault.save` reads the entry —
   and its `origin` — from the effective catalog while connected (`main.ts` builds it over
   `{ ...database, entry: catalogEntryOf }`), and the `login.report` origin guard reads the same
@@ -88,7 +109,7 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
 
 | Method | Params | Result | Who |
 | --- | --- | --- | --- |
-| `host.state` | — | `HostState` (`none` / `connected` / `stale`, guild, address, fingerprint, lastSyncAt, lastError, pending outbox count) | unlocked |
+| `host.state` | — | `HostState` (`none` / `connected` / `stale`, guild, address, fingerprint, lastSyncAt, lastError, pending outbox count, `updateRequired`, `minAppVersion`) | unlocked |
 | `host.discover` | `{ address }` | `{ guild, fingerprint }` | no session needed (first run) |
 | `host.activate` | `{ address, fingerprint, email, code, password, name? }` | `SessionState` | no session needed; `name` only for a setup code |
 | `host.signIn` | `{ address, fingerprint, email, password }` | `SessionState` | no session needed |
@@ -101,7 +122,32 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
 | `host.sessions` / `host.revokeSession` | `— / { id }` | `DeviceSession[] / true` | unlocked (block 2, O1) |
 | `personal.saveTool` / `personal.removeTool` | `{ entry }` / `{ id }` | `Entry` / `true` | unlocked (block 2) |
 | `personal.saveView` / `personal.removeView` | `{ view }` / `{ id }` | `View` / `true` | unlocked (block 2) |
-| `favorites.set` | `{ ids }` | `true` | unlocked (block 2) |
+| `favorites.list` / `favorites.set` | `— / { ids }` | `Id[]` / `true` | unlocked (block 2); the read is B7's addition beside the write |
+| `session.disableBiometric` | — | `SessionState` | unlocked (V1); the delete path of SP02 §9 |
+| `people.sessions` / `people.revokeSession` | `{ personId }` / `{ id }` | `DeviceSession[] / true` | unlocked, admin (O1); the admin's side of the session list |
+| `host.localLeftovers` / `host.adoptLocalAsPersonal` | `— / { ids }` | `Entry[] / { created: number }` | unlocked (B8b, RF-40); the leftover offer on Add host and the adoption |
+| `keys.mine` / `peers.list` / `peers.confirm` | `— / — / { personId }` | `MineKeys` (`{ fingerprint: string \| null, status: 'ok' \| 'pending' \| 'unavailable', message: string \| null }`) / `PeerKey[]` / `true` | unlocked (K1–K2); the fingerprint card and the pin table, `confirm` promoting a `changed` peer |
+| `vault.copy` / `vault.setScope` | `{ toolId, password? }` / `{ toolId, scope }` | `true` / `VaultItem` | unlocked (K4–K7); `copy` behind the K5 gate, `setScope` the owner's sharing scope |
+| `shares.recipients` / `shares.send` | `{ toolId }` / `{ toolId, to, password? }` | `ShareRecipient[]` / `{ sent: number }` | unlocked (K4, K6); `send` behind the gate |
+| `shares.inbox` / `shares.accept` / `shares.decline` / `shares.removeHolder` | `— / { id, password? } / { id } / { toolId, personId }` | `InboxShare[]` / `VaultItem` / `true` / `VaultItem` | unlocked (K4, K9); `accept` behind the gate (an `update` of a held credential skips it) | 
+| `assignments.set` / `assignments.missing` / `assignments.sealMissing` | `{ toolId, roleId?, personId?, assigned, password? }` / `—` / `{ password? }` | `{ … }` / `MissingCopyView[]` / `{ sent, skipped }` | unlocked, admin (K8); the two writes behind the gate |
+- `vault.reveal` and `vault.copy` gain the K5 gate: biometrics where the machine has them, the
+  person's `password` otherwise (SP02 §9); without either the call fails and nothing is shown or
+  copied. The same `password?` is on `shares.send`, `shares.accept` and the two assignment writes.
+- **O2, while this Nod is older than the guild's `minAppVersion` (owner decision 2026-10-17)**: the
+  guild is disconnected, so `host.state` carries `updateRequired: true` (the status stays the one the
+  host answered, and Settings → Hosts shows the guild with the reason), `host.activate` and
+  `host.signIn` refuse over the discovery's `minAppVersion` before any credential, every other RPC
+  that would reach the host is refused with `update required — this guild needs a newer Nod` — the
+  writes of the table above (with `host.revokeSession`, which the disconnected guild no longer keeps
+  open as a security action) and the two reads only the host can answer, `host.sessions` and
+  `people.sessions` — and the
+  RPCs whose answer is the cached snapshot (`shares.inbox`, `shares.recipients`, `holders.list`,
+  `assignments.missing`, `peers.list`, `host.localLeftovers`) answer empty — `keys.mine` is not one
+  of them: it reports this machine's own pair and never reaches the host. The whole catalog layer
+  runs on the local tables (`shared/catalog.ts`'s `catalogMode`): `catalog.list`, the sidebar, Home,
+  the palette, the roles/people screens and the vault list (no holders, no `rotationPending`) are
+  local, as if no host existed. The `host` row, the bearer and the cached body stay on disk.
 
 - Existing admin methods (`catalog.save`, `roles.*`, `people.*`, `invites.issue`) keep their names.
   When connected, the backend sends them to SP03 admin routes.
@@ -127,8 +173,16 @@ ALTER TABLE tool ADD COLUMN owner_id TEXT;
 - **Admin tabs**, when connected:
   - People: email, name, roles; "New access code" shows the code once with a copy button.
   - Tools, Roles, Activity: same screens, host data.
+- **Settings → Vault** (block 2): the sharing inbox with Accept/Decline, the scope select (owner
+  only, Send hidden for `blocked`), Reveal behind the gate with a 10 s countdown, Copy (the secret
+  never reaches the page), Send with the recipient list, and the holders of a credential with a
+  `Remove` for a live holder (owner or admin) and the `rotation pending` chip. An admin gets the
+  `Assign` dialog per credential, the "Members missing a copy" list, and a "Credential holders" card
+  that lists every guild credential's holders — the ones the admin does not hold included (M7).
 - **Settings → Account**: an "App icon" card — Default or Guild icon, the second offered only while
-  the guild has one (§6).
+  the guild has one (§6) — and, only with a host, the device sessions list with Revoke (O1), the
+  person's key fingerprint (K1) and the colleagues list with a `key changed — confirm` warning and its
+  Confirm (K2).
 
 ## 5. Acceptance (block 1 smoke, B11)
 

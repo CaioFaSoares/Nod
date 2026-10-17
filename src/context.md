@@ -12,18 +12,29 @@ The single page of the main window: sign-in, sidebar, Home, palette and Settings
   during its countdown (E02 §5). The page clears both right after.
 - **English everywhere**: text, identifiers, messages (`docs/canonico.md` RNF-08).
 - **Keyboard first**: every action reachable from the palette (`docs/canonico.md` RNF-07).
+- **O2 (owner decision 2026-10-17)**: while this Nod is older than the guild's `minAppVersion` the
+  guild is disconnected. The banner says so at the top of the window; `hasHost()` and `sharing()`
+  (`settings.ts`) are the page's half of the rule, so every screen that would read the guild — the
+  org tools, the devices, the colleagues, the inbox, the holders, the leftovers — shows the
+  local-mode one instead, and Settings → Hosts keeps the guild's card with the reason on it. The
+  backend answers empty or refuses the calls that would reach the host (`backend/context.md`).
 
-## Screens (block 1 landed; block 2 pending)
+## Screens (block 1 and block 2 landed)
 
 | Screen | Change | Story | Spec |
 | --- | --- | --- | --- |
 | First run | Third path: "Join a guild"; a `nod://join` invite opens it | B2 | SP05 §4 |
-| Settings → Hosts (new) | Add (address → guild + fingerprint → email + code), activate, sign in, status, sync now, remove; the signed-out notice | B2 | SP05 §4 |
-| Settings → People/Tools/Roles/Activity | Same screens; data from the host when connected; "New access code"; Activity's sent vs pending | B6, B10 | SP05 §4 |
-| Sidebar | Order favorites → org → personal; "offline" badge | B4 | SP05 §4 |
-| Main window | New-version notice with Install (admin), Details and dismiss | u1 | RF-55, `docs/distribuicao.md` §8 |
-| Home / sidebar | Favorite toggle; "Add personal tool" | B7 (block 2) | SP05 §3 |
-| Settings → Vault | Gate on reveal/copy with countdown; inbox; holders; scope; rotation pending | K4–K9 (block 2) | SP06 |
-| Settings → Account | Devices (sessions) list and revoke; own key fingerprint | O1, K2 (block 2) | SP03, SP06 §2 |
+| Settings → Hosts (new) | Add (address → guild + fingerprint → email + code), activate, sign in, status, sync now, remove; the signed-out notice; a "Keep your local tools" step listing the join's leftovers, all checked, "Keep as personal tools" (B8b) | B2, B8a, B8b | SP05 §4 |
+| People/Tools/Roles/Activity | Same screens; data from the host when connected; "New access code"; Activity's sent vs pending; People: one person's devices with Revoke (O1) | B6, B10, O1 | SP05 §4 |
+| Sidebar | Order favorites → org → personal; "offline" badge; the count of shares waiting in the inbox on the Settings action | B4, K4 | SP05 §4 |
+| Main window | New-version notice with Install (admin), Details and dismiss; the O2 banner while this Nod is older than the guild's `minAppVersion` (persistent, no dismiss) | u1, O2 | RF-55, SP03 §3, `docs/distribuicao.md` §8 |
+| Home / sidebar | Favorite toggle; "Add personal tool" (a dialog, and a palette action); the personal card and the tool window of a tool that did not come from the org carry the canonico §22 warning | B7 | SP05 §3–§4, canonico §22 |
+| Settings → Vault | Inbox (`shares.inbox`) with Accept/Decline, read again on the `host` push; per credential: the scope select (Role/Org/Blocked, owner only), Reveal behind the gate with a 10 s countdown, Copy behind the gate (the secret never reaches the page), Send (hidden when `blocked`) with the recipients dialog and its `key changed — confirm in Account` warning, holders with date and scope and a `Remove` for a live holder (owner or admin, K9), and the `rotation pending` chip (title "save a new secret to rotate"); saving a shared credential shows the update warning and the save itself fans the update out; for an admin, an `Assign` dialog per credential (to a role or to one person, with `Remove assignment`) and the "Members missing a copy" list with each member's key state and one gated "Send copies" | K4–K9 | SP06 §4–§5, SP02 §9 |
+| Palette | "Vault inbox" opens Settings → Vault on the inbox | K4 | RNF-07 |
+| Settings → Account | Devices (sessions) list and revoke — hidden without a host (O1); "Your key fingerprint" (K1), whose `keys.mine` answer is `MineKeys` — `ok`/`pending`/`unavailable` and the sentence to show; the Colleagues list with each pinned fingerprint, the `key changed — confirm` warning and its Confirm (K2) — both hidden without a host | O1, K1–K2 | SP03, SP06 §2 |
 
 The docked view and tabs (`docs/epics/E03-docked-tabs.md`) are not in these blocks.
+
+Block 2 review fixes: the Vault tab carries a "Credential holders" card for an admin (M7)
+— every guild credential from `holders.list`, with its holders, date, scope and revoked marker — and
+the reveal countdown is a wall-clock deadline that the page clears on `visibilitychange` (L5).

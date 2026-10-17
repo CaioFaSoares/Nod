@@ -1,6 +1,8 @@
 // The effective catalog of a connected Nod (SP05 §2, §4; RF-34): the org tools, the roles and the
 // grants of the verified snapshot, parsed once per change and kept in memory, with the 14-day window
-// of `docs/canonico.md` §22 (owner, 2026-10-16) applied on top of it.
+// of `docs/canonico.md` §22 (owner, 2026-10-16) applied on top of it. The personal half is the
+// snapshot's own rows with the writes still in the outbox applied over them (SP05 §2's overlay,
+// SP04 §4), so a personal write shows before it is flushed.
 //
 // Why it is not `backend/repo.ts`: while a `host` row exists the `tool`/`role` tables are not the
 // catalog (SP05 §2) — they keep the local-mode one, untouched, and removing the host returns to them.
@@ -15,10 +17,9 @@
 // dependency, so `bun test` drives the whole module with a fixture and a fixed instant.
 
 import { visibleEntries } from '../shared/catalog';
-import { orgToolsUsable, parseSnapshot, sidebarOrder } from '../shared/host-merge';
-import type { SnapshotRows } from '../shared/host-merge';
-import type { PersonalView } from '../shared/host-api';
-import type { Entry, Id, Role, View } from '../shared/types';
+import { applyOutbox, attachPersonalViews, orgToolsUsable, parseSnapshot, sidebarOrder } from '../shared/host-merge';
+import type { OutboxOp, SnapshotRows } from '../shared/host-merge';
+import type { Entry, Id, Role } from '../shared/types';
 
 /**
  * What the catalog layer reads of the `host` row (SP05 §2): the last verified body and its clock.
@@ -45,6 +46,11 @@ export interface EffectiveCatalog {
   me: SnapshotRows['me'];
   /** The guild's roles (SP04 §2): the names are not secret inside the guild. */
   roles: Role[];
+  /**
+   * The person's ordered favorites (SP04 §2) with the pending `favorites.set` writes applied:
+   * `favorites.list` hands them to the page, which draws the toggle from them.
+   */
+  favorites: Id[];
   /** The entries the person sees, in SP05 §4's order — favorites, org, personal. */
   entries: Entry[];
 }
@@ -56,14 +62,19 @@ export interface ConnectedCatalogDeps {
 
 export interface ConnectedCatalog {
   /**
-   * Re-derives the catalog from the row the caller just read, and answers whether what the page
-   * would see changed — the signal `backend/main.ts` pushes the catalog on.
+   * Re-derives the catalog from the row the caller just read and the writes still in the outbox, and
+   * answers whether what the page would see changed — the signal `backend/main.ts` pushes the
+   * catalog on.
    *
    * The body is parsed when its bytes changed and not before ("parsed once per change", SP05 §2).
    * The bytes, not the `version`, are the key on purpose: a `401` rewrites the cached body under the
    * same version (`clearOrgData`), and that rewrite has to be read.
+   *
+   * `outbox` is SP05 §2's overlay: the pending personal writes SP04 §4 applies over the snapshot's
+   * personal half. It is the second input, so a write already queued — and not yet flushed — moves
+   * the catalog the moment it is made (`shared/host-merge.ts`'s `applyOutbox`).
    */
-  refresh(record: HostSnapshotRow | null): boolean;
+  refresh(record: HostSnapshotRow | null, outbox?: readonly OutboxOp[]): boolean;
   /** The effective catalog, or `null` when there is nothing to read: no row, or no readable body. */
   current(): EffectiveCatalog | null;
   /** The entries the person sees; empty without an effective catalog. */
@@ -90,24 +101,6 @@ function readBody(raw: string, personId: Id): SnapshotRows | null {
   }
 }
 
-/**
- * SP04 §2: a personal view hangs under any entry the person sees, after that entry's own views —
- * which is the order `tools.openView` indexes and the page's view buttons follow.
- */
-function withPersonalViews(entries: Entry[], views: PersonalView[]): Entry[] {
-  if (views.length === 0) return entries;
-  const byEntry = new Map<Id, View[]>();
-  for (const view of views) {
-    const list = byEntry.get(view.entryId);
-    if (list === undefined) byEntry.set(view.entryId, [view]);
-    else list.push(view);
-  }
-  return entries.map((entry) => {
-    const extra = byEntry.get(entry.id);
-    return extra === undefined ? entry : { ...entry, views: [...entry.views, ...extra] };
-  });
-}
-
 export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCatalog {
   /** The last row seen: everything below is derived from it (`null`: no host, no catalog). */
   let row: HostSnapshotRow | null = null;
@@ -117,10 +110,17 @@ export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCat
   let parsedVersion: string | null = null;
   /** The rows those bytes yielded. A body that does not read keeps the previous ones (SP05 §2). */
   let parsed: SnapshotRows | null = null;
+  /**
+   * The writes still in the outbox (SP05 §2), as the caller read them, and their text — the third
+   * input of the catalog, so a queued write moves it without the body moving at all (SP04 §4).
+   */
+  let ops: readonly OutboxOp[] = [];
+  let opsKey: string = JSON.stringify([]);
   /** The last effective catalog and what it was built from: the body, and the window's verdict. */
   let built: EffectiveCatalog | null = null;
   let builtFrom: string | null = null;
   let builtUsable: boolean | null = null;
+  let builtOps: string | null = null;
   let builtOnce = false;
   /**
    * The catalog as text, the change detector of the push. It starts at `JSON.stringify(null)`, the
@@ -137,16 +137,23 @@ export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCat
    * The org half goes through `shared/catalog.ts`'s `visibleEntries` — the rule the local catalog
    * already applies (`active` plus a grant to one of my roles, or `me.admin` for the whole guild) —
    * and the personal half through `active` alone: SP04 §2 says those are mine by construction.
+   *
+   * SP05 §2's overlay comes first: the personal half is the snapshot's rows with the writes still in
+   * the outbox applied over them (SP04 §4), which is what makes a write visible before it is flushed.
    */
   function build(usable: boolean): EffectiveCatalog {
     const rows = parsed;
     if (rows === null) throw new Error('no parsed snapshot to build from');
     const org = usable ? visibleEntries(rows.orgTools, rows.me) : [];
-    const personal = rows.personalTools.filter((entry) => entry.active !== false);
+    const half = applyOutbox(
+      { personalTools: rows.personalTools, personalViews: rows.personalViews, favorites: rows.favorites },
+      ops,
+    );
+    const personal = half.personalTools.filter((entry) => entry.active !== false);
     const ordered = sidebarOrder({
       orgTools: org,
       personalTools: personal,
-      favorites: rows.favorites,
+      favorites: half.favorites,
     });
     return {
       // Not the row's `version`: a body that did not read leaves the cache on the previous one, and
@@ -155,25 +162,27 @@ export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCat
       orgUsable: usable,
       me: rows.me,
       roles: rows.roles,
-      entries: withPersonalViews(ordered, rows.personalViews),
+      favorites: half.favorites,
+      entries: attachPersonalViews(ordered, half.personalViews),
     };
   }
 
   /**
-   * The effective catalog of the last row seen, rebuilt only when its inputs moved: the body, or the
-   * 14-day verdict of the clock (RF-37). A Nod that sat idle past the window therefore hides the org
-   * half the moment it is read, and nothing is rebuilt while the verdict is the same — which is what
-   * keeps an ordinary read free of work.
+   * The effective catalog of the last row seen, rebuilt only when its inputs moved: the body, the
+   * 14-day verdict of the clock (RF-37) or the outbox. A Nod that sat idle past the window therefore
+   * hides the org half the moment it is read, and nothing is rebuilt while the verdict is the same —
+   * which is what keeps an ordinary read free of work.
    */
   function effective(): EffectiveCatalog | null {
     const source = row;
     const usable = source === null || parsed === null ? null : orgToolsUsable(source.lastSyncAt, deps.now());
     // `parsedFrom` and `builtFrom` are the same string object while the body has not moved, so this
     // is a reference compare: no body is copied to decide it.
-    if (!builtOnce || builtFrom !== parsedFrom || builtUsable !== usable) {
+    if (!builtOnce || builtFrom !== parsedFrom || builtUsable !== usable || builtOps !== opsKey) {
       built = usable === null ? null : build(usable);
       builtFrom = parsedFrom;
       builtUsable = usable;
+      builtOps = opsKey;
       builtOnce = true;
       // The catalog is worth its own text: what `refresh` compares to answer whether the page has
       // anything new. `null` is the empty catalog, the state a Nod with no host row is in.
@@ -182,8 +191,12 @@ export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCat
     return built;
   }
 
-  function refresh(record: HostSnapshotRow | null): boolean {
+  function refresh(record: HostSnapshotRow | null, outbox: readonly OutboxOp[] = []): boolean {
     row = record;
+    // The text is the change key: the caller reads the rows per call, and the catalog is only worth
+    // rebuilding when a row (or its body) is not the one the last build used.
+    ops = outbox;
+    opsKey = JSON.stringify(outbox);
     if (record === null || record.snapshot === null) {
       // No host row, or one that never synced: nothing of the guild is cached, and the local tables
       // are the catalog again (SP05 §2).

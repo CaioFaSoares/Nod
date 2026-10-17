@@ -252,6 +252,26 @@ export function visibleEntries(entries: Entry[], person: { roles: Id[]; admin: b
   return visible.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, 'en'));
 }
 
+// ---------------------------------------------------------------- which catalog is in force
+
+/**
+ * SP05 §2 + O2/SP04 §1: which of the two catalogs a Nod serves. `connected` is the verified
+ * snapshot's; `local` is the `tool`/`role` tables, the one a Nod that never joined runs on.
+ */
+export type CatalogMode = 'local' | 'connected';
+
+/**
+ * The switch, in one place (owner decision 2026-10-17): the snapshot's catalog only while a `host`
+ * row exists **and** this build is not older than the host's `minAppVersion`. Too old, the guild is
+ * disconnected — the person runs on the local catalog as if no host existed, while the row, the
+ * bearer and the cached body stay on disk untouched and Settings → Hosts still shows the guild.
+ * `updateRequired` is `false` without a `host` row (`backend/sync.ts`), so a local-only Nod is never
+ * moved off its own tables.
+ */
+export function catalogMode(hasHostRow: boolean, updateRequired: boolean): CatalogMode {
+  return hasHostRow && !updateRequired ? 'connected' : 'local';
+}
+
 // ---------------------------------------------------------------- seed applied
 
 /**

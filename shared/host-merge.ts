@@ -1,13 +1,16 @@
 // Pure merge of one verified host snapshot into the Nod's own shapes (SP04 §2, §4, SP05 §1–§2,
-// §4): the rows the catalog layer keeps, the sidebar order, the one decision an outbox replay asks
-// for and the window in which the cached org half may still be shown.
+// §4): the rows the catalog layer keeps, the sidebar order, the person's views hung under the entry
+// they belong to, the overlay of the writes still in the outbox, the one decision an outbox replay
+// asks for and the window in which the cached org half may still be shown.
 //
 // Imported by `backend/sync.ts` (B4) and by whatever renders the sidebar from the cache (B5/B2).
 // No `tjs`, no `tiny`, no DOM, no `bun:*`: the language and type-only imports, as `shared/context.md`
 // requires of every module of this folder.
 
+import { auditUrl } from './catalog';
+import { HOST_ROUTES } from './host-api';
 import type { PersonalView, Snapshot } from './host-api';
-import type { Entry, Id, Role } from './types';
+import type { Entry, Id, Role, View } from './types';
 
 // ---------------------------------------------------------------- the cached org window
 
@@ -201,6 +204,34 @@ export function clearOrgData(raw: string): string | null {
   return JSON.stringify(cleared);
 }
 
+// ---------------------------------------------------------------- the person's own views
+
+/**
+ * SP04 §2: a personal view hangs under any entry the person sees, after that entry's own views —
+ * which is the order `tools.openView` indexes and the page's view buttons follow (B5).
+ *
+ * A view whose `id` is already among the entry's own views is skipped: the host answers a personal
+ * tool's own views both inside that entry and in `personalViews` (`docs/handovers/h6.md` decision 11),
+ * and the person must see each of them once.
+ */
+export function attachPersonalViews(entries: Entry[], views: readonly PersonalView[]): Entry[] {
+  if (views.length === 0) return entries;
+  const byEntry = new Map<Id, PersonalView[]>();
+  for (const view of views) {
+    const list = byEntry.get(view.entryId);
+    if (list === undefined) byEntry.set(view.entryId, [view]);
+    else list.push(view);
+  }
+  return entries.map((entry) => {
+    const extra = byEntry.get(entry.id);
+    if (extra === undefined) return entry;
+    const own = new Set<Id>();
+    for (const view of entry.views) if (view.id !== undefined) own.add(view.id);
+    const attached: View[] = extra.filter((view) => !own.has(view.id));
+    return attached.length === 0 ? entry : { ...entry, views: [...entry.views, ...attached] };
+  });
+}
+
 // ---------------------------------------------------------------- sidebar
 
 /**
@@ -237,6 +268,53 @@ export function sidebarOrder(rows: {
   return ordered;
 }
 
+// ---------------------------------------------------------------- RF-40: a local tool the guild does not carry
+
+/**
+ * The address two entries are compared by: origin plus path, query and fragment dropped — the same
+ * canonical form `shared/catalog.ts`'s `auditUrl` gives an event. A value that does not parse is
+ * compared as it stands, so a row is kept rather than swallowed by a comparison it cannot take part
+ * in.
+ */
+function normalizedAddress(url: string): string {
+  try {
+    return auditUrl(url) ?? url;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * RF-40 (B8b): the local tools a joined host does not already carry, so the join can offer them as
+ * personal tools and no local tool disappears.
+ *
+ * `local` are the person's local rows — both scopes. An `org` row whose normalized address (origin
+ * plus path) matches one of the snapshot's `orgTools` **is** that guild tool, not a leftover: the
+ * person sees the same button, not a second one. Comparing origin plus path — and not the origin
+ * alone — keeps a tool the guild serves on another path of the same host a distinct tool.
+ *
+ * A `personal` row (B7, added before a host existed) is hidden from the connected catalog, so it is
+ * a leftover unless the snapshot's own personal half already carries its id — the id is that tool's
+ * identity, and the same one means the tool is already the guild's (RF-40's fix).
+ */
+export function leftoverLocalTools(
+  local: readonly Entry[],
+  orgTools: readonly Entry[],
+  personalTools: readonly Entry[] = [],
+): Entry[] {
+  const knownOrg = new Set(orgTools.map((entry) => normalizedAddress(entry.url)));
+  const knownPersonal = new Set(personalTools.map((entry) => entry.id));
+  const leftovers: Entry[] = [];
+  for (const entry of local) {
+    if ((entry.scope ?? 'org') === 'org') {
+      if (!knownOrg.has(normalizedAddress(entry.url))) leftovers.push(entry);
+    } else if (!knownPersonal.has(entry.id)) {
+      leftovers.push(entry);
+    }
+  }
+  return leftovers;
+}
+
 // ---------------------------------------------------------------- outbox
 
 /**
@@ -257,4 +335,112 @@ export function outboxVerdict(status: number | null): OutboxVerdict {
   if (status === 409) return 'drop';
   if (status >= 400 && status <= 499 && status !== 401 && status !== 429) return 'rejected';
   return 'retry';
+}
+
+// ---------------------------------------------------------------- the writes still in flight
+
+/** One pending write of SP05 §2's `host_outbox`, as `backend/repo.ts` holds it. */
+export interface OutboxOp {
+  method: 'PUT' | 'DELETE';
+  path: string;
+  /** the JSON body the replay sends; `''` for a call that carries none (SP04 §4) */
+  body: string;
+}
+
+/** The personal half of SP04 §2's snapshot: what the overlay below rewrites. */
+export interface PersonalRows {
+  personalTools: Entry[];
+  personalViews: PersonalView[];
+  favorites: Id[];
+}
+
+/** The prefix of a route with an `:id` segment in it: `/v1/personal/tools/:id` → `/v1/personal/tools/`. */
+function idPrefix(route: string): string {
+  const at = route.indexOf(':id');
+  return at === -1 ? route : route.slice(0, at);
+}
+
+/** A body already parsed, or `undefined` when it is empty or not JSON — SP04 §4 has no verdict for it. */
+function bodyOf(op: OutboxOp): unknown {
+  if (op.body === '') return undefined;
+  try {
+    return JSON.parse(op.body) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/** An object read out of an outbox body, or `null` when the shape is not one. */
+function record(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** `list` with `item` replacing the row of the same `id`, or appended at the end when it is new. */
+function upsert<T extends { id: Id }>(list: readonly T[], item: T): T[] {
+  const at = list.findIndex((row) => row.id === item.id);
+  if (at === -1) return [...list, item];
+  const next = list.slice();
+  next[at] = item;
+  return next;
+}
+
+/**
+ * SP04 §4: "each write updates the local cache immediately and appends one row". The row goes out in
+ * `id` order and the host answers with its version at the next snapshot; until it does, the person's
+ * pending writes are applied over the snapshot's personal half, so the sidebar, Home and the tool
+ * windows show what the person just did — offline included (RF-37).
+ *
+ * A pending write is newer than the cached snapshot by construction: it is the write no snapshot has
+ * answered yet, and SP04 §4 gives a record one writer ("the host keeps the newest"). No timestamp is
+ * compared — SP04 §2's `personalTools` carries none (finding in `docs/handovers/h6.md`).
+ *
+ * The overlay never invents. A path that is not one of SP03 §2's three personal writes, a body that
+ * does not read, or an id in the path that the body does not name leaves the rows as they are; a
+ * `DELETE` of something the snapshot does not hold is a no-op. `DELETE /v1/personal/tools/:id` also
+ * takes the entry's personal views with it, which is what the host does with the row they hang under.
+ */
+export function applyOutbox(rows: PersonalRows, ops: readonly OutboxOp[]): PersonalRows {
+  if (ops.length === 0) return rows;
+  const toolPrefix = idPrefix(HOST_ROUTES.personalTool);
+  const viewPrefix = idPrefix(HOST_ROUTES.personalView);
+  let personalTools = rows.personalTools;
+  let personalViews = rows.personalViews;
+  let favorites = rows.favorites;
+
+  for (const op of ops) {
+    if (op.path.startsWith(toolPrefix)) {
+      const id = op.path.slice(toolPrefix.length);
+      if (id === '') continue;
+      if (op.method === 'DELETE') {
+        personalTools = personalTools.filter((entry) => entry.id !== id);
+        personalViews = personalViews.filter((view) => view.entryId !== id);
+        continue;
+      }
+      const body = record(bodyOf(op));
+      if (body === null || body.id !== id) continue;
+      personalTools = upsert(personalTools, body as unknown as Entry);
+      continue;
+    }
+    if (op.path.startsWith(viewPrefix)) {
+      const id = op.path.slice(viewPrefix.length);
+      if (id === '') continue;
+      if (op.method === 'DELETE') {
+        personalViews = personalViews.filter((view) => view.id !== id);
+        continue;
+      }
+      const body = record(bodyOf(op));
+      if (body === null || body.id !== id || typeof body.entryId !== 'string') continue;
+      personalViews = upsert(personalViews, body as unknown as PersonalView);
+      continue;
+    }
+    if (op.method === 'PUT' && op.path === HOST_ROUTES.favorites) {
+      const body = record(bodyOf(op));
+      const entries = body === null ? null : body.entries;
+      if (!Array.isArray(entries) || entries.some((id) => typeof id !== 'string')) continue;
+      favorites = entries as Id[];
+    }
+  }
+  return { personalTools, personalViews, favorites };
 }
