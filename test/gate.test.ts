@@ -48,6 +48,19 @@ describe('the factor of the K5 gate (SP02 §9)', () => {
     expect(gateFactor(undefined, true, false, true)).toBe('biometrics');
     expect(gateFactor('', true, false, true)).toBe('biometrics');
   });
+
+  test('a confirmed gate covers the next calls until 15 idle minutes pass (owner, 2026-10-17)', async () => {
+    mock.module('tjs:sqlite', () => ({ Database: class {} }));
+    const { gateStillOpen, GATE_WINDOW_MS } = await import('../backend/main');
+
+    expect(GATE_WINDOW_MS).toBe(15 * 60 * 1000);
+    expect(gateStillOpen(null, 1_000)).toBe(false);
+    expect(gateStillOpen(1_000, 1_000)).toBe(true);
+    expect(gateStillOpen(1_000, 1_000 + GATE_WINDOW_MS - 1)).toBe(true);
+    expect(gateStillOpen(1_000, 1_000 + GATE_WINDOW_MS)).toBe(false);
+    // A clock that went backwards is not a confirmation.
+    expect(gateStillOpen(5_000, 1_000)).toBe(false);
+  });
 });
 
 describe('the build-mode stamp (SP02 §9, canonico §22)', () => {

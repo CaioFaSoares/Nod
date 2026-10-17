@@ -1,45 +1,53 @@
-// RF-63 (0.5.1): the backend's `SecretStore` keeps only the biometric item in the system keychain,
-// every `bv1.` value in the `secret` table, and moves what an older Nod left in the keychain on its
-// first read. The keychain here counts its reads, which is the whole point of the change: after the
-// move, nothing but `nod.bio.*` ever reaches it.
+// RF-63 (0.5.1): outside the biometric item the backend's `SecretStore` never touches the system
+// keychain — every read, write or delete of a keychain item an older build wrote is a password
+// prompt on macOS. The keychain here records every call, which is the property under test.
 import { describe, expect, test } from 'bun:test';
 
 import { createRepo } from '../backend/repo';
-import { createSecretStore, sealedSecrets } from '../backend/secret-store';
+import {
+  createSecretStore,
+  importLegacySecrets,
+  legacyImportedKey,
+  legacySkippedKey,
+  sealedSecrets,
+} from '../backend/secret-store';
 import { encryptVaultBytes, isSealedVaultValue } from '../shared/vault-crypto';
 import type { Repo } from '../backend/repo';
 import type { SecretStore } from '../shared/types';
 import { memorySqlite } from './helpers/sqlite-bun';
 
 const CRED = 'nod.cred.p-ana.kanban';
+const KEYS = 'nod.keys.p-ana';
 const BIO = 'nod.bio.p-ana';
 const BEARER = 'nod.host.kid-1.p-ana';
 
-function countingKeychain() {
+function recordingKeychain() {
   const items = new Map<string, string>();
-  const reads: string[] = [];
+  const calls: string[] = [];
   const keychain: SecretStore = {
     async get(key) {
-      reads.push(key);
+      calls.push(`get ${key}`);
       return items.get(key) ?? null;
     },
     async set(key, value) {
+      calls.push(`set ${key}`);
       items.set(key, value);
       return true;
     },
     async delete(key) {
+      calls.push(`delete ${key}`);
       return items.delete(key);
     },
   };
-  return { keychain, items, reads };
+  return { keychain, items, calls };
 }
 
 function scene() {
   const repo: Repo = createRepo(memorySqlite());
   repo.migrate();
-  const { keychain, items, reads } = countingKeychain();
+  const { keychain, items, calls } = recordingKeychain();
   const store = createSecretStore({ rows: repo, keychain });
-  return { repo, store, items, reads };
+  return { repo, rows: repo, keychain, store, items, calls };
 }
 
 function vaultKey(fill: number): Uint8Array<ArrayBuffer> {
@@ -51,16 +59,22 @@ async function sealed(key: string, text: string): Promise<string> {
 }
 
 describe('createSecretStore', () => {
-  test('a sealed value lives in the table and is read without touching the keychain', async () => {
+  test('outside the biometric item no read, write, miss or delete reaches the keychain', async () => {
     const s = scene();
-    const value = await sealed(CRED, 'x');
+    // What an older Nod left behind: the store must not even look at it.
+    s.items.set(CRED, await sealed(CRED, 'old'));
+    s.items.set(KEYS, await sealed(KEYS, 'old'));
 
-    expect(await s.store.set(CRED, value)).toBe(true);
-    expect(s.repo.secret(CRED)).toBe(value);
-    expect(s.items.has(CRED)).toBe(false);
-    s.reads.length = 0;
-    expect(await s.store.get(CRED)).toBe(value);
-    expect(s.reads).toEqual([]);
+    expect(await s.store.get(CRED)).toBeNull();
+    expect(await s.store.get('nod.host.kid-1.')).toBeNull();
+    const value = await sealed(KEYS, 'new');
+    expect(await s.store.set(KEYS, value)).toBe(true);
+    expect(await s.store.get(KEYS)).toBe(value);
+    expect(await s.store.delete(KEYS)).toBe(true);
+    expect(await s.store.delete(CRED)).toBe(false);
+
+    expect(s.calls).toEqual([]);
+    expect(s.items.has(CRED)).toBe(true);
   });
 
   test('a plaintext is never written to the table', async () => {
@@ -78,62 +92,68 @@ describe('createSecretStore', () => {
     expect(s.repo.secret(BIO)).toBeNull();
     expect(await s.store.get(BIO)).toBe('raw-key');
     expect(await s.store.delete(BIO)).toBe(true);
-    expect(s.items.has(BIO)).toBe(false);
+    expect(s.calls).toEqual([`set ${BIO}`, `get ${BIO}`, `delete ${BIO}`]);
   });
+});
 
-  test('a sealed value an older Nod left in the keychain moves to the table on its first read', async () => {
+describe('importLegacySecrets', () => {
+  const sealPlain = async (key: string, plaintext: string): Promise<string | null> =>
+    plaintext === 'junk' ? null : encryptVaultBytes(vaultKey(1), key, new TextEncoder().encode(plaintext));
+
+  test('reads each missing key once, copies sealed values, seals plaintexts and never writes or deletes the keychain', async () => {
     const s = scene();
-    const value = await sealed(CRED, 'x');
-    s.items.set(CRED, value);
+    const cred = await sealed(CRED, 'x');
+    s.items.set(CRED, cred);
+    s.items.set(BEARER, 'token-old');
+    s.items.set(KEYS, 'junk');
 
-    expect(await s.store.get(CRED)).toBe(value);
-    expect(s.repo.secret(CRED)).toBe(value);
-    expect(s.items.has(CRED)).toBe(false);
-    // The keychain was asked once, and is never asked again for that key.
-    s.reads.length = 0;
-    expect(await s.store.get(CRED)).toBe(value);
-    expect(s.reads).toEqual([]);
+    expect(await importLegacySecrets(s, 'p-ana', [CRED, BEARER, KEYS, BIO], sealPlain)).toBe(0);
+
+    expect(s.repo.secret(CRED)).toBe(cred);
+    expect(isSealedVaultValue(s.repo.secret(BEARER) ?? '')).toBe(true);
+    expect(s.repo.secret(KEYS)).toBeNull();
+    // Read-only: the biometric key is not this pass's, and nothing was written or removed.
+    expect(s.calls).toEqual([`get ${CRED}`, `get ${BEARER}`, `get ${KEYS}`]);
+    expect(s.items.has(CRED)).toBe(true);
   });
 
-  test('a legacy plaintext is answered as it is and leaves the keychain with its first sealed write', async () => {
+  test('a key the table already holds is never read from the keychain', async () => {
     const s = scene();
-    s.items.set(CRED, '{"username":"ana","secret":"plain"}');
+    const current = await sealed(KEYS, 'adopted from the host');
+    s.repo.setSecret(KEYS, current);
+    s.items.set(KEYS, await sealed(KEYS, 'stale'));
 
-    expect(await s.store.get(CRED)).toBe('{"username":"ana","secret":"plain"}');
-    expect(s.repo.secret(CRED)).toBeNull();
-
-    const value = await sealed(CRED, 'x');
-    expect(await s.store.set(CRED, value)).toBe(true);
-    expect(s.items.has(CRED)).toBe(false);
-    expect(s.repo.secret(CRED)).toBe(value);
+    expect(await importLegacySecrets(s, 'p-ana', [KEYS], sealPlain)).toBe(0);
+    expect(s.calls).toEqual([]);
+    expect(s.repo.secret(KEYS)).toBe(current);
   });
 
-  test('a keychain that refuses to drop the old item does not fail the move', async () => {
-    const repo = createRepo(memorySqlite());
-    repo.migrate();
-    const value = await sealed(CRED, 'x');
-    const keychain: SecretStore = {
-      get: async () => value,
-      set: async () => true,
-      delete: async () => {
-        throw new Error('keychain error');
+  test('one attempt per person ever: a refused read is counted, and the next unlock reads nothing', async () => {
+    const s = scene();
+    s.items.set(KEYS, await sealed(KEYS, 'pair'));
+    // The person denies the prompt for the credential; the pair reads fine.
+    const refusing: SecretStore = {
+      ...s.keychain,
+      get: async (key) => {
+        if (key === CRED) {
+          s.calls.push(`get ${key}`);
+          throw new Error('keychain error');
+        }
+        return s.keychain.get(key);
       },
     };
-    const store = createSecretStore({ rows: repo, keychain });
+    const deps = { rows: s.repo, keychain: refusing };
 
-    expect(await store.get(CRED)).toBe(value);
-    expect(repo.secret(CRED)).toBe(value);
-  });
-
-  test('delete removes the row and whatever an older Nod left under the same key', async () => {
-    const s = scene();
-    await s.store.set(CRED, await sealed(CRED, 'x'));
-    s.items.set(CRED, 'stale');
-
-    expect(await s.store.delete(CRED)).toBe(true);
+    expect(await importLegacySecrets(deps, 'p-ana', [CRED, KEYS], sealPlain)).toBe(1);
     expect(s.repo.secret(CRED)).toBeNull();
-    expect(s.items.has(CRED)).toBe(false);
-    expect(await s.store.delete(CRED)).toBe(false);
+    expect(s.repo.secret(KEYS)).not.toBeNull();
+    expect(s.repo.meta(legacyImportedKey('p-ana'))).toBe('1');
+    expect(s.repo.meta(legacySkippedKey('p-ana'))).toBe('1');
+
+    // The next unlock: the marker stops it before a single keychain call.
+    s.calls.length = 0;
+    expect(await importLegacySecrets(deps, 'p-ana', [CRED, KEYS], sealPlain)).toBe(0);
+    expect(s.calls).toEqual([]);
   });
 });
 
@@ -158,18 +178,6 @@ describe('sealedSecrets', () => {
     key = null;
     expect(await bearers.get(BEARER)).toBeNull();
     expect(await bearers.set(BEARER, 'token-2')).toBe(false);
-  });
-
-  test("a 0.5.0 bearer in the keychain is answered, then sealed into the table and dropped", async () => {
-    const s = scene();
-    s.items.set(BEARER, 'token-old');
-    const bearers = sealedSecrets(s.store, () => vaultKey(1));
-
-    expect(await bearers.get(BEARER)).toBe('token-old');
-    expect(s.items.has(BEARER)).toBe(false);
-    expect(isSealedVaultValue(s.repo.secret(BEARER) ?? '')).toBe(true);
-    s.reads.length = 0;
-    expect(await bearers.get(BEARER)).toBe('token-old');
-    expect(s.reads).toEqual([]);
+    expect(s.calls).toEqual([]);
   });
 });

@@ -19,6 +19,7 @@ import { leftoverLocalTools, parseSnapshot } from '../shared/host-merge';
 import { joinLink, parseJoinLink } from '../shared/join-link';
 import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED, MAIN_WINDOW, toolOfWindow } from '../shared/types';
 import { tooOldFor } from '../shared/version';
+import { encryptVaultBytes, encryptVaultValue, plainVaultCredential } from '../shared/vault-crypto';
 import type {
   AppIconChoice,
   AppIconState,
@@ -48,7 +49,6 @@ import type {
   Result,
   Role,
   Seed,
-  SecretStore,
   SessionState,
   ToolsState,
   UpdateInfo,
@@ -82,7 +82,7 @@ import { probe } from './probe-net';
 import { createRepo, LegacyDatabaseError } from './repo';
 import { applyBundledSeed, applySeedFile, gateOrigins, importSeedFile, seedCountsDetail, storedSeedVersion } from './seed';
 import type { SeedApplied } from './seed';
-import { createSecretStore, sealedSecrets } from './secret-store';
+import { createSecretStore, importLegacySecrets, sealedSecrets } from './secret-store';
 import { OFFLINE_SESSION_ERROR, createSession } from './session';
 import { createShares, GATE_REASON } from './shares';
 import { openSqlite } from './sqlite';
@@ -144,13 +144,6 @@ let keys: Keys | null = null;
  * holders of a credential — over the vault, the key pairs and the cached snapshot.
  */
 let shares: Shares | null = null;
-/**
- * 0.5.1 (RF-63): the one `SecretStore` of the backend (`backend/secret-store.ts`) — the biometric
- * item in the system keychain, every `bv1.` value in the `secret` table — and the view of it that
- * seals the guild bearer under the session's `vaultKey`. Built in `init`.
- */
-let secrets: SecretStore | null = null;
-let bearers: SecretStore | null = null;
 /**
  * K5/SP02 §9: whether this machine has biometrics. The gate of `vault.reveal`, `vault.copy`,
  * `shares.send` and `shares.accept` uses `app.authenticate` when it does, and the person's password
@@ -285,10 +278,9 @@ export async function init(app: TinyApp): Promise<void> {
   });
 
   // 0.5.1 (RF-63): the keychain keeps the biometric item only; the `bv1.` values live in the
-  // `secret` table, and what an older Nod left in the keychain moves there on its first read.
+  // `secret` table, and what an older Nod left in the keychain is copied once by `importLegacy`.
   const sealed = createSecretStore({ rows: database, keychain: app.secrets });
-  secrets = sealed;
-  bearers = sealedSecrets(sealed, () => (session === null ? null : session.vaultKey()));
+  const bearers = sealedSecrets(sealed, () => (session === null ? null : session.vaultKey()));
   session = createSession({
     repo: database,
     keychain: sealed,
@@ -1086,19 +1078,45 @@ export function gateFactor(
 }
 
 /**
+ * Owner on 2026-10-17 ("peça sempre no máximo uma vez", choosing "once per session, with a
+ * timeout"): a confirmed gate — the Touch ID unlock, or a gated action that passed — covers the next
+ * gated actions of the same unlocked person until 15 minutes pass without one. Each covered action
+ * restarts the clock (idle, not absolute); a lock forgets it.
+ */
+export const GATE_WINDOW_MS = 15 * 60 * 1000;
+
+/** Whether a gate confirmed at `confirmedAt` still covers a call made at `now` (pure, for the test). */
+export function gateStillOpen(confirmedAt: number | null, now: number): boolean {
+  return confirmedAt !== null && now >= confirmedAt && now - confirmedAt < GATE_WINDOW_MS;
+}
+
+/** The last confirmation of the gate in this unlocked session: whose, and when (`Date.now()`). */
+let gateConfirmed: { personId: Id; at: number } | null = null;
+
+/** Records a confirmation by `personId` now: the Touch ID unlock and every gate that passes. */
+function confirmGate(personId: Id): void {
+  gateConfirmed = { personId, at: Date.now() };
+}
+
+/**
  * K5/SP06 §4: the one gate behind `vault.reveal`, `vault.copy`, `shares.send`, `shares.accept` and
  * the admin's `assignments.*` seals.
  *
- * Where the machine has `app.authenticate` that prompt runs first — the person is present. When it
- * does not confirm, the refusal is `GATE_PROMPT_FAILED` and the session remembers it, so the page's
- * next call may carry the typed password instead (`gateFactor`). Without the capability, or after
- * that failure, a password the call carries is verified against the verifier of the unlocked
- * person's row (`verifyStoredPassword`, SP02 §6), exactly as it always was on Linux. A machine with
- * neither factor refuses: nothing is shown, copied, sent or accepted, and no message carries a
- * password or a secret.
+ * A confirmation of the same person still inside `GATE_WINDOW_MS` covers the call and nothing is
+ * asked. Otherwise, where the machine has `app.authenticate` that prompt runs — the person is
+ * present. When it does not confirm, the refusal is `GATE_PROMPT_FAILED` and the session remembers
+ * it, so the page's next call may carry the typed password instead (`gateFactor`). Without the
+ * capability, or after that failure, a password the call carries is verified against the verifier
+ * of the unlocked person's row (`verifyStoredPassword`, SP02 §6), exactly as it always was on Linux.
+ * A machine with neither factor refuses: nothing is shown, copied, sent or accepted, and no message
+ * carries a password or a secret.
  */
 async function authenticate(reason: string, password?: string): Promise<void> {
   const person = unlockedPerson('authentication');
+  if (gateConfirmed !== null && gateConfirmed.personId === person.id && gateStillOpen(gateConfirmed.at, Date.now())) {
+    confirmGate(person.id);
+    return;
+  }
   const factor = gateFactor(password, biometrics, devRun, promptFailed);
   if (factor === 'unavailable') throw new Error(GATE_PASSWORD_REQUIRED);
   if (factor === 'biometrics') {
@@ -1106,6 +1124,7 @@ async function authenticate(reason: string, password?: string): Promise<void> {
       promptFailed = true;
       throw new Error(GATE_PROMPT_FAILED);
     }
+    confirmGate(person.id);
     return;
   }
   // `factor === 'password'` — `gateFactor` answers it only for a non-empty string.
@@ -1115,6 +1134,7 @@ async function authenticate(reason: string, password?: string): Promise<void> {
   if (!(await verifyStoredPassword(typed, found.password))) {
     throw new Error(GATE_PASSWORD_REQUIRED);
   }
+  confirmGate(person.id);
 }
 
 // ---------------------------------------------------------------- input helpers
@@ -1351,19 +1371,10 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
   const open = required(windows, 'session');
   // K5: a fresh session starts on the system prompt again (canonico §22, gate fallback).
   promptFailed = false;
-  // RF-63: whatever an older Nod left in the system keychain for this person moves to the `secret`
-  // table now, in one pass right after the unlock — so the operating system's prompts for those
-  // items (macOS asks again whenever the app's signature changed) come together, once, instead of
-  // one by one whenever a credential, the key pair or the bearer is first needed.
-  if (state.person !== null) await moveLegacySecrets(state.person.id);
-  // SP02 §8/V1: the first unlock after the upgrade turns the person's legacy plaintext values into
-  // `bv1.` ones, and a password unlock is when the key exists. A keychain that refuses leaves the
-  // value as it was and the next unlock tries again; nothing about the unlock depends on it.
-  const store = vault;
-  const keys = session === null ? null : session.vaultKey();
-  if (store !== null && keys !== null && state.person !== null) {
-    await store.migrateLegacy(state.person.id).catch(() => 0);
-  }
+  // RF-63: whatever an older Nod left in the system keychain for this person is copied into the
+  // `secret` table once, right after the first unlock, and never again (`importLegacy`). After that
+  // the only keychain item this backend reads is the biometric one.
+  if (state.person !== null) await importLegacy(state.person.id);
   // SP05 §2: before anything reads an entry — a join has just added the `host` row, and the tools
   // this function pushes next come from the effective catalog.
   refreshConnectedCatalog();
@@ -1397,22 +1408,30 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
 }
 
 /**
- * RF-63: reads every secret of `personId` once through the store, which is what moves an item an
- * older Nod left in the keychain into the `secret` table (`backend/secret-store.ts`): the vault
- * items, the E02 pair and the guild bearer. A refused item (the person denied the system prompt)
- * stays where it is and is tried again on its next read; nothing about the unlock depends on it.
+ * RF-63: copies what an older Nod left in the system keychain for `personId` — the vault items, the
+ * E02 pair and the guild bearer — into the `secret` table, through `importLegacySecrets`: one
+ * attempt per person ever, read-only, only the keys the table lacks, nothing deleted, a refused item
+ * counted and never retried. From then on no read of this person's reaches the keychain, so a new
+ * build of the app finds nothing there to prompt about. A plaintext (a 0.5.0 bearer, a pre-V1
+ * credential) is sealed under the session's `vaultKey` on the way in.
  */
-async function moveLegacySecrets(personId: Id): Promise<void> {
+async function importLegacy(personId: Id): Promise<void> {
   const r = repo;
-  const store = secrets;
-  const bearer = bearers;
-  if (r === null || store === null || bearer === null) return;
-  const items = [...r.listVault(personId).map((item) => item.keychainKey), keysKey(personId)];
-  for (const key of items) await store.get(key).catch(() => null);
+  const app = runtime;
+  const vaultKey = session === null ? null : session.vaultKey();
+  if (r === null || app === null || vaultKey === null) return;
   const host = r.hostRecord();
-  if (host !== null && host.personId === personId) {
-    await bearer.get(hostTokenKey(host.kid, personId)).catch(() => null);
-  }
+  const bearer = host !== null && host.personId === personId ? hostTokenKey(host.kid, personId) : null;
+  const keys = [
+    ...r.listVault(personId).map((item) => item.keychainKey),
+    keysKey(personId),
+    ...(bearer === null ? [] : [bearer]),
+  ];
+  await importLegacySecrets({ rows: r, keychain: app.secrets }, personId, keys, async (key, plaintext) => {
+    if (key === bearer) return encryptVaultBytes(vaultKey, key, new TextEncoder().encode(plaintext));
+    const credential = plainVaultCredential(plaintext);
+    return credential === null ? null : encryptVaultValue(vaultKey, key, credential);
+  }).catch(() => 0);
 }
 
 /** §4: locking closes every tool window and the popups they opened. */
@@ -1420,6 +1439,7 @@ function lockSession(): SessionState {
   // SP04 §3: nothing is synced while locked — the state a locked Nod shows is the cache.
   sync?.stop();
   promptFailed = false;
+  gateConfirmed = null;
   const state = required(session, 'session.lock').lock();
   required(windows, 'session.lock').closeAll();
   push('session', state);
@@ -2007,11 +2027,13 @@ const methods: { [M in Method]: Handler<M> } = {
 
   'session.unlockBiometric': async (params) => {
     const p = parameters(params, 'invalid credentials');
-    return afterUnlock(
-      await required(session, 'session.unlockBiometric').unlockBiometric({
-        target: optional(p.target, (value) => entryTarget(value)),
-      }),
-    );
+    const state = await required(session, 'session.unlockBiometric').unlockBiometric({
+      target: optional(p.target, (value) => entryTarget(value)),
+    });
+    // The fingerprint of the unlock is the session's first confirmation of the gate (owner,
+    // 2026-10-17): the next reveal or copy inside `GATE_WINDOW_MS` asks nothing more.
+    if (state.person !== null) confirmGate(state.person.id);
+    return afterUnlock(state);
   },
 
   'session.enableBiometric': (params) => {

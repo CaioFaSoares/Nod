@@ -301,51 +301,6 @@ describe('the vaultKey gate and the legacy migration (SP02 §8, V1)', () => {
     expect(await other.read(s.ana.id, 'kanban')).toBeNull();
     expect(s.repo.listVault(s.ana.id)).toHaveLength(1);
   });
-
-  test('migrateLegacy re-encrypts the plaintext values and is idempotent', async () => {
-    const s = scene();
-    const item = await s.vault.save(s.ana.id, {
-      toolId: 'kanban',
-      username: 'ana',
-      secret: KANBAN_SECRET,
-    });
-    // The value an earlier build wrote: plaintext, no prefix. A junk value is not a credential and
-    // must survive the run as it is.
-    s.items.set(item.keychainKey, JSON.stringify({ username: 'ana', secret: KANBAN_SECRET }));
-    s.repo.saveVaultItem({
-      personId: s.ana.id,
-      toolId: 'affine',
-      label: 'affine',
-      username: 'ana',
-      keychainKey: `nod.cred.${s.ana.id}.affine`,
-      origin: 'https://affine.example.test',
-    });
-    s.items.set(`nod.cred.${s.ana.id}.affine`, 'not a credential');
-
-    expect(await s.vault.migrateLegacy(s.ana.id)).toBe(1);
-    const migrated = s.items.get(item.keychainKey) ?? '';
-    expect(migrated.startsWith(VAULT_VALUE_PREFIX)).toBe(true);
-    expect(await decryptVaultValue(VAULT_KEY, item.keychainKey, migrated)).toEqual({
-      username: 'ana',
-      secret: KANBAN_SECRET,
-    });
-    expect(s.items.get(`nod.cred.${s.ana.id}.affine`)).toBe('not a credential');
-    // Reading is unchanged by the migration, and a second run rewrites nothing.
-    expect(await s.vault.read(s.ana.id, 'kanban')).toEqual({
-      username: 'ana',
-      secret: KANBAN_SECRET,
-    });
-    expect(await s.vault.migrateLegacy(s.ana.id)).toBe(0);
-  });
-
-  test('migrateLegacy refuses without the key instead of writing a value nothing opens', async () => {
-    const s = scene();
-    const locked = createVault({ repo: s.repo, keychain: s.keychain, iterations: ITERATIONS });
-
-    expect(await messageOf(() => locked.migrateLegacy(s.ana.id))).toBe(
-      'the vault is locked — unlock with your password first',
-    );
-  });
 });
 
 describe('origin', () => {
