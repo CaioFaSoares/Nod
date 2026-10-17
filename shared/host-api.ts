@@ -63,6 +63,11 @@ export const HOST_ROUTES = {
   // block 2 (SP03 §3)
   /** `204`; replaces the caller's public keys, which is what a reset does (SP06 §2). */
   keys: '/v1/keys',
+  /**
+   * `OwnKeys` to its owner only, `404` when that person has no pair: the sealed private halves a
+   * second machine of the same person adopts instead of generating a pair (`docs/canonico.md` §22).
+   */
+  keysPrivate: '/v1/keys/private',
   /** Answers `{ ids }`; the host checks every recipient against the credential's scope (SP06 §5). */
   shares: '/v1/shares',
   /** `204`; the recipient accepts: the host purges `sealed` and records the holder (SP06 §4). */
@@ -72,6 +77,17 @@ export const HOST_ROUTES = {
   holders: '/v1/credentials/:id/holders',
   /** `204`; the owner holder or an admin revokes one holder (SP06 §4). */
   holder: '/v1/credentials/:id/holders/:personId',
+  /**
+   * `204`; the owner holder (or an admin) records that a new secret was saved, which is the
+   * explicit signal that clears `rotationPending` when no live holder is left to receive an
+   * `update` share (RF-48).
+   */
+  credentialRotated: '/v1/credentials/:id/rotated',
+  /**
+   * `204`; the credential's owner holder (or an admin) sets the scope of every holder row
+   * (SP06 §5). Every later share derives its allowed scope from the owner row.
+   */
+  credentialScope: '/v1/credentials/:id/scope',
   adminAssignments: '/v1/admin/assignments',
   /** The members of an assigned role still without a copy (SP03 §3, RF-47). */
   adminAssignmentsMissing: '/v1/admin/assignments/missing',
@@ -576,13 +592,32 @@ export function normalizeEmail(email: string): string {
 
 /**
  * `PUT /v1/keys` (SP03 §3): the two raw 32-byte public keys of SP06 §2, base64url without padding.
- * The private halves never reach the wire — `backend/` stores them under `vaultKey` (SP02 §8).
+ * The private halves never travel in clear — they ride `privateSealed`, an opaque `bv1.` value the
+ * host stores and never opens (`docs/canonico.md` §22).
  */
 export interface PublicKeys {
   /** The receiving key of SP06 §2. */
   x25519Public: string;
   /** The signing key of SP06 §2. */
   ed25519Public: string;
+  /**
+   * `docs/canonico.md` §22, SP06 §2: the private halves of this pair as a `bv1.` value sealed under
+   * the person's `vaultKey` (AAD `nod.keys.private/v1|<person>`), so every other machine of that
+   * person opens the same pair instead of generating a competing one. Absent means "keep what the
+   * host already holds"; the two public keys above always travel together with it.
+   */
+  privateSealed?: string;
+}
+
+/**
+ * `GET /v1/keys/private` (SP03 §3): the caller's own row — the public keys and the sealed private
+ * halves as published. `404` while the person has no pair. Nobody else's row is ever in an answer.
+ */
+export interface OwnKeys {
+  x25519Public: string;
+  ed25519Public: string;
+  /** The `bv1.` blob `PUT /v1/keys` stored, or `null` for a pair published before the column. */
+  privateSealed: string | null;
 }
 
 /**
@@ -618,6 +653,14 @@ export interface ShareResponse {
   ids: Id[];
 }
 
+/**
+ * `PUT /v1/credentials/:id/scope` (SP03 §3): sets the scope of every holder row of the credential.
+ * A later share may narrow it, never widen it; `blocked` refuses every share (SP06 §5).
+ */
+export interface CredentialScopeRequest {
+  scope: ShareScope;
+}
+
 /** One open share addressed to the caller, as `Snapshot.incomingShares` carries it (SP04 §2). */
 export interface IncomingShare {
   id: Id;
@@ -641,6 +684,8 @@ export interface IncomingShare {
 export interface Holder {
   personId: Id;
   name: string;
+  /** The org entry the credential is for; every holder row of one credential carries it (H1). */
+  toolId: Id;
   /** The credential's owner: the one holder who can re-share it (SP06 §4). */
   owner: boolean;
   scope: ShareScope;

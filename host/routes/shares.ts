@@ -13,7 +13,7 @@
 
 import { Elysia, status, t } from 'elysia';
 
-import { HOST_ROUTES, type Holder, type ShareResponse } from '../../shared/host-api';
+import { HOST_ROUTES, type Holder, type OwnKeys, type ShareResponse } from '../../shared/host-api';
 import { callerOf, hostOf, personAuth } from '../auth';
 import { ForbiddenError, NotFoundError } from '../repo';
 
@@ -32,24 +32,46 @@ const holderParams = t.Object({ id: idSchema, personId: idSchema });
  */
 const publicKeySchema = t.String({ pattern: '^[A-Za-z0-9_-]{43}$' });
 
+/**
+ * `docs/canonico.md` §22, SP06 §2: the private halves as a `bv1.` value (SP02 §8) — the prefix, then
+ * the base64url nonce and ciphertext. Unlike a share's `sealed` it carries a dot, and it is opaque
+ * here either way: the only checks are the prefix and the alphabet of the body. Its size is bounded
+ * by the request limit of `host/app.ts` (256 KB), like every other string of a body.
+ */
+const privateSealedSchema = t.String({ minLength: 1, pattern: '^bv1\\.[A-Za-z0-9_-]+$' });
+
 /** SP03 §3 `PUT /v1/keys`: both halves at once, because a pair with one key is useless (SP06 §2). */
-const keysBody = t.Object({ x25519Public: publicKeySchema, ed25519Public: publicKeySchema });
+const keysBody = t.Object({
+  x25519Public: publicKeySchema,
+  ed25519Public: publicKeySchema,
+  privateSealed: t.Optional(privateSealedSchema),
+});
 
 /**
  * SP06 §3's `sealed` is base64url of `body || sig` and the host never looks inside it: the only
- * check the schema can make is that it is a non-empty string of the alphabet. Its length is bounded
- * by the request body limit of `host/app.ts` (256 KB) and by nothing else.
+ * check the schema can make is that it is a non-empty string of the alphabet. L7 caps it well below
+ * the request body limit (256 KB in `host/app.ts`): a credential payload is a small JSON object, and
+ * 64 KB per copy leaves room for the rest of the batch.
  */
-const sealedSchema = t.String({ minLength: 1, pattern: '^[A-Za-z0-9_-]+$' });
+const sealedSchema = t.String({
+  minLength: 1,
+  maxLength: 65_536,
+  pattern: '^[A-Za-z0-9_-]+$',
+});
 
 const shareItemBody = t.Object({ to: idSchema, sealed: sealedSchema });
+
+/** SP03 §3: one credential, one scope for every holder row. `blocked` is a state, not a share. */
+const credentialScopeBody = t.Object({
+  scope: t.Union([t.Literal('role'), t.Literal('blocked'), t.Literal('org')]),
+});
 
 const shareBody = t.Object({
   credentialId: idSchema,
   toolId: idSchema,
   scope: t.Union([t.Literal('role'), t.Literal('blocked'), t.Literal('org')]),
   kind: t.Union([t.Literal('send'), t.Literal('assign'), t.Literal('update')]),
-  items: t.Array(shareItemBody),
+  items: t.Array(shareItemBody, { minItems: 1, maxItems: 500 }),
 });
 
 // ---------------------------------------------------------------- routes
@@ -59,15 +81,35 @@ export const shareRoutes = new Elysia({ name: 'host-shares-routes' })
   .use(personAuth)
 
   /**
-   * SP03 §3: `{ x25519Public, ed25519Public }` in, `204` out. It replaces whatever the person had,
-   * which is exactly what SP06 §2 asks of an activation and of a reset: a pair sealed to the old key
-   * is worthless, and the Nod re-sends those shares.
+   * SP03 §3: `{ x25519Public, ed25519Public, privateSealed? }` in, `204` out. New public keys
+   * replace whatever the person had — a reset, which is what SP06 §2 asks of an activation: a pair
+   * sealed to the old key is worthless, and the Nod re-sends those shares. The same public keys
+   * move the sealed private halves alone (`docs/canonico.md` §22: a password change re-seals them
+   * and the pair does not change), so `created_at` stays.
    */
   .put(HOST_ROUTES.keys, { body: keysBody }, (ctx) => {
     const { person } = callerOf(ctx);
     const { repo, auth } = hostOf(ctx);
-    repo.savePersonKeys(person.id, ctx.body, auth.now());
+    repo.savePersonKeys(
+      person.id,
+      { x25519Public: ctx.body.x25519Public, ed25519Public: ctx.body.ed25519Public },
+      ctx.body.privateSealed ?? null,
+      auth.now(),
+    );
     return status(204);
+  })
+
+  /**
+   * SP03 §3, `docs/canonico.md` §22: the caller's own pair, the sealed private halves included, so a
+   * second machine of the same person adopts it instead of generating a competing one. The row is
+   * the caller's and only the caller's (`personAuth`), so no other person's blob is ever in an
+   * answer; `404` says this person has published no pair yet.
+   */
+  .get(HOST_ROUTES.keysPrivate, (ctx): OwnKeys => {
+    const { person } = callerOf(ctx);
+    const stored = hostOf(ctx).repo.ownPersonKeys(person.id);
+    if (stored === null) throw new NotFoundError('unknown keys');
+    return stored;
   })
 
   /**
@@ -152,6 +194,45 @@ export const shareRoutes = new Elysia({ name: 'host-shares-routes' })
         byId: person.id,
         admin: person.admin,
       },
+      auth.now(),
+    );
+    return status(204);
+  })
+
+  /**
+   * SP03 §3, SP06 §5, `docs/canonico.md` §22: the credential's owner holder (or an admin) sets the
+   * scope of the credential, and every holder row takes it. This is the only writer of `blocked`:
+   * from then on every `POST /v1/shares` for that credential is refused, and a later share may
+   * narrow the stored scope but never widen it. Anyone else gets the `403` of SP03 §1, and a
+   * credential no one holds is the `404` `unknown credential`.
+   */
+  .put(
+    HOST_ROUTES.credentialScope,
+    { params: idParams, body: credentialScopeBody },
+    (ctx) => {
+      const { person } = callerOf(ctx);
+      const { repo } = hostOf(ctx);
+      repo.setCredentialScope({
+        credentialId: ctx.params.id,
+        byId: person.id,
+        admin: person.admin,
+        scope: ctx.body.scope,
+      });
+      return status(204);
+    },
+  )
+
+  /**
+   * RF-48, SP03 §3: the credential's owner holder (or an admin) records that a new secret was saved
+   * for a credential that was `rotationPending` — the explicit signal that clears the state when the
+   * revoked holder was the last non-owner one and the update fan-out had no recipient. The owner
+   * rule is `host/repo.ts`'s, like every other one; anyone else gets the `403` of SP03 §1.
+   */
+  .post(HOST_ROUTES.credentialRotated, { params: idParams }, (ctx) => {
+    const { person } = callerOf(ctx);
+    const { repo, auth } = hostOf(ctx);
+    repo.markRotated(
+      { credentialId: ctx.params.id, byId: person.id, admin: person.admin },
       auth.now(),
     );
     return status(204);

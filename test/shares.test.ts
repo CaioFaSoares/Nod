@@ -19,8 +19,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createConnectedCatalog, type ConnectedCatalog } from '../backend/connected-catalog';
-import { createKeys, type Keys, type OwnPrivatePair } from '../backend/keys';
-import { createHostClient, type HostClient, type HostConnection } from '../backend/host-client';
+import { createKeys, keysKey, type Keys, type OwnPrivatePair } from '../backend/keys';
+import { createHostClient, HostError, type HostClient, type HostConnection } from '../backend/host-client';
 import { createHostAdmin, type HostAdmin } from '../backend/host-admin';
 import { createRepo as createNodRepo, type Repo as NodRepo } from '../backend/repo';
 import { createSession, type Session } from '../backend/session';
@@ -37,6 +37,7 @@ import {
   HOST_ROUTES,
   type Device,
   type Holder,
+  type MissingCopy,
   type SaltResponse,
   type ShareRequest,
   type Snapshot,
@@ -53,6 +54,7 @@ import {
 } from '../shared/seal';
 import type { SealKeyPair, SealPayload } from '../shared/seal';
 import type { Entry, Id, SecretStore } from '../shared/types';
+import { decryptVaultBytes } from '../shared/vault-crypto';
 import { createApp } from '../host/app';
 import { createRepo as createHostRepo, type Repo as HostRepo } from '../host/repo';
 import { issueSetupCode } from '../host/cli/setup-code';
@@ -242,15 +244,18 @@ function installSnapshot(
 interface FakeConnection extends HostConnection {
   calls: string[];
   sent: ShareRequest[];
+  missing: MissingCopy[];
 }
 
 function fakeConnection(): FakeConnection {
   const calls: string[] = [];
   const sent: ShareRequest[] = [];
+  const missing: MissingCopy[] = [];
   return {
     host: { address: 'https://host.example.test', kid: 'kid', publicKey: 'public', personId: 'me' },
     calls,
     sent,
+    missing,
     tokenKey: () => 'token',
     saveToken: async () => {},
     forgetToken: async () => {},
@@ -263,6 +268,8 @@ function fakeConnection(): FakeConnection {
     revokeSession: async () => true,
     presence: async () => [],
     putKeys: async () => {},
+    // K1/`docs/canonico.md` §22: no host row in this double, so the caller's own read is a 404.
+    getOwnKeys: async () => null,
     appMeta: async () => ({ minAppVersion: '0.0.0', update: null }),
     async sendShares(request) {
       sent.push(request);
@@ -274,6 +281,26 @@ function fakeConnection(): FakeConnection {
     },
     async declineShare(id) {
       calls.push(`decline:${id}`);
+      return true;
+    },
+    // K9: `backend/shares.removeHolder` is the only caller; this double has no holder row.
+    async removeHolder() {
+      return true;
+    },
+    // RF-48: `backend/shares.update` calls this after an owner's save of a revoked credential.
+    async markRotated() {
+      return true;
+    },
+    // M4: `backend/shares.setScope` calls this for a credential that already has holder rows.
+    async setCredentialScope(credentialId, scope) {
+      calls.push(`scope:${credentialId}:${scope}`);
+      return true;
+    },
+    // K8: `backend/shares.refreshAssignments` reads the host's missing list; a test fills `missing`.
+    async missingCopies() {
+      return missing;
+    },
+    async putAssignment() {
       return true;
     },
   };
@@ -303,6 +330,7 @@ async function sealedShare(p: {
   kind?: 'send' | 'assign' | 'update';
   username?: string;
   secret?: string;
+  issuedAt?: string;
 }): Promise<string> {
   const payload: SealPayload = {
     v: SEAL_VERSION,
@@ -316,7 +344,7 @@ async function sealedShare(p: {
     from: p.from,
     to: p.to,
     kind: p.kind ?? 'send',
-    issuedAt: AT,
+    issuedAt: p.issuedAt ?? AT,
   };
   return await seal(payload, p.recipient.publicKey, p.sender.privateKey);
 }
@@ -543,6 +571,7 @@ describe('accept (SP06 §3–§4)', () => {
       kind?: 'send' | 'update';
       username?: string;
       secret?: string;
+      issuedAt?: string;
     } = {},
   ): Promise<Snapshot['incomingShares']> {
     const id = overrides.id ?? 'share-1';
@@ -572,6 +601,7 @@ describe('accept (SP06 §3–§4)', () => {
             kind: overrides.kind ?? 'send',
             username: overrides.username,
             secret: overrides.secret,
+            issuedAt: overrides.issuedAt,
           });
     return [
       {
@@ -614,6 +644,68 @@ describe('accept (SP06 §3–§4)', () => {
     expect(connection.calls).toEqual(['accept:share-1']);
   });
 
+  test('an accept, a decline and an invalid decline each write their event (E02 §6)', async () => {
+    // An accept: the share landed in the vault and on the host.
+    const accepted = await acceptFixture();
+    accepted.nod.link.current = fakeConnection();
+    installSnapshot(accepted.nod, {
+      people: [{ id: 'alice', name: 'Alice', roles: ['team'], kind: 'member' }],
+      incomingShares: await share(accepted),
+    });
+    await createSharesFor(accepted.nod, accepted.nod.link.current).accept('share-1');
+    const acceptEvents = accepted.nod.repo
+      .listEvents({})
+      .filter((event) => event.type === 'share.accepted');
+    expect(acceptEvents).toHaveLength(1);
+    expect(acceptEvents[0]).toMatchObject({
+      personId: accepted.meId,
+      toolId: 'figma',
+      result: null,
+      detail: 'share-1',
+    });
+
+    // The recipient's own decline.
+    const declined = await acceptFixture();
+    declined.nod.link.current = fakeConnection();
+    installSnapshot(declined.nod, {
+      people: [{ id: 'alice', name: 'Alice', roles: ['team'], kind: 'member' }],
+      incomingShares: await share(declined),
+    });
+    await createSharesFor(declined.nod, declined.nod.link.current).decline('share-1');
+    const declineEvents = declined.nod.repo
+      .listEvents({})
+      .filter((event) => event.type === 'share.declined');
+    expect(declineEvents).toHaveLength(1);
+    expect(declineEvents[0]).toMatchObject({
+      personId: declined.meId,
+      toolId: 'figma',
+      result: null,
+      detail: 'share-1',
+    });
+
+    // A decline by validation: the reason travels as `result`, the share id as `detail`.
+    const invalid = await acceptFixture();
+    const connection = fakeConnection();
+    invalid.nod.link.current = connection;
+    installSnapshot(invalid.nod, {
+      people: [{ id: 'alice', name: 'Alice', roles: ['team'], kind: 'member' }],
+      incomingShares: await share(invalid, { id: 'tampered' }),
+    });
+    await expect(createSharesFor(invalid.nod, connection).accept('tampered')).rejects.toThrow(
+      'invalid share',
+    );
+    const invalidEvents = invalid.nod.repo
+      .listEvents({})
+      .filter((event) => event.type === 'share.declined');
+    expect(invalidEvents).toHaveLength(1);
+    expect(invalidEvents[0]).toMatchObject({
+      personId: invalid.meId,
+      toolId: 'figma',
+      result: 'invalid share',
+      detail: 'tampered',
+    });
+  });
+
   test('an origin that is not the catalog tool origin is `invalid share`, and is declined', async () => {
     const fixture = await acceptFixture();
     const connection = fakeConnection();
@@ -650,10 +742,12 @@ describe('accept (SP06 §3–§4)', () => {
     }
   });
 
-  test('a changed sender key never opens a share', async () => {
+  test('a changed sender key still opens a share signed with the pinned key (M2)', async () => {
     const fixture = await acceptFixture();
     const connection = fakeConnection();
     fixture.nod.link.current = connection;
+    // The share is signed by the PINNED key (acceptFixture pinned it); the host just started
+    // publishing a different one, which is the `changed` state.
     installSnapshot(fixture.nod, { incomingShares: await share(fixture) });
     fixture.nod.repo.markPeerKeyChanged({
       personId: 'alice',
@@ -663,8 +757,99 @@ describe('accept (SP06 §3–§4)', () => {
       since: AT,
     });
     const shares = createSharesFor(fixture.nod, connection);
+
+    // M2/SP06 §3 step 2: still verified with the pinned (old) key, so it opens and is accepted.
+    const item = await shares.accept('share-1');
+    expect(item).toMatchObject({ toolId: 'figma', credentialId: 'c1' });
+    expect(connection.calls).toEqual(['accept:share-1']);
+  });
+
+  test('a share signed by a key other than the pinned one declines as `invalid share` (M2)', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    // A different signer key than the one pinned: the signature cannot verify, so this really is
+    // invalid and is declined.
+    const impostor = await generateEd25519KeyPair();
+    installSnapshot(fixture.nod, {
+      incomingShares: [
+        {
+          id: 'share-1',
+          credentialId: 'c1',
+          toolId: 'figma',
+          from: 'alice',
+          scope: 'role',
+          kind: 'send',
+          sealed: await sealedShare({
+            credentialId: 'c1',
+            toolId: 'figma',
+            toolOrigin: TOOL_ORIGIN,
+            from: 'alice',
+            to: fixture.meId,
+            sender: impostor,
+            recipient: { publicKey: fixture.own.x25519Public, privateKey: fixture.own.x25519Private },
+          }),
+          createdAt: AT,
+          expiresAt: '2026-10-31T10:00:00.000Z',
+        },
+      ],
+    });
+    const shares = createSharesFor(fixture.nod, connection);
     await expect(shares.accept('share-1')).rejects.toThrow('invalid share');
     expect(connection.calls).toEqual(['decline:share-1']);
+  });
+
+  test('a locked keychain leaves a good share in the inbox instead of destroying it (M2)', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    installSnapshot(fixture.nod, { incomingShares: await share(fixture) });
+    // The own pair cannot be read (a locked keychain / a missing keychain value).
+    await fixture.nod.secrets.delete(keysKey(fixture.meId));
+    const shares = createSharesFor(fixture.nod, connection);
+
+    await expect(shares.accept('share-1')).rejects.toThrow('the key pair is not available');
+    // M2: nothing was declined, and the share is still there to accept once the key is back.
+    expect(connection.calls).toEqual([]);
+    expect(shares.inbox()).toHaveLength(1);
+    expect(fixture.nod.repo.listVault(fixture.meId)).toEqual([]);
+  });
+
+  test('a share from somebody this Nod never pinned is left in the inbox (M2)', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    const strangerEd = await generateEd25519KeyPair();
+    installSnapshot(fixture.nod, {
+      incomingShares: [
+        {
+          id: 'share-1',
+          credentialId: 'c1',
+          toolId: 'figma',
+          from: 'stranger',
+          scope: 'role',
+          kind: 'send',
+          sealed: await sealedShare({
+            credentialId: 'c1',
+            toolId: 'figma',
+            toolOrigin: TOOL_ORIGIN,
+            from: 'stranger',
+            to: fixture.meId,
+            sender: strangerEd,
+            recipient: { publicKey: fixture.own.x25519Public, privateKey: fixture.own.x25519Private },
+          }),
+          createdAt: AT,
+          expiresAt: '2026-10-31T10:00:00.000Z',
+        },
+      ],
+    });
+    const shares = createSharesFor(fixture.nod, connection);
+
+    // No pin row for the sender: there is nothing to verify the signature with, which is not the
+    // same as the share being invalid.
+    await expect(shares.accept('share-1')).rejects.toThrow('recipient has no pinned key');
+    expect(connection.calls).toEqual([]);
+    expect(shares.inbox()).toHaveLength(1);
   });
 
   test('a cancelled gate accepts nothing and declines nothing', async () => {
@@ -695,6 +880,10 @@ describe('accept (SP06 §3–§4)', () => {
     });
     installSnapshot(fixture.nod, {
       incomingShares: await share(fixture, { kind: 'update', username: 'new', secret: 'new-secret' }),
+      // H1: an update is applied silently only when its sender is the credential's live owner holder.
+      holders: {
+        c1: [{ personId: 'alice', name: 'Alice', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null }],
+      },
     });
     let gated = 0;
     const shares = createSharesFor(fixture.nod, connection, async () => {
@@ -709,6 +898,226 @@ describe('accept (SP06 §3–§4)', () => {
       username: 'new',
       secret: 'new-secret',
     });
+  });
+
+  test('an update whose sender is not the live owner holder needs the gate (H1)', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    await fixture.nod.vault.save(fixture.meId, {
+      toolId: 'figma',
+      username: 'old',
+      secret: 'old-secret',
+      label: 'Tool figma',
+      credentialId: 'c1',
+      scope: 'role',
+    });
+    // The credential's live owner holder is somebody else: `alice` is only a holder, not the owner.
+    installSnapshot(fixture.nod, {
+      incomingShares: await share(fixture, { kind: 'update', username: 'new', secret: 'new-secret' }),
+      holders: {
+        c1: [
+          { personId: 'carol', name: 'Carol', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+          { personId: 'alice', name: 'Alice', owner: false, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+        ],
+      },
+    });
+    let gated = 0;
+    const shares = createSharesFor(fixture.nod, connection, async () => {
+      gated += 1;
+    });
+
+    // With a password the person answers the gate and the share is applied...
+    const item = await shares.accept('share-1');
+    expect(gated).toBe(1);
+    expect(item.username).toBe('new');
+  });
+
+  test('applyUpdates never applies a non-owner update silently (H1)', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    await fixture.nod.vault.save(fixture.meId, {
+      toolId: 'figma',
+      username: 'old',
+      secret: 'old-secret',
+      label: 'Tool figma',
+      credentialId: 'c1',
+      scope: 'role',
+    });
+    installSnapshot(fixture.nod, {
+      incomingShares: await share(fixture, { kind: 'update', username: 'new', secret: 'new-secret' }),
+      // No holder row names `alice` as owner, so the update is not silent.
+      holders: {
+        c1: [{ personId: 'bob', name: 'Bob', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null }],
+      },
+    });
+    let gated = 0;
+    const shares = createSharesFor(fixture.nod, connection, async () => {
+      gated += 1;
+    });
+
+    await shares.applyUpdates();
+
+    // Nothing was applied and nobody was prompted: the share waits in the inbox for a gated accept.
+    expect(gated).toBe(0);
+    expect(connection.calls).toEqual([]);
+    expect(shares.inbox()).toHaveLength(1);
+    expect(await fixture.nod.vault.read(fixture.meId, 'figma')).toEqual({
+      username: 'old',
+      secret: 'old-secret',
+    });
+  });
+
+  test('a replayed `update` older than the applied one declines as `invalid share` (L1)', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    await fixture.nod.vault.save(fixture.meId, {
+      toolId: 'figma',
+      username: 'old',
+      secret: 'old-secret',
+      label: 'Tool figma',
+      credentialId: 'c1',
+      scope: 'role',
+    });
+    const holders = {
+      c1: [{ personId: 'alice', name: 'Alice', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null }],
+    };
+    // The first, newer update is applied and remembered.
+    installSnapshot(fixture.nod, {
+      incomingShares: await share(fixture, {
+        kind: 'update',
+        username: 'new',
+        secret: 'new-secret',
+        issuedAt: '2026-10-17T11:00:00.000Z',
+      }),
+      holders,
+    });
+    const shares = createSharesFor(fixture.nod, connection);
+    await shares.accept('share-1');
+    // The host re-serves an older payload for the same credential: a replay.
+    installSnapshot(fixture.nod, {
+      incomingShares: await share(fixture, {
+        kind: 'update',
+        id: 'replay',
+        username: 'stale',
+        secret: 'stale-secret',
+        issuedAt: '2026-10-17T09:00:00.000Z',
+      }),
+      holders,
+    });
+
+    await expect(shares.accept('replay')).rejects.toThrow('invalid share');
+
+    expect(connection.calls).toEqual(['accept:share-1', 'decline:replay']);
+    expect(await fixture.nod.vault.read(fixture.meId, 'figma')).toEqual({
+      username: 'new',
+      secret: 'new-secret',
+    });
+  });
+
+  test('an accepted share drops its ciphertext from the cached snapshot (L3)', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    installSnapshot(fixture.nod, { incomingShares: await share(fixture) });
+    const shares = createSharesFor(fixture.nod, connection);
+
+    await shares.accept('share-1');
+
+    // The `host` row no longer carries the sealed body of the settled share, and the share is gone
+    // from the inbox (a `sealed` that is not a non-empty string is not a share).
+    const cached = fixture.nod.repo.hostRecord()?.snapshot ?? '';
+    const body = JSON.parse(cached) as { incomingShares: { sealed: string }[] };
+    expect(body.incomingShares[0]?.sealed).toBe('');
+    expect(shares.inbox()).toHaveLength(0);
+  });
+
+  test('a declined share drops its ciphertext from the cached snapshot (L3)', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    installSnapshot(fixture.nod, { incomingShares: await share(fixture) });
+    const shares = createSharesFor(fixture.nod, connection);
+
+    await shares.decline('share-1');
+
+    const cached = fixture.nod.repo.hostRecord()?.snapshot ?? '';
+    const body = JSON.parse(cached) as { incomingShares: { sealed: string }[] };
+    expect(body.incomingShares[0]?.sealed).toBe('');
+    expect(shares.inbox()).toHaveLength(0);
+  });
+
+  test('two concurrent accepts of one update apply it once (L4)', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    await fixture.nod.vault.save(fixture.meId, {
+      toolId: 'figma',
+      username: 'old',
+      secret: 'old-secret',
+      label: 'Tool figma',
+      credentialId: 'c1',
+      scope: 'role',
+    });
+    installSnapshot(fixture.nod, {
+      incomingShares: await share(fixture, { kind: 'update', username: 'new', secret: 'new-secret' }),
+      holders: {
+        c1: [{ personId: 'alice', name: 'Alice', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null }],
+      },
+    });
+    const shares = createSharesFor(fixture.nod, connection);
+
+    const [first, second] = await Promise.allSettled([
+      shares.accept('share-1'),
+      shares.accept('share-1'),
+    ]);
+
+    // One accept reached the host and the value is the new one; the loser did not double-apply.
+    expect(connection.calls).toEqual(['accept:share-1']);
+    expect(first.status).toBe('fulfilled');
+    expect(second.status).toBe('rejected');
+    expect(await fixture.nod.vault.read(fixture.meId, 'figma')).toEqual({
+      username: 'new',
+      secret: 'new-secret',
+    });
+  });
+
+  test('an update from a revoked sender is not the live owner and needs the gate (H1)', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    await fixture.nod.vault.save(fixture.meId, {
+      toolId: 'figma',
+      username: 'old',
+      secret: 'old-secret',
+      label: 'Tool figma',
+      credentialId: 'c1',
+      scope: 'role',
+    });
+    installSnapshot(fixture.nod, {
+      incomingShares: await share(fixture, { kind: 'update', username: 'new', secret: 'new-secret' }),
+      holders: {
+        c1: [
+          {
+            personId: 'alice',
+            name: 'Alice',
+            owner: true,
+            scope: 'role',
+            since: AT,
+            toolId: 'figma',
+            removedAt: '2026-10-16T10:00:00.000Z',
+          },
+        ],
+      },
+    });
+    let gated = 0;
+    const shares = createSharesFor(fixture.nod, connection, async () => {
+      gated += 1;
+    });
+    await shares.accept('share-1');
+    expect(gated).toBe(1);
   });
 
   test('an unknown share id is `unknown share`, with nothing written', async () => {
@@ -911,16 +1320,32 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     expect(connection.sent).toEqual([]);
   });
 
+  test('a first send the host refuses leaves no credentialId behind (L6)', async () => {
+    const { nod, meId } = await sendFixture();
+    const connection = fakeConnection();
+    connection.sendShares = async () => {
+      throw new Error('the host refused the request');
+    };
+    const shares = createSharesFor(nod, connection);
+
+    await expect(shares.send('figma', ['bob'])).rejects.toThrow('the host refused the request');
+
+    // L6: the id is persisted only after the host took the copies, so the item stays shareable and
+    // the scope can still be set.
+    expect(nod.repo.vaultItem(meId, 'figma')?.credentialId).toBeNull();
+    expect(await shares.setScope('figma', 'blocked')).toMatchObject({ scope: 'blocked' });
+  });
+
   test('a blocked credential has no send and a personal tool is not shareable', async () => {
     const { nod } = await sendFixture();
     const connection = fakeConnection();
     const shares = createSharesFor(nod, connection);
 
-    shares.setScope('figma', 'blocked');
+    await shares.setScope('figma', 'blocked');
     await expect(shares.send('figma', ['bob'])).rejects.toThrow('blocked credential');
     expect(connection.sent).toEqual([]);
 
-    shares.setScope('figma', 'role');
+    await shares.setScope('figma', 'role');
     nod.repo.saveEntry(tool('personal', { scope: 'personal', ownerId: nod.session.current()?.id }));
     await nod.vault.save(nod.session.current()?.id ?? '', {
       toolId: 'personal',
@@ -940,6 +1365,55 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     expect(connection.sent).toEqual([]);
   });
 
+  test('a send writes one content-free share.sent event per recipient (E02 §6)', async () => {
+    const { nod, meId } = await sendFixture();
+    const shares = createSharesFor(nod, fakeConnection());
+
+    await shares.send('figma', ['bob']);
+
+    const events = nod.repo.listEvents({}).filter((event) => event.type === 'share.sent');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      personId: meId,
+      toolId: 'figma',
+      result: null,
+      detail: 'bob scope=role kind=send',
+    });
+    // E02 §6/canonico §13/RF-44: no username, secret or label of the credential in any row.
+    const serialized = JSON.stringify(nod.repo.listEvents({}));
+    expect(serialized).not.toContain(CREDENTIAL_USER);
+    expect(serialized).not.toContain(CREDENTIAL_SECRET);
+  });
+
+  test('an update fan-out writes share.sent with kind update (E02 §6)', async () => {
+    const { nod, meId } = await sendFixture();
+    const connection = fakeConnection();
+    const shares = createSharesFor(nod, connection);
+    await shares.send('figma', ['bob']);
+    const credentialId = nod.repo.vaultItem(meId, 'figma')?.credentialId ?? '';
+    // The snapshot says I own the credential and Bob is a live holder: the fan-out of K9.
+    installSnapshot(nod, {
+      people: [{ id: 'bob', name: 'Bob', roles: ['team'], kind: 'member' }],
+      holders: {
+        [credentialId]: [
+          { personId: meId, name: 'Me', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+          { personId: 'bob', name: 'Bob', owner: false, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+        ],
+      },
+    });
+    const stored = nod.repo.vaultItem(meId, 'figma');
+    if (stored === null) throw new Error('the fixture needs the shared item');
+
+    const warning = await shares.update(meId, stored);
+
+    expect(warning).toBeNull();
+    const updateEvents = nod.repo
+      .listEvents({})
+      .filter((event) => event.type === 'share.sent' && event.detail === 'bob scope=role kind=update');
+    expect(updateEvents).toHaveLength(1);
+    expect(updateEvents[0]).toMatchObject({ personId: meId, toolId: 'figma' });
+  });
+
   test('only the owner holder changes the scope of a credential that travelled', async () => {
     const { nod, meId } = await sendFixture();
     const connection = fakeConnection();
@@ -951,7 +1425,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
       people: [{ id: 'bob', name: 'Bob', roles: ['team'], kind: 'member' }],
       holders: {
         [credentialId]: [
-          { personId: 'bob', name: 'Bob', owner: true, scope: 'role', since: AT, removedAt: null },
+          { personId: 'bob', name: 'Bob', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
         ],
       },
     });
@@ -960,11 +1434,84 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     installSnapshot(nod, {
       holders: {
         [credentialId]: [
-          { personId: meId, name: 'Me', owner: true, scope: 'role', since: AT, removedAt: null },
+          { personId: meId, name: 'Me', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
         ],
       },
     });
-    expect(shares.setScope('figma', 'org')).toMatchObject({ scope: 'org' });
+    // M4: the credential has holder rows, so the scope reaches the host before the local store.
+    expect(await shares.setScope('figma', 'org')).toMatchObject({ scope: 'org' });
+    expect(connection.calls).toEqual([`scope:${credentialId}:org`]);
+  });
+
+  test('a scope set with no credentialId is local; with one the host is told (M4/L6/F4)', async () => {
+    const { nod, meId } = await sendFixture();
+    const connection = fakeConnection();
+    const shares = createSharesFor(nod, connection);
+
+    // No credentialId yet: the scope travels on the first send, so this is local only.
+    expect(await shares.setScope('figma', 'org')).toMatchObject({ scope: 'org' });
+    expect(connection.calls).toEqual([]);
+
+    // L6: a first send the host refused leaves a credentialId but no holder row. F4: the scope
+    // reaches the host anyway — a cached snapshot without the row is not proof the host has none.
+    await shares.send('figma', ['bob']);
+    const credentialId = nod.repo.vaultItem(meId, 'figma')?.credentialId ?? '';
+    installSnapshot(nod, { holders: {} });
+    expect(await shares.setScope('figma', 'blocked')).toMatchObject({ scope: 'blocked' });
+    expect(connection.calls).toEqual([`scope:${credentialId}:blocked`]);
+    expect(credentialId).not.toBe('');
+  });
+
+  test('a scope set offline is pending, and the next sync retries it (F4)', async () => {
+    const { nod, meId } = await sendFixture();
+    nod.repo.setVaultCredential(meId, 'figma', 'cred-offline');
+
+    const offline = createSharesFor(nod, null);
+    expect(await offline.setScope('figma', 'blocked')).toMatchObject({ scope: 'blocked' });
+    expect(nod.repo.meta('shares.scope.pending')).toContain('cred-offline');
+
+    // The next sync has a connection: `retryPending` carries the scope and clears the marker.
+    const connection = fakeConnection();
+    const shares = createSharesFor(nod, connection);
+    await shares.retryPending();
+    expect(connection.calls).toEqual(['scope:cred-offline:blocked']);
+    expect(nod.repo.meta('shares.scope.pending')).toBe('{}');
+  });
+
+  test('a scope the host could not be reached for is pending, and a retry lands it (F4)', async () => {
+    const { nod, meId } = await sendFixture();
+    nod.repo.setVaultCredential(meId, 'figma', 'cred-net');
+    const connection = fakeConnection();
+    let offline = true;
+    connection.setCredentialScope = async (credentialId, scope) => {
+      if (offline) throw new HostError('offline', 'host is not reachable');
+      connection.calls.push(`scope:${credentialId}:${scope}`);
+      return true;
+    };
+    const shares = createSharesFor(nod, connection);
+
+    expect(await shares.setScope('figma', 'org')).toMatchObject({ scope: 'org' });
+    expect(nod.repo.meta('shares.scope.pending')).toContain('cred-net');
+
+    offline = false;
+    await shares.retryPending();
+    expect(connection.calls).toEqual(['scope:cred-net:org']);
+    expect(nod.repo.meta('shares.scope.pending')).toBe('{}');
+  });
+
+  test('a credential the host does not know keeps its scope locally, with nothing pending (F4)', async () => {
+    const { nod, meId } = await sendFixture();
+    nod.repo.setVaultCredential(meId, 'figma', 'cred-unknown');
+    const connection = fakeConnection();
+    connection.setCredentialScope = async () => {
+      throw new HostError('refused', 'unknown credential', 404);
+    };
+    const shares = createSharesFor(nod, connection);
+
+    // The host's `404 unknown credential` says the credential is not there yet: the scope stays
+    // local and travels on the first send, so there is nothing to retry.
+    expect(await shares.setScope('figma', 'blocked')).toMatchObject({ scope: 'blocked' });
+    expect(nod.repo.meta('shares.scope.pending')).toBe('{}');
   });
 
   test('holders and rotationPending come from the snapshot (K7)', async () => {
@@ -976,8 +1523,8 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     installSnapshot(nod, {
       holders: {
         [credentialId]: [
-          { personId: meId, name: 'Me', owner: true, scope: 'role', since: AT, removedAt: null },
-          { personId: 'bob', name: 'Bob', owner: false, scope: 'role', since: AT, removedAt: null },
+          { personId: meId, name: 'Me', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+          { personId: 'bob', name: 'Bob', owner: false, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
         ],
       },
       rotationPending: [credentialId],
@@ -987,6 +1534,69 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     expect(listed).toHaveLength(1);
     expect(listed[0].holders.map((holder) => holder.name)).toEqual(['Me', 'Bob']);
     expect(listed[0].rotationPending).toBe(true);
+  });
+});
+
+describe('assignment sealing (F1, K8/SP06 §4)', () => {
+  async function assignmentFixture() {
+    const nod = newNod();
+    nod.repo.saveRole({ id: 'team', name: 'Team', admin: false });
+    const meId = await openAccount(nod, ['admin']);
+    nod.repo.saveEntry(tool('figma', { url: `${TOOL_ORIGIN}/app`, roles: ['team'] }));
+    nod.repo.saveEntry(
+      tool('kalendar', { url: 'https://kalendar.example.test/app', roles: ['team'] }),
+    );
+    await nod.vault.save(meId, {
+      toolId: 'figma',
+      username: CREDENTIAL_USER,
+      secret: CREDENTIAL_SECRET,
+      label: 'Tool figma',
+    });
+    await nod.vault.save(meId, {
+      toolId: 'kalendar',
+      username: 'kalendar-user',
+      secret: 'kalendar-secret',
+      label: 'Tool kalendar',
+    });
+    nod.repo.setVaultCredential(meId, 'figma', 'cred-figma');
+    nod.repo.setVaultCredential(meId, 'kalendar', 'cred-kalendar');
+    for (const personId of ['alice', 'bob']) {
+      const x = await generateX25519KeyPair();
+      const ed = await generateEd25519KeyPair();
+      nod.repo.pinPeerKey({
+        personId,
+        x25519: toBase64url(x.publicKey),
+        ed25519: toBase64url(ed.publicKey),
+        fingerprint: await personFingerprint(x.publicKey, ed.publicKey),
+        firstSeen: AT,
+        confirmedAt: AT,
+      });
+    }
+    return { nod, meId };
+  }
+
+  test('a credential the host refuses is skipped, and the others still travel (F1)', async () => {
+    const { nod } = await assignmentFixture();
+    const connection = fakeConnection();
+    connection.missing.push(
+      { credentialId: 'cred-figma', toolId: 'figma', roleId: 'team', personId: 'alice' },
+      { credentialId: 'cred-kalendar', toolId: 'kalendar', roleId: 'team', personId: 'bob' },
+    );
+    const real = connection.sendShares.bind(connection);
+    connection.sendShares = async (request) => {
+      if (request.toolId === 'kalendar') {
+        throw new HostError('refused', 'tool not visible to recipient', 403);
+      }
+      return await real(request);
+    };
+    const shares = createSharesFor(nod, connection);
+
+    // One request per credential; the host refuses the kalendar one, whose item fails validation as
+    // a whole. F1: that group is skipped and counted, and the figma copy still goes out.
+    expect(await shares.sealMissing()).toEqual({ sent: 1, skipped: 1 });
+    expect(connection.sent.map((request) => request.toolId)).toEqual(['figma']);
+    const events = nod.repo.listEvents({}).filter((event) => event.type === 'share.sent');
+    expect(events.map((event) => event.detail)).toEqual(['alice scope=role kind=assign']);
   });
 });
 
@@ -1277,10 +1887,11 @@ describe('send and accept against the real host (K4, K6, K7)', () => {
     const carolId = aliceSnapshot.people?.find((person) => person.name === 'Carol')?.id ?? '';
     await expect(aliceNod.shares.send('figma', [carolId])).rejects.toThrow('no role in common');
 
-    // K6: a blocked credential refuses a send, and the host would refuse it too.
-    expect(aliceNod.shares.setScope('figma', 'blocked').scope).toBe('blocked');
+    // K6: a blocked credential refuses a send, and the host would refuse it too. M4: the credential
+    // already has holder rows, so the scope reaches the host before the local store.
+    expect((await aliceNod.shares.setScope('figma', 'blocked')).scope).toBe('blocked');
     await expect(aliceNod.shares.send('figma', [bob.id])).rejects.toThrow('blocked credential');
-    expect(aliceNod.shares.setScope('figma', 'role').scope).toBe('role');
+    expect((await aliceNod.shares.setScope('figma', 'role')).scope).toBe('role');
 
     // SP06 §3: a share whose bytes were changed after the host stored it is declined.
     await aliceNod.shares.send('figma', [bob.id]);
@@ -1301,5 +1912,156 @@ describe('send and accept against the real host (K4, K6, K7)', () => {
       .query<{ declined_at: string | null }, [string]>('SELECT declined_at FROM shares WHERE id = ?')
       .get(open.id);
     expect(declined?.declined_at).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------- one pair per person (canonico §22)
+
+/**
+ * A second machine of a person already on the host: the sign-in flow (`POST /v1/auth/salt` for the
+ * salt the host publishes, `POST /v1/auth/login` with the derived `authKey`) instead of an
+ * activation. Same password and same salt, so the same `vaultKey` (SP02 §1/§6) — which is what lets
+ * this machine open the sealed private halves the first one published (`docs/canonico.md` §22).
+ */
+async function signInNod(
+  running: Running,
+  nod: Nod,
+  input: { email: string; name: string; password: string },
+): Promise<{ id: Id; token: string }> {
+  const pre = running.client.connect({
+    address: running.address,
+    kid: running.pin.kid,
+    publicKey: running.pin.ed25519Public,
+    personId: '',
+  });
+  const published = await pre.request<SaltResponse>('POST', HOST_ROUTES.authSalt, {
+    email: input.email,
+  });
+  const derived = await nod.session.deriveFor(input.password, published.salt, published.iterations);
+  const opened = await pre.request<TokenResponse>('POST', HOST_ROUTES.authLogin, {
+    email: input.email,
+    authKey: toBase64url(derived.authKey),
+    device: { ...DEVICE, name: 'nod-shares-test-2' },
+  });
+  await nod.session.adoptConnectedAccount({
+    personId: opened.personId,
+    email: input.email,
+    name: input.name,
+    password: input.password,
+    salt: published.salt,
+    iterations: published.iterations,
+    admin: false,
+  });
+  nod.repo.saveHost({
+    address: running.address,
+    guild: 'Nod test guild',
+    kid: running.pin.kid,
+    publicKey: running.pin.ed25519Public,
+    personId: opened.personId,
+    salt: published.salt,
+    addedAt: AT,
+  });
+  const connection = connectionFor(running, { id: opened.personId });
+  await connection.saveToken(opened.token);
+  nod.link.current = connection;
+  await nod.keys.ensure(connection);
+  return { id: opened.personId, token: opened.token };
+}
+
+/** The pair this machine holds, as `meta` records the two public halves. */
+function myPublics(nod: Nod, personId: Id): { x25519: string; ed25519: string } {
+  const raw = nod.repo.meta(`keys.public.${personId}`);
+  if (raw === null) throw new Error('this machine holds no pair');
+  return JSON.parse(raw) as { x25519: string; ed25519: string };
+}
+
+describe('one pair per person across machines (canonico §22)', () => {
+  test('a second machine adopts the host’s pair and no colleague’s pin moves', async () => {
+    const running = await startHost();
+    const admin = await adminOf(running);
+    await admin.saveRole({ id: 'team', name: 'Team', admin: false });
+    const aliceCreated = await admin.createPerson({
+      email: 'alice@nod.test',
+      name: 'Alice',
+      roles: ['team'],
+    });
+    const bobCreated = await admin.createPerson({
+      email: 'bob@nod.test',
+      name: 'Bob',
+      roles: ['team'],
+    });
+
+    const home = newNod();
+    const laptop = newNod();
+    const bobNod = newNod();
+    const alice = await joinNod(running, home, {
+      email: 'alice@nod.test',
+      name: 'Alice',
+      code: aliceCreated.code,
+      password: PASSWORD,
+    });
+    const bob = await joinNod(running, bobNod, {
+      email: 'bob@nod.test',
+      name: 'Bob',
+      code: bobCreated.code,
+      password: PASSWORD,
+    });
+
+    // The first machine published both halves: the public keys and a `bv1.` blob the host never opens.
+    const published = running.repo.ownPersonKeys(alice.id);
+    expect(published?.x25519Public).toBe(myPublics(home, alice.id).x25519);
+    expect(published?.privateSealed?.startsWith('bv1.')).toBe(true);
+
+    // RF-44/`docs/canonico.md` §22: the file holds the blob as it was handed over and not one byte of
+    // the private keys inside it — read here from the machine's own keychain value.
+    const dump = dumpHost(running.db);
+    expect(dump).toContain(published?.privateSealed ?? '');
+    const vaultKey = home.session.vaultKey();
+    if (vaultKey === null) throw new Error('the first machine is not unlocked');
+    const stored = await home.secrets.get(keysKey(alice.id));
+    if (stored === null) throw new Error('the first machine holds no sealed pair');
+    const privates = JSON.parse(
+      new TextDecoder().decode(
+        (await decryptVaultBytes(vaultKey, keysKey(alice.id), stored)) ?? new Uint8Array(),
+      ),
+    ) as { x25519: string; ed25519: string };
+    expect(dump).not.toContain(privates.x25519);
+    expect(dump).not.toContain(privates.ed25519);
+
+    // First sight: Bob pins Alice's pair after a sync, and Alice pins Bob's.
+    await syncNod(bobNod);
+    await syncNod(home);
+    const alicePin = (personId: Id) => bobNod.keys.peerKeyFor(personId);
+    expect(alicePin(alice.id)?.status).toBe('pinned');
+    const pinnedBefore = alicePin(alice.id)?.fingerprint;
+    expect(home.keys.peerKeyFor(bob.id)?.status).toBe('pinned');
+
+    // The second machine signs in with the same password: it adopts the host's pair, generating none.
+    const second = await signInNod(running, laptop, {
+      email: 'alice@nod.test',
+      name: 'Alice',
+      password: PASSWORD,
+    });
+    expect(second.id).toBe(alice.id);
+    // Both machines hold the account's pair, published and usable: the same fingerprint, `ok`.
+    const laptopKeys = await laptop.keys.mine();
+    const homeKeys = await home.keys.mine();
+    expect(laptopKeys).toEqual(homeKeys);
+    expect(laptopKeys).toEqual({ fingerprint: homeKeys.fingerprint, status: 'ok', message: null });
+    expect(myPublics(laptop, alice.id)).toEqual(myPublics(home, alice.id));
+
+    // Nothing of the host's row moved: one pair, one blob, and the same `created_at` (no reset).
+    expect(running.repo.ownPersonKeys(alice.id)).toEqual(published);
+    expect(running.repo.personKeys(alice.id)).toEqual({
+      x25519Public: published?.x25519Public ?? '',
+      ed25519Public: published?.ed25519Public ?? '',
+    });
+
+    // And no colleague sees a change: Bob syncs again and Alice's pin is the one he pinned.
+    await syncNod(laptop);
+    await syncNod(bobNod);
+    expect(alicePin(alice.id)?.status).toBe('pinned');
+    expect(alicePin(alice.id)?.fingerprint).toBe(pinnedBefore);
+    expect((await bobNod.keys.peers()).find((row) => row.personId === alice.id)?.status).toBe('pinned');
   });
 });

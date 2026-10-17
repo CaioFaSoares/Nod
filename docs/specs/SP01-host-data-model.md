@@ -18,7 +18,8 @@ SQLite through `bun:sqlite`, one file `/data/host.db`, opened with `PRAGMA journ
 
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
--- keys: schema_version, guild_name, created_at
+-- keys: schema_version; guild_icon_sha256 and guild_icon_bytes (the guild icon, SP03 §2);
+--       guild_name and created_at are still unwritten (the discovery reads NOD_GUILD_NAME, h6)
 
 CREATE TABLE people (
   id            TEXT PRIMARY KEY,                 -- uuid
@@ -142,6 +143,7 @@ CREATE TABLE person_keys (
   person_id        TEXT PRIMARY KEY REFERENCES people(id) ON DELETE CASCADE,
   x25519_public    TEXT NOT NULL,                 -- base64url raw 32 bytes
   ed25519_public   TEXT NOT NULL,                 -- base64url raw 32 bytes
+  private_sealed   TEXT,                          -- migration 3: bv1. blob, opaque ciphertext (canonico §22)
   created_at       TEXT NOT NULL                  -- replaced on reset (new activation)
 );
 
@@ -171,6 +173,7 @@ CREATE TABLE credential_holders (
   via_share_id   TEXT REFERENCES shares(id),
   since          TEXT NOT NULL,
   removed_at     TEXT,                            -- revoked from the share
+  rotated_at     TEXT,                            -- owner's new-secret signal on the owner row (RF-48)
   PRIMARY KEY (credential_id, person_id)
 );
 
@@ -191,11 +194,15 @@ opaque ciphertext.
 
 `host/migrations.ts` exports an ordered array of SQL strings; `meta.schema_version` is the count
 applied. On boot the repo applies the missing ones inside one transaction each. A migration never
-edits an earlier one. The block 1 schema is migration 1; block 2 tables are migration 2.
+edits an earlier one. The block 1 schema is migration 1; block 2 tables are migration 2;
+`person_keys.private_sealed` (one key pair per person across machines, `docs/canonico.md` §22) is
+migration 3; `credential_holders.rotated_at` (the owner's explicit rotation signal, RF-48) is
+migration 4.
 
 ## 5. Acceptance
 
 - A fresh `/data` boots, creates both key files with mode 0600, applies migrations, and reports
-  `schema_version = 1` (block 1).
+  `schema_version = 4` (block 1's migration 1, block 2's migration 2, `person_keys.private_sealed`
+  as migration 3, and `credential_holders.rotated_at` as migration 4).
 - Restarting the container keeps every row (volume at `/data`).
 - Inserting a personal entry without `owner_id`, or a grant on a personal entry, fails.

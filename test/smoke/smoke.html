@@ -10,8 +10,8 @@
       // Test page for the smoke (runtime recipe "Self-driving test page":
       // TINYJS_HTML=/abs/page.html tinyjs dev). Plain JavaScript, no bundler.
       // This file is a TEMPLATE: test/smoke/run.ts replaces its one config marker with the JSON
-      // { originA, originB, originC, exportPath } and writes the generated page to
-      // test/smoke/.gerado/smoke.html (never `.build/`, which `tinyjs dev` recreates).
+      // { nonce, originA, originB, originC, exportPath } and writes the generated page to
+      // test/smoke/.gerado/smoke-<nonce>.html (never `.build/`, which `tinyjs dev` recreates).
       // The page drives the API through the real path (tiny.api.call) and writes the result to the
       // app store (tiny.store.set), which the runner reads at <app data>/store.json.
       (async function () {
@@ -68,10 +68,12 @@
 
         async function writeResult(done, error) {
           // The runner reads this object in store.json; `done: true` ends its wait. The intermediate
-          // writes (done: false) leave the partial visible if something hangs.
+          // writes (done: false) leave the partial visible if something hangs. The nonce is the one
+          // of this launch: the runner ignores a result the previous launch left in the same file.
           try {
             await window.tiny.store.set('smoke_result', {
               done: !!done,
+              nonce: CONFIG.nonce,
               steps: steps,
               error: error || null,
             });

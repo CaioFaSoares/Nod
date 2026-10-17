@@ -134,7 +134,7 @@ sequenceDiagram
 | Action | Gate |
 | --- | --- |
 | Unlock the Nod | biometrics or password |
-| Reveal a credential | biometrics; the secret then stays visible for **a few seconds with a countdown indicator** (proposal: 10 s), and hides itself at zero. Revealing again asks again |
+| Reveal a credential | biometrics; the secret then stays visible for **a few seconds with a countdown indicator** (10 s, `src/settings.ts`), and hides itself at zero. Revealing again asks again |
 | Copy a credential | biometrics |
 | Accept an incoming share | biometrics |
 | Send, assign or re-share | biometrics |
@@ -159,6 +159,9 @@ the same user, which can read the stored `vaultKey` (E01 §7).
   - for the admin, a "members missing an assigned credential" list.
 - Events: `share.sent`, `share.accepted`, `share.declined`, `share.expired` — never with content
   (`docs/canonico.md` §13).
+  - Built: the Nod raises the first three in `backend/shares.ts` (`share.sent` also covers the
+    assignment and update fan-outs); `share.expired` is written by the host on the expiry purge — the
+    one host-originated event. `docs/handovers/share-events.md`.
 
 ## 7. Milestones
 

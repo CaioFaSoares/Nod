@@ -234,3 +234,55 @@ inbox/rotation of a holder. `execucao`.
 This file, per `docs/handovers/README.md` (one file per slice, written only by its owner: the files
 touched, the acceptance and how it was met, the command and the observation, and what was left out).
 The state of the work is not declared here; the coordinator's handover for the front carries it.
+
+## Review fixes
+
+Findings closed here: **H1**, **M4** (host half), **M5** (host half), **L7** — from
+`docs/handovers/block2-review.md`, against the owner decisions in `docs/canonico.md` §22.
+
+### Files touched
+
+| File | What changed |
+| --- | --- |
+| `shared/host-api.ts` | Additive: `HOST_ROUTES.credentialScope` (`PUT /v1/credentials/:id/scope`) and `CredentialScopeRequest { scope: ShareScope }`. |
+| `host/repo.ts` | `createShares` rewritten around the holder rows: only a credential with no row writes the owner row, `send`/`assign` require a live holder and the credential's `toolId`, the allowed scope comes from the owner row (narrower only; `blocked` refuses all), self-shares, a sender who cannot see the tool and shares to a revoked person are refused. `setCredentialScope` writes the scope to every holder row. `answerShare` clears `removed_at` only for a share from the owner or an admin. `missingCopies` treats any holder row — removed included — as "not missing". |
+| `host/routes/shares.ts` | `PUT /v1/credentials/:id/scope` (`204`, `403 not yours`, `404 unknown credential`) and the body schema. `items` is `minItems: 1` / `maxItems: 500`; `sealed` is capped at 64 KB. |
+| `host/shares.test.ts` | The H1 attack end to end over HTTP, the scope route and derivation, revoked sender/recipient/accept semantics, missing-list suppression, self-share, sender visibility and oversized bodies. One existing assertion moved from `tool not visible to recipient` to `tool not visible to sender`, and the recipient half now uses its own credential (a known credential cannot change tool). |
+| `docs/specs/SP03-host-api.md` | §1 statuses and §3's route table: the scope route, the `POST /v1/shares` preconditions, `409 credential belongs to another tool`. |
+| `docs/specs/SP06-credential-sharing.md` | §4 send/revoke and §5 scope: owner row as the scope reference, `blocked` reachable, revoked holder rules, missing-list suppression, batch/copy bounds. |
+
+### Finding → fix → test
+
+| Finding | Fix | Test (`bun test host/shares.test.ts`) |
+| --- | --- | --- |
+| H1 | A credential with holder rows accepts `send`/`assign` only from a live holder; `toolId` must equal the rows' `tool_id` (409); only zero rows write the owner row, once; `items` has `minItems: 1`. | `a member who knows the credential id cannot become a second owner (H1)` — Bob's forged send is `403 not a holder`, `items: []` is `400`, a tool swap is `409`, one owner row remains. |
+| M4 | `PUT /v1/credentials/:id/scope` updates every holder row; `createShares` reads `blocked` and the scope breadth from the owner row; a wider body scope is 403. | `the owner sets the holder scope through the route, and every share derives it (M4)` — 403/401/404, wider refused, admin widens, org send passes, `blocked` refuses all. |
+| M5 | Removed sender is refused; a share to a removed person needs the owner or an admin; accept preserves `removed_at` unless the share came from the owner/admin; `missingCopies` excludes any holder row. | `a revoked holder cannot send, and only the owner re-adds one (M5)` and `a revoked holder of an assigned role leaves the missing list (M5)`. |
+| L7 | Self-share 403, sender without the grant 403, `items` 1–500, `sealed` ≤ 64 KB. | `refuses a self-share, a sender who cannot see the tool, and oversized bodies (L7)` plus the updated visibility test. |
+
+### Command and result
+
+`bun test host/shares.test.ts` → `26 pass, 0 fail, 806 expect() calls` (`execucao`). No typecheck,
+whole suite, formatter or smoke was run (phase rule).
+
+### Open
+
+- None for this slice's findings. The admin half of M5's exemption is covered by `sender.admin` in
+  `createShares`; it is not exercised by a separate test because an admin can only send once they
+  are a live holder, and the owner path already covers the same accept behaviour.
+
+### Follow-up: `Holder.toolId` (M7)
+
+`Holder` in `shared/host-api.ts` gained `toolId: Id`. `host/repo.ts` selects
+`credential_holders.tool_id` in `HOLDER_COLUMNS` and maps it into every `HolderRecord`, so both the
+signed snapshot's `holders` and `GET /v1/credentials/:id/holders` carry it. `backend/holders.ts`
+(`readHolder` + the one-line precedence in `buildCredentialHolders`) now reads the row's `toolId` as
+the primary source and keeps `source.toolOf(credentialId) ?? credentialId` as the fallback for a
+snapshot cached before the field; a holder cached without it still lists under the local lookup.
+
+Test doubles updated with `toolId` (`test/rotation.test.ts`, `test/shares.test.ts`,
+`test/holders.test.ts`), and `host/shares.test.ts` asserts `toolId: TOOL` on the snapshot's holder
+rows and on the holders route.
+
+Command: `bun test host/shares.test.ts test/holders.test.ts` → `34 pass, 0 fail, 823 expect() calls`
+(`execucao`).

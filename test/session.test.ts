@@ -8,9 +8,10 @@ import { createRepo } from '../backend/repo';
 import { createSession } from '../backend/session';
 import { createVault } from '../backend/vault';
 import { HostError } from '../backend/host-client';
+import { keysKey } from '../backend/keys';
 import { deriveKeys, hashInviteCode, hashPassword, passwordCheck } from '../shared/auth';
 import { fromBase64url, toBase64url } from '../shared/encoding';
-import { VAULT_VALUE_PREFIX, decryptVaultValue } from '../shared/vault-crypto';
+import { VAULT_VALUE_PREFIX, decryptVaultBytes, decryptVaultValue, encryptVaultBytes } from '../shared/vault-crypto';
 import { memorySqlite } from './helpers/sqlite-bun';
 import type { PasswordHashV2 } from '../shared/auth';
 import type { PasswordChangeRequest } from '../shared/host-api';
@@ -514,6 +515,39 @@ describe('changePassword', () => {
     // Changing the password does not touch the keychain: the vault item is still there.
     expect(await vault.read(id, 'kanban')).toEqual({ username: 'ana', secret: 'kanban-secret' });
     expect(eventTypes(s)).toContain('password_changed');
+  });
+
+  test('the E02 pair of this machine moves in the same batch, under the new `vaultKey` (M1)', async () => {
+    const s = scene();
+    const id = await firstAccount(s);
+    await s.session.unlock({ email: EMAIL, password: PASSWORD });
+    const before = keysOf(s);
+    // The keychain value `backend/keys.ts` writes: a `bv1.` value under `nod.keys.<person>` whose AAD
+    // is the same string (SP06 §2), carrying the two PKCS#8 private halves.
+    const aad = keysKey(id);
+    const halves = new TextEncoder().encode(JSON.stringify({ x25519: 'pkcs8-x', ed25519: 'pkcs8-ed' }));
+    await s.keychain.set(aad, await encryptVaultBytes(fromBase64url(before.vaultKey), aad, halves));
+
+    await s.session.changePassword(PASSWORD, NEW_PASSWORD);
+
+    const after = keysOf(s);
+    expect(after.vaultKey).not.toBe(before.vaultKey);
+    const stored = s.secrets.get(aad) ?? '';
+    // Written with the vault items, in the one batch that runs before the verifier moves: the pair
+    // opens with the new key, so a failure after it (the host's blob is all that is left to publish)
+    // no longer leaves the machine unable to read its own pair.
+    expect(await decryptVaultBytes(fromBase64url(after.vaultKey), aad, stored)).toEqual(halves);
+    expect(await decryptVaultBytes(fromBase64url(before.vaultKey), aad, stored)).toBeNull();
+  });
+
+  test('a value of the batch the keychain does not hold is skipped, not fatal (M1)', async () => {
+    const s = scene();
+    await firstAccount(s);
+
+    // A machine that never ran `ensure`: there is no pair item at all, and the password change has
+    // to go through regardless (the same is true of a value neither key opens — `keys.reSeal` is
+    // what reports that, not this batch).
+    expect(await messageOf(() => s.session.changePassword(PASSWORD, NEW_PASSWORD))).toBe('did not throw');
   });
 
   test('a wrong current password, a short new password and a locked session are refused', async () => {
@@ -1665,6 +1699,31 @@ describe('adopting a local account (F1)', () => {
     off();
     await adoptConnected(s, { email: 'other@guild.test', personId: 'host-person-2' });
     expect(events).toHaveLength(1);
+  });
+
+  test('an access-code activation reports a key reset even when no vault was wiped (K1)', async () => {
+    const s = scene();
+    const events: { personId: string; reset: boolean }[] = [];
+    const off = s.session.onActivated((event) => {
+      events.push({ personId: event.personId, reset: event.reset });
+    });
+
+    // No `wipeVault` here: this machine never held the account, so there was nothing to wipe. The
+    // activation still chose a fresh salt (SP02 §7), so the account's `vaultKey` moved and K1 must
+    // regenerate the E02 pair — `reset: true` is what the subscriber (`backend/main.ts` →
+    // `keys.ensure`) acts on. Without it the machine keeps a pair sealed under the old key and the
+    // host holds a blob nothing can open (`keys unavailable — sign in again`, forever).
+    await adoptConnected(s, { activation: true });
+    expect(events).toEqual([{ personId: HOST_PERSON_ID, reset: true }]);
+
+    // A password sign-in is not an activation: without a wipe the pair is the account's and stays,
+    // so no reset is reported.
+    await adoptConnected(s, { email: 'other@guild.test', personId: 'host-person-2' });
+    expect(events).toEqual([
+      { personId: HOST_PERSON_ID, reset: true },
+      { personId: 'host-person-2', reset: false },
+    ]);
+    off();
   });
 
   test('a keychain that refuses the new key leaves the old item where it is (F1)', async () => {

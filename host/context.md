@@ -5,7 +5,8 @@ tools and favorites, events, and (block 2) relayed credential shares. Optional: 
 host works exactly as before (`docs/epics/E01-connected-mode.md` §5).
 
 Status: **block 1 complete** (milestone "Block 1 — One guild, synced", 2026-10-16; commit
-`6af9e64`); **block 2's mine and shared landed** (H7, O1's person side, O2). `main.ts` boots on env
+`6af9e64`); **block 2 complete** (mine and shared: H7, O1 and O2, and the host side of E02 —
+K1/K3, K7, K8 and K9 — with migrations 2, 3 and 4). `main.ts` boots on env
 data (`config.ts`), creates the data dir and both key files
 (`keys.ts`), opens `bun:sqlite`, applies the ordered migrations (`migrations.ts` — migration 1 holds
 every block 1 table of SP01 §2), builds the Elysia app (`app.ts`), serves it and runs the backup
@@ -28,7 +29,7 @@ for itself; `snapshot.ts` builds the discovery document and the signed snapshot.
 holders and assignments, SP06) **has landed** — the Nod side of those stories is `backend/`'s and
 `src/`'s. Handovers: `docs/handovers/h1.md`, `h2.md`, `h4.md`,
 `h5.md`, `h6.md`, `h8.md`, `h9.md`, `i2h-guild-icon-host.md`, `h7-o1-o2-host.md`,
-`k3-host-shares.md`.
+`k3-host-shares.md`, `k8-assign.md`, `k1-k2-keys.md` (the key-sync half).
 
 ## Stack (decided 2026-10-16)
 
@@ -45,7 +46,7 @@ is never imported at runtime and never ships in the image. One process, one SQLi
 | `app.ts` | Elysia routes; the repo and the auth service of the process; auth levels; error mapping; body limit | SP03 |
 | `config.ts` | Environment → `HostConfig` (data dir, public URL, port, dev) and to `AppMeta` (minimum app version, update manifest URL — the one value discovery and `/v1/meta/app` share) | SP07 §1–§2, SP03 §3 |
 | `repo.ts` | The **only** module touching `bun:sqlite` (besides the connection in `migrations.ts`): every block 1 and block 2 query, every rule SP01 §2 keeps out of SQL, the share rules of SP06 §4–§5, and every read of personal data filtered by owner | SP01, SP03 §2–§3 |
-| `migrations.ts` | Ordered SQL migrations — 1 holds every block 1 table of SP01 §2, **2 every block 2 table of SP01 §3**; opens the connection at boot and applies them (queries belong to `repo.ts`) | SP01 §1, §3–§4 |
+| `migrations.ts` | Ordered SQL migrations — 1 holds every block 1 table of SP01 §2, **2 every block 2 table of SP01 §3**, **3 `person_keys.private_sealed` (canonico §22)**, **4 `credential_holders.rotated_at` (the owner's rotation signal, RF-48)**; opens the connection at boot and applies them (queries belong to `repo.ts`) | SP01 §1, §3–§4 |
 | `auth.ts` | The auth service: argon2id over `authKey`, real or fake salt, session tokens, the rate limits, and the `personAuth`/`adminAuth` guards | SP02, SP03 §1 |
 | `routes/auth.ts` | The auth routes: `salt`, `activate`, `setup`, `login` (public) and `logout`, `password` (person) | SP02, SP03 §2 |
 | `routes/admin.ts` | The admin group: people, their access codes and sessions, roles, grants, org tools, the one-time bootstrap and the event list; every route behind `adminAuth` (mounts `personAuth` first) | SP01 §2, SP02 §3, SP03 §2 |
@@ -56,7 +57,7 @@ is never imported at runtime and never ships in the image. One process, one SQLi
 | `routes/guild.ts` | `GET /v1/guild/icon` (person): the guild PNG byte for byte, `ETag: "<sha256>"`, `404` without one | SP03 §2 |
 | `routes/person.ts` | The person group: `/v1/sessions` and `/v1/sessions/:id` (own only), `/v1/personal/tools/:id`, `/v1/personal/views/:id`, `/v1/favorites`; every route behind `personAuth`, every `updatedAt` the Nod's | SP01 §2, SP03 §2, SP04 §4 |
 | `routes/meta.ts` | `GET /v1/meta/app` (public): the minimum app version the discovery repeats and the update manifest URL, or `null` | SP03 §3 |
-| `routes/shares.ts` | Block 2's person group: `PUT /v1/keys`, `POST /v1/shares` (one sealed copy per item), the `accept` and `decline` of a share, `GET /v1/credentials/:id/holders` and `DELETE /v1/credentials/:id/holders/:personId`; every route behind `personAuth` | SP03 §3, SP06 |
+| `routes/shares.ts` | Block 2's person group: `PUT /v1/keys` (the public halves and the sealed `privateSealed` blob, canonico §22), `GET /v1/keys/private` (the caller's own pair, blob included), `POST /v1/shares` (one sealed copy per item), the `accept` and `decline` of a share, `GET /v1/credentials/:id/holders`, `DELETE /v1/credentials/:id/holders/:personId` and `POST /v1/credentials/:id/rotated` (the owner's new-secret signal, RF-48); every route behind `personAuth` | SP03 §3, SP06 |
 | `routes/assignments.ts` | Block 2's admin group: `PUT /v1/admin/assignments` and `GET /v1/admin/assignments/missing`; behind `personAuth` + `adminAuth`, for the reason above | SP03 §3, SP06 §4 |
 | `snapshot.ts` | The discovery document, the fingerprint; per-person snapshot, version, `guildIcon`, the block 2 fields (`people`, `incomingShares`, `holders`, `rotationPending`), Ed25519 signature | SP04 §1–§2 |
 | `keys.ts` | Signing key and host secret files | SP01 §1 |
@@ -138,11 +139,27 @@ is never imported at runtime and never ships in the image. One process, one SQLi
   and `blocked` refuses the whole request — as does a credential whose owner holder row is blocked.
   Only an admin assigns (`kind: 'assign'`) and only the credential's owner holder updates
   (`kind: 'update'`, to current non-removed holders).
+- **An assignment is not a member-to-member share (K8).** For `kind: 'assign'` the `role` scope of
+  SP06 §5 drops its "a role in common with the sender" rule — the admin who assigns a credential to
+  `team` is not in `team` — and the rule that applies instead is the membership of an assigned role:
+  a recipient of a credential with an assignment row has to be a member of one of the assigned
+  roles (`403 not a member of an assigned role`), while a credential with no assignment row at all
+  is the direct person assignment and carries the scope of the request. The grant and the
+  `org` → `member` rules hold for every kind, and `blocked` still never travels.
+- **The missing-copy list is derived from the holder rows**, one line per member of an assigned role
+  who has keys, is not the assigner and has no live holder row (`missingCopies`, RF-47); a `client`
+  of E04 is left out, the way SP06 §5 refuses them an `org` share. The list clears when the member
+  **accepts** their copy — an unaccepted share is not a holder row yet.
 - **The sender becomes the owner holder** on the first share of a credential, and the holder rows
   are what the host derives everything else from: `GET /v1/credentials/:id/holders` and
   `Snapshot.holders` (a holder or an admin; an admin sees every credential), and
   `Snapshot.rotationPending` — the credential ids the owner revoked somebody from and has not
-  re-sealed since (an `update` share clears it). The owner row is not removable (409).
+  re-sealed since. A save clears it two ways: the `update` share from the owner, or the explicit
+  `POST /v1/credentials/:id/rotated` signal (`credential_holders.rotated_at`, migration 4) that
+  also covers the revocation of the **last** non-owner holder, where the fan-out has no recipient
+  (RF-48). The owner row is not removable (409). The Nod's side of this is K9
+  (`docs/handovers/k9-rotation.md`): the Vault tab's `Remove` on a holder row, the `rotation
+  pending` chip, and the owner's save fanning the `update` out and sending the signal.
 - **The block 2 fields of `Snapshot` are inside the signed bytes**: the roster with public keys, the
   open shares addressed to the caller, the holders of what the caller holds, and what must rotate
   (SP04 §2). They are optional in the type so a Nod still reads an older host's body.

@@ -33,6 +33,14 @@ const MEMBER_EMAIL = 'bob@nod.test';
 const PERSONAL_ID = 'p-abc1234567';
 const HOUR_MS = 3_600_000;
 
+/**
+ * A share of `docs/canonico.md` §22 for the F2 case: the credential id a Nod chooses and an opaque
+ * stand-in for its sealed body — base64url of the alphabet only, like `shared/seal.ts` writes, since
+ * the host never looks inside it (SP06 §3).
+ */
+const SHARED_CREDENTIAL = '55555555-5555-4555-8555-555555555555';
+const SEALED = toBase64url(new TextEncoder().encode('sealed-body-stand-in'));
+
 /** What a test needs from an app: Elysia's answer to one `Request`. */
 type HttpApp = { handle(request: Request): Promise<Response> };
 
@@ -112,6 +120,8 @@ async function body<T>(response: Response): Promise<T> {
 
 const randomSalt = (): string => toBase64url(crypto.getRandomValues(new Uint8Array(16)));
 const randomAuthKey = (): string => toBase64url(crypto.getRandomValues(new Uint8Array(32)));
+/** SP06 §2: the raw 32 bytes of a public key, in base64url — the shape `authKey` already has. */
+const randomPublicKey = (): string => toBase64url(crypto.getRandomValues(new Uint8Array(32)));
 const instant = (): string => new Date().toISOString();
 
 /** SP02 §3: a code the host would issue, seeded through the real repo (the admin route is H5's). */
@@ -679,6 +689,66 @@ describe('org tools', () => {
     const again = await remove(host, HOST_ROUTES.adminTool.replace(':id', 'kanban'), admin.token);
     expect(again.status).toBe(404);
     expect(await body<ErrorResponse>(again)).toEqual({ error: 'unknown tool' });
+  });
+
+  test('DELETE refuses a tool a share still names, and removes an unshared one (F2)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+    await put(
+      host,
+      HOST_ROUTES.adminRole.replace(':id', 'team'),
+      { name: 'Team', admin: false },
+      admin.token,
+    );
+    await put(
+      host,
+      HOST_ROUTES.adminTool.replace(':id', 'kanban'),
+      tool('kanban', { roles: ['team'] }),
+      admin.token,
+    );
+    // A member of the granted role with keys, and one real share over the real route: that row is
+    // what keeps the tool alive for the child reference of `shares.tool_id`.
+    const person = await createPerson(host, admin.token, { roles: ['team'] });
+    const member = await activate(host, MEMBER_EMAIL, person.code);
+    expect(
+      (
+        await put(
+          host,
+          HOST_ROUTES.keys,
+          { x25519Public: randomPublicKey(), ed25519Public: randomPublicKey() },
+          member.token,
+        )
+      ).status,
+    ).toBe(204);
+    const sent = await post(
+      host,
+      HOST_ROUTES.shares,
+      {
+        credentialId: SHARED_CREDENTIAL,
+        toolId: 'kanban',
+        scope: 'org',
+        kind: 'send',
+        items: [{ to: person.personId, sealed: SEALED }],
+      },
+      admin.token,
+    );
+    expect(sent.status).toBe(200);
+
+    // F2: the bare parent delete would abort on the FK — `shares.tool_id` carries no `ON DELETE`, on
+    // purpose — leaving the route to answer `500 internal error`. It refuses with `409` instead, and
+    // the tool is still there, in the catalog and in the table.
+    const refused = await remove(host, HOST_ROUTES.adminTool.replace(':id', 'kanban'), admin.token);
+    expect(refused.status).toBe(409);
+    expect(await body<ErrorResponse>(refused)).toEqual({
+      error: 'a shared credential keeps the tool',
+    });
+    expect(host.repo.listOrgTools().map((saved) => saved.id)).toEqual(['kanban']);
+
+    // A tool no share names still goes: the refusal is the row, not the route.
+    await put(host, HOST_ROUTES.adminTool.replace(':id', 'jitsi'), tool('jitsi'), admin.token);
+    const removed = await remove(host, HOST_ROUTES.adminTool.replace(':id', 'jitsi'), admin.token);
+    expect(removed.status).toBe(204);
+    expect(host.repo.listOrgTools().map((saved) => saved.id)).toEqual(['kanban']);
   });
 
   test('promote copies the admin`s personal tool to the org, and the owner keeps theirs', async () => {

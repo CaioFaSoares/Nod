@@ -179,15 +179,15 @@ smoke (the coordinator's, at the end of the phase).
    promotion of a pending pair moves `confirmed_at` to the confirmation and `first_seen` to when the
    new pair first appeared (`pending_since`), because that is when the machine met the key it now
    trusts.
-4. **Two machines of one account fight over one pair, and this slice re-publishes the local one.**
-   SP06 §2 has one pair per account, generated at activation and again after a reset; it says nothing
-   about a second machine signing in. This slice's rule (from the assignment): a machine whose stored
-   private halves belong to this account re-publishes them when the snapshot's own entry differs —
-   which is what makes `ensure` after an applied snapshot meaningful. The consequence is real and
-   worth the coordinator's eye: the last machine to sync owns the account's pair, and shares sealed
-   to the previous one stop opening on the machine that published it (the `invalid share` decline of
-   SP06 §3, which E02 §3 already answers with a re-send). A per-device pair, or a rule that the first
-   publisher keeps the account's, are spec decisions.
+4. **Two machines of one account fight over one pair — resolved by the owner.** This slice made the
+   machine whose stored private halves belong to the account re-publish them when the snapshot's own
+   entry differs, so the last machine to sync owned the pair and shares sealed to the previous one
+   stopped opening (the `invalid share` decline of SP06 §3). The owner decided the opposite rule
+   (`docs/canonico.md` §22, 2026-10-17): the first machine to activate publishes its private pair as
+   a `bv1.` blob beside the public keys, and every other machine of that person adopts it instead of
+   generating a competitor. `backend/keys.ts` no longer re-publishes a local pair the host does not
+   hold; the implementation and its evidence are in the "Key sync" section at the end of this file,
+   and SP06 §2 carries the rule.
 5. **The public halves live in `meta.keys.public.<person>`, the private ones in the keychain.**
    SP06 §2 only says where the privates go; the assignment allows either the same keychain JSON or
    `meta`. `meta` was taken because the opener needs its own x25519 **public** key besides the
@@ -237,9 +237,11 @@ smoke (the coordinator's, at the end of the phase).
   `meta.keys.public.<person>` (or `mine()`, which answers the fingerprint only) — K4 will want a
   named read for it too.
 - **K9/K10**: the `share.*` events are still nobody's, and nothing of this slice raises one.
-- **Coordinator**: findings 1 (the four extra columns), 4 (two machines, one pair) and 10
-  (`bond.keys` vs `nod.keys`) are the ones that need a spec answer; s0's finding stands that
-  `docs/arquitetura.md` §3/§4 have no entry for `shared/seal.ts` (and now none for `backend/keys.ts`).
+- **Coordinator**: findings 1 (the four extra columns) and 10 (`bond.keys` vs `nod.keys`) are the
+  ones that still need a spec answer; finding 4 (two machines, one pair) was decided by the owner
+  (`docs/canonico.md` §22) and implemented — see the "Key sync" section at the end of this file. s0's
+  finding stands that `docs/arquitetura.md` §3/§4 have no entry for `shared/seal.ts` (and none for
+  `backend/keys.ts`).
 
 ## What was left out
 
@@ -252,11 +254,244 @@ smoke (the coordinator's, at the end of the phase).
   either smoke covers a key pair or a pin, so the `people`/`peer_keys` half of K1–K2 has only the
   unit and probe evidence above.
 - **`bun run typecheck`, the repo-wide `bun test`, formatters and linters**: the coordinator's.
-- **`docs/specs/SP06-credential-sharing.md` and `docs/arquitetura.md`**: not edited; findings 1, 4
-  and 10 above and s0's entry finding are reported instead.
+- **`docs/arquitetura.md`**: not edited; s0's entry finding is reported instead. (SP06 §2, SP01 §3–§4
+  and SP03 §3 were edited by the "Key sync" work at the end of this file; findings 1 and 10 above
+  still await a spec answer.)
 
 ## Where the evidence lands
 
 This file, per `docs/handovers/README.md` (one file per slice, written only by its owner: the files
 touched, the acceptance and how it was met, the command and the observation, and what was left out).
 The state of #29 and #30 is the GitHub issues; this file closes nothing and decides no spec.
+
+---
+
+## Key sync — one pair per person across machines (`docs/canonico.md` §22, Decidido 2026-10-17)
+
+The owner's decision after finding 4 above: the **first machine to activate publishes its private
+pair to the host** as a `bv1.` blob (`privateSealed`) beside the public keys, and **every other
+machine of the same person downloads and opens it** instead of generating a pair of its own. The
+host stores only ciphertext; a reset replaces both halves; a password change re-seals the blob.
+
+### Files touched
+
+| File | What changed |
+| --- | --- |
+| `host/migrations.ts` | **Migration 3**: `ALTER TABLE person_keys ADD COLUMN private_sealed TEXT` (nullable; entry 2 is untouched). A fresh `/data` reports `schema_version = 3`. |
+| `host/repo.ts` | `OwnPersonKeys` (`PersonKeys` + `privateSealed`); `savePersonKeys(personId, keys, privateSealed, now)` with the two rules of the decision (new public keys replace the row and its `created_at`; the same ones move `private_sealed` alone, a `null` blob keeping what is stored); `ownPersonKeys(personId)` — the only read that carries the blob. `personKeys`/`keysByPerson` (the roster and the sender's lookup) stay public-only. |
+| `host/routes/shares.ts` | `PUT /v1/keys` body gains `privateSealed?` (schema `^bv1\.[A-Za-z0-9_-]+$`, opaque like `sealed`); new `GET /v1/keys/private` → the caller's own `OwnKeys`, `404` without a row, never another person's. |
+| `shared/host-api.ts` | `HOST_ROUTES.keysPrivate`; `PublicKeys.privateSealed?`; `OwnKeys`. |
+| `backend/host-client.ts` | `HostConnection.getOwnKeys()` → `OwnKeys \| null` (`null` on the host's `404`, every other refusal still throws); `readOwnKeys` shape check. |
+| `backend/keys.ts` | `privateKeysAad(personId)` = `nod.keys.private/v1\|<person>`; `KeyPair`/`BlobFields`; `localPair`, `generatePair`, `storePair`, `publicKeysOf`, `sealBlob`, `openBlob`, `adoptBlob`, `report`, `publish`; `ensure` rewritten to the five cases below; **`reSeal(previousVaultKey, connection)`** for the password change; a `meta` mark `keys.pending.<person>` for a pair generated while the host could not be asked. |
+| `backend/main.ts` | The `session.changePassword` handler reads `session.vaultKey()` before the call and runs `keys.reSeal(previous, keysConnection())` after it. |
+| `host/shares.test.ts` | `PUT /v1/keys` stores the blob byte for byte and the roster never carries it; the new `GET /v1/keys/private` describe (own row, `404`, `401`, never another person's). |
+| `host/health.test.ts`, `host/repo.test.ts` | `schema_version` 2 → **3**, the `private_sealed` column, and a v2→v3 test keeping a published pair. |
+| `test/keys.test.ts` | Harness: the host's own row (`getOwnKeys`/`setHostKeys`) and `forgetLocal`; the blob format pinned by the test itself (`hostBlob`); cases (a)–(e) and both `reSeal` outcomes. |
+| `test/shares.test.ts` | The two-machine end-to-end over the **real** host app, client, session and `backend/keys.ts`: machine 1 publishes, machine 2 signs in and adopts, Bob's pin of Alice never moves. |
+| `test/sync.test.ts` | The scripted `HostConnection` gained `getOwnKeys` (the interface has a new member). |
+| `docs/specs/SP06-credential-sharing.md` §2, `SP01-host-data-model.md` §3/§4, `SP03-host-api.md` §3 | The rule, the column, the migration, the two routes. |
+
+### `ensure` — the five cases
+
+1. **(a) Local pair = the host's publics**: the host's blob is uploaded when it lacks one (the repair
+   for a row published before migration 3); otherwise nothing is written.
+2. **(b) No usable local pair**: `GET /v1/keys/private`; a blob this `vaultKey` opens *and* whose
+   public halves are the host's is decrypted, stored (keychain + `meta`) and nothing is published; a
+   `404` (or a row whose blob is `null`) means this machine makes the pair and publishes both halves.
+3. **(c) Local pair ≠ the host's publics, not a reset**: nothing is re-published (this is what stops
+   the fight of finding 4); the host's blob is opened and adopted, replacing the local pair.
+4. **(d) `regenerate` (the activation event's reset)**: the host's blob is adopted when it opens with
+   this `vaultKey` — that is another machine's reset having published the new pair, and adopting it is
+   what keeps the two machines from fighting; otherwise a fresh pair is generated and replaces both
+   halves on the host. A pair generated while the connection was `null` (the `host` row does not exist
+   yet at the activation hook, or the O2 gate is closed) is marked `keys.pending.<person>`, and the
+   next `ensure` publishes *it* instead of adopting the pair the reset replaced.
+5. **(e) The blob does not open** (the password moved elsewhere and this machine still holds the old
+   `vaultKey`): nothing is written and no pair is generated — the answer is
+   `keys unavailable — sign in again` in `KeyStatus.error`, the status the UI shows. A machine with no
+   keys of its own is refused the same way, which is what "never a competing pair" means.
+
+`reSeal(previousVaultKey, connection)` opens the keychain value with the key the session held before
+the change, stores it again under the new one and publishes the re-sealed blob. The public keys never
+move, so no colleague's pin goes `changed`; a value the old key does not open is left exactly as it is
+and reported the same way as (e).
+
+### Commands run and observed
+
+```
+$ bun test test/keys.test.ts            35 pass  0 fail  (178 expect() calls)
+$ bun test test/shares.test.ts          28 pass  0 fail  (127 expect() calls)
+$ bun test test/sync.test.ts            41 pass  0 fail  (213 expect() calls)
+$ bun test host/shares.test.ts          20 pass  0 fail  (603 expect() calls)
+$ bun test host/repo.test.ts            26 pass  0 fail  (265 expect() calls)
+$ bun test host/health.test.ts           7 pass  0 fail
+```
+
+### Open findings
+
+1. **`ensure` reads `GET /v1/keys/private` on every call that has a connection** — it is the only way
+   to know whether the host holds the blob, and it is what makes case (a) repair a legacy row. The
+   call happens on an unlock and on every snapshot that moved, so it is one extra small GET per
+   changed snapshot. A `meta` flag ("this machine published a blob") would remove it from the steady
+   state at the cost of a second source of truth; not done here.
+2. **The activation path passes `reset: false` for an access-code activation of a person who already
+   has keys on the host** (`session.announceActivated` reports `reset` only when this machine's vault
+   was wiped). That machine's fresh pair then meets a host blob sealed under the previous salt, which
+   does not open: case (c) reports `keys unavailable — sign in again` until the person signs in (which
+   moves the cached salt and reports the reset). With `keys.pending.<person>` the pair is not lost:
+   the same activation's `afterUnlock` publishes it. Reported rather than changed: `session.ts` is
+   another slice's file.
+3. **A `null` blob on a row whose public keys differ is replaced by a generated pair** (case b, the
+   legacy window before any machine uploads a blob): the pair changes once and every colleague sees
+   `changed` once. Documented, not special-cased.
+4. **`KeyStatus.error` is reported but not drawn**: `keys.mine` answers the fingerprint alone, so
+   Settings → Account cannot show `keys unavailable — sign in again` yet. A UI seam (a new RPC field)
+   is a decision for the owner of `src/settings.ts`.
+
+---
+
+## Fixes — finding 2 (activation reset) and finding 4 (`keys.mine` status)
+
+Owner assignment: close the two open findings of the "Key sync" section above. Both are K1; nothing
+here changes a contract SP06 §2 pins (no spec edit — SP06 does not document the `keys.mine` shape).
+
+### Files touched
+
+| File | What changed |
+| --- | --- |
+| `backend/session.ts` | `adoptConnectedAccount` gained `activation?: boolean`; `announceActivated` gained the matching argument. `reset` is now `activation \|\| (lastWiped matched)` — an access-code activation (or the setup) always derives a fresh salt, so the pair sealed under the old `vaultKey` can never open; the wipe alone is what `host.signIn` still reports through. `ActivationEvent`/`onActivated` docs restated to "the pair must be regenerated". |
+| `backend/main.ts` | `host.activate` passes `activation: true` to `adoptConnectedAccount` (one flag covers the setup and an access-code activation). The `onActivated` comment restated. **`keys.mine`** now returns `MineKeys` unchanged from `backend/keys.ts` (no more `null`-or-`{ fingerprint }` narrowing). |
+| `backend/keys.ts` | `Keys.mine()` returns the new `MineKeys`: `localPair` (the `meta` row **and** the keychain value this `vaultKey` opens) decides the fingerprint, `pendingPublish` decides `pending`, and the two "no usable pair" answers become `unavailable` with the instruction in `message`. New `PENDING_PUBLISH` sentence. `clearPending` now runs wherever this machine adopts the host's pair, so an adopted pair can never leave the `pending` mark of a pair this machine once made. |
+| `shared/types.ts` | **`MineKeys`** = `{ fingerprint: string \| null; status: 'ok' \| 'pending' \| 'unavailable'; message: string \| null }`; `keys.mine` → `[void, MineKeys]` (was `{ fingerprint } \| null`). |
+| `src/settings.ts` | Account: `state.keys` is `MineKeys \| null`, `readOwnFingerprint` returns it, and `keyFingerprintCard()` shows the fingerprint when there is one, the `pending` note, or the `unavailable` sentence (`keys unavailable — sign in again`). |
+| `test/keys.test.ts` | `mine()` assertions moved to the new shape; `unavailable` for a value the moved `vaultKey` cannot open; `ok`/`pending`/`ok`-after-publish transitions; the "no connection" test now pins `pending`; adopting the host's pair clears a stale `pending`. |
+| `test/session.test.ts` | New test: an activation (`activation: true`) reports `reset: true` with no `wipeVault`, and a plain `adoptConnectedAccount` (a sign-in) still reports `reset: false`. |
+| `docs/handovers/k1-k2-keys.md` | This section. |
+
+### Findings 2 and 4, and how they are closed
+
+**Finding 2 — an access-code activation of a person who already had host keys left the machine with
+`keys unavailable — sign in again` forever.** `wipeResetVault` (main.ts) returns `false` whenever
+`local.id !== personId` or the vault is empty — an F1 adoption, or a machine that never held the
+account — so `announceActivated` reported `reset: false` and `keys.ensure` ran the non-regenerate
+path, hit the host's blob sealed under the old `vaultKey` and refused (case e) without generating a
+pair. The fix keeps the wipe decision (it still decides `wipedVault` in the answer and the local
+`salt` cache) out of the key decision: an activation always chooses a fresh salt
+(`randomSalt()` in `backend/main.ts`), so `activation: true` makes `reset: true` unconditionally, and
+`ensure(regenerate: true)` adopts the host's blob **when this `vaultKey` opens it** (another machine
+of the same activation already published) or generates and replaces both halves otherwise
+(`keys.pending.<person>` covers a reset whose `PUT /v1/keys` could not go out).
+
+**Finding 4 — `keys.mine` answered a fingerprint or `null`, so the card could not draw the
+instruction.** It now answers the status and the sentence, and the Account card draws
+`keys unavailable — sign in again` (unavailable) and the pending-publish note.
+
+### Acceptance — evidence
+
+| Item | How | Evidence |
+| --- | --- | --- |
+| Reset by access code replaces the pair on the host; no permanent `keys unavailable` | `activation: true` → `reset: true` → `ensure(regenerate)`; the host blob that cannot open is replaced by a fresh pair that is published (`markPending` + `PUT /v1/keys`) | `execucao` (`test/session.test.ts`: "an access-code activation reports a key reset even when no vault was wiped (K1)" — `reset: true` with no `wipeVault`; the pre-existing "a reported reset replaces the pair the key cannot open" drives the same `ensure(regenerate)` path against the host) |
+| Account card shows the key status | `keys.mine` → `MineKeys` → `keyFingerprintCard()` | `execucao` (`test/keys.test.ts`: `ok`/`pending`/`unavailable` — `pending` on the O2 gate, `ok` once the host takes the pair, `unavailable` for a value the moved `vaultKey` cannot open, a locked session and a refused keychain); `leitura` (the card branches on `status`; the page was not driven in a window — SmokeK10/coordinator) |
+
+```
+$ bun test test/keys.test.ts test/session.test.ts
+97 pass
+0 fail
+557 expect() calls
+Ran 97 tests across 2 files. [137.00ms]
+```
+
+### For other owners
+
+- **DocsK10**: no spec edit was needed (SP06 does not pin the `keys.mine` shape); the two Account
+  cards' rule in `src/context.md` / `backend/context.md` names the old fingerprint-or-null result, so
+  the module rows want the `MineKeys` status.
+- **Coordinator / SmokeK10**: the smoke's `host.activate` steps now run `ensure(regenerate: true)`
+  for a fresh activation; the outcome is the same (the pair is generated and published by the
+  `afterUnlock` that closes the join, `keys.pending.<person>` bridging the gap), and a re-activation
+  now replaces the pair instead of failing.
+
+## Review fixes — M1 and L2 (`docs/handovers/block2-review.md`)
+
+### M1 — a password change no longer leaves the host's blob sealed under the old `vaultKey`
+
+`backend/keys.ts` gained a second `meta` mark, `keys.reseal.pending.<person>`:
+
+- `Keys.beginReseal()` writes it, and `backend/main.ts`'s `session.changePassword` calls it **before**
+  the vault moves (`main.ts:1578`). The order is the point: a host that refuses the new blob leaves
+  the mark, and so does a process that dies between the change and the re-seal.
+- `publish` clears it beside `keys.pending.` once `PUT /v1/keys` lands, and an adoption clears it too
+  — an adopted blob is one the current `vaultKey` has just opened.
+- `ensure`'s branch (a) no longer stops at "the public keys match": with the mark set it republishes
+  the blob (`keys.ts:799`, the branch the review names at old `keys.ts:735`).
+- `keys.mine` answers `pending` while the mark is set, and `src/settings.ts` reads `keys.mine` again
+  right after a successful password change (`settings.ts:1821`), so Settings → Account says so
+  without a reload.
+
+Tests (`bun test test/keys.test.ts`, 40 pass): "a re-seal the host refused is repaired by the next
+ensure (M1)" — the harness gained a put-only refusal (`refusePut`) so the host keeps answering
+`GET /v1/keys/private` while refusing the write; it fails before the fix (the early return answers
+`published: false` and `mine` says `ok`) and passes after. "a pair that is in step is not republished,
+mark or no mark (M1)" pins the other side: the mark, not the code path, is what triggers it.
+
+**Open finding, same id** (closed by the follow-up section at the end of this file): the window
+*between* `session.changePassword` and `reSeal`'s local re-seal was unrecoverable, because there the
+keychain value is sealed under the old `vaultKey` and so is the host's blob. The follow-up moves that
+value into the session's own keychain batch; what follows is the state of the first fix.
+
+### L2 — `peers.confirm` is bound to the fingerprint the person read
+
+`Keys.confirm(personId, fingerprint)` refuses anything that is not the row's `pending_fingerprint`
+(`keys.ts:979`) with `the key changed since this list was drawn — check the fingerprint again`;
+`peers.confirm` takes `{ personId, fingerprint }` (`shared/types.ts`), `backend/main.ts` passes both,
+and the Confirm button sends the fingerprint it displayed (`src/settings.ts` `confirmPeer`).
+
+Tests (`test/keys.test.ts`): "confirm promotes the pending pair, and the peer is pinned again" now
+carries the shown fingerprint and expects a refusal for the same call once nothing is pending, and
+"confirm refuses a fingerprint the list is not showing (L2)" drives a third pair arriving between the
+read and the click — the call is refused, the pin table does not move, and the fingerprint the newest
+list shows is the one that goes through.
+
+Spec: SP06 §2 (pinning, the confirmation's fingerprint) and SP02 §7 (the `keys.reseal.pending` mark);
+SP02 §9 for M3, below in `k10-smoke.md`.
+
+## Review fix — M1, the residual window closed (follow-up)
+
+The open finding above is closed: the pair's keychain value no longer depends on `reSeal` running
+after the vault has moved.
+
+**The session's own batch takes it.** `reencryptVaultItems` (`backend/vault.ts`) gained a fifth
+parameter, `extra: readonly { key: string; aad: string }[]` — `bv1.` values that live under the same
+`vaultKey` but are not vault items. They are opened first, with the vault set, and written in the
+same `planned` pass, so the existing abort discipline still holds for the vault and a crash cannot
+leave one half of the batch behind. `session.changePassword` passes the E02 pair's own item
+(`{ key: keysKey(person.id), aad: keysKey(person.id) }`, `backend/session.ts:944`): that value is a
+`bv1.` envelope over the same key with the same string as its AAD (SP06 §2), so the session can move
+it without knowing what it holds. An extra value the keychain does not hold, or one neither key
+opens, is **skipped** rather than fatal: such a pair is already unusable (a reset elsewhere) and must
+not block a password change; `keys.reSeal` is what reports it.
+
+**`reSeal` now accepts a value the session already moved** (`backend/keys.ts:853`): it opens with
+`previousVaultKey`, and when that fails it opens with the key in hand — then there is no second write,
+only the publish. Before, a session that had done its job made `reSeal` answer
+`keys unavailable — sign in again` about its own work, and the blob waited for the next `ensure`.
+
+**Every window is now covered.** Death between the batch and the verifier: the old password still
+works, the host's blob (still under the old key, since nothing published) opens with it, and the next
+`ensure` adopts and re-stores — consistent again. Death after the verifier, or a host that refuses the
+blob: the value is already under the new key, `keys.mine` says `pending`, and the next `ensure`
+republishes the blob through the mark (the fix above).
+
+**Tests** (`bun test test/keys.test.ts test/session.test.ts test/vault.test.ts`, 124 pass):
+`test/session.test.ts` "the E02 pair of this machine moves in the same batch, under the new
+`vaultKey` (M1)" writes the item as `backend/keys.ts` writes it, changes the password and asserts it
+opens with the new key and no longer with the old (fails before this fix: the item stayed under the
+old key), plus "a value of the batch the keychain does not hold is skipped, not fatal (M1)" for a
+machine that never ran `ensure`. `test/keys.test.ts` "a value the session already moved is published
+without a second write (M1)" puts the harness in exactly that state (`resealLocal`), refuses the
+host's write and asserts the error is the **host's** (`could not reach the host`; pre-fix it was
+`keys unavailable — sign in again`), that the keychain value is byte-identical afterwards (no second
+re-seal), that `mine` is `pending`, and that the next `ensure` publishes the blob and turns it `ok`.
+
+Files: `backend/vault.ts`, `backend/session.ts`, `backend/keys.ts`, `test/session.test.ts`,
+`test/keys.test.ts`, SP02 §7, `backend/context.md` (session.ts and vault.ts rows).

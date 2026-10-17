@@ -27,6 +27,7 @@ import {
   plainVaultCredential,
 } from '../shared/vault-crypto';
 import { HostError } from './host-client';
+import { keysKey } from './keys';
 import { reencryptVaultItems } from './vault';
 import type { DerivedKeys, PasswordHashV2 } from '../shared/auth';
 import type { PasswordChangeRequest } from '../shared/host-api';
@@ -120,7 +121,9 @@ export type JoinGate<T> =
 /**
  * SP02 §7/V1: what `Session.onActivated` hands a subscriber once an activation — or the reset that
  * an activation over an existing local account is — has written the row and the session holds the
- * new keys. `reset` is true when this Nod's vault of the person was just wiped.
+ * new keys. `reset` is true when the E02 key pair must be regenerated: this Nod's vault of the
+ * person was just wiped, **or** the adoption is an access-code activation (which always derives a
+ * fresh `vaultKey`, K1). Either way the subscriber (`backend/main.ts`) regenerates the pair.
  */
 export interface ActivationEvent {
   personId: Id;
@@ -155,6 +158,13 @@ export interface Session {
     admin: boolean;
     /** F1: the local person (`JoinGate.local`) this host person replaces, if any. */
     adoptLocalId?: Id;
+    /**
+     * SP02 §7/K1: this adoption is an **access-code activation** (or the setup of the first admin),
+     * which always chooses a fresh salt — so the account's `vaultKey` moved and the E02 key pair
+     * must be regenerated even when no local vault was wiped (an F1 adoption, a machine that never
+     * held the account). A password sign-in leaves it `false`: there the wipe is the only reset.
+     */
+    activation?: boolean;
   }): Promise<SessionState>;
   /**
    * F1, F3, F7: the local half of a join, in the one order the rules need. Everything this machine
@@ -192,9 +202,9 @@ export interface Session {
    */
   keys(): { authKey: Uint8Array | null; vaultKey: Uint8Array } | null;
   /**
-   * SP02 §7/V1: registers a callback that runs after an activation — and after the reset that an
-   * activation of an existing local account is, `reset: true` — once the session holds the new
-   * keys. The `vaultKey` is the one the adoption derived; `session.vaultKey()` returns it too.
+   * SP02 §7/V1: registers a callback that runs after an activation — and after the key reset an
+   * access-code activation always is, `reset: true` — once the session holds the new keys. The
+   * `vaultKey` is the one the adoption derived; `session.vaultKey()` returns it too.
    * Returns a function that removes the callback. Callbacks run in registration order and are
    * awaited; a callback that throws does not fail the activation (the row is already written) — a
    * retry is the subscriber's own, so callbacks must be idempotent.
@@ -397,8 +407,16 @@ export function createSession(deps: SessionDeps): Session {
     personId: Id,
     key: Uint8Array<ArrayBuffer>,
     replaced: Id | null,
+    activation: boolean,
   ): Promise<void> {
-    const reset = lastWiped !== null && (lastWiped === personId || lastWiped === replaced);
+    // SP02 §7/K1: an activation always chooses a fresh salt, so the account's `vaultKey` moved and
+    // any E02 pair sealed under the old one — this machine's value, or the host's blob — is
+    // unreadable. The pair must be regenerated even when no local vault was wiped (an F1 adoption,
+    // a machine that never held the account): the wipe alone would leave the machine holding keys
+    // nothing can open (`keys unavailable — sign in again`, forever). A password sign-in keeps the
+    // wipe as the only signal.
+    const reset =
+      activation || (lastWiped !== null && (lastWiped === personId || lastWiped === replaced));
     lastWiped = null;
     for (const cb of [...activated]) {
       try {
@@ -676,6 +694,7 @@ export function createSession(deps: SessionDeps): Session {
     iterations: number;
     admin: boolean;
     adoptLocalId?: Id;
+    activation?: boolean;
   }): Promise<SessionState> {
     const email = p.email.trim().toLowerCase();
     if (!email.includes('@')) throw new Error(INVALID_EMAIL);
@@ -730,7 +749,7 @@ export function createSession(deps: SessionDeps): Session {
     currentVaultKey = keys.vaultKey;
     // SP02 §7/V1: the row and the session are the host person's now; a subscriber that had to wait
     // for the keys (K1 regenerates the E02 pairs here) runs before the caller is answered.
-    await announceActivated(person.id, keys.vaultKey, adopt);
+    await announceActivated(person.id, keys.vaultKey, adopt, p.activation === true);
     return state();
   }
 
@@ -928,6 +947,11 @@ export function createSession(deps: SessionDeps): Session {
       person.id,
       previousVaultKey,
       newKeys.vaultKey,
+      // M1/SP02 §7: the E02 pair's keychain value (`backend/keys.ts`, `nod.keys.<person>`, AAD = the
+      // same string) is a `bv1.` value under this very key, so it moves in the same batch: a crash
+      // after it can no longer leave the pair sealed under a key nothing holds. What is left for
+      // `keys.reSeal` afterwards is the host's blob, which its own mark makes republishable.
+      [{ key: keysKey(person.id), aad: keysKey(person.id) }],
     );
     const biometric = await deps.keychain.get(biometricKey(person.id));
     if (biometric !== null && !(await deps.keychain.set(biometricKey(person.id), toBase64url(newKeys.vaultKey)))) {

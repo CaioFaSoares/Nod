@@ -26,6 +26,8 @@ dist-ssr
 # Nod: privado ou gerado
 resources/seed.json
 resources/icon.png
+# build-mode stamp: `dev` or `build`, written by `scripts/gen-config.ts` (SP02 §9)
+resources/build-mode
 .nod-icon.png
 tinyjs.json
 .build

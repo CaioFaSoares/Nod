@@ -202,3 +202,89 @@ were closed here:
 - **Coordinator — RF-40's scope**: decide whether a local-mode *personal* row (see "What was left
   out") is also offered on a join. It is the one local tool the current definition leaves out, and it
   needs its own rule (the id cannot be reused through `personal.saveTool`).
+
+---
+
+## Fixes (HandoffFix, 2026-10-17) — the two divergences b8b left open, plus the orphan keychain item
+
+This section is additive: it closes finding 1 and finding 4 of the "What was left out" list above and
+the orphan-keychain finding, without changing what the slice above already stated. Same rules: English
+(RNF-08), no project gate run here (no `bun run typecheck`, no whole `bun test test/`, no formatter, no
+linter, no smoke). What ran are the files this fix touched (`bun test`, allowed by the mandate). Nothing
+added here holds a secret.
+
+### Files touched
+
+| File | What changed |
+| --- | --- |
+| `shared/host-merge.ts` | `leftoverLocalTools(local, orgTools, personalTools = [])`: the pure rule now takes the person's local rows of both scopes. An `org` row is a leftover when its normalized address matches no snapshot org tool (unchanged); a `personal` row is a leftover unless the snapshot's personal half already carries its **id** (a personal tool's identity is its id). |
+| `backend/personal.ts` | `ownedTool` falls back to the local `tool` row while connected, so a local `personal` row (hidden from the snapshot catalog) is recognised; `adoptLocalTool` reuses a personal row's own `p-…` id (fresh id otherwise) and copies its views out of the meta table (`localViews`), not from the row. |
+| `backend/main.ts` | `leftoverTools()` now passes every local row (org, plus the person's own personal rows) and the snapshot's `personalTools` to the pure rule; the five personal writes are in `HOST_WRITES`; `hostWriteRefused(method, updateRequired)` is extracted from `guarded()` and exported; `host.adoptLocalAsPersonal` re-keys the vault rows only when the id actually moved. |
+| `backend/vault.ts` | `save` reads the index row before the write and, when its `keychain_key` differs from the canonical key, deletes the stale keychain item after the new value landed. |
+| `src/settings.ts` | The "Keep your local tools" card's copy now says the personal tools added on this machine are included. |
+| `test/host-handoff.test.ts` | 3 new cases: a personal row not in the snapshot is a leftover; a personal row the snapshot carries by id is not; org + personal leftovers in the local order. |
+| `test/personal.test.ts` | 2 new cases for adoption (id + views survive Add host → Remove host with keep-personal, exactly one local row; a personal row whose id is not a `p-…` gets a fresh one) and 1 for the O2 gate. |
+| `test/vault.test.ts` | 1 new case: re-saving a re-keyed credential writes the canonical keychain key and leaves no orphan. |
+| `docs/handovers/b8b.md` | This section. |
+
+### Acceptance — how each item was met
+
+1. **Every pre-existing local tool survives Add host and Remove host with keep-personal, no duplicates.**
+   - *Pure rule* (`execucao`, `test/host-handoff.test.ts`): a local `personal` row is a leftover until
+     the snapshot's personal half holds its id, and the org rule is unchanged.
+   - *Adoption round trip* (`execucao`, `test/personal.test.ts`): a local personal row keeps its id and
+     its views; after the join handler drops the local row and `host.remove(keepPersonal)` runs
+     `adoptSnapshot` over the snapshot + outbox, exactly one local row of that tool remains.
+   - *Id reuse* is why there is no duplicate: the row is published under its own id, so the snapshot's
+     copy and the materialized local row are the same id (an org leftover still moves to a fresh id
+     and its `vault_item` rows are re-keyed).
+2. **Personal writes refused while update-required in connected mode; local mode unaffected.**
+   - The five methods are in `HOST_WRITES`; the gate refuses them through the exported
+     `hostWriteRefused(method, requiresUpdate())` (`execucao`, the new `test/personal.test.ts` case
+     pins the table + both halves).
+   - `requiresUpdate()` is `false` while no `host` row exists (`backend/sync.ts`'s `updateRequiredNow`,
+     already covered by `test/sync.test.ts`), so adding the methods unconditionally never stops a
+     local-only Nod — the second argument of `hostWriteRefused` is that state.
+3. **Re-saving a re-keyed credential leaves no orphan keychain item.** `execucao`,
+   `test/vault.test.ts`: after the re-key the index row still points at `nod.cred.<person>.<oldId>`; a
+   re-save writes `nod.cred.<person>.<newId>` (bv1 AAD = canonical key) and deletes the old item, so
+   the keychain holds one value.
+
+### Decisions
+
+1. **The personal-row leftover is keyed by id, the org-row one by address.** Two ids that match are
+   the same personal tool (the host's `p-…` is globally unique); the org comparison stays origin +
+   path, as above. Mixed lists keep the input order, so the card and the handler read the same rows.
+2. **`hostWriteRefused` is exported from `backend/main.ts`.** The `HOST_WRITES` gate could not be
+   unit-tested before: `backend/main.ts` imports the `tjs:sqlite` built-in, so a test has to stub that
+   module. The predicate takes the two decisions as data (`method`, `updateRequired`), so the test
+   pins the real table without booting the runtime. `guarded()` calls the same predicate, so the test
+   exercises the gate and not a copy of it.
+3. **The vault clean-up is ordered after the new value lands.** `previous` is read before the seal;
+   the stale item is deleted only once `keychain.set` accepted, so a refused or locked save never
+   destroys the credential that is still in place.
+4. **No schema bump.** The local tables are untouched; `user_version` stays 5.
+
+### Commands run and observed results
+
+```
+$ bun test test/host-handoff.test.ts test/personal.test.ts test/vault.test.ts
+  56 pass, 0 fail
+
+$ bun test test/host-merge.test.ts test/connected-catalog.test.ts
+  26 pass, 0 fail
+```
+
+Not run, by the mandate: `bun run typecheck`, the whole `bun test test/`, the formatter, the linter and
+the smoke. `src/settings.ts`'s card copy was not executed (a string change), and the `backend/main.ts`
+wiring is `leitura` of the handlers and the gate; the exported predicate is the one exercised.
+
+### For other owners
+
+- **Coordinator — `docs/canonico.md` §15 open question 4 / RF-40's scope** (the closing note above):
+  the local personal row is now offered and kept, so RF-40's "every pre-existing local tool" holds for
+  both scopes.
+- **Vault (V1 / VaultFinish)**: `backend/vault.ts` now owns the re-key clean-up; the
+  `repo.rekeyVaultTool` naming quirk is retired on the next re-save. No `backend/session.ts` change.
+- **B11 (#22)**: the smoke phase can observe "a personal tool added before the join is still in the
+  sidebar after the join and after Remove host".

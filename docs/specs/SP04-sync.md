@@ -92,6 +92,11 @@ exactly that value; a `null` deletes the cached file and the icon falls back to 
   - "Sync now";
   - after any admin write.
 - **Order**: flush the outbox (§4), push events (§5), then `GET /v1/state`.
+- **Version gate (O2)**: the run reads `GET /v1/meta/app` first; while this Nod is older than
+  `minAppVersion` it pushes nothing — no outbox, no events and no snapshot read — and every method
+  that writes to the host is refused (`backend/sync.ts`, `HOST_WRITES` in `backend/main.ts`). The
+  state stays `connected` (the host answered) and the Nod keeps working from cache read-only; a host
+  that lowers its minimum, or an upgraded and restarted app, resumes the writes on the next run.
 - **Network failure**: the state goes **stale**; the cache stays in use; Settings → Hosts shows the
   last success time. Retry with backoff of 30 s, 1 min, 2 min, then the normal 5 min.
 - **401 on a valid-looking token** (revoked or expired): clear the token, drop org data from the

@@ -17,7 +17,9 @@
 import { originOf } from '../shared/catalog';
 import { exportVault, importVault } from '../shared/vault-export';
 import {
+  decryptVaultBytes,
   decryptVaultValue,
+  encryptVaultBytes,
   encryptVaultValue,
   isSealedVaultValue,
   plainVaultCredential,
@@ -47,6 +49,13 @@ export interface VaultDeps {
   vaultKey?: () => Uint8Array<ArrayBuffer> | null;
   /** PBKDF2 iterations of the export (§3). The tests pass 1000; default: the pure module's own. */
   iterations?: number;
+  /**
+   * K9/SP06 §4: the one sharing call-out of this file. After `save` stored a new value it asks
+   * this for what the credential's holders have to say — the owner's edit has to reach them as an
+   * `update`. It answers a warning to show with the item, or `null`. The call-out is best-effort:
+   * a throw leaves the save standing, because the value is already in the keychain and the index.
+   */
+  afterSave?: (personId: Id, item: VaultItem) => Promise<string | null>;
 }
 
 /** What `createVault` returns (§4). Declared apart so the contract has a name of its own. */
@@ -128,6 +137,11 @@ export function createVault(deps: VaultDeps): Vault {
 
     const label = p.label === undefined || p.label.trim().length === 0 ? p.toolId : p.label;
     const keychainKey = key(personId, p.toolId);
+    // B8b's fix: `repo.rekeyVaultTool` moves a credential's index row to a new tool id but keeps the
+    // `keychain_key` it was sealed under, so a re-save — which writes the canonical key — would leave
+    // that item orphaned in the keychain. The old row is read before the write and its value dropped
+    // once the new one landed (bv1's AAD is the canonical key, so the two never share a slot).
+    const previous = deps.repo.vaultItem(personId, p.toolId);
     // SP02 §8: sealed before the keychain sees it, with the keychain key as AAD. A locked session
     // and a value over the keychain limit both refuse here, with nothing written on either side.
     const value = await encryptVaultValue(requireVaultKey(), keychainKey, {
@@ -136,8 +150,11 @@ export function createVault(deps: VaultDeps): Vault {
     });
     const stored = await deps.keychain.set(keychainKey, value);
     if (!stored) throw new Error(KEYCHAIN_REFUSED);
+    if (previous !== null && previous.keychainKey !== keychainKey) {
+      await deps.keychain.delete(previous.keychainKey);
+    }
 
-    return deps.repo.saveVaultItem({
+    const item = deps.repo.saveVaultItem({
       personId,
       toolId: p.toolId,
       label,
@@ -147,6 +164,15 @@ export function createVault(deps: VaultDeps): Vault {
       credentialId: p.credentialId,
       scope: p.scope,
     });
+    // K9/SP06 §4: the value is stored — the call-out can only add a warning, never undo the save.
+    if (deps.afterSave === undefined) return item;
+    let warning: string | null = null;
+    try {
+      warning = await deps.afterSave(personId, item);
+    } catch {
+      warning = null;
+    }
+    return warning === null ? item : { ...item, updateWarning: warning };
   }
 
   async function read(
@@ -272,12 +298,20 @@ export function createVault(deps: VaultDeps): Vault {
  * A value that already opens with `to` was re-sealed by an interrupted earlier run and is accepted
  * as it is: the operation is safe to repeat. Values the keychain lost are skipped; plaintext values
  * are sealed under the new key.
+ *
+ * `extra` are `bv1.` values that live under the same `vaultKey` but are not vault items — today the
+ * E02 key pair of `backend/keys.ts`, held under `nod.keys.<person>` with the same string as its AAD
+ * (M1). They ride in this same batch, opened first and written with it, so no crash can leave the
+ * pair under a key nothing holds. One of them that neither key opens is **skipped** rather than
+ * fatal: such a pair is already unusable (a reset elsewhere) and must not block a password change —
+ * `keys.reSeal` is what reports it to the person afterwards.
  */
 export async function reencryptVaultItems(
   deps: { repo: Repo; keychain: SecretStore },
   personId: Id,
   from: Uint8Array<ArrayBuffer> | null,
   to: Uint8Array<ArrayBuffer>,
+  extra: readonly { key: string; aad: string }[] = [],
 ): Promise<number> {
   const planned: { key: string; value: string }[] = [];
   for (const item of deps.repo.listVault(personId)) {
@@ -296,6 +330,15 @@ export async function reencryptVaultItems(
       key: item.keychainKey,
       value: await encryptVaultValue(to, item.keychainKey, credential),
     });
+  }
+  for (const item of extra) {
+    const raw = await deps.keychain.get(item.key);
+    if (raw === null) continue;
+    const bytes =
+      (from === null ? null : await decryptVaultBytes(from, item.aad, raw)) ??
+      (await decryptVaultBytes(to, item.aad, raw));
+    if (bytes === null) continue;
+    planned.push({ key: item.key, value: await encryptVaultBytes(to, item.aad, bytes) });
   }
   for (const item of planned) {
     if (!(await deps.keychain.set(item.key, item.value))) throw new Error(KEYCHAIN_REFUSED);

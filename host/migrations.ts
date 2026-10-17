@@ -1,8 +1,10 @@
 // Ordered SQL migrations and the connection they run on (SP01 §4).
 //
 // `migrations[i]` is version `i + 1`; `meta.schema_version` holds the count already applied. A
-// released migration is never edited — block 2 tables (SP01 §3) arrive as a new entry, not as a
-// change to an existing one. H2 appends the block 1 tables (`people`, `sessions`, `access_codes`,
+// released migration is never edited — block 2 tables (SP01 §3) arrived as entry 2, and the
+// `person_keys.private_sealed` column of the one-pair-per-person rule (`docs/canonico.md` §22) as
+// entry 3, and the `credential_holders.rotated_at` column of the explicit rotation signal (RF-48)
+// as entry 4. H2 appends the block 1 tables (`people`, `sessions`, `access_codes`,
 // `roles`, `person_roles`, `entries`, `views`, `grants`, `favorites`, `events`) to migration 1 while
 // block 1 is unreleased, so a fresh `/data` still reports `schema_version = 1` (SP01 §5).
 
@@ -170,6 +172,27 @@ CREATE TABLE assignments (                        -- admin assigned a credential
   created_at     TEXT NOT NULL,
   PRIMARY KEY (credential_id, role_id)
 );
+`,
+
+  // 3 — one key pair per person across machines (`docs/canonico.md` §22, SP06 §2). The first machine
+  // to activate seals its private halves under its `vaultKey` as a `bv1.` value and publishes it
+  // beside the public keys, so every other machine of that person adopts the pair instead of
+  // generating a competing one. The column is opaque ciphertext like `shares.sealed`: the host
+  // stores it and hands it back to its owner, and it never opens it. Nullable on purpose — a row
+  // written before this migration carries public keys only, and the owner's next unlock uploads the
+  // blob. A reset replaces the value together with the two public keys.
+  `
+ALTER TABLE person_keys ADD COLUMN private_sealed TEXT;
+`,
+
+  // 4 — RF-48 (`docs/handovers/k10-smoke.md` finding 1): the explicit rotation signal. Revoking the
+  // last non-owner holder leaves the owner nobody to fan an `update` share out to, so their save
+  // cannot clear the credential's `rotationPending` through a share. The owner row records the
+  // instant they saved a new secret (`POST /v1/credentials/:id/rotated`), and `rotationPending`
+  // reads it beside the latest `update` share. Nullable: a credential nobody rotated never sets it,
+  // and the column is opaque bookkeeping — no value of a body is stored here.
+  `
+ALTER TABLE credential_holders ADD COLUMN rotated_at TEXT;
 `,
 ];
 

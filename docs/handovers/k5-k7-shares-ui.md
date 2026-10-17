@@ -166,3 +166,101 @@ whoever runs the smoke (or the coordinator) once SharesCore's backend half is in
 This file, per `docs/handovers/README.md`: the files touched, the acceptance and how it was met, the
 command and the observation (`execucao` for the transpile only, `leitura` for the rest), and what
 was left out. The state of the slice is not declared here; the coordinator's handover carries it.
+
+---
+
+## Review fixes
+
+Owner: **UIAdmin** (the page and the admin's holders list). Findings closed: **M7** and **L5** of
+`docs/handovers/block2-review.md`. Contracts followed: `docs/specs/SP06-credential-sharing.md` §4
+(the holders, RF-54), `docs/specs/SP02-auth-and-keys.md` §9 (the ten-second reveal), SP05 §4 (the
+Vault screen), `docs/arquitetura.md` §5 (the page talks to the backend only), `AGENTS.md`,
+`src/context.md`; the coordination contract that fixed `holders.list` and
+`CredentialHolders`. Nothing here carries a secret: the only secret the page holds is the revealed
+value, and the countdown now takes it off the screen by a wall-clock deadline.
+
+### M7 — the admin could not see the holders of credentials they do not hold
+
+**Cause.** The host already put `holders` for every credential of the guild inside an admin's signed
+snapshot (`host/snapshot.ts`, `heldCredentials(me.id, me.admin)`), but the only readers were
+`backend/shares.ts`'s `decorate`/`holdersOf` over the admin's own vault items. No RPC and no view
+existed for the rest.
+
+**Fix.**
+- `backend/holders.ts` (new, pure): `buildCredentialHolders` turns the verified snapshot's `holders`
+  map into `CredentialHolders[]` — one row per credential, the display names taken from
+  `Snapshot.people` (a name the roster does not carry stays as the host sent it), the holders ordered
+  owner first, live next, revoked last (each group in the host's own order), and the tool resolved
+  through two injected lookups. Rows that are not `Holder`s are dropped, and a credential left with
+  no valid row is dropped whole.
+- `backend/main.ts`: `'holders.list'` (in `ADMIN_ONLY`, not a `HOST_WRITES` method — it is a read),
+  and `credentialHolders()`, which assembles the two lookups from what this Nod knows: the person's
+  vault rows (`vault_item.credential_id → tool_id`), `Snapshot.incomingShares`, and
+  `shares.missing()`; the title comes from `catalogEntryOf` (the effective catalog). A credential
+  none of those names is still listed, under its own id with `toolTitle: null`, so no holder row is
+  lost.
+- `shared/types.ts`: `CredentialHolders` and the `'holders.list': [void, CredentialHolders[]]`
+  contract line.
+- `src/settings.ts`: state `credentialHolders`, read with the Vault tab for an admin while a guild
+  answers; a "Credential holders" card (`role="region"`, heading, one group per credential: title
+  or credential id, then each holder `Name` · `owner` chip · `Scope · since YYYY-MM-DD` · `revoked`
+  chip). Read-only, every value a text node, no `innerHTML`, no keyboard-only interaction. The card
+  refreshes on the `host` push through the Vault tab's existing `load()`.
+- `test/holders.test.ts` (new, 8 tests): one row per credential with roster names and catalog titles;
+  fallback to the host-sent name; owner-first/live/revoked ordering with date and scope; the
+  credential-id fallback with `toolTitle: null`; a tool the catalog does not carry; no snapshot /
+  no holders / empty rows; malformed rows and a credential left empty; two credentials of one tool.
+
+**Test (`execucao`).**
+
+```
+$ bun test test/holders.test.ts
+ 8 pass
+ 0 fail
+ 17 expect() calls
+Ran 8 tests across 1 file. [79.00ms]
+```
+
+**Dependency for another owner.** The signed body names a credential but not its tool (`Holder`
+carries no `toolId`, and the contract fixed `Snapshot.holders` as it is; NodShares confirmed it).
+The Nod therefore names the tool for the credentials it holds, saw in `incomingShares`, or that
+appear in `assignments.missing`; a member-to-member credential is listed under its own id with
+`toolTitle: null`. A host that adds `credential_holders.tool_id` to `holdersOf`/`Holder` would make
+every title real without a change to the builder — the fallback is the one line in
+`credentialHolders()`.
+
+### L5 — the reveal countdown was page-timer based
+
+**Cause.** `src/settings.ts` stored `left: 10` and decremented it once per `setInterval` tick. A
+hidden window's timers are throttled (`backend/context.md`, `docs/tinyjs.md` §3), so the secret
+could stay in the DOM well past ten seconds.
+
+**Fix.** `state.revealed` now carries `expiresAt: Date.now() + 10_000`; each tick compares the wall
+clock against it, clears at `remaining <= 0`, and rewrites only the counter with
+`Math.ceil(remaining / 1000)`; the first render's text derives from the same deadline. A
+`visibilitychange` listener clears the revealed secret (and re-renders) the moment the page becomes
+`hidden`, and is removed on `destroy()`. `hideRevealed()` still stops the timer and nulls the state,
+so the secret is out of the DOM and out of the page's variables at zero, on hide, on a lock, and on
+leaving the tab.
+
+No DOM harness exists for `src/` (same limitation as the original slice); the fix is `leitura` and
+was not executed in a browser. The math and the event wiring are the whole change; the smoke's
+reveal step, run by the coordinator, is the surface check.
+
+### Files touched
+
+- `backend/holders.ts` — new pure builder.
+- `backend/main.ts` — `CredentialHolders`/`Snapshot` imports, `snapshotBody()`,
+  `credentialHolders()`, the `holders.list` handler and its `ADMIN_ONLY` row.
+- `shared/types.ts` — `CredentialHolders`; `holders.list` in `ApiContract`.
+- `src/settings.ts` — the holders state and card; the deadline-based countdown and the
+  `visibilitychange` listener.
+- `test/holders.test.ts` — new.
+- `docs/specs/SP06-credential-sharing.md` §4 and §6, `docs/specs/SP02-auth-and-keys.md` §9,
+  `docs/specs/SP05-nod-connected.md` §4 — the spec lines the two behaviors moved.
+- `docs/handovers/k5-k7-shares-ui.md` — this section.
+
+Not touched: `backend/shares.ts`, `backend/host-client.ts`, `host/**`, `test/shares.test.ts`,
+`test/rotation.test.ts`, `test/assign.test.ts` (NodShares/ShareAuthz). The whole suite, the
+typecheck, the formatter and the smoke were not run (coordinator's).
+

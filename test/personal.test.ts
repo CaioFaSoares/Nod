@@ -1,6 +1,6 @@
 // B7: the pure overlay of SP05 §2 (`shared/host-merge.ts`'s `applyOutbox`, `attachPersonalViews`) and
 // the local/connected personal layer of `backend/personal.ts` (SP05 §2–§4) against a real SQLite.
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, mock, test } from 'bun:test';
 import { createRepo } from '../backend/repo';
 import { createPersonal, generatePersonalToolId, PERSONAL_TOOL_ID } from '../backend/personal';
 import { applyOutbox, attachPersonalViews } from '../shared/host-merge';
@@ -472,5 +472,95 @@ describe('adoptLocalTool (RF-40, B8b)', () => {
     expect(h.repo.rekeyVaultTool('notes', saved.id)).toBe(1);
     expect(h.repo.vaultItem(h.person.id, saved.id)?.keychainKey).toBe('nod.cred.p.notes');
     expect(h.repo.vaultItem(h.person.id, 'notes')).toBeNull();
+  });
+});
+
+describe('adoptLocalTool for a local personal row (RF-40 fix)', () => {
+  /** A snapshot with an empty personal half: the local personal row is not the guild's yet. */
+  const EMPTY_SNAPSHOT = JSON.stringify({
+    api: 1,
+    version: 'v1',
+    issuedAt: '2026-10-15T10:00:00.000Z',
+    me: { id: 'p1', email: 'p@example.test', name: 'P', roles: ['admin'], admin: true, kind: 'member' },
+    roles: [],
+    orgTools: [],
+    personalTools: [],
+    personalViews: [],
+    favorites: [],
+    guildIcon: null,
+  });
+
+  test('keeps its id and views through Add host and Remove host with keep-personal', () => {
+    const h = harness('local');
+    const saved = h.personal.saveTool({ title: 'Notes', url: 'https://notes.example.test/app' });
+    h.personal.saveView({
+      entryId: saved.id,
+      label: 'Inbox',
+      url: 'https://notes.example.test/inbox',
+      mode: 'navigate',
+    });
+
+    // Add host: the local personal row is hidden by the snapshot's catalog (SP05 §2), yet published.
+    h.connected(true);
+    const adopted = h.personal.adoptLocalTool(h.repo.entry(saved.id)!, null);
+    expect(adopted.id).toBe(saved.id);
+    const ops = h.repo.listOutbox();
+    expect(ops.filter((o) => o.path === HOST_ROUTES.personalTool.replace(':id', saved.id))).toHaveLength(1);
+    expect(ops.filter((o) => o.path.startsWith('/v1/personal/views/'))).toHaveLength(1);
+
+    // The join handler drops the local row: the tool is the guild's now (no duplicate).
+    h.repo.removeEntry(saved.id);
+    expect(h.repo.entry(saved.id)).toBeNull();
+
+    // Remove host with keep-personal materializes the personal half (snapshot + outbox overlay).
+    h.personal.adoptSnapshot(EMPTY_SNAPSHOT, h.person.id, true, ops);
+    const rows = h.repo.listEntries().filter((e) => e.url === 'https://notes.example.test/app');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(saved.id);
+    const catalog = h.personal.localCatalog(h.person).find((e) => e.id === saved.id);
+    expect(catalog?.views.map((v) => v.label)).toEqual(['Inbox']);
+  });
+
+  test('a local personal row whose id is not a `p-…` gets a fresh one', () => {
+    const h = harness('connected');
+    h.connected(true);
+    const local = entry('mine-1', {
+      scope: 'personal',
+      ownerId: h.person.id,
+      url: 'https://mine.example.test/app',
+    });
+    h.repo.saveEntry(local);
+    const adopted = h.personal.adoptLocalTool(local, null);
+    expect(adopted.id).toMatch(PERSONAL_TOOL_ID);
+    expect(adopted.id).not.toBe('mine-1');
+    const tool = h.repo.listOutbox().filter((o) => o.path.startsWith('/v1/personal/tools/'));
+    expect(tool).toHaveLength(1);
+    expect(tool[0].path).toBe(HOST_ROUTES.personalTool.replace(':id', adopted.id));
+  });
+});
+
+describe('the O2 gate on the personal writes (B8b)', () => {
+  test('an outdated connected Nod refuses them; a local one is never stopped', async () => {
+    // `backend/main.ts` reads the `tjs:sqlite` built-in at import time, which only exists in the
+    // runtime. A static import would resolve before this stub — the dynamic import is the loading
+    // boundary the test has to cross; the gate itself never touches SQLite.
+    mock.module('tjs:sqlite', () => ({ Database: class {} }));
+    const { hostWriteRefused } = await import('../backend/main');
+    const writes = [
+      'personal.saveTool',
+      'personal.removeTool',
+      'personal.saveView',
+      'personal.removeView',
+      'favorites.set',
+    ] as const;
+    for (const method of writes) {
+      expect(hostWriteRefused(method, true)).toBe(true);
+      // No `host` row means `requiresUpdate()` is false (`backend/sync.ts`'s `updateRequiredNow`),
+      // which is the second half: local mode is never stopped by this gate.
+      expect(hostWriteRefused(method, false)).toBe(false);
+    }
+    // A write the host holds nothing of stays out of the table.
+    expect(hostWriteRefused('vault.save', true)).toBe(false);
+    expect(hostWriteRefused('catalog.importFromFile', true)).toBe(false);
   });
 });

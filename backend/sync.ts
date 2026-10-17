@@ -73,6 +73,17 @@ export interface SyncDeps {
   onState: (state: HostState) => void;
   /** Once per session that ends on a `401`: the app asks for sign-in (SP04 §3, RF-39). */
   onSignedOut: () => void;
+  /**
+   * K8/SP06 §4, RF-47: one read per run that reached the host — the admin's missing-copy list,
+   * which `backend/shares.ts` keeps in memory. Best effort by contract: it never throws, and a Nod
+   * that is not an admin leaves it undefined so no call is made.
+   */
+  refreshAssignments?: () => Promise<void>;
+  /**
+   * K8: how many members that read found, for `host.state`. Undefined — a member's Nod, or a build
+   * wired without it — leaves the field out of the state altogether.
+   */
+  missingCopies?: () => number;
   setInterval: (run: () => void, ms: number) => unknown;
   clearInterval: (handle: unknown) => void;
 }
@@ -307,6 +318,10 @@ export function createSync(deps: SyncDeps): Sync {
     } catch (error) {
       return failed(connection, record, error);
     }
+    // K8/RF-47: an admin's Nod reads the members still without an assigned copy on every run that
+    // reached the host, so the next `host.state` carries a fresh count. Best effort: the read never
+    // fails the run (`refreshAssignments` swallows its own failure).
+    await deps.refreshAssignments?.();
     // The state of a run whose events did not go up is the stale one of SP04 §3, after the snapshot
     // it did receive: the person sees that their activity is behind without losing the catalog.
     if (refused !== null) return failed(connection, record, refused);
@@ -577,6 +592,9 @@ export function createSync(deps: SyncDeps): Sync {
       lastSyncAt: record === null ? null : record.lastSyncAt,
       lastError: record === null ? null : record.lastError,
       pendingWrites: repo.listOutbox().length,
+      // K8/RF-47: the count of the last missing-copy read. The field is absent for a Nod wired
+      // without the read (a member, or the sync of a test), which the page reads as zero.
+      ...(deps.missingCopies === undefined ? {} : { missingCopies: deps.missingCopies() }),
       // O2: without a `host` row there is no guild to be too old for, and no minimum to show.
       updateRequired: updateRequiredNow(),
       minAppVersion: record === null ? null : minAppVersion,

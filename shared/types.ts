@@ -148,6 +148,12 @@ export interface VaultItem {
   rotationPending: boolean;
   /** K7/RF-54: who holds a copy, from the host's snapshot; `[]` without a host. */
   holders: Holder[];
+  /**
+   * K9/SP06 §4: what the update fan-out of a save had to say — a holder whose key changed was
+   * skipped, or the host could not be reached and the update waits for the next sync. Present only
+   * on the item `vault.save` answered; absent (undefined) from every list and read.
+   */
+  updateWarning?: string | null;
 }
 
 /**
@@ -182,6 +188,40 @@ export interface InboxShare {
   kind: ShareKind;
   createdAt: string;
   expiresAt: string;
+}
+
+/**
+ * K8/SP06 §4, RF-47: one row of the admin's missing-copy list, as `assignments.missing` answers it —
+ * a member of an assigned role whose Nod the admin has not sealed a copy to yet. The host carries
+ * `{ credentialId, toolId, roleId, personId }`; the name the page shows, the tool's title and the
+ * state of the member's key on this machine come from the verified snapshot and the pin table.
+ */
+export interface MissingCopyView {
+  credentialId: string;
+  toolId: Id;
+  /** Title of the tool in this Nod's catalog, or null when it is not there. */
+  toolTitle: string | null;
+  /** The role the credential was assigned to; the row exists only for a role assignment. */
+  roleId: Id;
+  personId: Id;
+  personName: string;
+  /** K2/RF-45: `changed` and `unknown` are the members `sealMissing` has to skip. */
+  keyStatus: 'pinned' | 'changed' | 'unknown';
+}
+
+/**
+ * M7/SP06 §4, RF-54: one row of the admin's holders list (`holders.list`), built from the verified
+ * snapshot's `holders`. The admin sees every credential of the guild, held or not; `toolTitle` is
+ * null when this Nod cannot name the tool — the credential then stands under `toolId`, which the
+ * builder sets to the credential's own id.
+ */
+export interface CredentialHolders {
+  credentialId: string;
+  toolId: Id;
+  /** Title of the tool in this Nod's catalog, or null when it cannot be named. */
+  toolTitle: string | null;
+  /** Owner first, then the live holders, then the revoked ones (SP06 §4). */
+  holders: Holder[];
 }
 
 /** An item as it goes into the optional encrypted export (RF-28). */
@@ -224,7 +264,17 @@ export type EventType =
    * excepted). Not one of canonico §13's kinds: it exists only in connected mode. `docs/handovers/c1.md`
    * (decision 5) left the member for this slice.
    */
-  | 'sync.rejected';
+  | 'sync.rejected'
+  /**
+   * E02 §6, canonico §13: one audit event per share action, never carrying content — no username,
+   * secret, label or sealed body (RF-44). `share.sent` covers a person's send, an admin's assignment
+   * and an owner's update; `share.expired` is written by the host when the expiry purge clears a copy
+   * (`docs/handovers/share-events.md`).
+   */
+  | 'share.sent'
+  | 'share.accepted'
+  | 'share.declined'
+  | 'share.expired';
 
 /** Result of the login cascade (canonico §8, §11). */
 export type LoginResult = 'session' | 'filled' | 'provider' | 'manual' | 'failed';
@@ -373,6 +423,12 @@ export interface HostState {
   /** Writes waiting in the outbox (SP04 §4). */
   pendingWrites: number;
   /**
+   * K8/SP06 §4, admin only: how many members of an assigned role the last sync saw without a copy
+   * of a credential the admin assigned. Absent for a member, a Nod without a host, or a host this
+   * build is too old for; the Vault tab says "N members missing a copy" from it, `0` when absent.
+   */
+  missingCopies?: number;
+  /**
    * O2/SP04 §1: the host serves a `minAppVersion` newer than this Nod, so nothing is pushed to the
    * guild and no write reaches it — the cache keeps the Nod readable (`backend/sync.ts`), and the
    * main window shows the notice that asks for the update. False without a host.
@@ -402,6 +458,24 @@ export interface PeerKey {
   status: 'pinned' | 'changed' | 'unknown';
   firstSeen: string | null;
   confirmedAt: string | null;
+}
+
+/**
+ * K1/SP06 §2: this machine's own E02 key pair as Settings → Account shows it (`keys.mine`).
+ *
+ * `fingerprint` is the digest of the two public keys, or `null` while there is no pair to read.
+ * `status` is what the card tells the person: `ok` when a usable pair is in place, `pending` when
+ * the host has not taken everything this machine owes it — a pair it made and never published (the
+ * O2 gate, a reset while the host was unreachable), or the blob a password change left sealed under
+ * the old `vaultKey` (M1). Either way it goes out at the next `ensure`. `unavailable` is the pair
+ * that cannot be used and needs the person to act. `message` is the sentence to show for
+ * `pending`/`unavailable` (`keys unavailable — sign in again`, SP02 §7), `null` while `status` is
+ * `ok`. No key material ever crosses this method — a fingerprint is a digest of two public keys.
+ */
+export interface MineKeys {
+  fingerprint: string | null;
+  status: 'ok' | 'pending' | 'unavailable';
+  message: string | null;
 }
 
 /**
@@ -460,6 +534,19 @@ export interface AppInfo {
   gateOrigins: string[];
   /** a tray icon exists, so closing the main window hides it instead of quitting */
   tray: boolean;
+  /**
+   * K5/SP02 §9: this machine reports the `authenticate` capability, so a gated action runs the
+   * operating system's prompt (`app.authenticate`) and no password has to be typed. This is the
+   * machine's own answer, not the per-person shortcut of `SessionState.biometric`.
+   */
+  biometricAvailable: boolean;
+  /**
+   * SP02 §9/`docs/canonico.md` §22: this is a non-release dev run (`tinyjs dev`), where the gate
+   * also accepts the account password on a machine that has `authenticate` — the path the
+   * unattended smoke uses. Always `false` in a release build, so the page may only offer the
+   * password field in a dev run.
+   */
+  devRun: boolean;
 }
 
 export interface UpdateInfo {
@@ -584,12 +671,12 @@ export interface ApiContract {
   'people.revokeSession': [{ id: Id }, true];
 
   /**
-   * K1/SP06 §2: the fingerprint of this person's own E02 key pair, or `null` while this machine
-   * holds none — a local account, or a connected one whose pair is not generated yet. The private
-   * halves never cross this method: what leaves is a digest of the two public keys, which is the
-   * string Settings → Account shows.
+   * K1/SP06 §2: the state of this person's own E02 key pair — the fingerprint to read out, whether
+   * it is still waiting to be published, and the sentence to show when it cannot be used. The
+   * private halves never cross this method: what leaves is a digest of the two public keys, which
+   * is the string Settings → Account shows.
    */
-  'keys.mine': [void, { fingerprint: string } | null];
+  'keys.mine': [void, MineKeys];
   /**
    * K2/SP06 §2: the guild's colleagues as this machine pinned them — the fingerprint of each and
    * whether it is the pair it was pinned with, a pair that changed under it, or no pair at all.
@@ -597,11 +684,13 @@ export interface ApiContract {
    */
   'peers.list': [void, PeerKey[]];
   /**
-   * K2/SP06 §2: the person confirmed that a changed key of a colleague is really theirs. The pair
-   * the host last published becomes the pinned one and sending to that person is allowed again.
-   * Confirming somebody with nothing pending changes nothing and still answers `true`.
+   * K2/SP06 §2: the person confirmed that a changed key of a colleague is really theirs — the pair
+   * whose `fingerprint` the list was showing, which the page passes back as it read it (L2). That
+   * pending pair becomes the pinned one and sending to that person is allowed again; a fingerprint
+   * that is not the pending one (the host published again since the read, or nothing was pending)
+   * is refused and nothing is promoted.
    */
-  'peers.confirm': [{ personId: Id }, true];
+  'peers.confirm': [{ personId: Id; fingerprint: string }, true];
 
   /**
    * B7/SP05 §3: a personal tool of this person — the entry the host stores at
@@ -702,6 +791,43 @@ export interface ApiContract {
   'shares.accept': [{ id: Id; password?: string }, VaultItem];
   /** K4: declines one share. Nothing secret is involved, so there is no gate. */
   'shares.decline': [{ id: Id }, true];
+  /**
+   * K9/SP06 §4: the owner (or an admin) revokes one holder; the host marks the credential rotation
+   * pending until a new secret is saved. The answer is the item with its fresh `holders`.
+   */
+  'shares.removeHolder': [{ toolId: Id; personId: Id }, VaultItem];
+
+  /**
+   * M7/SP06 §4, RF-54: the holders of every credential of the guild, as the verified snapshot
+   * carries them — admin only, because the snapshot sends an admin the holder rows of every
+   * credential, not only of the ones the admin holds. `[]` without a host. The page's Credential
+   * holders card reads it with the Vault tab and again on every `host` push.
+   */
+  'holders.list': [void, CredentialHolders[]];
+
+  /**
+   * K8/SP06 §4, RF-47: an admin assigns one credential to a role (`roleId`) or to one person
+   * (`personId`) — `PUT /v1/admin/assignments` for the role, a direct `kind: 'assign'` share for the
+   * `assigned: false` removes the role's assignment and seals nothing. Either way the action
+   * carries the copies of the members still missing one in the same gated step, so the page makes a
+   * single call after the person authenticates. M6: the answer reports how many copies were sealed
+   * and skipped; a direct `personId` that reached nobody throws the key-state reason instead.
+   */
+  'assignments.set': [
+    { toolId: Id; roleId?: Id; personId?: Id; assigned: boolean; password?: string },
+    { sent: number; skipped: number },
+  ];
+  /**
+   * K8/RF-47: the members of the assigned roles whose Nod still has no copy, as the admin's last
+   * read of `GET /v1/admin/assignments/missing` left them. Empty for a member or without a host.
+   */
+  'assignments.missing': [void, MissingCopyView[]];
+  /**
+   * K8/SP06 §4: seals one copy to every member of the list this Nod can reach, with `kind: 'assign'`
+   * and the scope of the credential. Gated (`password`), as `shares.send`. A member whose pinned key
+   * changed or is unknown is skipped and counted.
+   */
+  'assignments.sealMissing': [{ password?: string }, { sent: number; skipped: number }];
 
   'tools.state': [void, ToolsState];
   'tools.open': [{ id: Id }, ToolsState];

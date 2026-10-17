@@ -98,3 +98,48 @@ touches the session's internals), `src/**` (SharesUI's half).
   whose tool left the catalog is declined the same way (both sides of the same check, §3 step 5).
   If a later story wants updates to survive a tool removed from the snapshot, that check has to be
   relaxed there and only there.
+
+## Review fixes
+
+Block 2 review (`docs/handovers/block2-review.md`), Nod side of `backend/shares.ts` — H1, M2, M4,
+M6, L1, L3, L4, L6. Every fix has a failing-before/passing-after test in `test/shares.test.ts`,
+`test/rotation.test.ts` or `test/assign.test.ts`.
+
+- **H1** (`backend/shares.ts` `accept`/`applyUpdates`) — an `update` is applied silently only when
+  `share.from` is the credential's live owner holder in the verified snapshot (`holdersOf(...)` row
+  with `owner: true`, `removedAt: null`). Any other sender's `update` waits in the inbox for the
+  gated accept; `applyUpdates` skips it without prompting. Tests: "an update whose sender is not the
+  live owner holder needs the gate", "applyUpdates never applies a non-owner update silently", "an
+  update from a revoked sender ...".
+- **M2** (`accept`) — `ownPrivate() === null` throws `the key pair is not available` and leaves the
+  share; a sender with no pin throws `recipient has no pinned key` and leaves it; a sender flagged
+  `changed` is still verified with the pinned (old) key. Only a real `open`/`match` failure declines
+  as `invalid share`. Tests: "a locked keychain leaves a good share in the inbox", "a share from
+  somebody this Nod never pinned is left in the inbox", "a changed sender key still opens a share
+  signed with the pinned key", "a share signed by a key other than the pinned one declines".
+- **M4** (`setScope`, `HostConnection.setCredentialScope`, `shared/host-api.ts`) — a credential with
+  holder rows calls `PUT /v1/credentials/:id/scope` before storing locally; a credential with no
+  holder row stores locally only. Tests: "only the owner holder changes the scope ..." (asserts the
+  host call), "a never-travelled credential sets its scope locally".
+- **M6** (`assign`, `shared/types.ts` `assignments.set`, `src/settings.ts` dialog) — a direct
+  `personId` assignment that sealed nothing throws the key-state reason; the action answers
+  `{ sent, skipped }` and the dialog reports the skips. Tests: "a direct person assignment with no
+  pinned key raises the reason", plus updated role/person count assertions.
+- **L1** (`accept`, `shares.appliedIssuedAt` meta row) — an `update` whose `issuedAt` is not newer
+  than the last payload applied to that credential declines as `invalid share`. Test: "a replayed
+  `update` older than the applied one declines".
+- **L3** (`stripSettledSealed`) — an accepted or declined share drops its `sealed` from the cached
+  `host` snapshot at once (the cached body is not re-verified; the signature is checked on receipt in
+  `backend/host-client.ts`). Test: "an accepted share drops its ciphertext from the cached snapshot".
+- **L4** (`serialized`, per-share in-flight map) — accepts of one share id run one at a time, so a
+  concurrent sync run cannot double-apply or roll back. Test: "two concurrent accepts of one update
+  apply it once".
+- **L6** (`send`, `assign`) — a generated `credentialId` is persisted only after the host accepted
+  (the sealed copies, or the assignment row), so a refused action leaves no orphan id and the scope
+  stays settable. Tests: "a first send the host refuses leaves no credentialId behind", and the
+  "never-travelled credential" scope test.
+
+`vault.setScope` is now async (`Shares.setScope`): the RPC result stays `VaultItem`, and its handler
+in `backend/main.ts` awaits it. `HostConnection` gained `setCredentialScope`; `assignments.set`'s
+result changed to `{ sent, skipped }` (caller in `src/settings.ts` updated). No other caller was
+missed (`grep createShares` over `test/` matches only the three files above).

@@ -55,6 +55,12 @@ const KIND_SET: Readonly<Record<EventType, true>> = {
   access_revoked: true,
   update: true,
   'sync.rejected': true,
+  // E02 §6, canonico §13: the share family. The Nod raises `share.sent`/`accepted`/`declined` and
+  // the host writes `share.expired` on the expiry purge (`host/repo.ts`); all four travel content-free.
+  'share.sent': true,
+  'share.accepted': true,
+  'share.declined': true,
+  'share.expired': true,
 };
 
 /** The same list as values, in the order above. `Object.keys` is the only way back from a type. */

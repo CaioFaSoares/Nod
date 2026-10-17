@@ -1,0 +1,53 @@
+// K5/SP02 §9: the factor one gated call uses, and the build-mode stamp the dev exception of
+// `docs/canonico.md` §22 rests on. `backend/main.ts` reads the `tjs:sqlite` built-in at import time,
+// which only exists in the runtime, so the module is reached through a dynamic import with the same
+// stub `test/personal.test.ts` uses — the gate predicate itself touches no SQLite.
+import { describe, expect, mock, test } from 'bun:test';
+
+import { stampMode } from '../shared/build-mode';
+
+describe('the factor of the K5 gate (SP02 §9)', () => {
+  test('the machine capability decides: with `authenticate`, a release never takes a password', async () => {
+    mock.module('tjs:sqlite', () => ({ Database: class {} }));
+    const { gateFactor } = await import('../backend/main');
+
+    // `docs/canonico.md` §22, "gate where biometrics exist": where the runtime reports the
+    // capability the operating system's prompt is the factor, and a release build (`devRun` false)
+    // never takes a typed password there — whatever the page sends.
+    expect(gateFactor('smoke-connected-1', true, false)).toBe('biometrics');
+    expect(gateFactor('', true, false)).toBe('biometrics');
+    expect(gateFactor(undefined, true, false)).toBe('biometrics');
+
+    // The Proposto exception of `docs/canonico.md` §22, "gate in a dev run": a non-release
+    // (`tinyjs dev`) run also takes the typed password, which is what the unattended smoke passes.
+    // Without one the prompt is still what runs.
+    expect(gateFactor('smoke-connected-1', true, true)).toBe('password');
+    expect(gateFactor('', true, true)).toBe('biometrics');
+    expect(gateFactor(undefined, true, true)).toBe('biometrics');
+
+    // No capability (Linux): the typed password is the only factor there, and the run's mode has
+    // nothing to say about it.
+    expect(gateFactor('smoke-connected-1', false, false)).toBe('password');
+    expect(gateFactor('smoke-connected-1', false, true)).toBe('password');
+
+    // Neither factor: `authentication required`, before anything is read — in either mode.
+    expect(gateFactor(undefined, false, false)).toBe('unavailable');
+    expect(gateFactor('', false, false)).toBe('unavailable');
+    expect(gateFactor(undefined, false, true)).toBe('unavailable');
+    expect(gateFactor('', false, true)).toBe('unavailable');
+  });
+});
+
+describe('the build-mode stamp (SP02 §9, canonico §22)', () => {
+  test('names a dev run only for the exact `dev` text', () => {
+    // `scripts/gen-config.ts dev` writes it, and the backend reads it back at start-up.
+    expect(stampMode('dev\n')).toBe('dev');
+    expect(stampMode(' build \n')).toBe('build');
+    // A release stages no stamp at all (it is not in its `"resources"` list), so absence is a
+    // release — and so is every body this rule does not name: the exception fails closed.
+    expect(stampMode('')).toBeNull();
+    expect(stampMode('DEV')).toBeNull();
+    expect(stampMode('development')).toBeNull();
+    expect(stampMode('1')).toBeNull();
+  });
+});

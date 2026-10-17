@@ -1,6 +1,8 @@
 // The host's data access against a real migrated database in a temp data dir — no database mock
 // (`host/context.md`, SP01 §5). What is proved here: the migrations hold every table of SP01 §2–§3
-// and report `schema_version = 2`, the rules SP01 §2 keeps out of SQL (grants, owners, favorites,
+// — `person_keys.private_sealed` of migration 3 and `credential_holders.rotated_at` of migration 4
+// — and report `schema_version = 4`, the rules
+// SP01 §2 keeps out of SQL (grants, owners, favorites,
 // last admin), the atomic code redemption with its TTL and wrong tries, idempotent events, owner
 // filtering, and that no secret lands in the database.
 //
@@ -111,7 +113,7 @@ function activatedAdmin(repo: Repo): HostPerson {
 }
 
 describe('schema', () => {
-  test('the migrations create every table and report schema_version = 2', () => {
+  test('the migrations create every table and report schema_version = 4', () => {
     const { db, repo } = newRepo();
 
     const tables = db
@@ -154,10 +156,24 @@ describe('schema', () => {
         .all(),
     ).toHaveLength(1);
 
-    expect(repo.meta('schema_version')).toBe('2');
+    // Migration 3 (`docs/canonico.md` §22): the sealed private halves beside the public keys.
+    const keyColumns = db
+      .query<{ name: string }, []>('PRAGMA table_info(person_keys)')
+      .all()
+      .map((column) => column.name);
+    expect(keyColumns).toContain('private_sealed');
+
+    // Migration 4 (RF-48): the owner row's explicit rotation signal.
+    const holderColumns = db
+      .query<{ name: string }, []>('PRAGMA table_info(credential_holders)')
+      .all()
+      .map((column) => column.name);
+    expect(holderColumns).toContain('rotated_at');
+
+    expect(repo.meta('schema_version')).toBe('4');
   });
 
-  test('migration 2 applies to a data dir that already holds block 1, keeping its rows', () => {
+  test('migrations 2, 3 and 4 apply to a data dir that already holds block 1, keeping its rows', () => {
     const dir = mkdtempSync(join(tmpdir(), 'nod-host-migrate-'));
     const db = openDatabase(join(dir, 'host.db'));
     databases.push({ dir, close: () => db.close() });
@@ -172,13 +188,13 @@ describe('schema', () => {
       NOW,
     );
 
-    // SP01 §4: the boot applies only what is missing, and the version lands on 2.
-    expect(applyMigrations(db)).toBe(2);
+    // SP01 §4: the boot applies only what is missing, and the version lands on 4.
+    expect(applyMigrations(db)).toBe(4);
     expect(
       db
         .query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'schema_version'")
         .get()?.value,
-    ).toBe('2');
+    ).toBe('4');
     expect(db.query('SELECT id FROM people WHERE id = ?').get('p1')).not.toBeNull();
     expect(
       db
@@ -188,6 +204,37 @@ describe('schema', () => {
     ).toEqual(
       expect.arrayContaining(['person_keys', 'shares', 'credential_holders', 'assignments']),
     );
+  });
+
+  test('migration 3 adds the sealed column to a database that already holds published keys', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nod-host-migrate-'));
+    const db = openDatabase(join(dir, 'host.db'));
+    databases.push({ dir, close: () => db.close() });
+
+    // A `/data` of block 2 before the one-pair rule: migrations 1 and 2 applied, with a pair in.
+    db.exec(migrations[0]);
+    db.exec(migrations[1]);
+    db.query("INSERT INTO meta (key, value) VALUES ('schema_version', '2')").run();
+    db.query('INSERT INTO people (id, email, name, created_at) VALUES (?, ?, ?, ?)').run(
+      'p1',
+      'ada@nod.test',
+      'Ada',
+      NOW,
+    );
+    db.query(
+      'INSERT INTO person_keys (person_id, x25519_public, ed25519_public, created_at) VALUES (?, ?, ?, ?)',
+    ).run('p1', 'X'.repeat(43), 'E'.repeat(43), NOW);
+
+    // Migrations 3 and 4 apply, and the database lands on the current version.
+    expect(applyMigrations(db)).toBe(4);
+    // The published pair survives, with no blob: the owner's next unlock uploads one (`host/repo.ts`).
+    const row = db
+      .query<{ x25519: string; privateSealed: string | null }, []>(
+        'SELECT x25519_public AS x25519, private_sealed AS privateSealed FROM person_keys',
+      )
+      .get();
+    expect(row?.x25519).toBe('X'.repeat(43));
+    expect(row?.privateSealed).toBeNull();
   });
 
   test('the schema itself refuses an entry or a view whose scope and owner disagree', () => {
@@ -878,7 +925,7 @@ describe('meta', () => {
     repo.setMeta('created_at', NOW);
     expect(repo.meta('created_at')).toBe(NOW);
     expect(() => repo.setMeta('schema_version', '9')).toThrow(ConflictError);
-    expect(repo.meta('schema_version')).toBe('2');
+    expect(repo.meta('schema_version')).toBe('4');
   });
 });
 

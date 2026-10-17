@@ -77,8 +77,8 @@ export function snapshotSource(
   me: HostPerson,
   now: string = new Date().toISOString(),
 ): SnapshotSource {
-  // SP06 §4: every read path clears the ciphertext of the shares that reached 14 days. It is a
-  // no-op update when nothing expired, so a poll stays a poll.
+  // SP06 §4: every read path clears the ciphertext of the shares that reached 14 days, and records
+  // one `share.expired` per purge (E02 §6). Nothing expired is a lone read, so a poll stays a poll.
   repo.purgeExpiredShares(now);
   const keys = repo.keysByPerson();
   const holders: Record<string, Holder[]> = {};

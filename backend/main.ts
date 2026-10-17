@@ -11,6 +11,7 @@ import {
   randomSalt,
   verifyStoredPassword,
 } from '../shared/auth';
+import { BUILD_MODE_STAMP, stampMode } from '../shared/build-mode';
 import { auditUrl, exportSeed, originOf, validateEntry, validateSeed, visibleEntries } from '../shared/catalog';
 import { fromBase64url, toBase64url } from '../shared/encoding';
 import { HOST_ROUTES, isPng } from '../shared/host-api';
@@ -20,6 +21,7 @@ import type {
   AppIconChoice,
   AppIconState,
   AppInfo,
+  CredentialHolders,
   Entry,
   EntryDetails,
   EventFilter,
@@ -30,6 +32,7 @@ import type {
   JoinResult,
   LoginResult,
   Method,
+  MineKeys,
   PeerKey,
   Person,
   Probe,
@@ -53,10 +56,12 @@ import type {
   LoginRequest,
   PasswordChangeRequest,
   SaltResponse,
+  Snapshot,
   TokenResponse,
 } from '../shared/host-api';
 import { createConnectedCatalog } from './connected-catalog';
 import { createGuildIcon, GUILD_ICON_FILE } from './guild-icon';
+import { buildCredentialHolders } from './holders';
 import { hostAdminFor, orgViewsOf } from './host-admin';
 import { createHostClient } from './host-client';
 import { createIcons } from './icons';
@@ -133,6 +138,14 @@ let shares: Shares | null = null;
  */
 let biometrics = false;
 /**
+ * SP02 §9/`docs/canonico.md` §22: whether this is a non-release dev run (`tinyjs dev`) — the one
+ * place a typed password is still a factor on a machine that also has `app.authenticate`. Read once
+ * in `init` from the build-mode stamp `scripts/gen-config.ts` leaves in the project's `resources/`
+ * (`shared/build-mode.ts`): a release build stages no stamp, so this is `false` there whatever the
+ * environment, the seed or the page say.
+ */
+let devRun = false;
+/**
  * SP04 §1.3's `nod://join` link, kept until the join flow picks it up (`host.discover`) or a host
  * is added. Not a secret — the address, the fingerprint and the code the person was given — and it
  * never goes to a file, an event or `store`.
@@ -190,6 +203,10 @@ export async function init(app: TinyApp): Promise<void> {
   // K5/SP02 §9: the same answer the session gets, kept for the gate that guards reveal, copy,
   // send and accept. Linux has no `app.authenticate`, so there the gate is the password.
   biometrics = system !== 'linux' && supported(capabilities, 'authenticate');
+  // SP02 §9/`docs/canonico.md` §22: the dev exception of the gate. The stamp is written by
+  // `scripts/gen-config.ts <mode>` beside the seed and is not part of a release's resources, so a
+  // built app reads none and answers a plain `false` — see `shared/build-mode.ts`.
+  devRun = await readDevRun(paths.resources);
   // O2: the same version the page shows (`nod.info`), read once because the sync's gate is asked
   // synchronously. A runtime that does not answer leaves it unknown, and nothing is refused.
   try {
@@ -253,6 +270,10 @@ export async function init(app: TinyApp): Promise<void> {
     repo: { ...database, entry: (id) => catalogEntryOf(id) },
     keychain: app.secrets,
     vaultKey: () => (session === null ? null : session.vaultKey()),
+    // K9/SP06 §4: the one sharing call-out of the vault. A save of a credential the owner already
+    // shared re-seals the new value to the holders through `backend/shares.ts`; the call-out is
+    // best-effort and never fails the save (`backend/vault.ts` swallows a throw).
+    afterSave: async (personId, item) => (shares === null ? null : await shares.update(personId, item)),
   });
   // K1–K2/SP06 §2: the person's E02 pairs and the guild's pinned keys. Built with the database, and
   // fed by three moments — an activation, an unlock and an applied snapshot (`onState` below).
@@ -279,11 +300,12 @@ export async function init(app: TinyApp): Promise<void> {
     onChanged: () => sync?.afterWrite(),
   });
   // V1/K1: the session says when the row of an activation is written and the new keys are in hand —
-  // the first moment a `bv1.` value can be sealed under this account's `vaultKey`. `reset` is SP02
-  // §7's reset (the account was activated again, and this machine's vault was wiped): its key pairs
-  // are regenerated (SP06 §2). The host row does not exist yet at this moment — the join writes it
-  // right after — so this stores the pair, and the `afterUnlock` that closes the same call publishes
-  // it (SP06 §2's `PUT /v1/keys`).
+  // the first moment a `bv1.` value can be sealed under this account's `vaultKey`. `reset` is true
+  // for an access-code activation (SP02 §7: a fresh salt, so the pair sealed under the old key can
+  // never open) and for a sign-in that wiped this machine's vault: either way the key pairs are
+  // regenerated (SP06 §2). The host row does not exist yet at this moment — the join writes it right
+  // after — so this stores the pair, and the `afterUnlock` that closes the same call publishes it
+  // (SP06 §2's `PUT /v1/keys`).
   session.onActivated(async (event) => {
     await ensureKeys(event.reset);
   });
@@ -312,6 +334,11 @@ export async function init(app: TinyApp): Promise<void> {
         void keys?.observe();
         void keys?.ensure(keysConnection());
       }
+      // K9/SP06 §4: every run is a chance to deliver an update a save could not (`retryPending`),
+      // and an applied snapshot is when an incoming `update` of a credential already held lands
+      // with no gate (`applyUpdates`). Both are chained: the state push does not wait for them.
+      void shares?.retryPending();
+      if (moved) void shares?.applyUpdates();
       // SP05 §6: the snapshot's `guildIcon` is what says which icon this machine should hold. The
       // call is chained, not awaited: the state push the page is waiting for does not depend on it.
       syncGuildIcon();
@@ -325,6 +352,11 @@ export async function init(app: TinyApp): Promise<void> {
       const connection = connectionOf();
       if (connection !== null) void connection.forgetToken();
     },
+    // K8/SP06 §4, RF-47: an admin's Nod reads the members still without an assigned copy on every
+    // run that reached the host (`backend/shares.ts` keeps the list) and `host.state` carries the
+    // count. A non-admin's keychain-person clears it, and the read never fails a run.
+    refreshAssignments: () => shares?.refreshAssignments() ?? Promise.resolve(),
+    missingCopies: () => shares?.missingCount() ?? 0,
     setInterval: (run, ms) => setInterval(run, ms),
     // `Sync` keeps its handle opaque (`unknown`); the runtime's `clearInterval` takes back the id
     // its own `setInterval` answered.
@@ -490,6 +522,52 @@ function catalogEntryOf(id: Id): Entry | null {
   return visibleEntriesOf().find((entry) => entry.id === id) ?? r.entry(id);
 }
 
+/**
+ * M7/RF-54: the signed body of the last verified snapshot, or `null` without one. The signature was
+ * checked before `backend/sync.ts` stored the bytes, so this parses what the pinned key signed;
+ * `backend/shares.ts` reads its own fields from the same cached body.
+ */
+function snapshotBody(): Snapshot | null {
+  const record = repo === null ? null : repo.hostRecord();
+  if (record === null || record.snapshot === null) return null;
+  try {
+    const value = JSON.parse(record.snapshot) as unknown;
+    return typeof value === 'object' && value !== null ? (value as Snapshot) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * M7/RF-54, finding M7 of `docs/handovers/block2-review.md`: every credential the verified snapshot
+ * carries holder rows for — every credential of the guild, for an admin — with the roster's names
+ * and the tool each one belongs to.
+ *
+ * The signed body names the credential but not its tool, so the tool comes from what this Nod knows:
+ * its own vault rows (SP06 §3's `vault_item.credential_id`), the shares addressed to it (an
+ * `IncomingShare` names the pair), and the admin's missing-copy rows (K8's rows name it too). A
+ * credential none of them names is still listed, under its own id with no title, so the admin loses
+ * no holder row (`backend/holders.ts`).
+ */
+function credentialHolders(): CredentialHolders[] {
+  const snapshot = snapshotBody();
+  const person = currentPerson();
+  const tools: Record<string, Id> = {};
+  if (person !== null && repo !== null) {
+    for (const item of repo.listVault(person.id)) {
+      if (item.credentialId !== null) tools[item.credentialId] = item.toolId;
+    }
+  }
+  for (const share of snapshot?.incomingShares ?? []) tools[share.credentialId] = share.toolId;
+  for (const row of shares === null ? [] : shares.missing()) tools[row.credentialId] = row.toolId;
+  return buildCredentialHolders({
+    holders: snapshot?.holders,
+    people: snapshot?.people,
+    toolOf: (credentialId) => tools[credentialId] ?? null,
+    titleOf: (toolId) => catalogEntryOf(toolId)?.title ?? null,
+  });
+}
+
 function toolsState(): ToolsState {
   return windows === null ? { tools: [] } : windows.state();
 }
@@ -548,24 +626,34 @@ function rolesOf(): Role[] {
 }
 
 /**
- * B8b/RF-40: this Nod's local `org` tools that the verified snapshot does not already carry as an
- * org tool — the catalog the person saw before joining, minus the tools the guild serves itself. The
- * snapshot is read the way the catalog layer reads it; a body this side cannot read answers nothing,
- * the same way an absent one does, so the Hosts tab shows no offer rather than an error the person
- * cannot act on.
+ * B8b/RF-40: this Nod's local tools the verified snapshot does not already carry — the catalog the
+ * person saw before joining, minus the tools the guild serves itself (org) and the personal rows the
+ * snapshot's own personal half already holds. A local `personal` row (B7, added before the host
+ * existed) is hidden from the connected catalog, so without this it would disappear on a join
+ * (RF-40's fix). The snapshot is read the way the catalog layer reads it; a body this side cannot
+ * read answers nothing, the same way an absent one does, so the Hosts tab shows no offer rather than
+ * an error the person cannot act on.
  */
 function leftoverTools(): Entry[] {
   const r = repo;
   const record = r === null ? null : r.hostRecord();
   if (r === null || record === null || record.snapshot === null) return [];
   let orgTools: Entry[];
+  let personalTools: Entry[];
   try {
-    orgTools = parseSnapshot(JSON.parse(record.snapshot) as unknown).orgTools;
+    const rows = parseSnapshot(JSON.parse(record.snapshot) as unknown);
+    orgTools = rows.orgTools;
+    personalTools = rows.personalTools;
   } catch {
     return [];
   }
-  const local = r.listEntries().filter((entry) => (entry.scope ?? 'org') === 'org');
-  return leftoverLocalTools(local, orgTools);
+  const person = currentPerson();
+  const local = r
+    .listEntries()
+    .filter(
+      (entry) => (entry.scope ?? 'org') === 'org' || (person !== null && entry.ownerId === person.id),
+    );
+  return leftoverLocalTools(local, orgTools, personalTools);
 }
 
 /** The page and the tool windows read an entry's icon as a data URI (canonico §8). */
@@ -599,6 +687,22 @@ async function readBundledSeed(resourcesDir: string | null): Promise<Seed | null
     return validateSeed(JSON.parse(new TextDecoder().decode(bytes)));
   } catch {
     return null; // dev without a seed, or an unreadable one: the origin gate stays empty
+  }
+}
+
+/**
+ * SP02 §9/`docs/canonico.md` §22: whether this run is a non-release dev run, from the stamp
+ * `scripts/gen-config.ts <mode>` leaves in the resources folder (`shared/build-mode.ts`). A release
+ * stages no stamp — it is not in the `"resources"` list — so its read throws and answers `false`;
+ * a stamp that names anything but `dev` is a release too (fail closed).
+ */
+async function readDevRun(resourcesDir: string | null): Promise<boolean> {
+  if (resourcesDir === null) return false;
+  try {
+    const bytes = await tjs.readFile(`${resourcesDir}/${BUILD_MODE_STAMP}`);
+    return stampMode(new TextDecoder().decode(bytes)) === 'dev';
+  } catch {
+    return false;
   }
 }
 
@@ -664,6 +768,14 @@ const ADMIN_ONLY: Partial<Record<Method, true>> = {
   'host.bootstrap': true,
   'host.setGuildIcon': true,
   'host.clearGuildIcon': true,
+  // K8/SP06 §4: the assignment of a credential and the missing list behind it are the admin's; the
+  // host refuses a member the same way (`admin only`, SP03 §1).
+  'assignments.set': true,
+  'assignments.missing': true,
+  'assignments.sealMissing': true,
+  // M7/RF-54: the snapshot carries an admin the holder rows of every credential, so the list that
+  // shows them is the admin's; a member gets the same refusal the host gives (`admin only`).
+  'holders.list': true,
   'events.list': true,
   'events.syncStatus': true,
   'events.exportToFile': true,
@@ -692,9 +804,12 @@ const WITHOUT_SESSION: Partial<Record<Method, true>> = {
  * guild, sign in, disconnect, and sign a device out of their account (O1) — the last one is a
  * security action, not a change to the guild's data.
  *
- * A write the host holds nothing of is not here: `catalog.importFromFile` and `vault.*` are this
- * machine's own. The person's writes of block 2 (`personal.*`, `favorites.set`) reach the host
- * through the outbox, which the same gate stops.
+ * The person's writes of block 2 (`personal.*`, `favorites.set`) are here too (B8b's fix): while
+ * connected they reach the host through the outbox, and an outdated Nod must not queue a write the
+ * newer host may not read back. They stay out of the way in local mode: `requiresUpdate()` is
+ * `false` while no `host` row exists, so a local-only Nod is never stopped by this gate. A write the
+ * host holds nothing of is not here either: `catalog.importFromFile` and `vault.*` are this
+ * machine's own.
  */
 const HOST_WRITES: Partial<Record<Method, true>> = {
   // SP02 §7: with a host, the password is rewritten there first.
@@ -714,12 +829,36 @@ const HOST_WRITES: Partial<Record<Method, true>> = {
   'host.adoptLocalAsPersonal': true,
   'host.setGuildIcon': true,
   'host.clearGuildIcon': true,
+  // B7/B8b: SP05 §2–§4's personal writes. While connected each queues a row for the host, so an
+  // outdated Nod refuses them like the `host.*` writes — the outbox is not flushed anyway.
+  'personal.saveTool': true,
+  'personal.removeTool': true,
+  'personal.saveView': true,
+  'personal.removeView': true,
+  'favorites.set': true,
   // K4: the sealed copies and the recipient's answer are writes to the host's share rows. A Nod
   // this old must not send, accept or decline against a host that asked for a newer one.
   'shares.send': true,
   'shares.accept': true,
   'shares.decline': true,
+  // K9: revoking a holder is a write to the host's holder row (the update a save fans out is not
+  // here: its connection is already null while the gate is up, so it waits as a pending marker).
+  'shares.removeHolder': true,
+  // K8/SP06 §4: the assignment row and the sealing of the copies behind it are the admin's writes
+  // to the host; `assignments.missing` is only a read and stays out of the table.
+  'assignments.set': true,
+  'assignments.sealMissing': true,
 };
+
+/**
+ * O2/SP04 §1: whether `method` is refused while this Nod is older than the host's `minAppVersion`.
+ * The table is the one decision, and `requiresUpdate()` is the other; kept as a pure predicate so a
+ * test can pin both halves (an outdated connected Nod refuses; a local one, with no `host` row, has
+ * `updateRequired` false and is never stopped) without booting the runtime.
+ */
+export function hostWriteRefused(method: Method, updateRequired: boolean): boolean {
+  return HOST_WRITES[method] === true && updateRequired;
+}
 
 /**
  * §2: every method but `login.report` comes from the main window. `login.report` comes from a tool
@@ -744,7 +883,7 @@ function guarded<M extends Method>(method: M, handler: Handler<M>): TinyApiHandl
     }
     // O2: the host is reachable, and it told this Nod it needs a newer one. The write would only be
     // refused there (or, worse, silently change a catalog this build cannot read back).
-    if (HOST_WRITES[method] === true && requiresUpdate()) throw new Error(UPDATE_REQUIRED_ERROR);
+    if (hostWriteRefused(method, requiresUpdate())) throw new Error(UPDATE_REQUIRED_ERROR);
     return handler(params, app, meta);
   };
 }
@@ -778,25 +917,56 @@ const AUTHENTICATION_REQUIRED = 'authentication required';
 /** K5: the person cancelled the biometric prompt — nothing is shown, copied, sent or accepted. */
 const AUTHENTICATION_CANCELLED = 'authentication cancelled';
 
+/** SP02 §9: which of the two factors one gated call uses, or none at all. */
+export type GateFactor = 'password' | 'biometrics' | 'unavailable';
+
 /**
- * K5/SP06 §4: the one gate behind `vault.reveal`, `vault.copy`, `shares.send` and `shares.accept`.
- * Biometrics where this machine has them (`app.authenticate`); otherwise the unlocked person's
- * password, verified against the verifier their row carries (`verifyStoredPassword`, SP02 §6). With
- * neither, the call fails before reading anything. A cancelled prompt and a locked session change
- * nothing either, and no message carries a password or a secret.
+ * SP02 §9's factor, pure. The machine decides first: where the runtime reports `authenticate`,
+ * `app.authenticate` is the factor and the page sends no password at all. The typed password is the
+ * factor only where that capability is absent (Linux — SP02 §9's classical fallback) or in a
+ * non-release dev run (`devRun`, `docs/canonico.md` §22 "Gate in a dev run": the unattended smoke
+ * passes the account password so no operating system prompt can block it). On a release build
+ * `devRun` is always `false`, so a password a page sends there never becomes a factor. `unavailable`
+ * is the refusal: neither capability nor password.
+ *
+ * Exported for the test that pins the rule without a runtime (`test/gate.test.ts`).
+ */
+export function gateFactor(
+  password: string | undefined,
+  biometrics: boolean,
+  devRun: boolean,
+): GateFactor {
+  const typed = typeof password === 'string' && password !== '';
+  if (biometrics) return typed && devRun ? 'password' : 'biometrics';
+  return typed ? 'password' : 'unavailable';
+}
+
+/**
+ * K5/SP06 §4: the one gate behind `vault.reveal`, `vault.copy`, `shares.send`, `shares.accept` and
+ * the admin's `assignments.*` seals.
+ *
+ * Where the machine has `app.authenticate` this call is always the one that runs — the person is
+ * present, and only a dev run lets `gateFactor` take a typed password instead (`docs/canonico.md`
+ * §22). Without the capability a password the call carries is verified against the verifier of the
+ * unlocked person's row (`verifyStoredPassword`, SP02 §6), exactly as it always was on Linux. A
+ * machine with neither factor refuses: nothing is shown, copied, sent or accepted, and no message
+ * carries a password or a secret.
  */
 async function authenticate(reason: string, password?: string): Promise<void> {
   const person = unlockedPerson('authentication');
-  if (biometrics) {
+  const factor = gateFactor(password, biometrics, devRun);
+  if (factor === 'unavailable') throw new Error(AUTHENTICATION_REQUIRED);
+  if (factor === 'biometrics') {
     if (!(await required(runtime, 'authentication').authenticate(reason))) {
       throw new Error(AUTHENTICATION_CANCELLED);
     }
     return;
   }
-  if (password === undefined || password === '') throw new Error(AUTHENTICATION_REQUIRED);
+  // `factor === 'password'` — `gateFactor` answers it only for a non-empty string.
+  const typed = password ?? '';
   const found = required(repo, 'authentication').personAuthByEmail(person.email);
   if (found === null || found.person.id !== person.id) throw new Error(AUTHENTICATION_REQUIRED);
-  if (!(await verifyStoredPassword(password, found.password))) {
+  if (!(await verifyStoredPassword(typed, found.password))) {
     throw new Error(AUTHENTICATION_REQUIRED);
   }
 }
@@ -1395,17 +1565,39 @@ const methods: { [M in Method]: Handler<M> } = {
   'session.changePassword': async (params): Promise<true> => {
     const p = parameters(params, 'invalid passwords');
     const connection = connectionOf();
+    // K1/`docs/canonico.md` §22: the pair does not change with the password, but the `vaultKey` that
+    // seals it does (SP02 §7). The session still holds the old one at this point, so it is read
+    // first; `reSeal` then opens the keychain value and the host blob with it and seals both again
+    // under the new key, leaving the public halves — and every colleague's pin — untouched.
+    const previousVaultKey = session === null ? null : session.vaultKey();
+    // M1/SP02 §7: the host's blob is marked stale **before** the vault moves. A process that dies
+    // between the two, or a host that refuses the new blob, leaves that mark in place: the next
+    // `ensure` republishes the blob even though the public halves already match, and `keys.mine`
+    // answers `pending` until it lands — see `backend/keys.ts`. Without it the host would keep a
+    // blob sealed under a key nobody holds and every other machine of this person would be stuck.
+    keys?.beginReseal();
     // SP02 §7: when a host is connected, the host rewrites its salt and hash **first**; only then
     // does the local verifier follow. The request carries the two `authKey`s, never a password.
-    await required(session, 'session.changePassword').changePassword(
-      text(p.current, 'invalid current password'),
-      text(p.next, 'invalid new password'),
-      connection === null
-        ? undefined
-        : async (request: PasswordChangeRequest): Promise<void> => {
-            await connection.request('POST', HOST_ROUTES.authPassword, request);
-          },
-    );
+    try {
+      await required(session, 'session.changePassword').changePassword(
+        text(p.current, 'invalid current password'),
+        text(p.next, 'invalid new password'),
+        connection === null
+          ? undefined
+          : async (request: PasswordChangeRequest): Promise<void> => {
+              await connection.request('POST', HOST_ROUTES.authPassword, request);
+            },
+      );
+    } catch (error) {
+      // F3: the change was refused (a wrong current password locally, or a host that would not take
+      // the new `authKey`), so the vault did not move and the host's blob is not stale. The mark
+      // `beginReseal` just left would make Settings → Account answer `pending` until the next
+      // unlock, for a change that never happened — clear it and report the refusal.
+      const person = session?.current();
+      if (person !== null && person !== undefined) keys?.clearReseal(person.id);
+      throw error;
+    }
+    await keys?.reSeal(previousVaultKey, keysConnection());
     return true;
   },
 
@@ -1516,6 +1708,10 @@ const methods: { [M in Method]: Handler<M> } = {
       iterations: published.iterations,
       // An access-code activation says nothing about the roles: the snapshot fills them (B4/B5).
       admin: setup,
+      // K1/SP02 §7: an activation (or the setup) always picks a fresh salt, so the account's
+      // `vaultKey` moved and `onActivated` must regenerate the E02 pair — even a machine that never
+      // held the account, where `wipeResetVault` found nothing to wipe.
+      activation: true,
       ...(gate.local === null ? {} : { adoptLocalId: gate.local.id }),
     });
     await connection.saveToken(opened.token);
@@ -1599,14 +1795,15 @@ const methods: { [M in Method]: Handler<M> } = {
       publicKey: found.pin.ed25519Public,
       personId: opened.personId,
     });
-    const state = await s.adoptConnectedAccount({
+    await s.adoptConnectedAccount({
       personId: opened.personId,
       email,
       name: local === null ? (gate.local?.name ?? email) : local.name,
       password,
       salt: published.salt,
       iterations: published.iterations,
-      // The snapshot is what says who is an admin (B4/B5); the local row is the last word until then.
+      // The snapshot is what says who is an admin (B4/B5); the local row is the last word until the
+      // first sync below.
       admin: local !== null && local.admin,
       ...(gate.local === null || gate.local.id === opened.personId ? {} : { adoptLocalId: gate.local.id }),
     });
@@ -1621,7 +1818,13 @@ const methods: { [M in Method]: Handler<M> } = {
       addedAt: same && row !== null ? row.addedAt : new Date().toISOString(),
     });
     pendingJoin = null;
-    return { kind: 'session', session: await afterUnlock(state), wipedVault } satisfies JoinResult;
+    // F2 (RF-48 finding 2 of `docs/handovers/k10-smoke.md`): a fresh machine has no local account,
+    // so `admin` above is `false` until the first snapshot — the host's `me.admin` is the last word.
+    // The sign-in therefore runs that first sync here, before it answers, so the returned state
+    // already carries the admin flag (and the name) instead of reporting a guild admin as a member.
+    // It is the run the loop would make a moment later; a failure is the run's own state.
+    await sync?.syncNow();
+    return { kind: 'session', session: await afterUnlock(await s.state()), wipedVault } satisfies JoinResult;
   },
 
   'host.syncNow': async () => {
@@ -1701,9 +1904,10 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   /**
-   * B8b/RF-40: what the Hosts tab lists as the leftovers of a join. The ids are the local `org`
-   * rows the verified snapshot does not carry as an org tool (`leftoverTools`), each with its icon
-   * resolved to a data URI so the page can show the same tool the person saw before joining.
+   * B8b/RF-40: what the Hosts tab lists as the leftovers of a join. The ids are the local rows the
+   * verified snapshot does not carry — an `org` row the guild does not serve on its address, or a
+   * `personal` row (B7) the snapshot's personal half does not hold — each with its icon resolved to
+   * a data URI so the page can show the same tool the person saw before joining.
    */
   'host.localLeftovers': async (): Promise<Entry[]> => {
     unlockedPerson('host.localLeftovers');
@@ -1715,9 +1919,10 @@ const methods: { [M in Method]: Handler<M> } = {
   /**
    * B8b/RF-40: keeps the chosen leftovers as this person's personal tools. Each one goes through
    * `backend/personal.ts`'s `adoptLocalTool` — the same path `personal.saveTool` takes — and its
-   * local `org` row goes away with it: the tool is the guild's now, and a local row left behind
-   * would show up a second time once the host is removed. A credential saved for the old id is
-   * re-pointed to the new one before the row goes, so the saved login stays usable.
+   * local row goes away with it: the tool is the guild's now, and a local row left behind would show
+   * up a second time once the host is removed. An `org` row moves to a fresh `p-…` id and its saved
+   * credential is re-pointed before the row goes; a local `personal` row keeps its own id, so its
+   * credential and the snapshot's copy already agree.
    */
   'host.adoptLocalAsPersonal': async (params): Promise<{ created: number }> => {
     const r = required(repo, 'host.adoptLocalAsPersonal');
@@ -1729,17 +1934,17 @@ const methods: { [M in Method]: Handler<M> } = {
     const done = new Set<Id>();
     let created = 0;
     for (const id of ids) {
-      // Only a leftover is kept: an id the snapshot already carries as an org tool is the guild's,
-      // and the page can only have sent one the list it read gave it. A repeated id is kept once.
+      // Only a leftover is kept: an id the snapshot already carries is the guild's, and the page can
+      // only have sent one the list it read gave it. A repeated id is kept once.
       if (done.has(id)) continue;
       done.add(id);
       const local = withIcons.find((entry) => entry.id === id);
       if (local === undefined) continue;
       const entry = layer.adoptLocalTool(local, local.icon);
-      // The saved credential follows the tool to its new id (`repo.rekeyVaultTool` keeps the
+      // The saved credential follows the tool when its id changes (`repo.rekeyVaultTool` keeps the
       // keychain key, so the sealed value still opens), then the local row — and its views, already
       // copied above — go.
-      r.rekeyVaultTool(id, entry.id);
+      if (entry.id !== id) r.rekeyVaultTool(id, entry.id);
       r.removeEntry(id);
       created += 1;
     }
@@ -1801,14 +2006,13 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   /**
-   * K1/SP06 §2: the fingerprint of this person's own E02 pair — a digest of the two public keys,
-   * which is what Settings → Account shows. `null` while this machine holds no pair: a local
-   * account, or a connected one whose pair is not generated yet. No key material crosses here.
+   * K1/SP06 §2: the state of this person's own E02 pair — the fingerprint to read out, whether it
+   * is still waiting to be published, and the sentence Settings → Account shows when it cannot be
+   * used (`keys unavailable — sign in again`, SP02 §7). A local account, or a connected one whose
+   * pair is not generated yet, answers `unavailable` with no fingerprint. No key material crosses
+   * here — a fingerprint is a digest of the two public keys.
    */
-  'keys.mine': async (): Promise<{ fingerprint: string } | null> => {
-    const fingerprint = await required(keys, 'keys.mine').mine();
-    return fingerprint === null ? null : { fingerprint };
-  },
+  'keys.mine': (): Promise<MineKeys> => required(keys, 'keys.mine').mine(),
 
   /**
    * K2/SP06 §2: the guild's colleagues, the fingerprint of each and whether the pair is the one
@@ -1819,14 +2023,18 @@ const methods: { [M in Method]: Handler<M> } = {
   'peers.list': (): Promise<PeerKey[]> => required(keys, 'peers.list').peers(),
 
   /**
-   * K2/RF-45: the person confirmed that a changed key is really that colleague's. It becomes the
-   * pinned pair, `confirmed_at` moves and sending to them is allowed again (SP06 §2); with nothing
-   * pending the call changes nothing and still answers `true`.
+   * K2/RF-45: the person confirmed that a changed key is really that colleague's. The pair whose
+   * `fingerprint` the page is showing becomes the pinned one, `confirmed_at` moves and sending to
+   * them is allowed again (SP06 §2). L2: the fingerprint is what the confirmation is checked
+   * against, so a pair the host replaced between the list and the click is refused instead of
+   * promoted unseen.
    */
   'peers.confirm': (params): true => {
     unlockedPerson('peers.confirm');
+    const p = parameters(params, 'invalid peer');
     return required(keys, 'peers.confirm').confirm(
-      text(parameters(params, 'invalid peer').personId, 'invalid person'),
+      text(p.personId, 'invalid person'),
+      text(p.fingerprint, 'invalid fingerprint'),
     );
   },
 
@@ -2436,12 +2644,12 @@ const methods: { [M in Method]: Handler<M> } = {
    * holder row, so its person is its owner) or by the admin of an assignment. Not gated: nothing
    * secret is shown to change it.
    */
-  'vault.setScope': (params) => {
+  'vault.setScope': async (params) => {
     const p = parameters(params, 'invalid scope');
     if (p.scope !== 'role' && p.scope !== 'blocked' && p.scope !== 'org') {
       throw new Error('invalid scope');
     }
-    return required(shares, 'vault.setScope').setScope(
+    return await required(shares, 'vault.setScope').setScope(
       text(p.toolId, 'invalid tool'),
       p.scope,
     );
@@ -2540,6 +2748,56 @@ const methods: { [M in Method]: Handler<M> } = {
       text(parameters(params, 'invalid share').id, 'invalid share'),
     ),
 
+  /**
+   * K9/SP06 §4: the owner (or an admin) revokes one holder; the host sets `removed_at` and the next
+   * snapshot marks the credential `rotationPending`. Not gated: nothing secret is shown or sent.
+   */
+  'shares.removeHolder': async (params) => {
+    const p = parameters(params, 'invalid holder');
+    return await required(shares, 'shares.removeHolder').removeHolder(
+      text(p.toolId, 'invalid tool'),
+      text(p.personId, 'invalid recipient'),
+    );
+  },
+
+  /**
+   * K8/SP06 §4, RF-47 (admin): assign a credential to a role (`roleId`) or to a person (`personId`)
+   * and seal the copies of the members still missing one in the same gated step (`backend/shares.ts`
+   * runs the second half after the first). `assigned: false` takes the role's assignment away.
+   */
+  'assignments.set': async (params): Promise<{ sent: number; skipped: number }> => {
+    const p = parameters(params, 'invalid assignment');
+    const toolId = text(p.toolId, 'invalid tool');
+    const roleId = p.roleId === undefined ? null : text(p.roleId, 'invalid role');
+    const personId = p.personId === undefined ? null : text(p.personId, 'invalid person');
+    const assigned = booleanValue(p.assigned, 'invalid assignment');
+    return await required(shares, 'assignments.set').assign(
+      { toolId, roleId, personId, assigned },
+      optionalPassword(p.password),
+    );
+  },
+
+  /** K8/RF-47 (admin): the members of the assigned roles still without a copy, as of the last sync. */
+  'assignments.missing': () => required(shares, 'assignments.missing').missing(),
+
+  /**
+   * K8/SP06 §4 (admin): seals a copy to every member of the list this Nod can reach, with the one
+   * gate the send uses. A member whose pinned key changed or is unknown is skipped and counted.
+   */
+  'assignments.sealMissing': async (params) => {
+    const p = parameters(params, 'invalid request');
+    return await required(shares, 'assignments.sealMissing').sealMissing(
+      optionalPassword(p.password),
+    );
+  },
+
+  /**
+   * M7/SP06 §4, RF-54 (admin): the holders of every credential of the guild — including the ones
+   * this Nod does not hold. The rows come from the verified snapshot, the names from its roster and
+   * the titles from the effective catalog (`credentialHolders`, `backend/holders.ts`).
+   */
+  'holders.list': () => credentialHolders(),
+
   // -------------------------------------------------------------- tool windows
   'tools.state': () => required(windows, 'tools.state').state(),
 
@@ -2597,6 +2855,12 @@ const methods: { [M in Method]: Handler<M> } = {
       os: system,
       gateOrigins: gateOrigins(bundledSeed),
       tray,
+      // SP02 §9/`docs/canonico.md` §22: what the page needs to decide between the operating
+      // system's prompt and its own password field — the machine capability (not the per-person
+      // shortcut of `session.biometric`) and whether this is a non-release dev run, the only case
+      // where a typed password is a factor on a machine that also has `authenticate`.
+      biometricAvailable: biometrics,
+      devRun,
     };
   },
 

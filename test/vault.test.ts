@@ -574,3 +574,32 @@ describe('export and import', () => {
     expect(s.repo.listVault(s.bruno.id)).toEqual([]);
   });
 });
+
+describe('a re-keyed credential (B8b)', () => {
+  test('re-saving it writes the canonical keychain key and leaves no orphan', async () => {
+    const s = scene();
+    // A credential saved for the old tool id, then moved to a new id the way
+    // `repo.rekeyVaultTool` does it: the index row moves, its `keychain_key` does not.
+    await s.vault.save(s.ana.id, { toolId: 'kanban', username: 'ana', secret: KANBAN_SECRET });
+    s.repo.saveEntry(tool('kanban-personal'));
+    expect(s.repo.rekeyVaultTool('kanban', 'kanban-personal')).toBe(1);
+    expect(s.repo.vaultItem(s.ana.id, 'kanban-personal')?.keychainKey).toBe(`nod.cred.${s.ana.id}.kanban`);
+    expect(s.items.has(`nod.cred.${s.ana.id}.kanban`)).toBe(true);
+
+    const item = await s.vault.save(s.ana.id, {
+      toolId: 'kanban-personal',
+      username: 'ana',
+      secret: 'secret-after',
+    });
+
+    expect(item.keychainKey).toBe(`nod.cred.${s.ana.id}.kanban-personal`);
+    // The old item is gone: one value, under the canonical key (the bv1 AAD is that same key).
+    expect(s.items.has(`nod.cred.${s.ana.id}.kanban`)).toBe(false);
+    expect(s.items.has(`nod.cred.${s.ana.id}.kanban-personal`)).toBe(true);
+    expect(s.items.size).toBe(1);
+    expect(await s.vault.read(s.ana.id, 'kanban-personal')).toEqual({
+      username: 'ana',
+      secret: 'secret-after',
+    });
+  });
+});

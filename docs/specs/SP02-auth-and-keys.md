@@ -106,6 +106,16 @@ format, `PasswordHashV2`:
   The Nod then re-encrypts every vault item with the new `vaultKey` (§8) and rewrites
   `PasswordHashV2`, in that order. If the Nod crashes between the two steps, the next unlock tries
   the new password first and re-encrypts any item that still opens with the old key.
+  - The E02 pair of SP06 §2 does not change with the password, but its keychain value
+    (`nod.keys.<person>`, a `bv1.` value under the same `vaultKey`, AAD = the same string) is
+    **re-sealed in the very batch that moves the vault items** (`reencryptVaultItems`, which takes
+    those extra values with their AADs), so no crash can leave the pair under a key nothing holds;
+    the public halves stay untouched. Only the host's blob is left, published right after by
+    `backend/keys.ts` `reSeal`. A `keys.reseal.pending.<person>` mark is written **before** the vault
+    moves and cleared only once the host took the new blob, so a host that refuses — or a crash
+    between the batch and the publish — leaves the blob republishable by the next `ensure` instead of
+    leaving the host with a blob sealed under a key nobody holds, and the next machine of that person
+    waiting forever (`keys.mine` reports `pending` meanwhile). Review finding M1.
 - **Reset** (new access code): activation stores a new salt. The Nod detects a salt change at
   sign-in (cached salt ≠ host salt). It then:
   - tells the person their saved logins on this machine will be removed;
@@ -136,10 +146,28 @@ Today `nod.bio.<person>` holds the person id as a marker (`backend/session.ts`).
 
 - Biometric unlock: `app.authenticate`, then read `vaultKey` from that item; `authKey` isn't needed
   offline.
+- The password still unlocks where biometrics exist: the entry screen keeps its password field and
+  offers the biometrics button beside it, so the item is a shortcut, not the only way in
+  (`src/app.ts` `renderUnlock`).
 - Any host call that needs a fresh sign-in after the session token expires asks for the password.
 - Enabling or disabling biometrics writes or deletes the item.
 - Linux has no biometrics (`docs/canonico.md` §9), so the item never exists there.
 
-The gate for reveal, copy, accept and send (E02 §5) calls `app.authenticate` each time, or asks for
-the password where biometrics are unavailable. Reveal shows a countdown (10 s) and then clears the
-value from the page.
+The gate for reveal, copy, accept and send (E02 §5) is `app.authenticate` wherever the runtime
+reports the `authenticate` capability — the **machine's** capability, not the per-person shortcut of
+`session.state.biometric` (`docs/canonico.md` §22, "gate where biometrics exist"). The page reads
+that capability from `nod.info` (`biometricAvailable`) and sends no password there: the operating
+system's prompt is what runs, each time.
+
+A typed password is the factor only where the capability is absent (Linux, `docs/canonico.md` §9)
+and, in a non-release dev run (`tinyjs dev`), where it exists too — the Proposto "gate in a dev run"
+of `docs/canonico.md` §22, which is what lets the unattended connected smoke pass the gate with the
+account's password (`test/smoke/connected.html`). The run's mode is read once at start-up from the
+build-mode stamp `scripts/gen-config.ts <dev|build>` leaves beside the seed in `resources/`
+(`shared/build-mode.ts`, `nod.info.devRun`); it comes from no environment variable, no seed and no
+page, and a release's `"resources"` list never carries the stamp — so a release build answers
+`false` and never takes a password on a machine that has `authenticate`.
+
+Reveal shows a countdown (10 s) and then clears the value from the page. The deadline is a wall-clock
+instant, and the page drops the value the moment it is hidden, so a throttled background page cannot
+keep it past the ten seconds (review finding L5).

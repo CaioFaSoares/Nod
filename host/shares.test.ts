@@ -27,6 +27,7 @@ import {
   type ErrorResponse,
   type Holder,
   type MissingCopy,
+  type OwnKeys,
   type PublicKeys,
   type ShareRequest,
   type Snapshot,
@@ -55,6 +56,9 @@ const OTHER_TOOL = 'kalendar';
 
 const CREDENTIAL = '11111111-1111-4111-8111-111111111111';
 const BLOCKED_CREDENTIAL = '22222222-2222-4222-8222-222222222222';
+/** Credentials of their own, so a refusal writes no row beside the fixture's `CREDENTIAL`. */
+const VISIBILITY_CREDENTIAL = '33333333-3333-4333-8333-333333333333';
+const RECIPIENT_VISIBILITY_CREDENTIAL = '44444444-4444-4444-8444-444444444444';
 
 /** What a Nod would put inside the seal. The host must never hold either of them (RF-44). */
 const USERNAME = 'alice@figma.test';
@@ -63,6 +67,13 @@ const SECRET = 'figma-password-do-not-store';
 /** An opaque stand-in for SP06 §3's `body || sig`: the host never looks inside it. */
 const SEALED = toBase64url(new TextEncoder().encode(`${USERNAME}:${SECRET}/for-bob`));
 const UPDATED_SEALED = toBase64url(new TextEncoder().encode(`${USERNAME}:rotated/for-bob`));
+
+/**
+ * Stand-ins for the sealed private halves of `docs/canonico.md` §22 — a `bv1.` envelope the host
+ * stores and never opens, exactly like `sealed` above.
+ */
+const SEALED_PRIVATE = `bv1.${toBase64url(new TextEncoder().encode('private-halves-of-the-pair'))}`;
+const SEALED_PRIVATE_OTHER = `bv1.${toBase64url(new TextEncoder().encode('private-halves-of-the-new-pair'))}`;
 
 // ---------------------------------------------------------------- the app under test
 
@@ -236,13 +247,18 @@ async function joinGuild(
 }
 
 /** A client of E04: no admin route creates one, so the row is seeded through the repo (SP01 §2). */
-async function joinClient(host: TestHost, roles: string[]): Promise<Member> {
+async function joinClient(
+  host: TestHost,
+  roles: string[],
+  email = CLIENT_EMAIL,
+  name = 'Clint',
+): Promise<Member> {
   const person = host.repo.createPerson(
-    { id: crypto.randomUUID(), email: CLIENT_EMAIL, name: 'Clint', kind: 'client', roles },
+    { id: crypto.randomUUID(), email, name, kind: 'client', roles },
     instant(),
   );
   const code = await seedCode(host, 'activate', person.id);
-  return await activate(host, CLIENT_EMAIL, code);
+  return await activate(host, email, code);
 }
 
 async function putRole(host: TestHost, adminToken: string, id: string): Promise<void> {
@@ -317,6 +333,8 @@ const send = (host: TestHost, token: string, body: ShareRequest) =>
 const acceptPath = (id: string) => HOST_ROUTES.shareAccept.replace(':id', id);
 const declinePath = (id: string) => HOST_ROUTES.shareDecline.replace(':id', id);
 const holdersPath = (credentialId: string) => HOST_ROUTES.holders.replace(':id', credentialId);
+const scopePath = (credentialId: string) =>
+  HOST_ROUTES.credentialScope.replace(':id', credentialId);
 const holderPath = (credentialId: string, personId: string) =>
   HOST_ROUTES.holder.replace(':id', credentialId).replace(':personId', personId);
 
@@ -380,6 +398,30 @@ function shareRows(host: TestHost): ShareRow[] {
               expires_at AS expiresAt, accepted_at AS acceptedAt, declined_at AS declinedAt,
               purged_at AS purgedAt
          FROM shares ORDER BY created_at, id`,
+    )
+    .all();
+}
+
+/** One `events` row as SP01 §2 stores it: what the host wrote and what a Nod pushed. */
+type EventRow = {
+  id: string;
+  personId: string;
+  sessionId: string;
+  at: string;
+  kind: string;
+  toolId: string | null;
+  url: string | null;
+  result: string | null;
+  detail: string | null;
+  receivedAt: string;
+};
+
+function eventRows(host: TestHost): EventRow[] {
+  return host.db
+    .query<EventRow, []>(
+      `SELECT id, person_id AS personId, session_id AS sessionId, at, kind,
+              tool_id AS toolId, url, result, detail, received_at AS receivedAt
+         FROM events ORDER BY at, id`,
     )
     .all();
 }
@@ -460,6 +502,88 @@ describe('PUT /v1/keys', () => {
         .status,
     ).toBe(400);
     expect((await put(host, HOST_ROUTES.keys, replacement)).status).toBe(401);
+  });
+
+  test('stores the sealed private halves opaquely, never in the snapshot', async () => {
+    const { host, alice } = await guild();
+
+    // `docs/canonico.md` §22: the blob rides the same body as the public keys it belongs to.
+    const publication: PublicKeys = { ...alice.keys, privateSealed: SEALED_PRIVATE };
+    expect((await put(host, HOST_ROUTES.keys, publication, alice.token)).status).toBe(204);
+    // The host keeps the string byte for byte and never opens it (SP01 §3: only ciphertext).
+    const stored = host.db
+      .query<{ privateSealed: string | null }, [string]>(
+        'SELECT private_sealed AS privateSealed FROM person_keys WHERE person_id = ?',
+      )
+      .get(alice.personId);
+    expect(stored?.privateSealed).toBe(SEALED_PRIVATE);
+    expect(host.repo.ownPersonKeys(alice.personId)?.privateSealed).toBe(SEALED_PRIVATE);
+
+    // SP04 §2: the roster carries the public halves and no private field at all.
+    const roster = (await state(host, alice.token)).people ?? [];
+    const mine = roster.find((person) => person.id === alice.personId);
+    expect(mine?.x25519Public).toBe(alice.keys.x25519Public);
+    expect(mine).not.toHaveProperty('privateSealed');
+    expect(
+      roster.every((person) => !Object.prototype.hasOwnProperty.call(person, 'privateSealed')),
+    ).toBe(true);
+
+    // The same public keys with no blob: the pair did not move, so what the host holds stays (a
+    // reset sends both halves at once, which the case below is).
+    expect((await put(host, HOST_ROUTES.keys, alice.keys, alice.token)).status).toBe(204);
+    expect(host.repo.ownPersonKeys(alice.personId)?.privateSealed).toBe(SEALED_PRIVATE);
+
+    // New public keys are a reset: the row is replaced whole, the blob included (SP06 §2).
+    const replacement: PublicKeys = {
+      x25519Public: randomBase64url(),
+      ed25519Public: randomBase64url(),
+      privateSealed: SEALED_PRIVATE_OTHER,
+    };
+    expect((await put(host, HOST_ROUTES.keys, replacement, alice.token)).status).toBe(204);
+    expect(host.repo.ownPersonKeys(alice.personId)).toEqual({ ...replacement, privateSealed: SEALED_PRIVATE_OTHER });
+
+    // A value that is not a `bv1.` envelope fails the schema: this column holds a sealed blob only.
+    expect(
+      (await put(host, HOST_ROUTES.keys, { ...alice.keys, privateSealed: 'plain' }, alice.token)).status,
+    ).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------- own keys (SP03 §3, §22)
+
+describe('GET /v1/keys/private', () => {
+  test('answers the caller’s own pair and nobody else’s, and 404 without one', async () => {
+    const { host, admin, alice, bob } = await guild();
+
+    expect((await get(host, HOST_ROUTES.keysPrivate)).status).toBe(401);
+
+    // A pair published before the blob existed reads back with `privateSealed: null` (migration 3).
+    expect(await json<OwnKeys>(await get(host, HOST_ROUTES.keysPrivate, alice.token))).toEqual({
+      ...alice.keys,
+      privateSealed: null,
+    });
+
+    // The route is the caller's own row (SP03 §3): Bob's answer is Bob's pair, never Alice's.
+    const theirs = await json<OwnKeys>(await get(host, HOST_ROUTES.keysPrivate, bob.token));
+    expect(theirs.x25519Public).toBe(bob.keys.x25519Public);
+    expect(theirs.x25519Public).not.toBe(alice.keys.x25519Public);
+
+    // And a person who published no pair at all gets a 404 rather than somebody else's row.
+    const created = await createPerson(host, admin.token, {
+      email: 'new@nod.test',
+      name: 'New',
+      roles: [],
+    });
+    const activated = await post(host, HOST_ROUTES.authActivate, {
+      email: 'new@nod.test',
+      code: created.code,
+      salt: randomSalt(),
+      authKey: randomBase64url(),
+      device: DEVICE,
+    });
+    expect(activated.status).toBe(200);
+    const { token } = await json<{ token: string }>(activated);
+    expect((await get(host, HOST_ROUTES.keysPrivate, token)).status).toBe(404);
   });
 });
 
@@ -545,7 +669,7 @@ describe('POST /v1/shares', () => {
   });
 
   test('refuses a role share with no role in common, and a tool the recipient cannot see', async () => {
-    const { host, alice, bob, cara } = await guild();
+    const { host, admin, alice, bob, cara } = await guild();
 
     expect(
       (await send(host, alice.token, shareBody({ items: [{ to: bob.personId, sealed: SEALED }] })))
@@ -561,14 +685,32 @@ describe('POST /v1/shares', () => {
     expect(noCommon.status).toBe(403);
     expect(await failure(noCommon)).toBe('no role in common');
 
-    // `kalendar` is granted to `other` only: Bob cannot see it, so nothing may be sealed for him.
+    // `kalendar` is granted to `other` only: Alice cannot see it, so she cannot share it (L7).
+    // A credential with no holder row yet, so the tool check itself is what refuses.
     const invisible = await send(
       host,
       alice.token,
-      shareBody({ toolId: OTHER_TOOL, items: [{ to: bob.personId, sealed: SEALED }] }),
+      shareBody({
+        credentialId: VISIBILITY_CREDENTIAL,
+        toolId: OTHER_TOOL,
+        items: [{ to: bob.personId, sealed: SEALED }],
+      }),
     );
     expect(invisible.status).toBe(403);
-    expect(await failure(invisible)).toBe('tool not visible to recipient');
+    expect(await failure(invisible)).toBe('tool not visible to sender');
+
+    // The recipient half stays: the admin can see both tools, Bob cannot see `kalendar`.
+    const invisibleToRecipient = await send(
+      host,
+      admin.token,
+      shareBody({
+        credentialId: RECIPIENT_VISIBILITY_CREDENTIAL,
+        toolId: OTHER_TOOL,
+        items: [{ to: bob.personId, sealed: SEALED }],
+      }),
+    );
+    expect(invisibleToRecipient.status).toBe(403);
+    expect(await failure(invisibleToRecipient)).toBe('tool not visible to recipient');
 
     // An unknown tool is a 404, and none of the three refusals wrote a row.
     const unknown = await send(
@@ -622,6 +764,200 @@ describe('POST /v1/shares', () => {
     expect(later.status).toBe(403);
     expect(await failure(later)).toBe('the credential is blocked');
     expect(shareRows(host)).toHaveLength(0);
+  });
+
+  test('a member who knows the credential id cannot become a second owner (H1)', async () => {
+    const { host, alice, bob, dana } = await guild();
+    expect(
+      (await send(host, alice.token, shareBody({ items: [{ to: bob.personId, sealed: SEALED }] })))
+        .status,
+    ).toBe(200);
+
+    // Bob knows the id from the inbox but holds nothing yet: his send cannot create an owner row.
+    const attack = await send(
+      host,
+      bob.token,
+      shareBody({ items: [{ to: dana.personId, sealed: SEALED }] }),
+    );
+    expect(attack.status).toBe(403);
+    expect(await failure(attack)).toBe('not a holder');
+
+    // An empty batch no longer reaches the repo at all.
+    expect((await send(host, bob.token, shareBody({ items: [] }))).status).toBe(400);
+
+    // A known credential cannot be pointed at another tool.
+    const retooled = await send(
+      host,
+      alice.token,
+      shareBody({ toolId: OTHER_TOOL, items: [{ to: dana.personId, sealed: SEALED }] }),
+    );
+    expect(retooled.status).toBe(409);
+    expect(await failure(retooled)).toBe('credential belongs to another tool');
+
+    // One owner row, Alice's, and only her one share exists.
+    const owners = holderRows(host, CREDENTIAL).filter((row) => row.owner === 1);
+    expect(owners).toHaveLength(1);
+    expect(owners[0].personId).toBe(alice.personId);
+    expect(shareRows(host)).toHaveLength(1);
+  });
+
+  test('refuses a self-share, a sender who cannot see the tool, and oversized bodies (L7)', async () => {
+    const { host, alice, bob } = await guild();
+
+    const self = await send(
+      host,
+      alice.token,
+      shareBody({ items: [{ to: alice.personId, sealed: SEALED }] }),
+    );
+    expect(self.status).toBe(403);
+    expect(await failure(self)).toBe('cannot share with yourself');
+
+    const invisible = await send(
+      host,
+      alice.token,
+      shareBody({ toolId: OTHER_TOOL, items: [{ to: bob.personId, sealed: SEALED }] }),
+    );
+    expect(invisible.status).toBe(403);
+    expect(await failure(invisible)).toBe('tool not visible to sender');
+
+    expect((await send(host, alice.token, shareBody({ items: [] }))).status).toBe(400);
+    expect(
+      (
+        await send(
+          host,
+          alice.token,
+          shareBody({
+            items: Array.from({ length: 501 }, () => ({ to: bob.personId, sealed: SEALED })),
+          }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await send(
+          host,
+          alice.token,
+          shareBody({ items: [{ to: bob.personId, sealed: 'A'.repeat(65_537) }] }),
+        )
+      ).status,
+    ).toBe(400);
+
+    expect(shareRows(host)).toHaveLength(0);
+    expect(holderRows(host, CREDENTIAL)).toHaveLength(0);
+  });
+
+  test('the owner sets the holder scope through the route, and every share derives it (M4)', async () => {
+    const { host, admin, alice, bob, cara, dana } = await guild();
+    await sendAndAccept(host, alice, bob);
+
+    // Only the owner holder or an admin sets the scope; a credential no one holds is a 404.
+    const byHolder = await put(host, scopePath(CREDENTIAL), { scope: 'org' }, bob.token);
+    expect(byHolder.status).toBe(403);
+    expect(await failure(byHolder)).toBe('not yours');
+    const byOutsider = await put(host, scopePath(CREDENTIAL), { scope: 'org' }, cara.token);
+    expect(byOutsider.status).toBe(403);
+    expect((await put(host, scopePath(CREDENTIAL), { scope: 'org' })).status).toBe(401);
+    const unknown = await put(host, scopePath(crypto.randomUUID()), { scope: 'org' }, admin.token);
+    expect(unknown.status).toBe(404);
+    expect(await failure(unknown)).toBe('unknown credential');
+
+    // The stored scope is the ceiling: a wider body is refused, a narrower one is accepted.
+    const wider = await send(
+      host,
+      alice.token,
+      shareBody({ scope: 'org', items: [{ to: dana.personId, sealed: SEALED }] }),
+    );
+    expect(wider.status).toBe(403);
+    expect(await failure(wider)).toBe('scope wider than the credential');
+    expect(
+      (
+        await send(
+          host,
+          alice.token,
+          shareBody({ scope: 'role', items: [{ to: dana.personId, sealed: SEALED }] }),
+        )
+      ).status,
+    ).toBe(200);
+
+    // The admin widens it; every holder row takes the new scope and an org send now passes.
+    expect((await put(host, scopePath(CREDENTIAL), { scope: 'org' }, admin.token)).status).toBe(204);
+    expect(holderRows(host, CREDENTIAL).map((row) => row.scope)).toEqual(['org', 'org']);
+    expect(
+      (
+        await send(
+          host,
+          alice.token,
+          shareBody({ scope: 'org', items: [{ to: cara.personId, sealed: SEALED }] }),
+        )
+      ).status,
+    ).toBe(200);
+
+    // `blocked` is the state no share survives; the route is its only writer.
+    expect((await put(host, scopePath(CREDENTIAL), { scope: 'blocked' }, alice.token)).status).toBe(
+      204,
+    );
+    const blocked = await send(
+      host,
+      alice.token,
+      shareBody({ scope: 'role', items: [{ to: dana.personId, sealed: SEALED }] }),
+    );
+    expect(blocked.status).toBe(403);
+    expect(await failure(blocked)).toBe('the credential is blocked');
+    expect(holderRows(host, CREDENTIAL).every((row) => row.scope === 'blocked')).toBe(true);
+  });
+
+  test('a revoked holder cannot send, and only the owner re-adds one (M5)', async () => {
+    const { host, alice, bob, dana } = await guild();
+    await sendAndAccept(host, alice, bob);
+    await sendAndAccept(host, alice, dana);
+
+    expect((await del(host, holderPath(CREDENTIAL, bob.personId), alice.token)).status).toBe(204);
+
+    // A revoked holder has no live row to send from.
+    const fromRemoved = await send(
+      host,
+      bob.token,
+      shareBody({ items: [{ to: dana.personId, sealed: SEALED }] }),
+    );
+    expect(fromRemoved.status).toBe(403);
+    expect(await failure(fromRemoved)).toBe('holder was removed');
+
+    // Nor may a non-owner send to a revoked person.
+    const toRemoved = await send(
+      host,
+      dana.token,
+      shareBody({ items: [{ to: bob.personId, sealed: SEALED }] }),
+    );
+    expect(toRemoved.status).toBe(403);
+    expect(await failure(toRemoved)).toBe('recipient was removed');
+
+    // The owner re-adds Bob, and his accept clears the revocation.
+    const readd = await send(
+      host,
+      alice.token,
+      shareBody({ items: [{ to: bob.personId, sealed: SEALED }] }),
+    );
+    expect(readd.status).toBe(200);
+    const { ids: readdIds } = await json<{ ids: string[] }>(readd);
+    expect((await post(host, acceptPath(readdIds[0]), undefined, bob.token)).status).toBe(204);
+    expect(
+      holderRows(host, CREDENTIAL).find((row) => row.personId === bob.personId)?.removedAt,
+    ).toBeNull();
+
+    // A pending share from another holder does not undo a later revocation on accept.
+    const pending = await send(
+      host,
+      dana.token,
+      shareBody({ items: [{ to: bob.personId, sealed: SEALED }] }),
+    );
+    expect(pending.status).toBe(200);
+    const { ids: pendingIds } = await json<{ ids: string[] }>(pending);
+    expect((await del(host, holderPath(CREDENTIAL, bob.personId), alice.token)).status).toBe(204);
+    expect((await post(host, acceptPath(pendingIds[0]), undefined, bob.token)).status).toBe(204);
+    expect(
+      holderRows(host, CREDENTIAL).find((row) => row.personId === bob.personId)?.removedAt,
+    ).not.toBeNull();
+    expect((await state(host, bob.token)).holders).toEqual({});
   });
 
   test('refuses an unknown, a disabled and a keyless recipient', async () => {
@@ -710,8 +1046,20 @@ describe('answer a share', () => {
 
     // Both sides now list both people, with the date and the scope (RF-54).
     const expectedHolders: Holder[] = [
-      expect.objectContaining({ personId: alice.personId, name: 'Alice', owner: true, scope: 'role' }),
-      expect.objectContaining({ personId: bob.personId, name: 'Bob', owner: false, scope: 'role' }),
+      expect.objectContaining({
+        personId: alice.personId,
+        name: 'Alice',
+        toolId: TOOL,
+        owner: true,
+        scope: 'role',
+      }),
+      expect.objectContaining({
+        personId: bob.personId,
+        name: 'Bob',
+        toolId: TOOL,
+        owner: false,
+        scope: 'role',
+      }),
     ];
     const bobState = await state(host, bob.token);
     expect(bobState.incomingShares).toEqual([]);
@@ -773,6 +1121,25 @@ describe('answer a share', () => {
     expect(row.purgedAt).not.toBeNull();
     expect(row.acceptedAt).toBeNull();
 
+    // E02 §6: the purge wrote one content-free `share.expired` for the recipient, on the recipient's
+    // own session (SP01 §2's `events.session_id` is NOT NULL REFERENCES `sessions`).
+    const events = eventRows(host);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      personId: bob.personId,
+      kind: 'share.expired',
+      toolId: TOOL,
+      url: null,
+      result: null,
+      detail: ids[0],
+    });
+    // RF-44/canonico §13: the row carries neither the username, nor the secret, nor the sealed body,
+    // and the ciphertext is already gone from the `shares` row the event points at.
+    const eventDump = JSON.stringify(events);
+    expect(eventDump).not.toContain(USERNAME);
+    expect(eventDump).not.toContain(SECRET);
+    expect(eventDump).not.toContain(SEALED);
+
     // Accepting it afterwards is the conflict of a share that is not open.
     const late = await post(host, acceptPath(ids[0]), undefined, bob.token);
     expect(late.status).toBe(409);
@@ -831,8 +1198,8 @@ describe('holders of a credential', () => {
     const byOwner = await get(host, holdersPath(CREDENTIAL), alice.token);
     expect(byOwner.status).toBe(200);
     expect(await json<Holder[]>(byOwner)).toEqual([
-      expect.objectContaining({ personId: alice.personId, owner: true }),
-      expect.objectContaining({ personId: bob.personId, owner: false }),
+      expect.objectContaining({ personId: alice.personId, owner: true, toolId: TOOL }),
+      expect.objectContaining({ personId: bob.personId, owner: false, toolId: TOOL }),
     ]);
 
     // The holder sees the same list (RF-54), and the admin sees every credential of the guild.
@@ -913,13 +1280,43 @@ describe('holders of a credential', () => {
     expect(update.status).toBe(200);
     expect((await state(host, alice.token)).rotationPending).toEqual([]);
   });
+
+  test('the owner signals a rotation, which clears the state with no remaining holder (RF-48)', async () => {
+    const { host, admin, alice, bob, dana } = await guild();
+    await sendAndAccept(host, alice, bob);
+    await sendAndAccept(host, alice, dana, UPDATED_SEALED);
+    const rotatedPath = (credentialId: string) =>
+      HOST_ROUTES.credentialRotated.replace(':id', credentialId);
+
+    // A holder who is not the owner cannot record a rotation on the credential.
+    const byDana = await post(host, rotatedPath(CREDENTIAL), undefined, dana.token);
+    expect(byDana.status).toBe(403);
+    expect(await failure(byDana)).toBe('not yours');
+
+    // The owner revokes both holders: pending, and there is nobody left to update.
+    expect((await del(host, holderPath(CREDENTIAL, bob.personId), alice.token)).status).toBe(204);
+    expect((await del(host, holderPath(CREDENTIAL, dana.personId), alice.token)).status).toBe(204);
+    expect((await state(host, alice.token)).rotationPending).toEqual([CREDENTIAL]);
+    // A removed holder is nobody's owner either.
+    expect((await post(host, rotatedPath(CREDENTIAL), undefined, bob.token)).status).toBe(403);
+
+    // The owner's save is the rotation: the signal clears the state even though no holder is left.
+    expect((await post(host, rotatedPath(CREDENTIAL), undefined, alice.token)).status).toBe(204);
+    expect((await state(host, alice.token)).rotationPending).toEqual([]);
+
+    // An unknown credential is the 404 of SP03 §1 for the admin too, and a 401 without a session.
+    expect((await post(host, rotatedPath(crypto.randomUUID()), undefined, admin.token)).status).toBe(
+      404,
+    );
+    expect((await post(host, rotatedPath(CREDENTIAL), undefined)).status).toBe(401);
+  });
 });
 
 // ---------------------------------------------------------------- assignments (SP03 §3, RF-47)
 
 describe('assignments', () => {
   test('a role assignment lists its members until each of them holds a copy', async () => {
-    const { host, admin, alice, bob, dana } = await guild();
+    const { host, admin, alice, bob, dana, cara } = await guild();
     const assignment = {
       credentialId: CREDENTIAL,
       roleId: TEAM,
@@ -944,16 +1341,21 @@ describe('assignments', () => {
       personId: bob.personId,
     });
 
-    // The admin's Bond seals one copy to Bob with `kind: 'assign'` (SP06 §4), and he accepts it.
-    //
-    // The scope is the admin's choice (SP06 §5) and the host checks it per item like any other
-    // share: Ada is not in `team`, so a `role` scope would need a role the admin and Bob share and
-    // would be refused with `no role in common`. An assignment of a whole role therefore travels as
-    // `org` — a reading of SP06 §4–§5 reported in `docs/handovers/k3-host-shares.md`.
+    // K8: the assignment is not a member-to-member share, so the `role` scope of SP06 §5 does not
+    // need a role in common with the sender — Ada is not in `team` and Bob is. The rule that applies
+    // instead is the membership of an assigned role: Bob is in `team`, Cara (in `other` only) is not.
+    const toStranger = await send(
+      host,
+      admin.token,
+      shareBody({ kind: 'assign', scope: 'role', items: [{ to: cara.personId, sealed: SEALED }] }),
+    );
+    expect(toStranger.status).toBe(403);
+    expect(await failure(toStranger)).toBe('not a member of an assigned role');
+
     const assigned = await send(
       host,
       admin.token,
-      shareBody({ kind: 'assign', scope: 'org', items: [{ to: bob.personId, sealed: SEALED }] }),
+      shareBody({ kind: 'assign', scope: 'role', items: [{ to: bob.personId, sealed: SEALED }] }),
     );
     expect(assigned.status).toBe(200);
     const { ids } = await json<{ ids: string[] }>(assigned);
@@ -1000,6 +1402,89 @@ describe('assignments', () => {
       ).status,
     ).toBe(204);
     expect(await listOf()).toEqual([]);
+  });
+
+  test('a revoked holder of an assigned role leaves the missing list (M5)', async () => {
+    const { host, admin, alice, bob, dana } = await guild();
+    const assignment = { credentialId: CREDENTIAL, roleId: TEAM, toolId: TOOL, assigned: true };
+    expect((await put(host, HOST_ROUTES.adminAssignments, assignment, admin.token)).status).toBe(204);
+
+    // Alice becomes the owner and Bob a live holder through the ordinary send path.
+    await sendAndAccept(host, alice, bob);
+
+    const missing = async (): Promise<string[]> =>
+      (await json<MissingCopy[]>(await get(host, HOST_ROUTES.adminAssignmentsMissing, admin.token)))
+        .map((row) => row.personId)
+        .sort();
+    expect(await missing()).toEqual([dana.personId]);
+
+    // The owner revokes Bob: his row stays, and the missing list must not bring him back.
+    expect((await del(host, holderPath(CREDENTIAL, bob.personId), alice.token)).status).toBe(204);
+    expect(await missing()).toEqual([dana.personId]);
+  });
+
+  test('a direct person assignment needs no assignment row, and leaves clients out of the list', async () => {
+    const { host, admin, bob } = await guild();
+    // K8: `kind: 'assign'` to one person with no assignment row at all is the direct person
+    // assignment. The host asks only for the grant — the recipient's role is the one the tool is
+    // granted to, and no assignment exists for this credential.
+    const direct = await send(
+      host,
+      admin.token,
+      shareBody({ kind: 'assign', scope: 'role', items: [{ to: bob.personId, sealed: SEALED }] }),
+    );
+    expect(direct.status).toBe(200);
+
+    // K8: a client in the assigned role never enters the missing list (SP06 §5 refuses them `org`).
+    const client = await joinClient(host, [TEAM], 'client-team@nod.test', 'Cli');
+    const assignment = {
+      credentialId: BLOCKED_CREDENTIAL,
+      roleId: TEAM,
+      toolId: TOOL,
+      assigned: true,
+    };
+    expect((await put(host, HOST_ROUTES.adminAssignments, assignment, admin.token)).status).toBe(204);
+    const missing = await json<MissingCopy[]>(
+      await get(host, HOST_ROUTES.adminAssignmentsMissing, admin.token),
+    );
+    expect(missing.every((row) => row.credentialId === BLOCKED_CREDENTIAL)).toBe(true);
+    expect(missing.map((row) => row.personId)).not.toContain(client.personId);
+  });
+
+  test('an assignment to a role the tool is not granted to lists nobody (F1)', async () => {
+    const { host, admin, cara } = await guild();
+    // `kalendar` is granted to `other` only; `team` has three members and no grant.
+    const assignment = {
+      credentialId: CREDENTIAL,
+      roleId: TEAM,
+      toolId: OTHER_TOOL,
+      assigned: true,
+    };
+    expect((await put(host, HOST_ROUTES.adminAssignments, assignment, admin.token)).status).toBe(204);
+
+    const missing = async (): Promise<MissingCopy[]> =>
+      await json<MissingCopy[]>(
+        await get(host, HOST_ROUTES.adminAssignmentsMissing, admin.token),
+      );
+
+    // F1: `createShares` refuses a recipient without the grant (`tool not visible to recipient`),
+    // and one refused item fails the whole request — so an un-granted member of the assigned role is
+    // not a recipient the assignment reaches and must not be listed (SP06 §5 holds for `assign`).
+    expect(await missing()).toEqual([]);
+
+    // The same tool assigned to the role it is granted to does list that role's member, so the empty
+    // list above is the grant predicate, not a query that answers nothing.
+    expect(
+      (
+        await put(
+          host,
+          HOST_ROUTES.adminAssignments,
+          { ...assignment, roleId: OTHER_ROLE },
+          admin.token,
+        )
+      ).status,
+    ).toBe(204);
+    expect((await missing()).map((row) => row.personId)).toEqual([cara.personId]);
   });
 });
 

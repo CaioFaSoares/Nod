@@ -70,6 +70,18 @@ function loginPage(tool: 'A' | 'C'): Response {
   );
 }
 
+/**
+ * A free loopback port: bound once and released, for the host (`PORT` refuses 0) and for each app
+ * launch — a fixed port could be held by a process a previous smoke left behind, and then the page
+ * would be served by the wrong instance.
+ */
+export function freePort(): number {
+  const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('ok') });
+  const port = server.port;
+  server.stop(true);
+  return port;
+}
+
 /** Starts A, B, C and the provider; returns their origins and how to stop them. */
 export function startTools(): Tools {
   // The four origins only exist after the bind (ephemeral port), but the handlers only run when

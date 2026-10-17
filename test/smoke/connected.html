@@ -9,9 +9,9 @@
     <script>
       // Test page for the two-instance smoke (SP05 §5). Plain JavaScript, no bundler.
       // This file is a TEMPLATE: test/smoke/connected.ts replaces its one config marker with the
-      // JSON of the launch { phase, nonce, address, guild, desk, originA, adminEmail,
-      // personEmail, methods, guildIcon } and writes the result to the app store (tiny.store.set),
-      // which the runner reads at <app data>/store.json.
+      // JSON of the launch { phase, nonce, address, guild, desk, originA, originB, originC,
+      // adminEmail, personEmail, otherEmail, methods, secrets, notes, guildIcon } and writes the
+      // result to the app store (tiny.store.set), which the runner reads at <app data>/store.json.
       //
       // The page drives the API through the real path (tiny.api.call), phase by phase:
       //
@@ -19,8 +19,13 @@
       //                                 saved for it; then the setup code, which collides with that
       //                                 account and answers F1's choice — adopted, the same code
       //                                 redeems and the saved credential comes along; publish the
-      //                                 local tools, create P with role `team`, grant Tool A to
-      //                                 `team`, sync; hand P's code over
+      //                                 local tools, create P and Q with role `team`, grant both
+      //                                 tools to `team`, the admin joins `team` too (a `role` share
+      //                                 needs a role in common), sync; hand both codes over
+      //                      B7/SP04 §2  a personal tool of the admin's own and its favorite: the
+      //                                 sync is what takes them up to the host
+      //                      K1/SP06 §2  this machine's own key pair, reported to the desk (a public
+      //                                 fingerprint) for the second machine to compare
       //                      SP05 §6    and upload the guild's PNG (host.setGuildIcon)
       //   person-join        SP05 §5.3  P activates, the granted tool appears (it is the host's
       //                     SP05 §5.5  entry: P's own seed has no row for it), the vault fills on
@@ -29,25 +34,56 @@
       //                      SP05 §6    and this machine reports the guild icon as available and
       //                                 shows it (nod.appIcon, nod.setAppIcon); the PNG itself is the
       //                                 runner's check, read off P's data dir after the phase
+      //                      B7/K1       no personal half of another person arrives, and P's own
+      //                                 pair is reported to the desk for the admin to pin
+      //   person2-join       SP05 §5.3  Q — the second member of `team` — activates the same way
       //   admin-clear        SP05 §6    the admin removes the guild icon
       //   person-cleared     SP05 §6    P's next sync deletes the file and drops the guild option
+      //   admin-share        K2/K4/K6   both members pinned with the fingerprints they reported, the
+      //                                 personal tool and the favorite read back out of the snapshot;
+      //                                 a credential of the granted tool saved, scoped `role` and
+      //                                 sent to both members; a second one assigned to `team` (K8)
+      //   person-share       K4/K7      P's inbox holds the send and the assign; the send is
+      //                                 accepted behind the gate, `vault.reveal` gives the sender's
+      //                                 value back and the holders list both people
+      //   person2-accept     K4         Q accepts the same two shares and reveals the same value
+      //   admin-update       K9         the owner saves a new secret, which fans an update out
+      //   person-update      K9         P's next sync applies it with no gate and the vault moves
+      //   admin-rotate       K9/RF-48   the admin revokes P as a holder (`rotationPending`), then
+      //                                 saves: the update reaches Q and the state clears
+      //   admin-second-      B7/K1      the same person's second machine signs in, ends with the pair
+      //     machine                     of the first one and finds the personal tool in the snapshot
       //   admin-revoke       SP05 §5.4  the admin revokes P
       //   person-signed-out  SP05 §5.4  P's next sync: `signed-out`, the org tools gone
       //
-      // No code, token or password is ever printed: the access code arrives over the runner's desk
-      // (loopback) and the password is this page's own constant, never echoed.
+      // No code, token or password is ever printed: the access codes arrive over the runner's desk
+      // (loopback) and the password is this page's own constant, never echoed. Every gated call
+      // carries that password: the backend takes it because this run is a non-release dev one
+      // (`tinyjs dev`), the only case where a typed password is a factor on a machine that also has
+      // `app.authenticate` (SP02 §9, canonico §22) — the operating system's prompt would otherwise
+      // be what runs, with nobody to answer it.
       (async function () {
         'use strict';
 
         const CONFIG = __CONFIG__;
 
-        /** The password this smoke sets for both accounts. Not a secret: it guards two throwaway
-         *  app data dirs under the smoke's own ids, and it never leaves this page. */
+        /** The password this smoke sets for every account. Not a secret: it guards throwaway app
+         *  data dirs under the smoke's own ids, and it never leaves this page. */
         const ACCOUNT_PASSWORD = 'smoke-connected-1';
 
-        /** F1: the credential the admin Nod saves before the join. Not a secret either: it is a
-         *  throwaway value of a throwaway keychain, and it is compared, never printed. */
-        const LOCAL_SECRET = 'smoke-local-secret';
+        /** The credential values the sharing steps write (SP06 §6): the runner's config carries the
+         *  username and the prefix, so the dump of `host.db` is asked for exactly what this page
+         *  saved. Not secrets either — throwaway values of throwaway keychains, compared and never
+         *  printed. */
+        const LOCAL_SECRET = CONFIG.secrets.local;
+        const SHARE_USERNAME = CONFIG.secrets.username;
+        const SHARED_1 = CONFIG.secrets.shared + '-1';
+        const SHARED_2 = CONFIG.secrets.shared + '-2';
+        const SHARED_3 = CONFIG.secrets.shared + '-3';
+        const ASSIGNED_SECRET = CONFIG.secrets.shared + '-b';
+
+        /** B7: the personal tool the admin adds, which its own second machine must find. */
+        const PERSONAL_TOOL_TITLE = 'Mine (smoke)';
 
         const TINY_WAIT_MS = 30000;
         const STATE_TIMEOUT_MS = 20000;
@@ -59,17 +95,28 @@
         /** What one phase carries from its own steps to the next one (never a code or a secret). */
         const shared = {
           fingerprint: null,
-          /** The setup code of the admin phase and the access code of the person phase: held in
+          /** The setup code of the admin phase and the access codes of the person phases: held in
            *  memory only, cleared as soon as the call that spends it returns. */
           setupCode: null,
           personCode: null,
+          otherCode: null,
           toolId: null,
           personId: null,
           /** F1: the local account of the admin Nod before the join, and the credential it saved. */
           localPersonId: null,
           localToolId: null,
-          /** The guild person id the local account became. */
+          /** The guild person id the local account became, and this machine's own person id. */
           guildPersonId: null,
+          meId: null,
+          /** K4/K6: the second granted tool, the personal tool, and the two shares of one phase. */
+          toolBId: null,
+          personalToolId: null,
+          shareId: null,
+          assignId: null,
+          sharedToolId: null,
+          assignedToolId: null,
+          /** K1/K2: the two members of `team` on the roster, as the admin's phase reads them. */
+          otherPersonId: null,
         };
 
         function sleep(ms) {
@@ -205,6 +252,45 @@
                 ' view(s))';
         }
 
+        /** One credential of a `vault.list` answer, or null when there is none for that tool. */
+        function vaultItemOf(items, toolId) {
+          return (items || []).find((item) => item.toolId === toolId) || null;
+        }
+
+        /**
+         * K1/K2: this machine's own key pair, reported to the desk under one note key. A fingerprint
+         * is a digest of two public keys — the one thing another machine needs to tell "the same
+         * pair" from "another one" — and no secret ever goes through the desk.
+         */
+        async function reportOwnFingerprint(note) {
+          const mine = await call('keys.mine');
+          expect(
+            !!mine && typeof mine.fingerprint === 'string' && mine.fingerprint.length > 0,
+            'keys.mine answered ' + summarize(mine),
+          );
+          await desk('/desk/note', { key: note, value: mine.fingerprint });
+          return mine.fingerprint;
+        }
+
+        /**
+         * The ids one admin phase needs: the two org tools by the origin of their fake server, and
+         * the three people by email. A phase is its own launch, so nothing carries over from the
+         * one before it — what is stable is the host's data.
+         */
+        async function adminIds() {
+          const list = await call('catalog.list');
+          const toolA = entryOfOrigin(list, CONFIG.originA);
+          const toolB = entryOfOrigin(list, CONFIG.originB);
+          expect(toolA !== null && toolB !== null, 'an org tool left the catalog (' + list.length + ' entries)');
+          const people = await call('people.list');
+          const me = people.find((item) => item.email === CONFIG.adminEmail) || null;
+          const person = people.find((item) => item.email === CONFIG.personEmail) || null;
+          const other = people.find((item) => item.email === CONFIG.otherEmail) || null;
+          expect(me !== null, 'the admin is not a person of the guild');
+          expect(person !== null && other !== null, 'a member of `team` is missing from the roster');
+          return { toolA, toolB, me, person, other };
+        }
+
         // ------------------------------------------------------------------ SP05 §5.2 — the admin
 
         async function stepStateFresh() {
@@ -332,7 +418,10 @@
             item.keychainKey === 'nod.cred.' + shared.guildPersonId + '.' + shared.localToolId,
             'the keychain key is ' + summarize(item.keychainKey),
           );
-          const revealed = await call('vault.reveal', { toolId: shared.localToolId });
+          const revealed = await call('vault.reveal', {
+            toolId: shared.localToolId,
+            password: ACCOUNT_PASSWORD,
+          });
           expect(
             !!revealed && revealed.secret === LOCAL_SECRET,
             'revealing the credential came back as ' + summarize(revealed && revealed.username),
@@ -416,13 +505,36 @@
           );
         }
 
-        // The code is handed over here, right after it exists: the person phases then fail for
+        /** The second member of `team`: the assignment seals to every member, and K9's revocation
+         *  needs somebody left to rotate to. */
+        async function stepCreateOther() {
+          const method = CONFIG.methods.personCreate;
+          if (method === null) throw new Error('ApiContract declares no person-create method');
+          expect(CONFIG.methods.personCreateEmail, 'the pre-B6 shape cannot name the second member');
+          const answer = await call(method, {
+            email: CONFIG.otherEmail,
+            name: 'Smoke Other',
+            roles: ['team'],
+            days: 1,
+          });
+          expect(
+            !!answer && typeof answer.code === 'string' && answer.code.length > 0,
+            method + ' answered ' + summarize(answer),
+          );
+          shared.otherCode = answer.code;
+          return method + ' issued the second member\'s access code (not printed)';
+        }
+
+        // The codes are handed over here, right after they exist: the person phases then fail for
         // their own reasons instead of for a missing hand-over.
         async function stepHandOver() {
           expect(typeof shared.personCode === 'string', 'no access code was issued');
-          await desk('/desk/handover', { code: shared.personCode });
+          await desk('/desk/handover', { code: shared.personCode, who: 'person' });
           shared.personCode = null;
-          return 'handed over through the desk (not printed)';
+          expect(typeof shared.otherCode === 'string', 'no access code was issued for the second member');
+          await desk('/desk/handover', { code: shared.otherCode, who: 'other' });
+          shared.otherCode = null;
+          return 'both access codes handed over through the desk (not printed)';
         }
 
         async function stepPersonListed() {
@@ -465,6 +577,86 @@
           return 'the snapshot carries the grant to team (' + toolLabel(entry) + ')';
         }
 
+        /** The second org tool, granted to the same role: it is the credential K8 assigns. */
+        async function stepGrantToolB() {
+          const list = await call('catalog.list');
+          const entry = entryOfOrigin(list, CONFIG.originB);
+          expect(entry !== null, 'Tool B is not in the catalog (' + list.length + ' entries)');
+          const ok = await call('roles.grant', { roleId: 'team', toolId: entry.id, granted: true });
+          expect(ok === true, 'roles.grant answered ' + summarize(ok));
+          shared.toolBId = entry.id;
+          return 'Tool B (' + entry.id + ') granted to team';
+        }
+
+        /**
+         * SP06 §5: a `role` share needs a role in common with the sender, so the admin joins `team`
+         * as well — the guild's admin is a member of the team it shares with. The host writes the
+         * row; the snapshot is what the scope decision reads.
+         */
+        async function stepAdminJoinsTeam() {
+          expect(shared.guildPersonId !== null, 'the guild person id is not known yet');
+          const people = await call('people.list');
+          const me = people.find((item) => item.id === shared.guildPersonId) || null;
+          expect(me !== null, 'the admin is not a person of the guild');
+          const roles = (me.roles || []).slice();
+          if (roles.indexOf('team') === -1) roles.push('team');
+          const updated = await call('people.setRoles', { personId: me.id, roles });
+          expect(
+            (updated.roles || []).indexOf('team') !== -1,
+            'the admin\'s roles are ' + summarize(updated.roles),
+          );
+          return 'the admin is in team too (' + (updated.roles || []).length + ' role(s))';
+        }
+
+        /** K1/SP06 §2: the pair this machine generated at the activation, for the desk to carry. */
+        async function stepAdminKeys() {
+          const fingerprint = await reportOwnFingerprint(CONFIG.notes.admin);
+          return 'this machine holds a pair: fingerprint ' + shortDigest(fingerprint) + ' (reported to the desk)';
+        }
+
+        /** B7/SP05 §3: a tool of the admin's own, on an origin no seed carries (SP04 §2). */
+        async function stepSavePersonalTool() {
+          const entry = await call('personal.saveTool', {
+            entry: { title: PERSONAL_TOOL_TITLE, url: CONFIG.originC },
+          });
+          expect(
+            !!entry && typeof entry.id === 'string' && entry.id.length > 0,
+            'personal.saveTool answered ' + summarize(entry),
+          );
+          expect(entry.scope === 'personal', 'the scope came back as ' + JSON.stringify(entry.scope));
+          shared.personalToolId = entry.id;
+          const list = await call('catalog.list');
+          expect(entryOfOrigin(list, CONFIG.originC) !== null, 'the personal tool is not in the catalog');
+          return 'personal tool ' + entry.id + ' saved on this machine (own origin, no view)';
+        }
+
+        /** SP05 §4: the favorites first, in the order the person chose — the star the page draws. */
+        async function stepFavoritePersonalTool() {
+          expect(shared.personalToolId !== null, 'no personal tool was saved');
+          const before = await call('favorites.list');
+          expect(before.indexOf(shared.personalToolId) === -1, 'the tool was already a favorite');
+          await call('favorites.set', { ids: [shared.personalToolId] });
+          const after = await call('favorites.list');
+          expect(
+            after.length === 1 && after[0] === shared.personalToolId,
+            'favorites.list = ' + summarize(after),
+          );
+          const list = await call('catalog.list');
+          expect(
+            list.length > 0 && list[0].id === shared.personalToolId,
+            'the favorite does not lead the order: ' + summarize(list.map((item) => item.id)),
+          );
+          return 'favorited: the list is [' + shared.personalToolId + '] and it leads the order';
+        }
+
+        /** B7/SP05 §3: the write is queued while connected; the sync is what takes it up. */
+        async function stepPersonalSync() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          expect(state.pendingWrites === 0, 'pendingWrites = ' + JSON.stringify(state.pendingWrites));
+          return 'status connected; the personal tool and the favorite went up (nothing pending)';
+        }
+
         // ----------------------------------------------------------------- SP05 §5.3 and §5.5 — P
 
         async function stepPersonStateFresh() {
@@ -474,7 +666,7 @@
         }
 
         async function stepPersonCode() {
-          const from = await desk('/desk/person');
+          const from = await desk('/desk/person?who=person');
           expect(from.guild === CONFIG.guild, 'the desk guild = ' + JSON.stringify(from.guild));
           expect(typeof from.code === 'string' && from.code.length > 0, 'the desk carries no access code');
           shared.personCode = from.code;
@@ -523,6 +715,28 @@
           );
           shared.toolId = entry.id;
           return 'Jitsi\'s stand-in appeared for team: ' + toolLabel(entry);
+        }
+
+        /**
+         * SP05 §2: the personal half of a snapshot is mine. The admin's own tool and favorite never
+         * travel to another person, which is the other side of the B7 step of the admin phase.
+         */
+        async function stepPersonalNotMine() {
+          const list = await call('catalog.list');
+          const personal = list.filter((entry) => entry.scope === 'personal');
+          expect(
+            personal.length === 0,
+            'another person\'s personal tools arrived: ' + summarize(personal.map((entry) => entry.id)),
+          );
+          const favorites = await call('favorites.list');
+          expect(favorites.length === 0, 'favorites.list = ' + summarize(favorites));
+          return 'no personal tool and no favorite of another person (' + list.length + ' entries)';
+        }
+
+        /** K1/SP06 §2: the pair this machine generated at its activation, for the admin to pin. */
+        async function stepPersonKeys() {
+          const fingerprint = await reportOwnFingerprint(CONFIG.notes.person);
+          return 'this machine holds a pair: fingerprint ' + shortDigest(fingerprint) + ' (reported to the desk)';
         }
 
         async function stepVaultSave() {
@@ -712,6 +926,541 @@
           );
         }
 
+        // ------------------------------------------------- SP05 §5.3 — the second member of team
+
+        async function stepOtherCode() {
+          const from = await desk('/desk/person?who=other');
+          expect(from.guild === CONFIG.guild, 'the desk guild = ' + JSON.stringify(from.guild));
+          expect(typeof from.code === 'string' && from.code.length > 0, 'the desk carries no access code');
+          shared.otherCode = from.code;
+          return "the second member's access code in memory (not printed)";
+        }
+
+        async function stepOtherActivate() {
+          const found = await call('host.discover', { address: CONFIG.address });
+          expect(found.guild === CONFIG.guild, 'guild = ' + JSON.stringify(found.guild));
+          const answer = await call('host.activate', {
+            address: CONFIG.address,
+            fingerprint: found.fingerprint,
+            email: CONFIG.otherEmail,
+            code: shared.otherCode,
+            password: ACCOUNT_PASSWORD,
+          });
+          shared.otherCode = null;
+          expect(answer && answer.kind === 'session', 'host.activate answered ' + summarize(answer));
+          const state = answer.session;
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          expect(!!state.person && state.person.admin !== true, 'the second member came out as an admin');
+          return 'activated with the access code; the session is unlocked and this person is not an admin';
+        }
+
+        async function stepOtherGranted() {
+          const list = await call('catalog.list');
+          const entry = entryOfOrigin(list, CONFIG.originA);
+          expect(entry !== null, 'the granted tool is not in the second member\'s catalog');
+          expect(
+            (entry.roles || []).indexOf('team') !== -1,
+            'the entry does not carry the grant: roles = ' + summarize(entry.roles),
+          );
+          return 'the granted tool is here too: ' + toolLabel(entry);
+        }
+
+        async function stepOtherKeys() {
+          const fingerprint = await reportOwnFingerprint(CONFIG.notes.other);
+          return 'this machine holds a pair: fingerprint ' + shortDigest(fingerprint) + ' (reported to the desk)';
+        }
+
+        async function stepOtherUnlock() {
+          const state = await call('session.unlock', {
+            email: CONFIG.otherEmail,
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          return 'the second member unlocked from the cache';
+        }
+
+        // ----------------------------------------------------------- K2/K4/K6/K8 — the admin shares
+
+        /**
+         * K2/RF-45: the colleagues as this machine pinned them. The fingerprint each machine
+         * reported to the desk is what has to be pinned here: the pin is that person's own key, and
+         * a `changed` one would refuse every send (SP06 §3 step 2).
+         */
+        async function stepPeersPinned() {
+          const ids = await adminIds();
+          shared.guildPersonId = ids.me.id;
+          shared.personId = ids.person.id;
+          shared.otherPersonId = ids.other.id;
+          shared.toolId = ids.toolA.id;
+          shared.toolBId = ids.toolB.id;
+          const peers = await call('peers.list');
+          const wanted = [
+            { who: 'the first member', personId: ids.person.id, note: CONFIG.notes.person },
+            { who: 'the second member', personId: ids.other.id, note: CONFIG.notes.other },
+          ];
+          const lines = [];
+          for (const target of wanted) {
+            const row = peers.find((peer) => peer.personId === target.personId) || null;
+            expect(row !== null, target.who + ' is not in peers.list');
+            expect(
+              row.status === 'pinned',
+              'the status of ' + target.who + ' is ' + JSON.stringify(row.status),
+            );
+            const reported = await desk('/desk/note?key=' + target.note);
+            expect(
+              row.fingerprint === reported.value,
+              'the pinned fingerprint of ' + target.who + ' is not the one that machine reported',
+            );
+            lines.push(target.who + ' pinned ' + shortDigest(row.fingerprint));
+          }
+          return lines.join('; ');
+        }
+
+        /**
+         * B7/SP04 §2: a later launch of this machine reads the personal tool and the favorite out of
+         * the last signed snapshot — the sync of the publish phase is what took them up, so nothing
+         * of the outbox is left to explain them.
+         */
+        async function stepPersonalFromSnapshot() {
+          const list = await call('catalog.list');
+          const personal = list.filter((entry) => entry.scope === 'personal');
+          expect(
+            personal.length === 1,
+            'personal entries: ' + summarize(personal.map((entry) => entry.id)),
+          );
+          expect(personal[0].title === PERSONAL_TOOL_TITLE, 'the title moved: ' + summarize(personal[0].title));
+          const favorites = await call('favorites.list');
+          expect(
+            favorites.length === 1 && favorites[0] === personal[0].id,
+            'favorites.list = ' + summarize(favorites),
+          );
+          expect(
+            list.length > 0 && list[0].id === personal[0].id,
+            'the favorite does not lead the order: ' + summarize(list.map((entry) => entry.id)),
+          );
+          shared.personalToolId = personal[0].id;
+          return 'the snapshot carries the personal tool and the favorite: ' + personal[0].id + ' leads';
+        }
+
+        /** K4/SP06 §4: the credential the owner is about to share, with the value of the run. */
+        async function stepSaveShared() {
+          expect(shared.toolId !== null, 'the granted tool is not known');
+          const item = await call('vault.save', {
+            toolId: shared.toolId,
+            username: SHARE_USERNAME,
+            secret: SHARED_1,
+          });
+          expect(!!item && item.toolId === shared.toolId, 'vault.save answered ' + summarize(item));
+          expect(item.scope === 'role', 'a new credential carries scope ' + JSON.stringify(item.scope));
+          return 'the credential of ' + item.toolId + ' saved (value only in the keychain)';
+        }
+
+        /** K6/SP06 §5: the scope of a credential is its owner's to set, and `role` is the default. */
+        async function stepScopeRole() {
+          const item = await call('vault.setScope', { toolId: shared.toolId, scope: 'role' });
+          expect(item.scope === 'role', 'the scope read back as ' + JSON.stringify(item.scope));
+          const recipients = await call('shares.recipients', { toolId: shared.toolId });
+          const allowed = recipients.filter((row) => row.allowed);
+          expect(
+            allowed.length === 2 && recipients.length === 2,
+            'the scope allows ' + allowed.length + ' of ' + recipients.length + ' recipient(s)',
+          );
+          for (const row of recipients) {
+            expect(
+              row.keyStatus === 'pinned',
+              row.name + ' has keyStatus ' + JSON.stringify(row.keyStatus) + ' (' + summarize(row.reason) + ')',
+            );
+            expect(row.fingerprint !== null, row.name + ' has no pinned fingerprint');
+          }
+          return 'scope role: both members of team are recipients (' + summarize(allowed.map((row) => row.name)) + ')';
+        }
+
+        /** K4/SP06 §4: one sealed copy per recipient, behind the gate — the password, here. */
+        async function stepSendShared() {
+          expect(shared.personId !== null && shared.otherPersonId !== null, 'the members are not known');
+          const answer = await call('shares.send', {
+            toolId: shared.toolId,
+            to: [shared.personId, shared.otherPersonId],
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(answer && answer.sent === 2, 'shares.send answered ' + summarize(answer));
+          return 'one sealed copy per member (' + answer.sent + '), nothing printed';
+        }
+
+        /** K7/RF-54: the sender's own rows name the owner, and the sync is what brings them. */
+        async function stepHoldersAfterSend() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          const item = vaultItemOf(await call('vault.list'), shared.toolId);
+          expect(item !== null, 'the credential left the vault');
+          expect(item.rotationPending === false, 'rotationPending = ' + JSON.stringify(item.rotationPending));
+          const owners = (item.holders || []).filter((holder) => holder.owner);
+          expect(
+            owners.length === 1 && owners[0].personId === shared.guildPersonId,
+            'the holder rows are ' + summarize(item.holders),
+          );
+          return 'the owner holder row is the admin (' + (item.holders || []).length + ' row(s) so far)';
+        }
+
+        /** K8/SP06 §4: the credential the assignment seals, of the second granted tool. */
+        async function stepSaveAssigned() {
+          expect(shared.toolBId !== null, 'the second granted tool is not known');
+          const item = await call('vault.save', {
+            toolId: shared.toolBId,
+            username: SHARE_USERNAME,
+            secret: ASSIGNED_SECRET,
+          });
+          expect(!!item && item.toolId === shared.toolBId, 'vault.save answered ' + summarize(item));
+          return 'the credential of ' + item.toolId + ' saved for the assignment (value in the keychain)';
+        }
+
+        /**
+         * K8/RF-47: the admin's one action — the assignment row and the copies of the members the
+         * host lists as missing, behind the one gate. The list clears on the member's accept, so
+         * both members are still listed right after the seal.
+         */
+        async function stepAssignTeam() {
+          expect(shared.toolBId !== null, 'the assigned tool is not known');
+          const result = await call('assignments.set', {
+            toolId: shared.toolBId,
+            roleId: 'team',
+            assigned: true,
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(
+            result !== null && typeof result === 'object' && result.sent === 2 && result.skipped === 0,
+            'assignments.set answered ' + summarize(result),
+          );
+          const missing = (await call('assignments.missing')).filter((row) => row.toolId === shared.toolBId);
+          expect(
+            missing.length === 2,
+            'the missing list holds ' + missing.length + ' member(s) of the assigned role',
+          );
+          for (const row of missing) {
+            expect(
+              row.keyStatus === 'pinned',
+              row.personName + ' has keyStatus ' + JSON.stringify(row.keyStatus),
+            );
+          }
+          return 'role team assigned; ' + missing.length + ' member(s) without a copy yet, both pinned';
+        }
+
+        // ------------------------------------------------------ K4/K7 — the receivers
+
+        async function stepInboxShares() {
+          const inbox = await call('shares.inbox');
+          expect(
+            inbox.length === 2,
+            'the inbox holds ' + inbox.length + ' share(s): ' + summarize(inbox.map((row) => row.kind)),
+          );
+          const sent = inbox.find((row) => row.kind === 'send') || null;
+          const assigned = inbox.find((row) => row.kind === 'assign') || null;
+          expect(sent !== null && assigned !== null, 'the kinds are ' + summarize(inbox.map((row) => row.kind)));
+          expect(sent.fromName === 'Smoke Admin', 'the sender is ' + JSON.stringify(sent.fromName));
+          expect(
+            sent.scope === 'role' && assigned.scope === 'role',
+            'the scopes are ' + summarize([sent.scope, assigned.scope]),
+          );
+          expect(sent.toolId !== assigned.toolId, 'both shares name the same tool');
+          expect(sent.toolTitle !== null && assigned.toolTitle !== null, 'a share names no tool');
+          shared.shareId = sent.id;
+          shared.assignId = assigned.id;
+          shared.sharedToolId = sent.toolId;
+          shared.assignedToolId = assigned.toolId;
+          return (
+            'two open shares: a send of ' + sent.toolId + ' and an assign of ' + assigned.toolId + ' (metadata only)'
+          );
+        }
+
+        /** K4/SP06 §4: the gate first (the password), then the copy lands in the vault. */
+        async function stepAcceptShare() {
+          const item = await call('shares.accept', { id: shared.shareId, password: ACCOUNT_PASSWORD });
+          expect(!!item && item.toolId === shared.sharedToolId, 'shares.accept answered ' + summarize(item));
+          expect(
+            typeof item.credentialId === 'string' && item.credentialId.length > 0,
+            'the item carries no credentialId',
+          );
+          expect(item.scope === 'role', 'the scope landed as ' + JSON.stringify(item.scope));
+          return 'accepted: the copy is in the vault under the credential its sender owns';
+        }
+
+        /** K4: the value is the one the admin saved, read back through the gate. */
+        async function stepRevealedShared() {
+          const revealed = await call('vault.reveal', {
+            toolId: shared.sharedToolId,
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(!!revealed && revealed.secret === SHARED_1, 'the revealed value is not the one the admin saved');
+          expect(revealed.username === SHARE_USERNAME, 'the revealed username is not the one the admin saved');
+          return 'revealed behind the password: the sender\'s own value (not printed)';
+        }
+
+        /** K5: the same gate, and the secret goes to the runtime's clipboard instead of the page. */
+        async function stepCopiedShared() {
+          const ok = await call('vault.copy', { toolId: shared.sharedToolId, password: ACCOUNT_PASSWORD });
+          expect(ok === true, 'vault.copy answered ' + summarize(ok));
+          return 'copied through the gate: the answer is true, and the value never came back to the page';
+        }
+
+        /** K7/RF-54: the holders come from the host's snapshot, and both sides read the same rows. */
+        async function stepHoldersBoth() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          const item = vaultItemOf(await call('vault.list'), shared.sharedToolId);
+          expect(item !== null, 'the credential left the vault');
+          const holders = item.holders || [];
+          expect(holders.length === 2, 'the holder rows are ' + summarize(holders.map((row) => row.name)));
+          const owners = holders.filter((row) => row.owner);
+          expect(
+            owners.length === 1 && owners[0].name === 'Smoke Admin',
+            'the owner row is ' + summarize(owners.map((row) => row.name)),
+          );
+          expect(
+            holders.some((row) => row.name === 'Smoke Person'),
+            'this Nod is not among them: ' + summarize(holders.map((row) => row.name)),
+          );
+          for (const holder of holders) {
+            expect(
+              typeof holder.since === 'string' && holder.since.length > 0,
+              'a holder row carries no date',
+            );
+            expect(holder.scope === 'role', 'a holder row carries scope ' + JSON.stringify(holder.scope));
+          }
+          return 'both holders with date and scope (' + holders.length + ' rows, owner Smoke Admin)';
+        }
+
+        async function stepAcceptAssign() {
+          const item = await call('shares.accept', { id: shared.assignId, password: ACCOUNT_PASSWORD });
+          expect(!!item && item.toolId === shared.assignedToolId, 'shares.accept answered ' + summarize(item));
+          expect(
+            typeof item.credentialId === 'string' && item.credentialId.length > 0,
+            'the assigned item carries no credentialId',
+          );
+          return 'the assigned copy is in the vault (' + item.toolId + ')';
+        }
+
+        async function stepShareSync() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          expect(state.pendingWrites === 0, 'pendingWrites = ' + JSON.stringify(state.pendingWrites));
+          return 'status connected; the accepts went up and nothing is pending';
+        }
+
+        // ------------------------------------------------------------ K9 — update and rotation
+
+        /** K7: both credentials now name the three people, and nothing is waiting to rotate. */
+        async function stepHolderCounts() {
+          const ids = await adminIds();
+          shared.toolId = ids.toolA.id;
+          shared.toolBId = ids.toolB.id;
+          shared.personId = ids.person.id;
+          shared.guildPersonId = ids.me.id;
+          const items = await call('vault.list');
+          for (const toolId of [ids.toolA.id, ids.toolB.id]) {
+            const item = vaultItemOf(items, toolId);
+            expect(item !== null, 'no credential for ' + toolId);
+            const holders = item.holders || [];
+            expect(holders.length === 3, toolId + ': the holder rows are ' + summarize(holders.map((row) => row.name)));
+            expect(
+              holders.filter((row) => row.owner && row.removedAt === null).length === 1,
+              toolId + ': ' + summarize(holders),
+            );
+            expect(
+              item.rotationPending === false,
+              toolId + ': rotationPending = ' + JSON.stringify(item.rotationPending),
+            );
+          }
+          return 'both credentials hold the admin, Smoke Person and Smoke Other (3 rows each, no rotation)';
+        }
+
+        /** K9/SP06 §4: the owner's save re-seals the new value to every live holder. */
+        async function stepOwnerSavesAgain() {
+          const before = vaultItemOf(await call('vault.list'), shared.toolId);
+          expect(before !== null, 'the credential left the vault');
+          const item = await call('vault.save', {
+            toolId: shared.toolId,
+            username: SHARE_USERNAME,
+            secret: SHARED_2,
+          });
+          expect(item.credentialId === before.credentialId, 'the credential id changed on the save');
+          expect(
+            item.updateWarning === null || item.updateWarning === undefined,
+            'the save answered ' + summarize(item.updateWarning),
+          );
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          return 'the owner saved a new secret; the update went out to both holders (no warning)';
+        }
+
+        /** K8/RF-47: both members accepted, so nothing is missing — the gated seal has no work. */
+        async function stepMissingEmpty() {
+          const missing = await call('assignments.missing');
+          expect(missing.length === 0, 'the missing list still holds ' + missing.length + ' row(s)');
+          const sealed = await call('assignments.sealMissing', { password: ACCOUNT_PASSWORD });
+          expect(
+            sealed && sealed.sent === 0 && sealed.skipped === 0,
+            'assignments.sealMissing answered ' + summarize(sealed),
+          );
+          return 'nothing is missing: the gated seal had nothing to send';
+        }
+
+        /**
+         * K9/SP06 §4: an `update` of a credential this Nod already holds is applied on the applied
+         * snapshot, with no gate and nothing shown — the sync is the whole of it.
+         */
+        async function stepUpdateApplied() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          expect(state.pendingWrites === 0, 'pendingWrites = ' + JSON.stringify(state.pendingWrites));
+          return 'status connected: the sync accepted the update of a held credential (no gate)';
+        }
+
+        async function stepUpdatedSecret() {
+          const list = await call('catalog.list');
+          const entry = entryOfOrigin(list, CONFIG.originA);
+          expect(entry !== null, 'the granted tool left the catalog');
+          const revealed = await call('vault.reveal', { toolId: entry.id, password: ACCOUNT_PASSWORD });
+          expect(!!revealed && revealed.secret === SHARED_2, 'the vault did not move to the new value');
+          return 'the vault holds the value the owner saved last (not printed)';
+        }
+
+        async function stepInboxEmpty() {
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          const inbox = await call('shares.inbox');
+          expect(
+            inbox.length === 0,
+            'the inbox still holds ' + inbox.length + ' share(s): ' + summarize(inbox.map((row) => row.kind)),
+          );
+          return 'the inbox is empty: the host purged the share the sync accepted';
+        }
+
+        /** K9/RF-48: revoking a holder marks the credential rotation pending until a new secret. */
+        async function stepRevokeHolder() {
+          const ids = await adminIds();
+          shared.toolId = ids.toolA.id;
+          shared.personId = ids.person.id;
+          const item = await call('shares.removeHolder', {
+            toolId: shared.toolId,
+            personId: shared.personId,
+          });
+          expect(!!item && item.toolId === shared.toolId, 'shares.removeHolder answered ' + summarize(item));
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          const rotated = vaultItemOf(await call('vault.list'), shared.toolId);
+          expect(rotated !== null, 'the credential left the vault');
+          expect(
+            rotated.rotationPending === true,
+            'rotationPending = ' + JSON.stringify(rotated.rotationPending),
+          );
+          const removed = (rotated.holders || []).find((row) => row.personId === shared.personId) || null;
+          expect(removed !== null && typeof removed.removedAt === 'string', 'the revoked row is ' + summarize(rotated.holders));
+          expect(removed.owner === false, 'the owner was the one revoked');
+          return (
+            'the holder was revoked and the credential is rotation pending (' +
+            (rotated.holders || []).length +
+            ' row(s) kept)'
+          );
+        }
+
+        /** K9/SP06 §4: the save that follows reaches the remaining holder and clears the state. */
+        async function stepRotationCleared() {
+          const item = await call('vault.save', {
+            toolId: shared.toolId,
+            username: SHARE_USERNAME,
+            secret: SHARED_3,
+          });
+          expect(
+            item.updateWarning === null || item.updateWarning === undefined,
+            'the save answered ' + summarize(item.updateWarning),
+          );
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          const rotated = vaultItemOf(await call('vault.list'), shared.toolId);
+          expect(rotated !== null, 'the credential left the vault');
+          expect(
+            rotated.rotationPending === false,
+            'rotationPending = ' + JSON.stringify(rotated.rotationPending),
+          );
+          return 'the new secret reached the remaining holder and cleared the rotation';
+        }
+
+        // ------------------------------------------------- B7/K1 — the same person's second machine
+
+        /** SP05 §5.3: a machine with no account of its own signs in to the guild it is pointed at. */
+        async function stepSecondSignIn() {
+          const found = await call('host.discover', { address: CONFIG.address });
+          expect(found.guild === CONFIG.guild, 'guild = ' + JSON.stringify(found.guild));
+          const answer = await call('host.signIn', {
+            address: CONFIG.address,
+            fingerprint: found.fingerprint,
+            email: CONFIG.adminEmail,
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(answer && answer.kind === 'session', 'host.signIn answered ' + summarize(answer));
+          const state = answer.session;
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          // The snapshot is what says who is an admin (SP05 §2): the join writes the local row from
+          // the host's answer, and the first sync is what brings `me.admin` — the next step checks it.
+          expect(
+            !!state.person && state.person.email === CONFIG.adminEmail,
+            'the person that signed in is ' + summarize(state.person && state.person.email),
+          );
+          shared.meId = state.person.id;
+          return 'signed in as the guild admin on a second machine of the same person';
+        }
+
+        /**
+         * canonico §22/SP06 §2: the pair is the person's, not the machine's — the second machine
+         * adopts the one the host holds (the fingerprint the first machine reported) and publishes
+         * nothing, which is what keeps every colleague's pin `pinned`. The same sync is what brings
+         * the `admin` flag of a connected account (SP05 §2).
+         */
+        async function stepSecondPair() {
+          const mine = await call('keys.mine');
+          expect(
+            !!mine && typeof mine.fingerprint === 'string' && mine.fingerprint.length > 0,
+            'keys.mine answered ' + summarize(mine),
+          );
+          const first = await desk('/desk/note?key=' + CONFIG.notes.admin);
+          expect(
+            mine.fingerprint === first.value,
+            'this machine holds another pair than the first machine of the same person',
+          );
+          const state = await call('host.syncNow');
+          expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
+          expect(state.pendingWrites === 0, 'pendingWrites = ' + JSON.stringify(state.pendingWrites));
+          const session = await call('session.state');
+          expect(
+            !!session.person && session.person.admin === true,
+            'the snapshot did not say this person is the admin',
+          );
+          return 'the same pair as the first machine (adopted, nothing published): ' + shortDigest(mine.fingerprint);
+        }
+
+        /** B7/SP04 §2: the personal tool and the favorite arrive inside the signed snapshot. */
+        async function stepSecondPersonal() {
+          expect(shared.meId !== null, 'this machine has no person id');
+          const list = await call('catalog.list');
+          const personal = list.filter((entry) => entry.scope === 'personal');
+          expect(
+            personal.length === 1,
+            'personal entries: ' + summarize(personal.map((entry) => entry.id)),
+          );
+          expect(personal[0].ownerId === shared.meId, 'the owner is ' + summarize(personal[0].ownerId));
+          expect(personal[0].title === PERSONAL_TOOL_TITLE, 'the title is not the one the first machine gave');
+          const favorites = await call('favorites.list');
+          expect(
+            favorites.length === 1 && favorites[0] === personal[0].id,
+            'favorites.list = ' + summarize(favorites),
+          );
+          expect(
+            list.length > 0 && list[0].id === personal[0].id,
+            'the favorite does not lead the order: ' + summarize(list.map((entry) => entry.id)),
+          );
+          return 'the personal tool and its favorite came with the snapshot (' + personal[0].id + ' leads)';
+        }
+
         // ------------------------------------------------------------------ SP05 §5.4 — revoke
 
         async function stepAdminState() {
@@ -806,10 +1555,17 @@
             ['2.7 catalog.list (published)', stepCatalogPublished],
             ['2.8 roles.save (team)', stepSaveTeam],
             ['2.9 invites.issue (P, role team)', stepCreatePerson],
-            ['2.10 hand P\'s code over', stepHandOver],
+            ['2.9b invites.issue (Q, role team)', stepCreateOther],
+            ['2.10 hand both codes over', stepHandOver],
             ['2.11 people.list (P of the guild)', stepPersonListed],
             ['2.12 roles.grant (Tool A to team)', stepGrant],
-            ['2.13 host.syncNow (the grant travels)', stepGrantVisible],
+            ['2.12b roles.grant (Tool B to team)', stepGrantToolB],
+            ['2.12c people.setRoles (the admin joins team)', stepAdminJoinsTeam],
+            ['2.13 host.syncNow (the grants travel)', stepGrantVisible],
+            ['2.14 keys.mine (this machine\'s pair, K1)', stepAdminKeys],
+            ['2.15 personal.saveTool (B7)', stepSavePersonalTool],
+            ['2.16 favorites.list/set (the star, SP05 §4)', stepFavoritePersonalTool],
+            ['2.17 host.syncNow (the personal half goes up)', stepPersonalSync],
             ['6.1 host.setGuildIcon (the guild PNG)', stepSetGuildIcon],
             ['6.2 host.syncNow (the signed digest)', stepGuildIconSync],
           ],
@@ -822,8 +1578,10 @@
             ['6.3 nod.appIcon (guildIconAvailable)', stepPersonGuildIconAvailable],
             ['6.4 nod.setAppIcon (guild)', stepPersonAppIconGuild],
             ['3.6 catalog.list (the granted tool)', stepGrantedToolAppears],
+            ['3.6b catalog.list/favorites.list (the personal half is mine, B7)', stepPersonalNotMine],
             ['3.7 vault.save (Tool A)', stepVaultSave],
             ['3.8 tools.open (fill on the origin)', stepFill],
+            ['3.9 keys.mine (this machine\'s pair, K1)', stepPersonKeys],
             ['5.1 desk: stop the host', stepHostDown],
             ['5.2 host.syncNow (offline)', stepOfflineSync],
             ['5.3 catalog.list (from the cache)', stepOfflineCatalog],
@@ -833,6 +1591,14 @@
             ['5.7 desk: start the host', stepHostUp],
             ['5.8 host.syncNow (back online)', stepOnlineSync],
           ],
+          'person2-join': [
+            ['3q.1 session.state (no account yet)', stepPersonStateFresh],
+            ['3q.2 desk: access code', stepOtherCode],
+            ['3q.3 host.activate (access code)', stepOtherActivate],
+            ['3q.4 host.syncNow', stepPersonSync],
+            ['3q.5 catalog.list (the granted tool)', stepOtherGranted],
+            ['3q.6 keys.mine (this machine\'s pair, K1)', stepOtherKeys],
+          ],
           'admin-clear': [
             ['6.5 session.unlock (admin)', stepAdminUnlock],
             ['6.6 host.clearGuildIcon', stepClearGuildIcon],
@@ -841,6 +1607,63 @@
             ['6.7 session.unlock (P)', stepPersonUnlockAgain],
             ['6.8 host.syncNow (guildIcon null)', stepPersonSync],
             ['6.9 nod.appIcon (the guild icon is gone)', stepPersonGuildIconGone],
+          ],
+          'admin-share': [
+            ['4.1 session.state', stepAdminState],
+            ['4.2 session.unlock (admin)', stepAdminUnlock],
+            ['4.3 host.syncNow', stepAdminSync],
+            ['7.1 peers.list (both members pinned, K2/RF-45)', stepPeersPinned],
+            ['7.2 catalog.list/favorites.list (the personal half, B7)', stepPersonalFromSnapshot],
+            ['7.3 vault.save (the credential to share, K4)', stepSaveShared],
+            ['7.4 vault.setScope/shares.recipients (role, K6)', stepScopeRole],
+            ['7.5 shares.send (one copy per member, K4)', stepSendShared],
+            ['7.6 host.syncNow (the holders, K7)', stepHoldersAfterSend],
+            ['7.7 vault.save (the credential to assign, K8)', stepSaveAssigned],
+            ['7.8 assignments.set/missing (role team, K8)', stepAssignTeam],
+          ],
+          'person-share': [
+            ['8.1 session.unlock (P)', stepPersonUnlockAgain],
+            ['8.2 host.syncNow (the shares arrive)', stepPersonSync],
+            ['8.3 shares.inbox (the send and the assign, K4)', stepInboxShares],
+            ['8.4 shares.accept (the send, gated, K4)', stepAcceptShare],
+            ['8.5 vault.reveal (the sender\'s value, K5)', stepRevealedShared],
+            ['8.5b vault.copy (the same gate, the clipboard, K5)', stepCopiedShared],
+            ['8.6 host.syncNow + vault.list (both holders, K7/RF-54)', stepHoldersBoth],
+            ['8.7 shares.accept (the assign, gated, K8)', stepAcceptAssign],
+            ['8.8 host.syncNow (the accepts go up)', stepShareSync],
+          ],
+          'person2-accept': [
+            ['9.1 session.unlock (Q)', stepOtherUnlock],
+            ['9.2 host.syncNow (the shares arrive)', stepPersonSync],
+            ['9.3 shares.inbox (the send and the assign, K4)', stepInboxShares],
+            ['9.4 shares.accept (the send, gated, K4)', stepAcceptShare],
+            ['9.5 vault.reveal (the same value, K4)', stepRevealedShared],
+            ['9.6 shares.accept (the assign, gated, K8)', stepAcceptAssign],
+            ['9.7 host.syncNow (the accepts go up)', stepShareSync],
+          ],
+          'admin-update': [
+            ['10.1 session.unlock (admin)', stepAdminUnlock],
+            ['10.2 host.syncNow', stepAdminSync],
+            ['10.3 vault.list (three holders, K7)', stepHolderCounts],
+            ['10.4 vault.save (the owner\'s new secret, K9)', stepOwnerSavesAgain],
+            ['10.5 assignments.missing/sealMissing (nothing missing, K8)', stepMissingEmpty],
+          ],
+          'person-update': [
+            ['11.1 session.unlock (P)', stepPersonUnlockAgain],
+            ['11.2 host.syncNow (the update applies, no gate, K9)', stepUpdateApplied],
+            ['11.3 vault.reveal (the new value, K9)', stepUpdatedSecret],
+            ['11.4 host.syncNow (the share is purged)', stepInboxEmpty],
+          ],
+          'admin-rotate': [
+            ['12.1 session.unlock (admin)', stepAdminUnlock],
+            ['12.2 host.syncNow', stepAdminSync],
+            ['12.3 shares.removeHolder (P, RF-48)', stepRevokeHolder],
+            ['12.4 vault.save (the rotation clears, K9)', stepRotationCleared],
+          ],
+          'admin-second-machine': [
+            ['13.1 host.discover/host.signIn (SP05 §5.3)', stepSecondSignIn],
+            ['13.2 keys.mine/host.syncNow (the pair is the person\'s, canonico §22)', stepSecondPair],
+            ['13.3 catalog.list/favorites.list (the personal half, B7)', stepSecondPersonal],
           ],
           'admin-revoke': [
             ['4.1 session.state', stepAdminState],

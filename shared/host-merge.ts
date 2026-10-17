@@ -285,18 +285,34 @@ function normalizedAddress(url: string): string {
 }
 
 /**
- * RF-40 (B8b): the local tools a joined host does not already carry as an org tool, so the join can
- * offer them as personal tools and no local tool disappears.
+ * RF-40 (B8b): the local tools a joined host does not already carry, so the join can offer them as
+ * personal tools and no local tool disappears.
  *
- * `local` are the person's local `org` rows — the catalog they saw before joining; the caller filters
- * the personal half out. An entry whose normalized address (origin plus path) matches one of the
- * snapshot's `orgTools` **is** that guild tool, not a leftover: the person sees the same button, not
- * a second one. Comparing origin plus path — and not the origin alone — keeps a tool the guild serves
- * on another path of the same host a distinct tool.
+ * `local` are the person's local rows — both scopes. An `org` row whose normalized address (origin
+ * plus path) matches one of the snapshot's `orgTools` **is** that guild tool, not a leftover: the
+ * person sees the same button, not a second one. Comparing origin plus path — and not the origin
+ * alone — keeps a tool the guild serves on another path of the same host a distinct tool.
+ *
+ * A `personal` row (B7, added before a host existed) is hidden from the connected catalog, so it is
+ * a leftover unless the snapshot's own personal half already carries its id — the id is that tool's
+ * identity, and the same one means the tool is already the guild's (RF-40's fix).
  */
-export function leftoverLocalTools(local: readonly Entry[], orgTools: readonly Entry[]): Entry[] {
-  const known = new Set(orgTools.map((entry) => normalizedAddress(entry.url)));
-  return local.filter((entry) => !known.has(normalizedAddress(entry.url)));
+export function leftoverLocalTools(
+  local: readonly Entry[],
+  orgTools: readonly Entry[],
+  personalTools: readonly Entry[] = [],
+): Entry[] {
+  const knownOrg = new Set(orgTools.map((entry) => normalizedAddress(entry.url)));
+  const knownPersonal = new Set(personalTools.map((entry) => entry.id));
+  const leftovers: Entry[] = [];
+  for (const entry of local) {
+    if ((entry.scope ?? 'org') === 'org') {
+      if (!knownOrg.has(normalizedAddress(entry.url))) leftovers.push(entry);
+    } else if (!knownPersonal.has(entry.id)) {
+      leftovers.push(entry);
+    }
+  }
+  return leftovers;
 }
 
 // ---------------------------------------------------------------- outbox

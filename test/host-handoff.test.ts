@@ -66,4 +66,27 @@ describe('leftoverLocalTools (RF-40, B8b)', () => {
     const guild = [entry('odd', 'not an address')];
     expect(leftoverLocalTools(local, guild)).toEqual([]);
   });
+
+  test('a local personal row the snapshot does not hold is a leftover (B8b fix)', () => {
+    const local = [
+      entry('p-aaaaaaaaaa', 'https://mine.example.test/app', { scope: 'personal', ownerId: 'p1' }),
+    ];
+    expect(leftoverLocalTools(local, [], []).map((e) => e.id)).toEqual(['p-aaaaaaaaaa']);
+  });
+
+  test('a personal row the snapshot already carries by id is not a leftover', () => {
+    const local = [entry('p-aaaaaaaaaa', 'https://mine.example.test/app', { scope: 'personal', ownerId: 'p1' })];
+    const held = [entry('p-aaaaaaaaaa', 'https://mine.example.test/app', { scope: 'personal', ownerId: 'p1' })];
+    expect(leftoverLocalTools(local, [], held)).toEqual([]);
+  });
+
+  test('org and personal leftovers come back in the local order', () => {
+    const local = [
+      entry('notes', 'https://notes.example.test/app'),
+      entry('p-bbbbbbbbbb', 'https://mine.example.test/app', { scope: 'personal', ownerId: 'p1' }),
+      entry('twin', 'https://twin.example.test/'),
+    ];
+    const orgTools = [entry('twin', 'https://twin.example.test/')];
+    expect(leftoverLocalTools(local, orgTools, []).map((e) => e.id)).toEqual(['notes', 'p-bbbbbbbbbb']);
+  });
 });

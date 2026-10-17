@@ -25,12 +25,17 @@ import {
 import { verify } from '../shared/seal';
 import type {
   AppMeta,
+  AssignmentRequest,
+  CredentialScopeRequest,
   DeviceSession,
   Discovery,
+  MissingCopy,
+  OwnKeys,
   PresenceEntry,
   PublicKeys,
   ShareRequest,
   ShareResponse,
+  ShareScope,
   SignInMethod,
   Snapshot,
   SnapshotSignature,
@@ -211,10 +216,17 @@ export interface HostConnection {
   presence(): Promise<PresenceEntry[]>;
   /**
    * `PUT /v1/keys` (SP03 §3, SP06 §2, K1): publishes this person's X25519 and Ed25519 public keys
-   * — base64url of the raw 32 bytes, the private halves never leave the machine. `204`; the call
-   * replaces whatever the host held, which is what a reset does.
+   * — base64url of the raw 32 bytes, the private halves never leave the machine — with the sealed
+   * `privateSealed` blob (`docs/canonico.md` §22) when the caller has one. `204`; new public keys
+   * replace whatever the host held, which is what a reset does.
    */
   putKeys(keys: PublicKeys): Promise<void>;
+  /**
+   * `GET /v1/keys/private` (SP03 §3, `docs/canonico.md` §22): this person's own pair as the host
+   * holds it, the sealed private halves included. `null` on the host's `404` — this person published
+   * none — which is an answer to act on, not a failure; every other refusal still throws.
+   */
+  getOwnKeys(): Promise<OwnKeys | null>;
   /**
    * `POST /v1/shares` (SP03 §3, SP06 §4, K4): one sealed copy per recipient, all of one credential.
    * The host answers the ids it created; it never sees a secret. The scope checks of SP06 §5 run on
@@ -225,6 +237,38 @@ export interface HostConnection {
   acceptShare(id: Id): Promise<true>;
   /** `POST /v1/shares/:id/decline` (SP03 §3, K4): `204`, the host purges the ciphertext. */
   declineShare(id: Id): Promise<true>;
+  /**
+   * `DELETE /v1/credentials/:id/holders/:personId` (SP03 §3, SP06 §4, K9): the owner holder — or an
+   * admin — revokes one holder; `204`. The host refuses anyone else (`403`), an unknown holder
+   * (`404`) and a row already removed (`409`); the owner's `rotationPending` carries the credential
+   * until an `update` share exists.
+   */
+  removeHolder(credentialId: Id, personId: Id): Promise<true>;
+  /**
+   * `POST /v1/credentials/:id/rotated` (SP03 §3, SP06 §4, RF-48): the owner holder — or an admin —
+   * records that a new secret was saved; `204`. It is the explicit signal that clears
+   * `rotationPending` when the revoked holder was the last non-owner one and no `update` share had a
+   * recipient; the Nod calls it after an owner's save of a rotation-pending credential.
+   */
+  markRotated(credentialId: Id): Promise<true>;
+  /**
+   * `PUT /v1/credentials/:id/scope` (SP03 §3, SP06 §5, M4): the credential's owner holder — or an
+   * admin — sets the scope of every holder row; `204`. Every later share derives its allowed scope
+   * from the owner row, so this is what makes `blocked` reachable on the host and stops a modified
+   * client from claiming a wider scope on a re-send. `403` for anyone else, `404` unknown credential.
+   */
+  setCredentialScope(credentialId: Id, scope: ShareScope): Promise<true>;
+  /**
+   * `PUT /v1/admin/assignments` (SP03 §3, SP06 §4, K8): an admin assigns a credential to a role
+   * (`assigned: true`) or takes the assignment away (`false`); `204` either way, and the host
+   * refuses a live non-admin (`403`).
+   */
+  putAssignment(request: AssignmentRequest): Promise<true>;
+  /**
+   * `GET /v1/admin/assignments/missing` (SP03 §3, RF-47, K8): the members of the assigned roles who
+   * still have no copy. Admin only; the admin who assigned is never among them.
+   */
+  missingCopies(): Promise<MissingCopy[]>;
   /**
    * `GET /v1/meta/app` (SP03 §3, O2): the oldest version this host serves and the update manifest it
    * points a Nod at. The route is **public** — SP03 §3 — so no bearer is sent: the gate below it
@@ -437,6 +481,25 @@ export function createHostClient(deps: HostClientDeps): HostClient {
     return { minAppVersion: meta.minAppVersion, update: { url: update.url } };
   }
 
+  /**
+   * SP03 §3's `OwnKeys`, shape-checked like every other document of this client: the two public
+   * halves and the sealed blob, which `publicKeyBytes`-style validation leaves to `backend/keys.ts`
+   * (the Nod is the only side that can open it). A blob of another shape is a host that answered
+   * something this route never defines.
+   */
+  function readOwnKeys(value: unknown): OwnKeys {
+    if (typeof value !== 'object' || value === null) throw notAHost();
+    const keys = value as Partial<OwnKeys>;
+    if (typeof keys.x25519Public !== 'string' || typeof keys.ed25519Public !== 'string') throw notAHost();
+    const sealed = keys.privateSealed;
+    if (sealed !== null && sealed !== undefined && typeof sealed !== 'string') throw notAHost();
+    return {
+      x25519Public: keys.x25519Public,
+      ed25519Public: keys.ed25519Public,
+      privateSealed: sealed ?? null,
+    };
+  }
+
   /** SP04 §2's `Nod-Signature: kid=<kid>; sig=<base64url>`. */
   function readSignature(header: string | null): SnapshotSignature {
     if (header === null) throw unsigned();
@@ -596,6 +659,19 @@ export function createHostClient(deps: HostClientDeps): HostClient {
       presence: () => request<PresenceEntry[]>('GET', HOST_ROUTES.presence),
       // K1: the public halves of this person's E02 pair (SP06 §2). A body of public keys only.
       putKeys: (keys: PublicKeys) => request<void>('PUT', HOST_ROUTES.keys, keys),
+      /**
+       * `docs/canonico.md` §22: the person's own row, sealed private halves included. SP03 §3 gives
+       * the route a `404` for a person who published no pair, and that is not a failure here — it is
+       * the answer that says "generate one", so it becomes `null` instead of a `refused` error.
+       */
+      async getOwnKeys(): Promise<OwnKeys | null> {
+        try {
+          return readOwnKeys(await request<unknown>('GET', HOST_ROUTES.keysPrivate));
+        } catch (error) {
+          if (error instanceof HostError && error.status === 404) return null;
+          throw error;
+        }
+      },
       // K4: the sealed copies, the recipient's answer and the decline (SP03 §3, SP06 §4).
       sendShares: (body) => request<ShareResponse>('POST', HOST_ROUTES.shares, body),
       async acceptShare(id: Id): Promise<true> {
@@ -606,6 +682,38 @@ export function createHostClient(deps: HostClientDeps): HostClient {
         await request<void>('POST', routePath(HOST_ROUTES.shareDecline, id));
         return true;
       },
+      // K9/SP06 §4: the owner's revocation; the route names both the credential and the holder, and
+      // `routePath` fills only the first `:id`, so the second is filled here the same way.
+      async removeHolder(credentialId: Id, personId: Id): Promise<true> {
+        await request<void>(
+          'DELETE',
+          routePath(HOST_ROUTES.holder, credentialId).replace(
+            ':personId',
+            encodeURIComponent(personId),
+          ),
+        );
+        return true;
+      },
+      // M4/SP06 §5: the credential's scope on the host, so `blocked` is reachable and every later
+      // share derives its allowed scope from the owner row instead of trusting the body.
+      async setCredentialScope(credentialId: Id, scope: ShareScope): Promise<true> {
+        await request<void>('PUT', routePath(HOST_ROUTES.credentialScope, credentialId), {
+          scope,
+        } satisfies CredentialScopeRequest);
+        return true;
+      },
+      // RF-48: the owner's "I saved a new secret" signal, the other half of the revocation above.
+      async markRotated(credentialId: Id): Promise<true> {
+        await request<void>('POST', routePath(HOST_ROUTES.credentialRotated, credentialId));
+        return true;
+      },
+      // K8/SP06 §4: the assignment row of a role, and the members of the assigned roles still
+      // without a copy (SP03 §3). Both are the admin's; the host is the one that refuses a member.
+      async putAssignment(body: AssignmentRequest): Promise<true> {
+        await request<void>('PUT', HOST_ROUTES.adminAssignments, body);
+        return true;
+      },
+      missingCopies: () => request<MissingCopy[]>('GET', HOST_ROUTES.adminAssignmentsMissing),
       appMeta,
     };
   }

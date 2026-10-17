@@ -95,7 +95,10 @@ o dono quiser; o app verifica checksum e assinatura antes de trocar a release.
 - `resources/seed.json` — o seed privado;
 - `resources/icon.png` — o ícone privado de uma build customizada (RF-56, §9);
 - `.nod-icon.png` — cópia gerada de um ícone dado por `NOD_ICON` (§9);
-- `tinyjs.json` — gerado, e o gate de origins sai do seed.
+- `tinyjs.json` — gerado, e o gate de origins sai do seed;
+- `resources/build-mode` — written by `scripts/gen-config.ts` with the mode it ran in (`dev`/`build`);
+  it is the stamp `backend/main.ts` reads to tell a dev run from a release (SP02 §9), and it is **not**
+  in the release's `"resources"` list, so a built app never carries one.
 
 Todos já estão no `.gitignore`. O versionado no lugar deles é só `resources/seed.example.json`, com
 dados falsos (e o ícone versionado é o `assets/icon.png`).

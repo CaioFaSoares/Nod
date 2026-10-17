@@ -169,11 +169,13 @@ export interface Personal {
   /** The local catalog: favorites → org → personal, with the person's views hung under their entry. */
   localCatalog(person: Person): Entry[];
   /**
-   * RF-40 (B8b): one local `org` row becomes a personal tool of this person — the same path
-   * `saveTool` takes (a `p-…` id, one outbox row while connected), with its views turned into
-   * personal views so they survive the local row going away. `icon` is the data URI of the tool's
-   * stored icon (or `null`), resolved by the caller from the icon store. Answers the new entry; the
-   * caller re-points the saved credential and removes the local row.
+   * RF-40 (B8b): one local row becomes a personal tool of this person — the same path `saveTool`
+   * takes (one outbox row while connected), with its views turned into personal views so they survive
+   * the local row going away. An `org` row gets a fresh `p-…` id; a local `personal` row (B7, added
+   * before the host existed) keeps its own id, which is already a `p-…` and would otherwise duplicate
+   * the tool once the host is removed. `icon` is the data URI of the tool's stored icon (or `null`),
+   * resolved by the caller from the icon store. Answers the new entry; the caller re-points the saved
+   * credential and removes the local row.
    */
   adoptLocalTool(local: Entry, icon: string | null): Entry;
   /**
@@ -246,7 +248,12 @@ export function createPersonal(deps: PersonalDeps): Personal {
 
   /** The person's own tool of this id: the effective entry, and only while it is theirs (SP04 §2). */
   function ownedTool(id: Id, personId: Id): Entry | null {
-    const entry = deps.entries().find((candidate) => candidate.id === id) ?? null;
+    // While connected the effective catalog is the snapshot's (SP05 §2), so a local `personal` row
+    // (B7, added before the host existed) is hidden from `deps.entries()`; the local table still
+    // answers for it, which is what lets RF-40 publish it under its own id (B8b's fix).
+    const entry =
+      deps.entries().find((candidate) => candidate.id === id) ??
+      (deps.connected() ? repo.entry(id) : null);
     return entry !== null && entry.scope === 'personal' && entry.ownerId === personId ? entry : null;
   }
 
@@ -343,9 +350,14 @@ export function createPersonal(deps: PersonalDeps): Personal {
   }
 
   function adoptLocalTool(local: Entry, icon: string | null): Entry {
+    // A local `personal` row is already the person's own tool (B7): it keeps its id — the host's own
+    // `p-…` shape — so the saved credential is not re-pointed and a later `host.remove` does not
+    // materialize a second copy. Any other local row gets a fresh id, like a new personal tool.
+    const reuseId = local.scope === 'personal' && PERSONAL_TOOL_ID.test(local.id);
     // The tool first: `saveView` below reads its parent out of the effective catalog, and the new
     // personal tool is in it once `saveTool`'s `onWrite` re-derived the cache (B7).
     const entry = saveTool({
+      ...(reuseId ? { id: local.id } : {}),
       title: local.title,
       url: local.url,
       icon,
@@ -353,10 +365,14 @@ export function createPersonal(deps: PersonalDeps): Personal {
       auth: local.auth,
       active: local.active,
     });
-    // The views go through their own route (SP03 §2): the host drops the `views` a tool body carries,
-    // so a view kept inside the tool's write would be lost at the next snapshot. Each becomes a
-    // personal view of the same origin, which is what the local view already was (validated here too).
-    for (const view of local.views) {
+    // A personal row keeps its views in the meta table (B7), not in the row; an org row carries them
+    // itself. Either way each view goes through its own route (SP03 §2): the host drops the `views` a
+    // tool body carries, so a view kept inside the tool's write would be lost at the next snapshot.
+    const views =
+      local.scope === 'personal'
+        ? localViews(deps.personId()).filter((view) => view.entryId === local.id)
+        : local.views;
+    for (const view of views) {
       saveView({ entryId: entry.id, label: view.label, url: view.url, mode: view.mode });
     }
     return entry;

@@ -148,10 +148,14 @@ function harness(script: Partial<Script> = {}): Harness {
     // K1: `PUT /v1/keys` belongs to the key-pin story (`backend/keys.ts`); nothing here publishes a
     // pair, and the sync never calls it.
     putKeys: async () => undefined,
+    // K1/`docs/canonico.md` §22: the caller's own pair; nothing here publishes or adopts one.
+    getOwnKeys: async () => null,
     // K4: the share flows are `backend/shares.ts`; the sync never sends, accepts or declines one.
     sendShares: async () => ({ ids: [] }),
     acceptShare: async () => true,
     declineShare: async () => true,
+    removeHolder: async () => true,
+    markRotated: async () => true,
     // O2: not part of SP04 §3's order, so it is counted in `calls` and not in `order`.
     appMeta: async () => {
       calls.meta += 1;
