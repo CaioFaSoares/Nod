@@ -1,4 +1,4 @@
-// The auth routes of SP03 §2: the six public ones (`salt`, `activate`, `setup`, `login`, and — 0.4.5,
+// The auth routes of SP03 §2: the six public ones (`salt`, `activate`, `setup`, `login`, and — 0.5.0,
 // RF-59 — `invite` and `join`) and the two of the person level (`logout`, `password`). `host/app.ts`
 // mounts this plugin with one `.use(...)`.
 //

@@ -6,7 +6,7 @@
 // The flow of the fixture is the real one: `POST /v1/auth/setup` makes the first admin, the admin
 // group mints the guild invites and builds the org catalog, and the person then redeems the code
 // `POST /v1/admin/people/:id/code` answered through `POST /v1/auth/activate` — so a test only ever
-// passes through a route that exists. A person is seeded through the repo (0.4.5, RF-59 removed the
+// passes through a route that exists. A person is seeded through the repo (0.5.0, RF-59 removed the
 // route that created one), as are the fixtures no story has landed yet (a personal tool, an event
 // batch, a code), and each one says so.
 
@@ -154,7 +154,7 @@ async function setupAdmin(host: TestHost): Promise<{ token: string; personId: st
 
 /**
  * One person, and the code the `:id/code` route of SP02 §3 would issue them — seeded through the
- * repo, because 0.4.5 (RF-59) removed the admin route that created a person with an email-bound
+ * repo, because 0.5.0 (RF-59) removed the admin route that created a person with an email-bound
  * code (a guild invite creates a person now), the way this file's `seedCode` does.
  */
 async function createPerson(
@@ -945,7 +945,7 @@ describe('access, validation and logs', () => {
     const toolId = 'kanban';
     await put(host, HOST_ROUTES.adminTool.replace(':id', toolId), tool(toolId), admin.token);
 
-    // One real invite, so the DELETE row below has an id to hand (0.4.5, RF-59).
+    // One real invite, so the DELETE row below has an id to hand (0.5.0, RF-59).
     const invite = await body<{ invite: { id: string } }>(
       await post(
         host,

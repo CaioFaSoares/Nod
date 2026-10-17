@@ -197,7 +197,7 @@ ALTER TABLE person_keys ADD COLUMN private_sealed TEXT;
 ALTER TABLE credential_holders ADD COLUMN rotated_at TEXT;
 `,
 
-  // 5 — guild invites (0.4.5, RF-59; SP01 §2). One row per invite an admin created: the roles it
+  // 5 — guild invites (0.5.0, RF-59; SP01 §2). One row per invite an admin created: the roles it
   // grants (JSON array of their ids), how many times it may be redeemed (`max_uses` null = no
   // limit) and until when (`expires_at` null = never). `code_hash` is the hex SHA-256 of the
   // normalized code, exactly like `access_codes.code_hash` (SP02 §3) — the code itself is shown
@@ -218,7 +218,7 @@ CREATE TABLE guild_invites (
 );
 `,
 
-  // 6 — the display category of an org tool (0.4.5, RF-62). `NULL` is "the guild filed it nowhere",
+  // 6 — the display category of an org tool (0.5.0, RF-62). `NULL` is "the guild filed it nowhere",
   // which is what every row written before this column is, and what a personal entry always stays:
   // the personal routes do not declare the field, so their writes leave it alone (`host/repo.ts`).
   // The name itself is bounded by the admin route's schema and by `shared/catalog.ts`'s validator.

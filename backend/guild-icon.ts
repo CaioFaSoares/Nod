@@ -76,7 +76,7 @@ export interface GuildIcon {
   /** SP05 §6 `nod.appIcon`: the choice, and whether a verified guild icon is available right now. */
   state(): Promise<AppIconState>;
   /**
-   * 0.4.5 (RF-60): the guild icon this machine holds, as the `data:image/png;base64,…` the entry
+   * 0.5.0 (RF-60): the guild icon this machine holds, as the `data:image/png;base64,…` the entry
    * screen's tile draws — the bytes on disk, and only when they are the ones `hash` signs (the
    * `guildIcon` of the cached snapshot, SP04 §2). It reads the file and nothing else: no snapshot,
    * no state and no call of the host's, so the locked screen can draw the tile before any unlock.

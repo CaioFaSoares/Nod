@@ -316,7 +316,7 @@ interface Methods {
   /** Whether the publish method takes SP03 §2's `BootstrapRequest` body instead of nothing. */
   publishBody: boolean;
   /**
-   * 0.4.5 (RF-59): the guild invite the admin creates — the way a person of the guild is created
+   * 0.5.0 (RF-59): the guild invite the admin creates — the way a person of the guild is created
    * now that `POST /v1/admin/people` is gone. `invites.issue` still exists for the local invite and
    * for the reissue of a code of a person who already has one; it is not this shape.
    */

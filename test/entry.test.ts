@@ -1,4 +1,4 @@
-// Proves the entry screen of the backend (0.4.5, RF-59/60/61): the tiles `session.profiles`
+// Proves the entry screen of the backend (0.5.0, RF-59/60/61): the tiles `session.profiles`
 // answers, the disconnected predicate the RPC gate and the guild readers share, the route a typed
 // code takes (`host.activate`), the seed import of the first run, and the invite card of a preview.
 //

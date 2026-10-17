@@ -1,4 +1,4 @@
-// Guild invites (0.4.5, RF-59) on the real Elysia app over a temp data dir: the admin's
+// Guild invites (0.5.0, RF-59) on the real Elysia app over a temp data dir: the admin's
 // create/list/revoke, the public preview a stranger reads, and the join that creates the account the
 // person chooses with the invite's roles. Every request goes through `app.handle(new Request(...))`
 // and every read of the host's own data goes to the database the app wrote: nothing here mocks the
@@ -37,7 +37,7 @@ import { bootHost, type Host } from './main';
 import { createRepo, type Repo } from './repo';
 import { GUILD_NAME_ENV } from './routes/state';
 
-const DEVICE: Device = { name: 'nod-invite-test', os: 'macos', appVersion: '0.4.5' };
+const DEVICE: Device = { name: 'nod-invite-test', os: 'macos', appVersion: '0.5.0' };
 const ADMIN_EMAIL = 'ada@nod.test';
 const MEMBER_EMAIL = 'bob@nod.test';
 const GUILD = 'Nod test guild';

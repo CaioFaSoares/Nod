@@ -242,7 +242,7 @@ async function signIn(running: Running, email: string, authKey: string, device: 
   return { id: opened.personId, token: opened.token };
 }
 
-/** Redeems a guild invite through the real join route: the account the person chose (0.4.5, RF-59). */
+/** Redeems a guild invite through the real join route: the account the person chose (0.5.0, RF-59). */
 async function joinViaInvite(
   running: Running,
   input: { email: string; name: string; code: string },
@@ -262,7 +262,7 @@ async function joinViaInvite(
 }
 
 /**
- * A person who joins the guild (0.4.5, RF-59): the admin creates an invite for these roles and the
+ * A person who joins the guild (0.5.0, RF-59): the admin creates an invite for these roles and the
  * person redeems it with the account they choose — what the People tab asks for is an invite now,
  * not the email-bound person `POST /v1/admin/people` created.
  */
@@ -377,7 +377,7 @@ describe('the admin writes reach the host (SP05 §3, RF-34)', () => {
 
 // ---------------------------------------------------------------- people and invites (RF-33, RF-59)
 
-describe('the People tab and the guild invites (SP05 §4, 0.4.5 RF-59)', () => {
+describe('the People tab and the guild invites (SP05 §4, 0.5.0 RF-59)', () => {
   test('an invite joins a person, spends its use, and the reissued code activates them (RF-33)', async () => {
     const running = await startHost();
     const { admin, person: adminPerson } = await adminOf(running);

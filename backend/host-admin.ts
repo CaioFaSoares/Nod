@@ -64,7 +64,7 @@ export interface HostAdmin {
   disable(personId: Id): Promise<Person>;
   /** `POST /v1/admin/people/:id/code` → a fresh code, the previous one revoked (SP02 §3). */
   issueCode(personId: Id): Promise<CodeResponse>;
-  /** `GET /v1/admin/invites` → the guild's invites, newest first (0.4.5, RF-59). */
+  /** `GET /v1/admin/invites` → the guild's invites, newest first (0.5.0, RF-59). */
   listInvites(): Promise<GuildInvite[]>;
   /** `POST /v1/admin/invites` → the invite and the one code of it, which is never returned again. */
   createInvite(input: CreateInviteRequest): Promise<CreateInviteResponse>;
@@ -218,7 +218,7 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
     },
 
     /**
-     * 0.4.5 (RF-59): the guild's invites. `GET` answers revoked ones too (the admin list shows their
+     * 0.5.0 (RF-59): the guild's invites. `GET` answers revoked ones too (the admin list shows their
      * state); `POST` answers the code exactly once — the host stores its hash and nothing else; and
      * `DELETE` sets `revoked_at` on the host, which is idempotent there.
      */

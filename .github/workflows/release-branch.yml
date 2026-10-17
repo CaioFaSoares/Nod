@@ -1,0 +1,62 @@
+# When a pull request from `dev` is merged into `main`, creates the branch `release-<version>` at the
+# merge commit (the version is `tinyjs.base.json`'s) and starts `release.yml` on it.
+#
+# A branch pushed with GITHUB_TOKEN does not start other workflows (GitHub's rule against loops),
+# so the `push` trigger of release.yml would not fire; this job dispatches it explicitly instead,
+# which GitHub allows. Process: docs/distribuicao.md §8.
+name: release branch
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+concurrency:
+  group: release-branch
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  branch:
+    name: create release-<version>
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'dev'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - id: version
+        name: read version
+        run: |
+          version=$(jq -r '.version' tinyjs.base.json)
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]]; then
+            echo "::error file=tinyjs.base.json::version '$version' is not semver"
+            exit 1
+          fi
+          echo "branch=release-$version" >> "$GITHUB_OUTPUT"
+
+      # An existing release branch means the version was not bumped: publishing again under the
+      # same version would replace that release's files, and installed apps would not update
+      # (docs/distribuicao.md §8). That is a human decision, so the job stops instead.
+      - name: create the branch
+        env:
+          BRANCH: ${{ steps.version.outputs.branch }}
+        run: |
+          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
+            echo "::error::$BRANCH already exists — bump version in tinyjs.base.json, or push $BRANCH by hand to republish"
+            exit 1
+          fi
+          git push origin "HEAD:refs/heads/$BRANCH"
+          echo "created $BRANCH at $(git rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: start the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.version.outputs.branch }}
+        run: |
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          echo "release.yml dispatched on $BRANCH" >> "$GITHUB_STEP_SUMMARY"

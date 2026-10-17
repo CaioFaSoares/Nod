@@ -404,7 +404,7 @@ describe('triggers', () => {
       // O2: without a guild there is nothing to be out of date for.
       updateRequired: false,
       minAppVersion: null,
-      // 0.4.5 (RF-60): a sync wired without a session is never the offline one.
+      // 0.5.0 (RF-60): a sync wired without a session is never the offline one.
       offlineSession: false,
     });
   });

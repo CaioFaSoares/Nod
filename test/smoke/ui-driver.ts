@@ -317,7 +317,7 @@ async function personOfEmail(email: string): Promise<PersonLite> {
 }
 
 /**
- * 0.4.5 (RF-60): the page opens on the entry screen, and its default entry is Offline. Every check
+ * 0.5.0 (RF-60): the page opens on the entry screen, and its default entry is Offline. Every check
  * below needs the **guild** session, so this drives the real screen: the guild tile of the rail, the
  * password, "Enter <guild>".
  */
@@ -394,7 +394,7 @@ async function setupAdmin(): Promise<void> {
   await synced();
 
   await call('roles.save', { role: { id: 'team', name: 'Team', admin: false } });
-  // 0.4.5 (RF-59): the way in for a member is a guild invite — the roles it grants, one use and a
+  // 0.5.0 (RF-59): the way in for a member is a guild invite — the roles it grants, one use and a
   // day to use it. The code travels through the desk; the join redeems it with the name the person
   // chose, which `activateWithCode` carries.
   for (const [name, who] of [

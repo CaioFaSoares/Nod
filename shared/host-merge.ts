@@ -247,7 +247,7 @@ export function attachPersonalViews(entries: Entry[], views: readonly PersonalVi
  * `shared/catalog.ts`'s `visibleEntries`). An id that resolves to no entry is skipped, which is what
  * a favorite of an org tool looks like once a sign-out emptied the org half.
  *
- * RF-62 (0.4.5): the org half reads grouped by category — the guild's dividers, and the order the
+ * RF-62 (0.5.0): the org half reads grouped by category — the guild's dividers, and the order the
  * sidebar digits follow, since this is the one list both the sidebar and `tools.state` are built
  * from. The favorites stay one block on top and are not split by category.
  */

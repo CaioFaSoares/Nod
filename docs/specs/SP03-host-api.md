@@ -124,7 +124,7 @@ the personal tool and view writes and the favorites write are B7. The Nod method
 | `DELETE /v1/admin/guild/icon` | — | `204`, and the next snapshot carries `guildIcon: null` |
 | `GET /v1/admin/events` | `?person&tool&from&to&limit` | `HostEvent[]` |
 
-`POST /v1/admin/people` — the email-bound "create person + one access code" — is gone in 0.4.5: a
+`POST /v1/admin/people` — the email-bound "create person + one access code" — is gone in 0.5.0: a
 guild invite creates a person (RF-59). `POST /v1/admin/people/:id/code` stays: it is the reissue for
 a person the guild already has, and it is what a reset uses.
 

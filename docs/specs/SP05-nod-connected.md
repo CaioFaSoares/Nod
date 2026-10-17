@@ -133,7 +133,7 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
 | `shares.inbox` / `shares.accept` / `shares.decline` / `shares.removeHolder` | `— / { id, password? } / { id } / { toolId, personId }` | `InboxShare[]` / `VaultItem` / `true` / `VaultItem` | unlocked (K4, K9); `accept` behind the gate (an `update` of a held credential skips it) | 
 | `assignments.set` / `assignments.missing` / `assignments.sealMissing` | `{ toolId, roleId?, personId?, assigned, password? }` / `—` / `{ password? }` | `{ … }` / `MissingCopyView[]` / `{ sent, skipped }` | unlocked, admin (K8); the two writes behind the gate |
 
-0.4.5 (RF-59/60/61) — the entry screen, the guild invites and the optional seed:
+0.5.0 (RF-59/60/61) — the entry screen, the guild invites and the optional seed:
 
 | Method | Params | Result | Who |
 | --- | --- | --- | --- |
@@ -145,7 +145,7 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
 | `guildInvites.list` | — | `GuildInvite[]` (newest first, revoked included) | unlocked, **admin**, connected; in `HOST_READS` |
 | `guildInvites.create` | `{ roles, maxUses, expiresInMinutes }` | `{ invite, code, link }` — `link` = `joinLink({ address, fingerprint, code })` from the `host` row | unlocked, **admin**, connected; in `HOST_WRITES`. The code is in the answer once and never in an event or a log |
 | `guildInvites.revoke` | `{ id }` | `true` | unlocked, **admin**, connected; in `HOST_WRITES`; a person who already joined keeps their account |
-| `invites.issue` (changed) | `{ roles, days?, personId? }` | `{ code, expiresAt }` | `email`/`name` are **gone** (0.4.5): while connected, `personId` reissues one existing person's access code (`POST /v1/admin/people/:id/code`); a person who does not exist yet joins through a guild invite. `POST /v1/admin/people` is no longer called (and no longer served) |
+| `invites.issue` (changed) | `{ roles, days?, personId? }` | `{ code, expiresAt }` | `email`/`name` are **gone** (0.5.0): while connected, `personId` reissues one existing person's access code (`POST /v1/admin/people/:id/code`); a person who does not exist yet joins through a guild invite. `POST /v1/admin/people` is no longer called (and no longer served) |
 - `vault.reveal` and `vault.copy` gain the K5 gate: biometrics where the machine has them, the
   person's `password` otherwise (SP02 §9); without either the call fails and nothing is shown or
   copied. The same `password?` is on `shares.send`, `shares.accept` and the two assignment writes.
@@ -163,7 +163,7 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
   runs on the local tables (`shared/catalog.ts`'s `catalogMode`): `catalog.list`, the sidebar, Home,
   the palette, the roles/people screens and the vault list (no holders, no `rotationPending`) are
   local, as if no host existed. The `host` row, the bearer and the cached body stay on disk.
-- **0.4.5 (RF-60), the offline session is the same disconnect**: a session unlocked through the
+- **0.5.0 (RF-60), the offline session is the same disconnect**: a session unlocked through the
   Offline tile carries `mode: 'offline'`, and the guild is as disconnected for it as it is for O2 —
   one predicate (`backend/main.ts`'s `disconnectedSession`) reads both, so `catalogMode`,
   `guildConnection()`, `snapshotBody()` and the two gate tables behave identically. `HostState` gains
@@ -178,7 +178,7 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
   When connected, the backend sends them to SP03 admin routes.
 - `invites.issue` is "an invite code for a new local account" (local mode) or "reissue the access
   code of an existing person" (`POST /v1/admin/people/:id/code`, `personId`); `days` stays local-only,
-  since the host fixes 72 h (B6). 0.4.5 (RF-59) removed its `email` + `name` (the create-person path):
+  since the host fixes 72 h (B6). 0.5.0 (RF-59) removed its `email` + `name` (the create-person path):
   a person who does not exist yet joins through a **guild invite** (`guildInvites.create`), which
   carries their roles — the host no longer serves `POST /v1/admin/people`.
 - `host.activate` and `host.signIn` receive the password once, derive the keys in the backend, and

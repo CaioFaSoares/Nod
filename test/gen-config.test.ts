@@ -115,7 +115,7 @@ describe('generateConfig', () => {
     expect(config.resources).toEqual(['seed.json', 'tray.png', 'icons/a.png']);
   });
 
-  test('build without a seed ships no seed and no tool origin (0.4.5, RF-61)', () => {
+  test('build without a seed ships no seed and no tool origin (0.5.0, RF-61)', () => {
     const config = generateConfig(BASE, null, 'build');
 
     // The seed is an optional import now: a release without one starts empty, and the seed it did

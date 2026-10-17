@@ -377,7 +377,7 @@ export async function init(app: TinyApp): Promise<void> {
     // count. A non-admin's keychain-person clears it, and the read never fails a run.
     refreshAssignments: () => shares?.refreshAssignments() ?? Promise.resolve(),
     missingCopies: () => shares?.missingCount() ?? 0,
-    // 0.4.5 (RF-60): `HostState.offlineSession`, and with it the sidebar's "not syncing" banner —
+    // 0.5.0 (RF-60): `HostState.offlineSession`, and with it the sidebar's "not syncing" banner —
     // the session is what knows, and it is created before this.
     offlineSession: () => offlineSession(),
     setInterval: (run, ms) => setInterval(run, ms),
@@ -808,7 +808,7 @@ const ADMIN_ONLY: Partial<Record<Method, true>> = {
   'people.sessions': true,
   'people.revokeSession': true,
   'invites.issue': true,
-  // 0.4.5 (RF-59): the guild's invites are the admin's — the host refuses a member the same way.
+  // 0.5.0 (RF-59): the guild's invites are the admin's — the host refuses a member the same way.
   'guildInvites.list': true,
   'guildInvites.create': true,
   'guildInvites.revoke': true,
@@ -832,7 +832,7 @@ const ADMIN_ONLY: Partial<Record<Method, true>> = {
 /** The only methods that work with the session locked (§2); the rest require an unlock. */
 const WITHOUT_SESSION: Partial<Record<Method, true>> = {
   'session.state': true,
-  // 0.4.5 (RF-60): the tiles of the entry screen are what the locked window draws before a password.
+  // 0.5.0 (RF-60): the tiles of the entry screen are what the locked window draws before a password.
   'session.profiles': true,
   // RF-61: the seed import belongs to the first run, which is unlocked by definition — no account
   // exists yet, so there is no session to open.
@@ -844,7 +844,7 @@ const WITHOUT_SESSION: Partial<Record<Method, true>> = {
   'host.discover': true,
   'host.activate': true,
   'host.signIn': true,
-  // 0.4.5 (RF-59): the invite card is shown before the account exists — someone with only a link has
+  // 0.5.0 (RF-59): the invite card is shown before the account exists — someone with only a link has
   // no session here yet, and the preview carries no secret but the code the person already holds.
   'host.invitePreview': true,
   'nod.info': true,
@@ -887,7 +887,7 @@ const HOST_WRITES: Partial<Record<Method, true>> = {
   // as a security action; a disconnected guild reaches no route, so it is refused like the rest.
   'host.revokeSession': true,
   'invites.issue': true,
-  // 0.4.5 (RF-59): both invite writes are rows on the host's side.
+  // 0.5.0 (RF-59): both invite writes are rows on the host's side.
   'guildInvites.create': true,
   'guildInvites.revoke': true,
   'host.bootstrap': true,
@@ -928,12 +928,12 @@ const HOST_WRITES: Partial<Record<Method, true>> = {
 const HOST_READS: Partial<Record<Method, true>> = {
   'host.sessions': true,
   'people.sessions': true,
-  // 0.4.5 (RF-59): the guild's invites are only the host's to list.
+  // 0.5.0 (RF-59): the guild's invites are only the host's to list.
   'guildInvites.list': true,
 };
 
 /**
- * O2 + 0.4.5 (RF-60): whether this Nod's guild is **disconnected** — it is older than the host's
+ * O2 + 0.5.0 (RF-60): whether this Nod's guild is **disconnected** — it is older than the host's
  * `minAppVersion`, or the session entered through the Offline tile. Both mean the same thing to
  * every caller: no call leaves the machine, the local tables are the catalog and the reads that only
  * the host can answer answer nothing. A Nod with no `host` row has no guild to disconnect: an Offline
@@ -984,7 +984,7 @@ function guarded<M extends Method>(method: M, handler: Handler<M>): TinyApiHandl
       const person = unlockedPerson(method);
       if (ADMIN_ONLY[method] === true && !person.admin) throw new Error('only an admin can do this');
     }
-    // O2 + 0.4.5 (RF-60): the guild is disconnected, and this method would reach the host — a write
+    // O2 + 0.5.0 (RF-60): the guild is disconnected, and this method would reach the host — a write
     // or a read only the host can answer. Anything else reaches no route and is answered below.
     const offline = offlineSession();
     const stopped = disconnectedSession(requiresUpdate(), offline ? 'offline' : null, hasHostRow());
@@ -1001,7 +1001,7 @@ function requiresUpdate(): boolean {
   return running !== null && running.state().updateRequired;
 }
 
-/** 0.4.5 (RF-60): the session entered through the Offline tile — the guild is disconnected for it. */
+/** 0.5.0 (RF-60): the session entered through the Offline tile — the guild is disconnected for it. */
 function offlineSession(): boolean {
   const s = session;
   return s !== null && s.mode() === 'offline' && hasHostRow();
@@ -1013,7 +1013,7 @@ function hasHostRow(): boolean {
 }
 
 /**
- * O2 + 0.4.5 (RF-60): the one predicate every reader of the guild goes through — the sync gate, the
+ * O2 + 0.5.0 (RF-60): the one predicate every reader of the guild goes through — the sync gate, the
  * RPC gate, `guildConnection()`, `snapshotBody()` and the catalog layer. `shared/catalog.ts`'s
  * `catalogMode`, `backend/sync.ts`'s state and this file's reads all see the same answer.
  */
@@ -1135,7 +1135,7 @@ function textList(value: unknown, message: string): Id[] {
   return items.map((item) => text(item, message));
 }
 
-/** 0.4.5 (RF-60): one tile of the entry screen, as the page sends it back. */
+/** 0.5.0 (RF-60): one tile of the entry screen, as the page sends it back. */
 function entryTarget(value: unknown): EntryTarget {
   const raw = object(value, 'invalid target');
   if (raw.kind === 'offline') return { kind: 'offline' };
@@ -1360,7 +1360,7 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
   // that is not one, and the second call changes nothing. Only a connected account has a pair: a
   // local one never reaches SP06 §2.
   //
-  // 0.4.5 (RF-60): an offline session reaches no host at all — no pair is published and the loop
+  // 0.5.0 (RF-60): an offline session reaches no host at all — no pair is published and the loop
   // does not start, so the entry by the Offline tile is the same disconnect as having no host. The
   // O2 case is left as it was: there the run itself is what confirms the minimum.
   const host = offlineSession() ? null : required(repo, 'host').hostRecord();
@@ -1537,7 +1537,7 @@ export async function beginAuth(deps: AuthPrologueDeps, email: string): Promise<
 }
 
 /**
- * 0.4.5 (RF-59): which route a code takes, and whether the person's name travels with it. The kind
+ * 0.5.0 (RF-59): which route a code takes, and whether the person's name travels with it. The kind
  * is read from the code itself (SP02 §3's length rule) and never from what the screen was showing:
  * a setup code creates the first admin, an invite creates the person who redeems it — both are named
  * — and an access code redeems the row of somebody who already exists. `null` is not a code at all,
@@ -1558,7 +1558,7 @@ export function activateRoute(code: string): { kind: CodeKind; route: string; ne
 }
 
 /**
- * 0.4.5 (RF-59): the invite card `host.invitePreview` answers — the guild of the invite, the names of
+ * 0.5.0 (RF-59): the invite card `host.invitePreview` answers — the guild of the invite, the names of
  * the roles it grants, and the address and fingerprint the person just confirmed. The icon travels
  * as a data URI; the host sends the PNG as base64url (the repo's rule for binary on the wire,
  * `docs/specs/README.md`), which a `data:` URI cannot carry as it is.
@@ -1578,7 +1578,7 @@ export function inviteView(found: HostDiscovery, preview: InvitePreview): Invite
 }
 
 /**
- * 0.4.5 (RF-59): the two `404`s of the invite routes, as sentences this side writes. The host's own
+ * 0.5.0 (RF-59): the two `404`s of the invite routes, as sentences this side writes. The host's own
  * body never reaches a Nod (`backend/host-client.ts` reads none on a failure), so every refusal a
  * screen has to explain is worded here — like F7's `invalid code or password`.
  */
@@ -1607,7 +1607,7 @@ function hostState(): HostState {
   return required(sync, 'host.state').state();
 }
 
-// ---------------------------------------------------------------- entry screen (0.4.5, RF-60/61)
+// ---------------------------------------------------------------- entry screen (0.5.0, RF-60/61)
 
 /** What `entryProfiles` reads, injected so a test drives the answer without a runtime. */
 export interface ProfilesDeps {
@@ -1634,7 +1634,7 @@ export interface ProfilesDeps {
 }
 
 /**
- * 0.4.5 (RF-60): the tiles of the entry screen, drawn before any password. The Offline profile is
+ * 0.5.0 (RF-60): the tiles of the entry screen, drawn before any password. The Offline profile is
  * always there — it is this machine's own account, or the offer of one — and the guild(s) come from
  * the `host` row; today that is at most one (canonico §22 "Guilds per install"), and the id of a
  * tile is the guild's address so several can live here later. Nothing of this answer is a secret:
@@ -1651,7 +1651,7 @@ export async function entryProfiles(deps: ProfilesDeps): Promise<EntryProfiles> 
     const state = deps.hostState();
     const hash = deps.snapshotIconHash();
     guilds.push({
-      // 0.4.5: one guild, named by the address it is pinned to — the id `EntryTarget` carries.
+      // 0.5.0: one guild, named by the address it is pinned to — the id `EntryTarget` carries.
       id: host.address,
       guild: host.guild,
       address: host.address,
@@ -1697,7 +1697,7 @@ export interface SeedImportDeps {
 export const SEED_IMPORT_REFUSED = 'this Nod already has an account — the seed is only imported at setup';
 
 /**
- * 0.4.5 (RF-61): the optional seed import of the first run. It is the same core the release's own
+ * 0.5.0 (RF-61): the optional seed import of the first run. It is the same core the release's own
  * seed runs through at boot (`applySeedFile`, boot mode: only what is missing, only a newer
  * version), so a seed imported here and one embedded in the release leave the same tables — and
  * `null` means the file was already applied (or is not a seed this build can read).
@@ -1881,7 +1881,7 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   /**
-   * 0.4.5 (RF-60): the tiles the entry screen draws, before any password. Everything it needs is
+   * 0.5.0 (RF-60): the tiles the entry screen draws, before any password. Everything it needs is
    * this machine's own — the people table, the `host` row, the cached body's icon hash — and no call
    * leaves here, which is what lets a locked window show the guild it is disconnected from.
    */
@@ -1906,7 +1906,7 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   /**
-   * 0.4.5 (RF-61): the optional seed import of the first run — the page picks the file with
+   * 0.5.0 (RF-61): the optional seed import of the first run — the page picks the file with
    * `tiny.dialog` and hands the path over. The tables it writes are the local ones (the catalog,
    * the roles and the invites), exactly as an embedded seed would at boot; the runtime origin gate
    * is untouched (it is built, RF-61), so this never widens what a tool may call.
@@ -1945,7 +1945,7 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   /**
-   * 0.4.5 (RF-60): unlocking from a tile. `target` is that tile — absent means the Offline one —
+   * 0.5.0 (RF-60): unlocking from a tile. `target` is that tile — absent means the Offline one —
    * and `backend/session.ts` refuses a guild target that is not the guild's own person with the
    * same `invalid credentials` a wrong password gets (a tile is never an oracle). The mode it
    * records is what makes the whole guild side of this session disconnected; the tile is kept in
@@ -2060,7 +2060,7 @@ const methods: { [M in Method]: Handler<M> } = {
       throw new Error('Nod is already connected to a host — remove it first');
     }
 
-    // 0.4.5 (RF-59): the code the person typed decides the route — a setup code creates the first
+    // 0.5.0 (RF-59): the code the person typed decides the route — a setup code creates the first
     // admin, a guild invite creates the account the person just chose (both carry a name), and an
     // access code redeems the row of somebody who already exists.
     const opening = activateRoute(code);
@@ -2111,7 +2111,7 @@ const methods: { [M in Method]: Handler<M> } = {
             opening.needsName ? { ...body, name } : body,
           );
         } catch (error) {
-          // 0.4.5 (RF-59): the host refuses a join whose invite names a role it has since deleted
+          // 0.5.0 (RF-59): the host refuses a join whose invite names a role it has since deleted
           // with `404 unknown role`, and it does not spend a use of the invite. F7's `401` (a wrong
           // code) is `joinGate`'s own.
           if (opening.kind === 'invite' && error instanceof HostError && error.status === 404) {
@@ -2167,7 +2167,7 @@ const methods: { [M in Method]: Handler<M> } = {
       salt,
       addedAt: new Date().toISOString(),
     });
-    // 0.4.5 (RF-60): the join entered as the guild, and the tile of it — its address — is what the
+    // 0.5.0 (RF-60): the join entered as the guild, and the tile of it — its address — is what the
     // next entry screen preselects.
     await s.rememberEntry({ kind: 'guild', id: found.address });
     pendingJoin = null;
@@ -2271,7 +2271,7 @@ const methods: { [M in Method]: Handler<M> } = {
       salt: published.salt,
       addedAt: same && row !== null ? row.addedAt : new Date().toISOString(),
     });
-    // 0.4.5 (RF-60): a sign-in is a guild entry too — the tile of that guild is preselected next.
+    // 0.5.0 (RF-60): a sign-in is a guild entry too — the tile of that guild is preselected next.
     await s.rememberEntry({ kind: 'guild', id: found.address });
     pendingJoin = null;
     // F2 (RF-48 finding 2 of `docs/handovers/k10-smoke.md`): a fresh machine has no local account,
@@ -2291,7 +2291,7 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   /**
-   * 0.4.5 (RF-59): what a guild invite opens, before any account exists — the guild, its icon, the
+   * 0.5.0 (RF-59): what a guild invite opens, before any account exists — the guild, its icon, the
    * roles the invite grants and how long and how often it still works. Works locked: somebody with
    * only a link has no session here.
    *
@@ -2325,7 +2325,7 @@ const methods: { [M in Method]: Handler<M> } = {
     return inviteView(found, preview);
   },
 
-  // -------------------------------------------------------------- guild invites (0.4.5, RF-59)
+  // -------------------------------------------------------------- guild invites (0.5.0, RF-59)
   /** The guild's invites, revoked ones included — the admin screen shows their state. */
   'guildInvites.list': async (): Promise<GuildInvite[]> => {
     const admin = hostAdminFor(guildConnection());
@@ -3081,11 +3081,11 @@ const methods: { [M in Method]: Handler<M> } = {
     const roles = textList(p.roles, 'invalid roles');
     const admin = hostAdminFor(guildConnection());
 
-    // SP05 §3/0.4.5: while connected the same question — "a code to hand over" — is the host's, but
+    // SP05 §3/0.5.0: while connected the same question — "a code to hand over" — is the host's, but
     // only for somebody who already exists: `personId` reissues their access code
     // (`POST /v1/admin/people/:id/code`, revoking the previous one). A person who does not exist yet
     // joins through a guild invite, which carries their roles (`guildInvites.create`, RF-59) — the
-    // email-bound create route is gone with 0.4.5. `days` stays local: SP02 §3 fixes 72 h on the
+    // email-bound create route is gone with 0.5.0. `days` stays local: SP02 §3 fixes 72 h on the
     // host's side.
     if (admin !== null) {
       const personId = optional(p.personId, (value) => text(value, 'invalid person'));

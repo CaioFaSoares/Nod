@@ -257,7 +257,7 @@ async function adminOf(running: Running): Promise<HostAdmin> {
 }
 
 /**
- * A person of the guild with an access code for them (0.4.5, RF-59): they join through a guild
+ * A person of the guild with an access code for them (0.5.0, RF-59): they join through a guild
  * invite — the People tab's create route is an invite now — and the code is the reissue for a person
  * who already exists (`POST /v1/admin/people/:id/code`, SP02 §3).
  */

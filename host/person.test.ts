@@ -8,7 +8,7 @@
 // is seeded through the repo with the code SP02 §3 would issue them, and every code is redeemed
 // through `POST /v1/auth/activate` (and signed in again through `POST /v1/auth/login` for a second
 // device) — so a test only ever passes through a route that exists. What this group does not write
-// itself — the people (0.4.5, RF-59) and the org catalog — is seeded through the repo, and each
+// itself — the people (0.5.0, RF-59) and the org catalog — is seeded through the repo, and each
 // seeding says so.
 //
 // What the file proves, beyond the statuses: no answer of this group carries a session token hash,
@@ -198,7 +198,7 @@ async function setupAdmin(host: TestHost): Promise<SignedIn> {
 
 /** One person seeded through the repo, and the code SP02 §3 would have issued them. */
 async function createPerson(host: TestHost, email: string, name: string): Promise<string> {
-  // 0.4.5, RF-59: the admin route that created a person with an email-bound code is gone — a guild
+  // 0.5.0, RF-59: the admin route that created a person with an email-bound code is gone — a guild
   // invite creates a person now — so the person and the code SP02 §3 would issue are seeded here
   // (the way this file's seedCode does).
   const person = host.repo.createPerson(

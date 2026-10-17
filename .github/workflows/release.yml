@@ -76,6 +76,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The notes step looks back for the `Release <version>:` commit (see below).
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -135,11 +138,21 @@ jobs:
           fi
 
       # Outside .build: `tinyjs build` (inside `publish`) wipes .build before packing.
+      # The notes are the body of the `Release <version>:` commit — what installed Nods show in the
+      # update notice (RF-55). A merge commit (`Merge pull request #…`) or a dispatched run (no
+      # head_commit, the case of release-branch.yml) would otherwise publish a header or nothing.
       - name: release notes
         env:
           MESSAGE: ${{ github.event.head_commit.message }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          printf '%s\n' "${MESSAGE:-Nod ${{ needs.prepare.outputs.version }}}" > "${{ runner.temp }}/release-notes.md"
+          pattern="^Release ${VERSION//./\\.}[: ]"
+          notes=$(git log -1 --extended-regexp --grep="$pattern" --format=%B)
+          [ -n "$notes" ] || notes="$MESSAGE"
+          [ -n "$notes" ] || notes=$(git log -1 --format=%B)
+          # GitHub's merge header (and the blank line after it) is not news for anyone.
+          notes=$(printf '%s\n' "$notes" | sed '/^Merge pull request #/,/^$/d')
+          printf '%s\n' "${notes:-Nod $VERSION}" > "${{ runner.temp }}/release-notes.md"
 
       - name: publish (macOS arm64 + x86_64)
         if: runner.os == 'macOS'

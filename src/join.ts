@@ -1,4 +1,4 @@
-// 0.4.5 (RF-59), SP05 §4: the Discord-like way into a guild. An invite link opens the guild's card
+// 0.5.0 (RF-59), SP05 §4: the Discord-like way into a guild. An invite link opens the guild's card
 // — icon, name, the roles the invite carries, how long and how often it still works, the
 // fingerprint to check out loud — and the person then creates the account they chose. The secondary
 // paths sit beside it: sign in to a guild this Nod already knows, use an access code an admin

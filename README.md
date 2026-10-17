@@ -1,5 +1,13 @@
 # Nod
 
+```
+                 _
+ _ __   ___   __| |
+| '_ \ / _ \ / _` |
+| | | | (_) | (_| |
+|_| |_|\___/ \__,_|
+```
+
 Nod is a desktop app that keeps your team's web tools in one place. Open it and every tool you have
 access to is a click (or a keyboard shortcut) away; each opens in its own window and stays signed in
 between sessions. You add the tools that are yours, an admin decides who sees what, and passwords sit
@@ -35,10 +43,86 @@ every derived key. The rename decision and plan are in `docs/canonico.md` §22 a
   visible manual fallback.
 - Vault in the system keychain, bound to the origin each credential was saved for.
 - Roles, grants and a local, exportable audit log.
-- Private releases with a seed (catalog, roles, grants) kept out of git; from 0.4.5 the seed is an
+- Private releases with a seed (catalog, roles, grants) kept out of git; from 0.5.0 the seed is an
   optional import at setup, so a release can start empty.
 - Optional host (`host/`, Bun + Elysia): one guild per container; people, roles, grants and tools
   sync to every connected Nod. Without a host, Nod works fully offline.
+
+## Screenshots
+
+Captured from the built page in headless Chromium, with the backend answered by fake data
+(`example.test` addresses, made-up people). They show the screens as they render, not a live guild.
+
+| | |
+| --- | --- |
+| ![Entry screen](docs/screenshots/entry.png) | **Entry screen.** The column on the left is where you can go: Offline (this machine only), your guild, and `+` to join one. Pick one and type your password. |
+| ![Invite card](docs/screenshots/invite-card.png) | **Joining a guild.** Paste the invite link your admin sent. Nod shows the guild, the roles you'll get and the fingerprint to check, then you create your own account. |
+| ![Home](docs/screenshots/home.png) | **Home.** The sidebar lists your tools — favorites first, then the guild's tools grouped by category, then your own. A short pill marks an open tool, the number is its `⌘` shortcut. |
+| ![Invites](docs/screenshots/invites.png) | **Invites (admin).** Pick roles, how many people can use the link and for how long; the list shows which invites are still active. |
+| ![Offline](docs/screenshots/offline.png) | **Offline session.** Entering through Offline uses only what is on this machine; nothing syncs until you switch back to the guild. |
+
+## How it works
+
+Nod is two halves inside one small app, plus an optional server:
+
+- **The page** is what you see: the entry screen, the sidebar, Home and Settings (`src/`). It never
+  talks to the network and never keeps a password; it asks the backend for everything.
+- **The backend** runs beside it on your machine (`backend/`). It keeps the catalog, people and the
+  audit log in a local SQLite file, and keeps every password in the system keychain (Keychain,
+  Credential Manager, Secret Service), encrypted with a key that only your password unlocks.
+- **The host** is optional (`host/`). One host is one guild: it stores people, roles, tools and
+  invites, and every connected Nod syncs with it every few minutes. It only ever sees encrypted
+  credentials — your password never leaves your machine.
+
+```mermaid
+flowchart LR
+  page["Page<br/>(src/)"] -- "call / push" --> backend["Backend<br/>(backend/)"]
+  backend --> db[("SQLite<br/>catalog, people, log")]
+  backend --> keychain[("System keychain<br/>encrypted credentials")]
+  backend --> tools["Tool windows<br/>(each site in its own window)"]
+  backend -. "only in a guild session" .-> host["Host (host/)<br/>one guild"]
+```
+
+**Getting in.** On the entry screen you choose *how* to enter, then type your password. Offline
+keeps everything on this machine; the guild tile also syncs with the host.
+
+```mermaid
+flowchart TD
+  start(["Open Nod"]) --> pick{"Which tile?"}
+  pick -- "Offline" --> pwd1["Password"] --> local["Local tools only<br/>no calls to the host"]
+  pick -- "Guild" --> pwd2["Password"] --> synced["Guild tools + your own<br/>synced with the host"]
+  pick -- "+" --> link["Paste an invite link"] --> card["See guild, roles, fingerprint"] --> account["Create your account"] --> synced
+```
+
+**Invites.** An admin creates an invite with roles, a use limit and an expiry. Whoever opens the
+link creates the account they want, and the host gives it the invite's roles. An invite can never
+make someone an admin; that is a separate step in People.
+
+```mermaid
+sequenceDiagram
+  participant A as Admin's Nod
+  participant H as Host
+  participant P as New person's Nod
+  A->>H: create invite (roles, uses, expiry)
+  H-->>A: link + code (shown once)
+  A-->>P: sends the link (chat, email…)
+  P->>H: preview the invite
+  H-->>P: guild name, icon, roles
+  P->>H: join with name, email and a key derived from the password
+  H-->>P: session — the person now exists with the invite's roles
+```
+
+**Releases.** Merging `dev` into `main` creates the `release-<version>` branch on its own, which
+builds every system and publishes a GitHub release. Installed Nods with an update channel notice the
+new version and show its notes.
+
+```mermaid
+flowchart LR
+  dev["PR dev → main merged"] --> branch["release-branch.yml<br/>creates release-&lt;version&gt;"]
+  branch --> build["release.yml<br/>tests, builds macOS · Linux · Windows"]
+  build --> gh["GitHub release<br/>archives + manifest.json"]
+  gh --> nods["Installed Nods<br/>see the update notice"]
+```
 
 ## Status
 
@@ -65,7 +149,7 @@ bun install
 bun run app:dev         # development (runs without the private seed)
 bun test                # unit tests
 bun run typecheck       # tsc for frontend and backend
-bun run app:build       # release (the private seed is optional since 0.4.5)
+bun run app:build       # release (the private seed is optional since 0.5.0)
 bun test/smoke/run.ts   # smoke test on the real app (opens it)
 ```
 

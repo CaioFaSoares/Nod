@@ -195,14 +195,14 @@ export interface SetupRequest extends ActivateRequest {
 }
 
 /**
- * `POST /v1/auth/join` (0.4.5, RF-59): redeem a guild invite. The person chooses the account — name,
+ * `POST /v1/auth/join` (0.5.0, RF-59): redeem a guild invite. The person chooses the account — name,
  * email, password — and the host creates it with the invite's roles, spending one use.
  */
 export interface JoinRequest extends ActivateRequest {
   name: string;
 }
 
-/** `POST /v1/auth/invite` (0.4.5, RF-59): what an invite opens, shown before any account is typed. */
+/** `POST /v1/auth/invite` (0.5.0, RF-59): what an invite opens, shown before any account is typed. */
 export interface InvitePreviewRequest {
   code: string;
 }
@@ -561,7 +561,7 @@ export interface SnapshotEnvelope {
 /**
  * The three codes of SP02 §3. `access` is the one the host stores as purpose `activate` — SP01 §2's
  * `access_codes.purpose` and `host/repo.ts`'s `CodePurpose` — `setup` is the one that creates the
- * first admin, and `invite` (0.4.5, RF-59) is a guild invite: roles, a use budget and an expiry,
+ * first admin, and `invite` (0.5.0, RF-59) is a guild invite: roles, a use budget and an expiry,
  * redeemed by whoever holds it with the account they choose (`POST /v1/auth/join`).
  */
 export type CodeKind = 'access' | 'setup' | 'invite';

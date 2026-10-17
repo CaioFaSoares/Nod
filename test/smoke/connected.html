@@ -86,7 +86,7 @@
         const PERSONAL_TOOL_TITLE = 'Mine (smoke)';
 
         /**
-         * 0.4.5 (RF-60): an unlock with no `target` is the Offline tile's session — the local
+         * 0.5.0 (RF-60): an unlock with no `target` is the Offline tile's session — the local
          * catalog, no host call, the guild disconnected. Every unlock of this smoke is the guild
          * person of this machine, so the target travels with all of them; 5.5's "offline" is the
          * host process being down, which is not the same thing (the cache still serves the guild).
@@ -495,7 +495,7 @@
         }
 
         /**
-         * 0.4.5 (RF-59): a person of the guild is created by redeeming an invite — the admin hands
+         * 0.5.0 (RF-59): a person of the guild is created by redeeming an invite — the admin hands
          * one over, and whoever opens it creates the account they choose (the join of the person
          * phase below). The step keeps its place and its meaning: it is what hands P a way in.
          */
@@ -548,7 +548,7 @@
         }
 
         /**
-         * 0.4.5 (RF-59): an invite is not a person. The admin's two invites are on the host, and the
+         * 0.5.0 (RF-59): an invite is not a person. The admin's two invites are on the host, and the
          * roster still holds nobody but the admin — P and Q come into being when each redeems their
          * own invite in their own phase (which `adminIds` then reads back, roles included).
          */

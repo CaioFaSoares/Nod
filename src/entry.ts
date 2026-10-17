@@ -1,4 +1,4 @@
-// 0.4.5 (RF-60): the entry screen — the locked screen of the main window, a Discord-like rail of
+// 0.5.0 (RF-60): the entry screen — the locked screen of the main window, a Discord-like rail of
 // tiles with the pane of the selected one beside it.
 //
 //   [ Offline ]  the profile of this machine: local catalog, no sync, no host call
@@ -159,7 +159,7 @@ function rail(current: Tile, profiles: EntryProfiles, offlineSuffix: string): HT
       null,
     ),
   );
-  // 0.4.5: the one separator of both rails, always under Offline, as the sidebar draws it under
+  // 0.5.0: the one separator of both rails, always under Offline, as the sidebar draws it under
   // its mark.
   list.append(el('span', { class: 'rail-separator', aria: { hidden: 'true' } }));
   for (const guild of profiles.guilds) {
@@ -567,6 +567,18 @@ async function importSeed(form: Form): Promise<void> {
   }
 }
 
+/**
+ * 0.5.0: the title of the entry screen — "nod" in a figlet-style ASCII font, drawn in the page's
+ * monospace. Decorative: screen readers get the word once, through the label.
+ */
+const NOD_BANNER = [
+  '                 _ ',
+  ' _ __   ___   __| |',
+  "| '_ \\ / _ \\ / _` |",
+  '| | | | (_) | (_| |',
+  '|_| |_|\\___/ \\__,_|',
+].join('\n');
+
 // ---------------------------------------------------------------- mounts
 
 function render(): void {
@@ -584,7 +596,16 @@ function render(): void {
       profiles === null
         ? el('nav', { class: 'entry-rail', aria: { hidden: 'true' } })
         : rail(selected, profiles, offlineSuffix),
-      el('div', { class: 'entry-pane' }, pane(current, selected)),
+      el(
+        'div',
+        { class: 'entry-pane' },
+        el(
+          'div',
+          { class: 'entry-column' },
+          el('pre', { class: 'entry-banner', attrs: { role: 'img' }, aria: { label: 'nod' } }, NOD_BANNER),
+          pane(current, selected),
+        ),
+      ),
     ),
   );
 }

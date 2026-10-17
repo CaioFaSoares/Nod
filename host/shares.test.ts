@@ -225,7 +225,7 @@ async function setupAdmin(host: TestHost): Promise<Member> {
   return { personId, token, keys };
 }
 
-// 0.4.5, RF-59: the admin route that created a person with an email-bound code is gone — a guild
+// 0.5.0, RF-59: the admin route that created a person with an email-bound code is gone — a guild
 // invite creates a person now — so the person and the code SP02 §3 would issue are seeded here (the
 // way this file's seedCode does).
 async function createPerson(
