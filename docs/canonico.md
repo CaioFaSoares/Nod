@@ -400,6 +400,7 @@ máquina.
 | RF-55 | The Nod notices on its own when a newer release exists and tells the person, without them opening Settings. | With a release `release-X.Y.Z` newer than the installed version published, the Nod shows a new-version notice within one launch or one day; with none, no notice. |
 | RF-56 | A build can carry a custom app icon without editing tracked files. | With `resources/icon.png` or `NOD_ICON` set, the built app shows that icon; without it, the default; `git status` stays clean. |
 | RF-57 | An admin sets a guild icon; each person chooses Default or Guild icon for their app. | Admin uploads a PNG; after sync a member's Settings offers Guild icon and choosing it changes the Dock/taskbar icon; a tampered icon (hash not matching the signed snapshot) is refused. |
+| RF-58 | A connected Nod shows who in the guild is online now. | With two people connected, each sees the other under "Online now" within one sync (≤ 6 min); a person who locked or quit drops off within 6 min; a revoked or disabled person never appears; local mode shows nothing. |
 
 ## 15. Requisitos não funcionais
 
@@ -627,8 +628,10 @@ Status: `Proposto` espera leitura do dono; `Aberto` espera pesquisa; só o dono 
 | Product and repository name | The project and the repository are **Nod** (`CaioFaSoares/Nod`), renamed from `Bond` on 2026-10-16; the docs, the README and the repo name use Nod from that date (`docs/rename-nod.md`) | keep `Bond` | Owner on 2026-10-16: the repository is Nod, and from now on the docs name it Nod | Decidido (2026-10-16) |
 | Internal rename to Nod | The identifier rename landed in **0.3.5 as a clean cutover**: app id `copland.nod`, `nod://` deep links, `nod.*` RPC methods, `NOD_*` environment variables, `/.well-known/nod`, `Nod-Signature`, `nod.db`, keychain keys under `nod.*`. No data migration and no compatibility aliases — an installed 0.3.0 starts fresh. The KDF/HKDF/seal protocol labels stay as they were (changing them would change every derived key). Hosts are redeployed with `NOD_*` env (`docs/rename-nod.md`) | migration plus compatibility aliases; keep the internal identifiers | Owner on 2026-10-16: "pode renomear, tem problema nao, limpa no 0.3.5" | Decidido (2026-10-16) |
 | Custom icons | A release can wear a custom app icon without touching tracked files (`resources/icon.png` or `NOD_ICON`, RF-56), and the guild icon the admin uploads is chosen per person — Default or Guild (RF-57) | an icon baked into the release only; one org-wide icon for everybody | Owner on 2026-10-16: "quero poder fazer builds customizadas com ícones diferentes de forma mais simples ou trocar o ícone dele por um custom por guild e escolher" | Decidido (2026-10-16) |
+| Presence ("Online now") | Online = a live host session seen in the last 6 minutes (the 5-min sync already touches `sessions.last_seen_at`; no heartbeat, no new traffic). Served by its own person route `GET /v1/presence`, **outside** the signed snapshot (presence would move the snapshot `version` every poll and kill the `304`). Visible to every member (`kind = member`), never to or about clients; shows name and "last seen", never device, OS or IP (RF-58) | admin-only column in People; a 1-min heartbeat; presence inside the snapshot | Owner on 2026-10-17: "quero ter algum canto para ver as pessoas online agora" | Proposto |
 | Distribuição macOS | Ad-hoc com liberação manual documentada; Developer ID só como melhoria | comprar o certificado antes de F4 | Dono em 2026-10-15: "somos devs, não tem problema repassar isso pros outros" | Decidido (2026-10-15) |
 | Extensões | Fora do v1: o Nod cadastra endereços, não hospeda código | registro/manifesto/actor como na Carna | Escopo: casca fina | Proposto |
+| Extension system and knowledge base | First-party extensions, enabled on the host (every connected person with the grant sees them, nothing installed on their Nod) or in one Nod (local, offline); third-party code stays out. The first extension is a team knowledge base in tiptap with its own database on the host (`docs/epics/E05-extensions-kb.md`). Would lift §1 principle 6 and two §2 non-goals and supersede the row above | keep "no extensions"; third-party extensions with a sandbox; a KB tool registered as a plain address | Owner on 2026-10-17: "adicionar um sistema de extensoes… uma base de conhecimento em tiptap com base propria e compartilhada dentro da equipe… se estiver só no host, quem acessar consegue ver as extensoes"; later phase | Proposto |
 | Duas identidades na mesma ferramenta | Fora: um app tem um perfil de cookies | um app por identidade | Não há isolamento por janela (`docs/tinyjs.md` §10) | Proposto |
 | Fechar a janela principal | Com bandeja, esconde e mantém as janelas de ferramenta; "Quit Nod" encerra tudo; sem bandeja, fechar encerra | fechar sempre encerra | A janela principal é o centro, não a dona das janelas | Proposto |
 
@@ -664,6 +667,8 @@ Questões:
     without iframe tabs: `docs/epics/E04-web-nod.md`.
 12. Quantas pessoas recebem a release, e o seed embutido pode ser lido por quem recebe? Hoje isso é
     aceito (é organização, não segredo), mas convém saber se cada release é por pessoa ou por grupo.
+13. Extensions and the team knowledge base (2026-10-17): what "instalada pelo cliente" means, how
+    the admin enables a host extension, KB permissions, real-time co-editing — `docs/epics/E05-extensions-kb.md` §12.
 
 Riscos:
 

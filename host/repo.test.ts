@@ -1,7 +1,7 @@
 // The host's data access against a real migrated database in a temp data dir — no database mock
-// (`host/context.md`, SP01 §5). What is proved here: migration 1 holds every block 1 table and
-// reports `schema_version = 1`, the rules SP01 §2 keeps out of SQL (grants, owners, favorites, last
-// admin), the atomic code redemption with its TTL and wrong tries, idempotent events, owner
+// (`host/context.md`, SP01 §5). What is proved here: the migrations hold every table of SP01 §2–§3
+// and report `schema_version = 2`, the rules SP01 §2 keeps out of SQL (grants, owners, favorites,
+// last admin), the atomic code redemption with its TTL and wrong tries, idempotent events, owner
 // filtering, and that no secret lands in the database.
 //
 // Run with `bun test host/`.
@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { applyMigrations, openDatabase } from './migrations';
+import { applyMigrations, migrations, openDatabase } from './migrations';
 import {
   ConflictError,
   ForbiddenError,
@@ -111,7 +111,7 @@ function activatedAdmin(repo: Repo): HostPerson {
 }
 
 describe('schema', () => {
-  test('migration 1 creates every block 1 table and reports schema_version = 1', () => {
+  test('the migrations create every table and report schema_version = 2', () => {
     const { db, repo } = newRepo();
 
     const tables = db
@@ -131,6 +131,11 @@ describe('schema', () => {
         'grants',
         'favorites',
         'events',
+        // Migration 2, block 2 (SP01 §3).
+        'person_keys',
+        'shares',
+        'credential_holders',
+        'assignments',
       ]),
     );
 
@@ -141,8 +146,48 @@ describe('schema', () => {
         )
         .all(),
     ).toHaveLength(1);
+    expect(
+      db
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'shares_to_open'",
+        )
+        .all(),
+    ).toHaveLength(1);
 
-    expect(repo.meta('schema_version')).toBe('1');
+    expect(repo.meta('schema_version')).toBe('2');
+  });
+
+  test('migration 2 applies to a data dir that already holds block 1, keeping its rows', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nod-host-migrate-'));
+    const db = openDatabase(join(dir, 'host.db'));
+    databases.push({ dir, close: () => db.close() });
+
+    // The state of a `/data` that has been running block 1: migration 1 applied, one person in.
+    db.exec(migrations[0]);
+    db.query("INSERT INTO meta (key, value) VALUES ('schema_version', '1')").run();
+    db.query('INSERT INTO people (id, email, name, created_at) VALUES (?, ?, ?, ?)').run(
+      'p1',
+      'ada@nod.test',
+      'Ada',
+      NOW,
+    );
+
+    // SP01 §4: the boot applies only what is missing, and the version lands on 2.
+    expect(applyMigrations(db)).toBe(2);
+    expect(
+      db
+        .query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'schema_version'")
+        .get()?.value,
+    ).toBe('2');
+    expect(db.query('SELECT id FROM people WHERE id = ?').get('p1')).not.toBeNull();
+    expect(
+      db
+        .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .all()
+        .map((row) => row.name),
+    ).toEqual(
+      expect.arrayContaining(['person_keys', 'shares', 'credential_holders', 'assignments']),
+    );
   });
 
   test('the schema itself refuses an entry or a view whose scope and owner disagree', () => {
@@ -833,7 +878,7 @@ describe('meta', () => {
     repo.setMeta('created_at', NOW);
     expect(repo.meta('created_at')).toBe(NOW);
     expect(() => repo.setMeta('schema_version', '9')).toThrow(ConflictError);
-    expect(repo.meta('schema_version')).toBe('1');
+    expect(repo.meta('schema_version')).toBe('2');
   });
 });
 

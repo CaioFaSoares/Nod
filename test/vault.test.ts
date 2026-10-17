@@ -1,12 +1,14 @@
 // Vault (`backend/vault.ts`) against in-memory SQLite and an in-memory keychain: proves this
-// slice's acceptance criteria — index without a secret, value only in the keychain, a tool that
-// does not exist, the keychain refusing, the origin the credential is bound to (RF-38), removal
-// (one item, one person, one tool) and the encrypted export/import round trip.
+// slice's acceptance criteria — index without a secret, value only in the keychain, the `bv1.`
+// seal of V1 (SP02 §8) and its legacy migration, a tool that does not exist, the keychain refusing,
+// the origin the credential is bound to (RF-38), removal (one item, one person, one tool) and the
+// encrypted export/import round trip.
 import { describe, expect, test } from 'bun:test';
 
 import { createRepo } from '../backend/repo';
 import { createVault } from '../backend/vault';
 import { memorySqlite } from './helpers/sqlite-bun';
+import { VAULT_VALUE_PREFIX, decryptVaultValue } from '../shared/vault-crypto';
 import type { Repo } from '../backend/repo';
 import type { Vault } from '../backend/vault';
 import type { Entry, PasswordHash, Person, SecretStore } from '../shared/types';
@@ -20,6 +22,8 @@ const LOCAL_PASSWORD: PasswordHash = {
   iterations: ITERATIONS,
 };
 const KANBAN_SECRET = 'kanban-subscription-secret';
+/** The `vaultKey` of the unlocked session this vault reads from (SP02 §8). */
+const VAULT_KEY = new Uint8Array(32).fill(7);
 
 function memoryKeychain() {
   const items = new Map<string, string>();
@@ -83,7 +87,7 @@ function scene(): VaultScene {
   for (const id of ['kanban', 'affine', 'orphan']) repo.saveEntry(tool(id));
 
   const { keychain, items, refuse, accept } = memoryKeychain();
-  const vault = createVault({ repo, keychain, iterations: ITERATIONS });
+  const vault = createVault({ repo, keychain, iterations: ITERATIONS, vaultKey: () => VAULT_KEY });
   const ana = repo.createPerson({
     email: 'ana@example.test',
     name: 'Ana',
@@ -116,7 +120,7 @@ describe('key and index', () => {
     expect(s.vault.list(s.ana.id)).toEqual([]);
   });
 
-  test('save writes the index without the secret and the value as JSON in the keychain', async () => {
+  test('save writes the index without the secret and the value as a bv1 value in the keychain', async () => {
     const s = scene();
 
     const item = await s.vault.save(s.ana.id, {
@@ -132,9 +136,14 @@ describe('key and index', () => {
     // The index has no secret field, and the value is nowhere in the record.
     expect('secret' in item).toBe(false);
     expect(JSON.stringify(item)).not.toContain(KANBAN_SECRET);
-    expect(s.items.get(item.keychainKey)).toBe(
-      JSON.stringify({ username: 'ana', secret: KANBAN_SECRET }),
-    );
+    // SP02 §8: the keychain holds the sealed value, openable only with this key and this keychain key.
+    const stored = s.items.get(item.keychainKey) ?? '';
+    expect(stored.startsWith(VAULT_VALUE_PREFIX)).toBe(true);
+    expect(stored).not.toContain(KANBAN_SECRET);
+    expect(await decryptVaultValue(VAULT_KEY, item.keychainKey, stored)).toEqual({
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
 
     expect(s.vault.list(s.ana.id)).toEqual([item]);
     expect(await s.vault.read(s.ana.id, 'kanban')).toEqual({
@@ -251,6 +260,94 @@ describe('key and index', () => {
   });
 });
 
+describe('the vaultKey gate and the legacy migration (SP02 §8, V1)', () => {
+  test('without a key the vault refuses to write and does not open a bv1 value', async () => {
+    const s = scene();
+    const item = await s.vault.save(s.ana.id, {
+      toolId: 'kanban',
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+    // The same repository and keychain as a session that is locked: the vault has no key.
+    const locked = createVault({ repo: s.repo, keychain: s.keychain, iterations: ITERATIONS });
+
+    expect(await messageOf(() => locked.save(s.ana.id, { toolId: 'affine', username: 'a', secret: 'b' }))).toBe(
+      'the vault is locked — unlock with your password first',
+    );
+    // Nothing was written: no index row and no keychain value.
+    expect(s.repo.vaultItem(s.ana.id, 'affine')).toBeNull();
+    expect(s.items.has(`nod.cred.${s.ana.id}.affine`)).toBe(false);
+
+    // A sealed value is an absent credential without the key; a legacy plaintext one is still read.
+    expect(await locked.read(s.ana.id, 'kanban')).toBeNull();
+    s.items.set(item.keychainKey, JSON.stringify({ username: 'ana', secret: 'legacy' }));
+    expect(await locked.read(s.ana.id, 'kanban')).toEqual({ username: 'ana', secret: 'legacy' });
+  });
+
+  test('another vaultKey does not open the value of this one', async () => {
+    const s = scene();
+    const item = await s.vault.save(s.ana.id, {
+      toolId: 'kanban',
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+    const other = createVault({
+      repo: s.repo,
+      keychain: s.keychain,
+      iterations: ITERATIONS,
+      vaultKey: () => new Uint8Array(32).fill(8),
+    });
+
+    expect(await other.read(s.ana.id, 'kanban')).toBeNull();
+    expect(s.repo.listVault(s.ana.id)).toHaveLength(1);
+  });
+
+  test('migrateLegacy re-encrypts the plaintext values and is idempotent', async () => {
+    const s = scene();
+    const item = await s.vault.save(s.ana.id, {
+      toolId: 'kanban',
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+    // The value an earlier build wrote: plaintext, no prefix. A junk value is not a credential and
+    // must survive the run as it is.
+    s.items.set(item.keychainKey, JSON.stringify({ username: 'ana', secret: KANBAN_SECRET }));
+    s.repo.saveVaultItem({
+      personId: s.ana.id,
+      toolId: 'affine',
+      label: 'affine',
+      username: 'ana',
+      keychainKey: `nod.cred.${s.ana.id}.affine`,
+      origin: 'https://affine.example.test',
+    });
+    s.items.set(`nod.cred.${s.ana.id}.affine`, 'not a credential');
+
+    expect(await s.vault.migrateLegacy(s.ana.id)).toBe(1);
+    const migrated = s.items.get(item.keychainKey) ?? '';
+    expect(migrated.startsWith(VAULT_VALUE_PREFIX)).toBe(true);
+    expect(await decryptVaultValue(VAULT_KEY, item.keychainKey, migrated)).toEqual({
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+    expect(s.items.get(`nod.cred.${s.ana.id}.affine`)).toBe('not a credential');
+    // Reading is unchanged by the migration, and a second run rewrites nothing.
+    expect(await s.vault.read(s.ana.id, 'kanban')).toEqual({
+      username: 'ana',
+      secret: KANBAN_SECRET,
+    });
+    expect(await s.vault.migrateLegacy(s.ana.id)).toBe(0);
+  });
+
+  test('migrateLegacy refuses without the key instead of writing a value nothing opens', async () => {
+    const s = scene();
+    const locked = createVault({ repo: s.repo, keychain: s.keychain, iterations: ITERATIONS });
+
+    expect(await messageOf(() => locked.migrateLegacy(s.ana.id))).toBe(
+      'the vault is locked — unlock with your password first',
+    );
+  });
+});
+
 describe('origin', () => {
   test('save records the entry origin; a moved tool does not move the saved credential', async () => {
     const s = scene();
@@ -263,8 +360,8 @@ describe('origin', () => {
 
     // The entry's canonical origin, as the tool window compares its own address against (RF-38).
     expect(s.repo.vaultOrigin(s.ana.id, 'kanban')).toBe('https://kanban.example.test');
-    expect(s.items.get(item.keychainKey)).toBe(
-      JSON.stringify({ username: 'ana', secret: KANBAN_SECRET }),
+    expect(await decryptVaultValue(VAULT_KEY, item.keychainKey, s.items.get(item.keychainKey) ?? '')).toEqual(
+      { username: 'ana', secret: KANBAN_SECRET },
     );
 
     // The tool address moves — a local edit or a host snapshot rewriting the entry. The credential
@@ -300,7 +397,12 @@ describe('origin', () => {
       ...s.repo,
       entry: (id) => (id === 'jitsi' ? hostEntry : s.repo.entry(id)),
     };
-    const vault = createVault({ repo: effective, keychain: s.keychain, iterations: ITERATIONS });
+    const vault = createVault({
+      repo: effective,
+      keychain: s.keychain,
+      iterations: ITERATIONS,
+      vaultKey: () => VAULT_KEY,
+    });
 
     const item = await vault.save(s.ana.id, {
       toolId: 'jitsi',
@@ -318,8 +420,8 @@ describe('origin', () => {
     });
     // The index row exists without a `tool` row behind it, and the credential is the keychain's.
     expect(s.repo.listVault(s.ana.id)).toEqual([item]);
-    expect(s.items.get(item.keychainKey)).toBe(
-      JSON.stringify({ username: 'ana', secret: KANBAN_SECRET }),
+    expect(await decryptVaultValue(VAULT_KEY, item.keychainKey, s.items.get(item.keychainKey) ?? '')).toEqual(
+      { username: 'ana', secret: KANBAN_SECRET },
     );
   });
 
@@ -372,7 +474,9 @@ describe('remove', () => {
     expect(s.items.has(affine.keychainKey)).toBe(false);
     expect(s.repo.listVault(s.ana.id)).toEqual([]);
     expect(s.repo.listVault(s.bruno.id)).toHaveLength(1);
-    expect(s.items.get(hers.keychainKey)).toBe(JSON.stringify({ username: 'bruno', secret: 'three' }));
+    expect(await decryptVaultValue(VAULT_KEY, hers.keychainKey, s.items.get(hers.keychainKey) ?? '')).toEqual(
+      { username: 'bruno', secret: 'three' },
+    );
   });
 
   test('removeAllForTool clears every person item and index row of that tool (A6)', async () => {
@@ -400,7 +504,9 @@ describe('remove', () => {
     expect(s.repo.vaultItemsByTool('kanban')).toEqual([]);
     expect(s.repo.listVault(s.ana.id)).toEqual([anaAffine]);
     expect(s.repo.listVault(s.bruno.id)).toEqual([]);
-    expect(s.items.get(anaAffine.keychainKey)).toBe(JSON.stringify({ username: 'ana', secret: 'three' }));
+    expect(
+      await decryptVaultValue(VAULT_KEY, anaAffine.keychainKey, s.items.get(anaAffine.keychainKey) ?? ''),
+    ).toEqual({ username: 'ana', secret: 'three' });
   });
 });
 

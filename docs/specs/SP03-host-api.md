@@ -78,6 +78,7 @@ SP05 §3). The host rejects those paths with its `404` until they land.
 | `PUT /v1/favorites` | `{ entries: Id[], updatedAt }` | `204`, replaces the ordered list |
 | `POST /v1/events` | `{ events: ClientEvent[] }` (≤ 500) | `{ acked: Id[] }` (SP04 §5) |
 | `GET /v1/guild/icon` | — | `200 image/png`, the stored bytes, `ETag: "<sha256>"`; `404` while the guild has none |
+| `GET /v1/presence` | — | `PresenceEntry[]` (RF-58): members with a live session, `{ personId, name, lastSeenAt, online }`, online = seen within `PRESENCE_WINDOW_MS` (6 min); a client gets `403`. Outside the signed snapshot |
 
 - Personal tool ids must match `^p-[a-z0-9]{10}$`. The Nod generates them.
 - A `PUT` of an id owned by someone else answers 403.

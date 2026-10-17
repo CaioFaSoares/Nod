@@ -70,7 +70,8 @@ describe('boot', () => {
     const version = host.db
       .query<{ value: string }, [string]>('SELECT value FROM meta WHERE key = ?')
       .get(SCHEMA_VERSION_KEY);
-    expect(version?.value).toBe('1');
+    // Migration 2 landed with block 2 (SP01 §3–§4): a fresh `/data` now reports 2.
+    expect(version?.value).toBe('2');
 
     host.close();
   });

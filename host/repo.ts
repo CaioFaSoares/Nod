@@ -211,6 +211,76 @@ export interface GuildIcon {
   bytes: Uint8Array<ArrayBuffer>;
 }
 
+// ---------------------------------------------------------------- block 2: credential sharing (SP06)
+
+/** SP06 §4: an unaccepted share dies after 14 days and its ciphertext is purged (SP01 §3). */
+export const SHARE_TTL_MS = 14 * 24 * 3_600_000;
+
+/** SP01 §3 `shares.scope`, SP06 §5: `blocked` is a state of the credential, never a share that travels. */
+export type ShareScope = 'role' | 'blocked' | 'org';
+
+/** SP01 §3 `shares.kind`, SP06 §4: a person's send, an admin's assignment, or the owner's update. */
+export type ShareKind = 'send' | 'assign' | 'update';
+
+/** SP06 §2: the public halves of a person's pair, as `person_keys` stores them (base64url, 32 bytes). */
+export interface PersonKeys {
+  x25519Public: string;
+  ed25519Public: string;
+}
+
+/** One `shares` row (SP01 §3) as the host reads it back. */
+export interface ShareRecord {
+  id: string;
+  credentialId: string;
+  fromId: string;
+  toId: string;
+  toolId: string;
+  scope: ShareScope;
+  kind: ShareKind;
+  /** base64url of SP06 §3's body, or `''` once accept, decline or expiry purged it. */
+  sealed: string;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+  declinedAt: string | null;
+  purgedAt: string | null;
+}
+
+/** One `credential_holders` row with the person's name: SP03 §3's `Holder`, row for row. */
+export interface HolderRecord {
+  personId: string;
+  name: string;
+  owner: boolean;
+  scope: ShareScope;
+  since: string;
+  removedAt: string | null;
+}
+
+/** One row of `GET /v1/admin/assignments/missing` (SP03 §3): a member of an assigned role without a copy. */
+export interface MissingCopyRecord {
+  credentialId: string;
+  toolId: string;
+  roleId: string;
+  personId: string;
+}
+
+/** One recipient of `POST /v1/shares`: the row id the route chose and the copy sealed to them. */
+export interface ShareItemInput {
+  id: string;
+  to: string;
+  sealed: string;
+}
+
+/** Everything `POST /v1/shares` carries: one scope, one kind, one sealed copy per item (SP06 §4). */
+export interface ShareInput {
+  fromId: string;
+  credentialId: string;
+  toolId: string;
+  scope: ShareScope;
+  kind: ShareKind;
+  items: ShareItemInput[];
+}
+
 // ---------------------------------------------------------------- errors
 
 /**
@@ -325,6 +395,11 @@ export interface Repo {
   revokeOwnSession(personId: string, id: string, now: string): boolean;
   /** Disabling a person, or "sign out everywhere". */
   revokeSessionsOfPerson(personId: string, now: string): number;
+  /**
+   * RF-58: every non-disabled `member` with a live session, with the newest `last_seen_at` among
+   * them, most recent first. Clients never appear; no device, OS or session id leaves.
+   */
+  presence(now: string): { personId: string; name: string; lastSeenAt: string }[];
 
   // roles
   listRoles(): Role[];
@@ -387,6 +462,59 @@ export interface Repo {
   setGuildIcon(icon: GuildIcon): void;
   /** Removes the icon and its digest; false when there was none. */
   clearGuildIcon(): boolean;
+
+  // block 2: public keys (SP06 §2, SP03 §3)
+  /** Upsert: a reset replaces the pair — `person_keys` holds one row per person (SP01 §3). */
+  savePersonKeys(personId: string, keys: PersonKeys, now: string): void;
+  /** The stored pair, or null: what `POST /v1/shares` reads before it seals to someone. */
+  personKeys(personId: string): PersonKeys | null;
+  /** Every stored pair by person id: what `Snapshot.people` fills its public keys from (SP04 §2). */
+  keysByPerson(): Map<string, PersonKeys>;
+
+  // block 2: shares (SP06, SP03 §3)
+  /**
+   * Every rule of SP06 §5 for every item, then the rows, in one transaction: `403` for a recipient
+   * the scope does not allow and for a non-admin assignment or a non-owner update, `404` for an
+   * unknown recipient or tool, `409` for a recipient without keys. The sender becomes the owner
+   * holder when the credential has no holder row yet (SP06 §4).
+   */
+  createShares(input: ShareInput, now: string): string[];
+  /** The open, unexpired shares of one person, oldest first (SP04 §2's `incomingShares`). */
+  openShares(personId: string, now: string): ShareRecord[];
+  /** Any state of a share, so a route can tell `404` from `403` (SP03 §1). */
+  shareById(id: string): ShareRecord | null;
+  /** Purges the `sealed` of every expired share; answers how many rows it purged (SP06 §4). */
+  purgeExpiredShares(now: string): number;
+  /** The recipient's accept: ciphertext purged, `accepted_at` set, holder row written (SP06 §4). */
+  acceptShare(id: string, personId: string, now: string): void;
+  /** The recipient's decline: the same row, purged, with `declined_at` (SP06 §4). */
+  declineShare(id: string, personId: string, now: string): void;
+  /** Every holder row of one credential, the owner first, removed holders included (SP03 §3). */
+  holdersOf(credentialId: string): HolderRecord[];
+  /** Credentials the person holds with a live row; every credential of the guild, if `all` (SP04 §2). */
+  heldCredentials(personId: string, all: boolean): string[];
+  /** The owner's revocation of one holder: `removed_at` on a live row (SP06 §4, RF-48). */
+  removeHolder(
+    input: { credentialId: string; personId: string; byId: string; admin: boolean },
+    now: string,
+  ): void;
+  /** The credentials the person owns with a revoked holder and no update since (SP04 §2). */
+  rotationPending(personId: string): string[];
+
+  // block 2: assignments (SP06 §4, SP03 §3)
+  /** `true` upserts, `false` removes: one assignment per credential and role (SP01 §3). */
+  saveAssignment(
+    input: {
+      credentialId: string;
+      roleId: string;
+      toolId: string;
+      assignedBy: string;
+      assigned: boolean;
+    },
+    now: string,
+  ): void;
+  /** Every member of an assigned role still without a live copy, the assigner excluded (RF-47). */
+  missingCopies(): MissingCopyRecord[];
 }
 
 // ---------------------------------------------------------------- rows
@@ -490,6 +618,38 @@ interface EventRow {
   result: string | null;
   detail: string | null;
   receivedAt: string;
+}
+
+const SHARE_COLUMNS = `id, credential_id AS credentialId, from_id AS fromId, to_id AS toId,
+  tool_id AS toolId, scope, kind, sealed, created_at AS createdAt, expires_at AS expiresAt,
+  accepted_at AS acceptedAt, declined_at AS declinedAt, purged_at AS purgedAt`;
+
+interface ShareRow {
+  id: string;
+  credentialId: string;
+  fromId: string;
+  toId: string;
+  toolId: string;
+  scope: string;
+  kind: string;
+  sealed: string;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+  declinedAt: string | null;
+  purgedAt: string | null;
+}
+
+const HOLDER_COLUMNS = `h.person_id AS personId, p.name AS name, h.owner AS owner, h.scope AS scope,
+  h.since AS since, h.removed_at AS removedAt`;
+
+interface HolderRow {
+  personId: string;
+  name: string;
+  owner: number;
+  scope: string;
+  since: string;
+  removedAt: string | null;
 }
 
 /** `email TEXT NOT NULL UNIQUE` holds the lowercased, trimmed form (SP01 §2). */
@@ -1038,6 +1198,19 @@ export function createRepo(db: Database): Repo {
       .run(now, personId).changes;
   }
 
+  function presence(now: string): { personId: string; name: string; lastSeenAt: string }[] {
+    return db
+      .query<{ personId: string; name: string; lastSeenAt: string }, [string]>(
+        `SELECT p.id AS personId, p.name AS name, MAX(s.last_seen_at) AS lastSeenAt
+           FROM people p JOIN sessions s ON s.person_id = p.id
+          WHERE p.kind = 'member' AND p.disabled_at IS NULL
+            AND s.revoked_at IS NULL AND s.expires_at > ?
+          GROUP BY p.id, p.name
+          ORDER BY lastSeenAt DESC, p.id`,
+      )
+      .all(now);
+  }
+
   function listRoles(): Role[] {
     return db
       .query<{ id: string; name: string; admin: number }, []>(
@@ -1416,6 +1589,373 @@ export function createRepo(db: Database): Repo {
     );
   }
 
+  // ---------------------------------------------------------------- block 2: sharing (SP06)
+
+  function savePersonKeys(personId: string, keys: PersonKeys, now: string): void {
+    runInTransaction(() => {
+      assertPersonExists(personId);
+      // SP06 §2: a reset replaces the pair, and the row is the person's — one per person.
+      db.query(
+        `INSERT INTO person_keys (person_id, x25519_public, ed25519_public, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(person_id) DO UPDATE SET x25519_public = excluded.x25519_public,
+           ed25519_public = excluded.ed25519_public, created_at = excluded.created_at`,
+      ).run(personId, keys.x25519Public, keys.ed25519Public, now);
+    });
+  }
+
+  function personKeys(personId: string): PersonKeys | null {
+    const row = db
+      .query<{ x25519Public: string; ed25519Public: string }, [string]>(
+        `SELECT x25519_public AS x25519Public, ed25519_public AS ed25519Public
+           FROM person_keys WHERE person_id = ?`,
+      )
+      .get(personId);
+    return row === null
+      ? null
+      : { x25519Public: row.x25519Public, ed25519Public: row.ed25519Public };
+  }
+
+  function keysByPerson(): Map<string, PersonKeys> {
+    const keys = new Map<string, PersonKeys>();
+    const rows = db
+      .query<{ personId: string; x25519Public: string; ed25519Public: string }, []>(
+        `SELECT person_id AS personId, x25519_public AS x25519Public, ed25519_public AS ed25519Public
+           FROM person_keys`,
+      )
+      .all();
+    for (const row of rows) {
+      keys.set(row.personId, { x25519Public: row.x25519Public, ed25519Public: row.ed25519Public });
+    }
+    return keys;
+  }
+
+  function toShare(row: ShareRow): ShareRecord {
+    return {
+      id: row.id,
+      credentialId: row.credentialId,
+      fromId: row.fromId,
+      toId: row.toId,
+      toolId: row.toolId,
+      scope: row.scope as ShareScope,
+      kind: row.kind as ShareKind,
+      sealed: row.sealed,
+      createdAt: row.createdAt,
+      expiresAt: row.expiresAt,
+      acceptedAt: row.acceptedAt,
+      declinedAt: row.declinedAt,
+      purgedAt: row.purgedAt,
+    };
+  }
+
+  function readShare(id: string): ShareRecord | null {
+    const row = db
+      .query<ShareRow, [string]>(`SELECT ${SHARE_COLUMNS} FROM shares WHERE id = ?`)
+      .get(id);
+    return row === null ? null : toShare(row);
+  }
+
+  /** The `credential_holders` state of one person on one credential, or null (SP01 §3). */
+  function holderState(
+    credentialId: string,
+    personId: string,
+  ): { owner: boolean; removedAt: string | null } | null {
+    const row = db
+      .query<{ owner: number; removedAt: string | null }, [string, string]>(
+        `SELECT owner, removed_at AS removedAt FROM credential_holders
+          WHERE credential_id = ? AND person_id = ?`,
+      )
+      .get(credentialId, personId);
+    return row === null ? null : { owner: row.owner === 1, removedAt: row.removedAt };
+  }
+
+  function createShares(input: ShareInput, now: string): string[] {
+    return runInTransaction(() => {
+      const sender = personById(input.fromId);
+      if (sender === null) throw new NotFoundError('unknown person');
+      // SP06 §5: `blocked` never accepts a share — neither the scope the body claims nor a
+      // credential whose owner holder row says so.
+      if (input.scope === 'blocked') throw new ForbiddenError('the credential is blocked');
+      const blocked =
+        db
+          .query<{ one: number }, [string]>(
+            `SELECT 1 AS one FROM credential_holders
+              WHERE credential_id = ? AND owner = 1 AND scope = 'blocked'`,
+          )
+          .get(input.credentialId) !== null;
+      if (blocked) throw new ForbiddenError('the credential is blocked');
+
+      const tool = readEntryState(input.toolId);
+      if (tool === null) throw new NotFoundError('unknown tool');
+
+      // SP06 §4: only an admin assigns, and only the credential's owner holder sends an update.
+      if (input.kind === 'assign' && !sender.admin) throw new ForbiddenError('admin only');
+      const senderHolder = holderState(input.credentialId, input.fromId);
+      if (input.kind === 'update' && (senderHolder === null || !senderHolder.owner)) {
+        throw new ForbiddenError('not the owner');
+      }
+
+      const expiresAt = addMs(now, SHARE_TTL_MS);
+      const insert = db.query(
+        `INSERT INTO shares
+           (id, credential_id, from_id, to_id, tool_id, scope, kind, sealed, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const item of input.items) {
+        const recipient = personById(item.to);
+        if (recipient === null) throw new NotFoundError('unknown person');
+        if (recipient.disabledAt !== null) throw new ForbiddenError('recipient is disabled');
+        // SP06 §2: without a pair there is nothing to seal to — the sender's copy would be lost.
+        if (personKeys(item.to) === null) throw new ConflictError('recipient has no keys');
+
+        // SP06 §5: both scopes require the tool to be an org entry granted to one of the
+        // recipient's roles, which is also what makes it visible to them.
+        const granted =
+          db
+            .query<{ one: number }, [string, string]>(
+              `SELECT 1 AS one FROM entries e
+                 JOIN grants g ON g.entry_id = e.id
+                 JOIN person_roles pr ON pr.role_id = g.role_id
+                WHERE e.id = ? AND pr.person_id = ? AND e.scope = 'org'`,
+            )
+            .get(input.toolId, item.to) !== null;
+        if (!granted) throw new ForbiddenError('tool not visible to recipient');
+
+        if (input.scope === 'org') {
+          // SP06 §5: clients never receive an `org` share (E04).
+          if (recipient.kind !== 'member') throw new ForbiddenError('org shares go to members only');
+        } else {
+          const commonRole =
+            db
+              .query<{ one: number }, [string, string]>(
+                `SELECT 1 AS one FROM person_roles mine
+                   JOIN person_roles theirs ON theirs.role_id = mine.role_id
+                  WHERE mine.person_id = ? AND theirs.person_id = ?`,
+              )
+              .get(input.fromId, item.to) !== null;
+          if (!commonRole) throw new ForbiddenError('no role in common');
+        }
+
+        // SP06 §4: an update goes to the current holders of the credential, nobody else.
+        if (input.kind === 'update') {
+          const holder = holderState(input.credentialId, item.to);
+          if (holder === null || holder.removedAt !== null) throw new ForbiddenError('not a holder');
+        }
+
+        insert.run(
+          item.id,
+          input.credentialId,
+          input.fromId,
+          item.to,
+          input.toolId,
+          input.scope,
+          input.kind,
+          item.sealed,
+          now,
+          expiresAt,
+        );
+      }
+
+      // SP06 §4: the sender becomes the owner holder when the credential has no holder row yet —
+      // the row that later lets them update and makes them the one who sees `rotationPending`.
+      if (senderHolder === null) {
+        db.query(
+          `INSERT INTO credential_holders
+             (credential_id, person_id, tool_id, owner, scope, via_share_id, since)
+           VALUES (?, ?, ?, 1, ?, NULL, ?)`,
+        ).run(input.credentialId, input.fromId, input.toolId, input.scope, now);
+      }
+      return input.items.map((item) => item.id);
+    });
+  }
+
+  function openShares(personId: string, now: string): ShareRecord[] {
+    return db
+      .query<ShareRow, [string, string]>(
+        `SELECT ${SHARE_COLUMNS} FROM shares
+          WHERE to_id = ? AND accepted_at IS NULL AND declined_at IS NULL AND purged_at IS NULL
+            AND expires_at > ?
+          ORDER BY created_at, id`,
+      )
+      .all(personId, now)
+      .map(toShare);
+  }
+
+  function purgeExpiredShares(now: string): number {
+    // SP06 §4: the ciphertext of an unaccepted share that reached 14 days is deleted, not the row:
+    // the metadata is what tells the sender it expired.
+    return db
+      .query("UPDATE shares SET sealed = '', purged_at = ? WHERE purged_at IS NULL AND expires_at <= ?")
+      .run(now, now).changes;
+  }
+
+  /**
+   * The two answers a recipient can give, which differ in one column. Both require an open share of
+   * the caller: an unknown id is `404`, someone else's or a closed one is `403`/`409` (SP03 §1).
+   */
+  function answerShare(id: string, personId: string, now: string, accept: boolean): void {
+    runInTransaction(() => {
+      const share = readShare(id);
+      if (share === null) throw new NotFoundError('unknown share');
+      if (share.toId !== personId) throw new ForbiddenError('not yours');
+      if (
+        share.acceptedAt !== null ||
+        share.declinedAt !== null ||
+        share.purgedAt !== null ||
+        share.expiresAt <= now
+      ) {
+        throw new ConflictError('share is not open');
+      }
+      db.query(
+        `UPDATE shares SET sealed = '', purged_at = ?, ${accept ? 'accepted_at' : 'declined_at'} = ?
+          WHERE id = ?`,
+      ).run(now, now, id);
+      if (!accept) return;
+      // SP06 §4: the accepted copy makes the caller a holder — an update of a credential they
+      // already hold refreshes the scope and clears an earlier revocation (`removed_at` is NULL, and
+      // `owner` is not in the update list, so a row that is the sender's stays their own).
+      db.query(
+        `INSERT INTO credential_holders
+           (credential_id, person_id, tool_id, owner, scope, via_share_id, since, removed_at)
+         VALUES (?, ?, ?, 0, ?, ?, ?, NULL)
+         ON CONFLICT(credential_id, person_id) DO UPDATE SET scope = excluded.scope,
+           via_share_id = excluded.via_share_id, since = excluded.since, removed_at = NULL`,
+      ).run(share.credentialId, personId, share.toolId, share.scope, id, now);
+    });
+  }
+
+  function holdersOf(credentialId: string): HolderRecord[] {
+    return db
+      .query<HolderRow, [string]>(
+        `SELECT ${HOLDER_COLUMNS} FROM credential_holders h JOIN people p ON p.id = h.person_id
+          WHERE h.credential_id = ?
+          ORDER BY h.owner DESC, h.since, p.name COLLATE NOCASE`,
+      )
+      .all(credentialId)
+      .map((row) => ({
+        personId: row.personId,
+        name: row.name,
+        owner: row.owner === 1,
+        scope: row.scope as ShareScope,
+        since: row.since,
+        removedAt: row.removedAt,
+      }));
+  }
+
+  function heldCredentials(personId: string, all: boolean): string[] {
+    const rows = all
+      ? db
+          .query<{ credentialId: string }, []>(
+            `SELECT DISTINCT credential_id AS credentialId FROM credential_holders
+              ORDER BY credential_id`,
+          )
+          .all()
+      : db
+          .query<{ credentialId: string }, [string]>(
+            `SELECT credential_id AS credentialId FROM credential_holders
+              WHERE person_id = ? AND removed_at IS NULL ORDER BY credential_id`,
+          )
+          .all(personId);
+    return rows.map((row) => row.credentialId);
+  }
+
+  function removeHolder(
+    input: { credentialId: string; personId: string; byId: string; admin: boolean },
+    now: string,
+  ): void {
+    runInTransaction(() => {
+      // SP03 §3: the owner holder or an admin revokes a holder. A member who holds the credential
+      // but is not its owner cannot remove anyone.
+      const caller = holderState(input.credentialId, input.byId);
+      if (!input.admin && (caller === null || !caller.owner)) throw new ForbiddenError('not yours');
+
+      const target = holderState(input.credentialId, input.personId);
+      if (target === null) throw new NotFoundError('unknown holder');
+      if (target.removedAt !== null) throw new ConflictError('holder already removed');
+      // The owner row is the credential's anchor in the host's bookkeeping: `rotationPending` is
+      // read from it and an update has to come from it, so it is not a removable holder.
+      if (target.owner) throw new ConflictError('the owner cannot be removed');
+
+      db.query(
+        'UPDATE credential_holders SET removed_at = ? WHERE credential_id = ? AND person_id = ?',
+      ).run(now, input.credentialId, input.personId);
+    });
+  }
+
+  function rotationPending(personId: string): string[] {
+    // SP06 §4: the owner revoked someone and has not saved a new secret since. The host sees the
+    // new secret as an `update` share, so that is what clears the state — at or after the removal,
+    // because the host clock has millisecond resolution and both can land in the same one.
+    return db
+      .query<{ credentialId: string }, [string, string]>(
+        `SELECT h.credential_id AS credentialId FROM credential_holders h
+          WHERE h.person_id = ? AND h.owner = 1
+            AND EXISTS (SELECT 1 FROM credential_holders r
+                         WHERE r.credential_id = h.credential_id AND r.removed_at IS NOT NULL)
+            AND NOT EXISTS (
+                  SELECT 1 FROM shares s
+                   WHERE s.credential_id = h.credential_id AND s.from_id = ? AND s.kind = 'update'
+                     AND s.created_at >= (SELECT MAX(r.removed_at) FROM credential_holders r
+                                           WHERE r.credential_id = h.credential_id))
+          ORDER BY h.credential_id`,
+      )
+      .all(personId, personId)
+      .map((row) => row.credentialId);
+  }
+
+  function saveAssignment(
+    input: {
+      credentialId: string;
+      roleId: string;
+      toolId: string;
+      assignedBy: string;
+      assigned: boolean;
+    },
+    now: string,
+  ): void {
+    runInTransaction(() => {
+      if (!input.assigned) {
+        db.query('DELETE FROM assignments WHERE credential_id = ? AND role_id = ?').run(
+          input.credentialId,
+          input.roleId,
+        );
+        return;
+      }
+      if (readRole(input.roleId) === null) throw new NotFoundError('unknown role');
+      const tool = readEntryState(input.toolId);
+      if (tool === null) throw new NotFoundError('unknown tool');
+      // As with a grant (SP01 §2): an assignment names an org entry, never a personal one.
+      if (tool.scope !== 'org') throw new ForbiddenError('assignments apply to org tools only');
+      db.query(
+        `INSERT INTO assignments (credential_id, role_id, tool_id, assigned_by, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(credential_id, role_id) DO UPDATE SET tool_id = excluded.tool_id,
+           assigned_by = excluded.assigned_by, created_at = excluded.created_at`,
+      ).run(input.credentialId, input.roleId, input.toolId, input.assignedBy, now);
+    });
+  }
+
+  function missingCopies(): MissingCopyRecord[] {
+    // RF-47: every current member of the assigned role who has keys, is not the admin who assigned,
+    // and has no live holder row for the credential. A removed holder is missing again.
+    return db
+      .query<MissingCopyRecord, []>(
+        `SELECT a.credential_id AS credentialId, a.tool_id AS toolId, a.role_id AS roleId,
+                p.id AS personId
+           FROM assignments a
+           JOIN person_roles pr ON pr.role_id = a.role_id
+           JOIN people p ON p.id = pr.person_id
+          WHERE p.disabled_at IS NULL
+            AND p.id <> a.assigned_by
+            AND EXISTS (SELECT 1 FROM person_keys k WHERE k.person_id = p.id)
+            AND NOT EXISTS (SELECT 1 FROM credential_holders h
+                             WHERE h.credential_id = a.credential_id AND h.person_id = p.id
+                               AND h.removed_at IS NULL)
+          ORDER BY a.credential_id, a.role_id, p.id`,
+      )
+      .all();
+  }
+
   return {
     transaction: runInTransaction,
 
@@ -1449,6 +1989,7 @@ export function createRepo(db: Database): Repo {
     revokeSession,
     revokeOwnSession,
     revokeSessionsOfPerson,
+    presence,
 
     listRoles,
     saveRole,
@@ -1481,5 +2022,23 @@ export function createRepo(db: Database): Repo {
     guildIcon,
     setGuildIcon,
     clearGuildIcon,
+
+    savePersonKeys,
+    personKeys,
+    keysByPerson,
+
+    createShares,
+    openShares,
+    shareById: readShare,
+    purgeExpiredShares,
+    acceptShare: (id, personId, now) => answerShare(id, personId, now, true),
+    declineShare: (id, personId, now) => answerShare(id, personId, now, false),
+    holdersOf,
+    heldCredentials,
+    removeHolder,
+    rotationPending,
+
+    saveAssignment,
+    missingCopies,
   };
 }

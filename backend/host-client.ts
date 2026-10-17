@@ -23,7 +23,18 @@ import {
   formatCode,
 } from '../shared/host-api';
 import { verify } from '../shared/seal';
-import type { Discovery, SignInMethod, Snapshot, SnapshotSignature } from '../shared/host-api';
+import type {
+  AppMeta,
+  DeviceSession,
+  Discovery,
+  PresenceEntry,
+  PublicKeys,
+  ShareRequest,
+  ShareResponse,
+  SignInMethod,
+  Snapshot,
+  SnapshotSignature,
+} from '../shared/host-api';
 import type { Id, SecretStore } from '../shared/types';
 
 // ---------------------------------------------------------------- constants
@@ -189,6 +200,38 @@ export interface HostConnection {
   getBytes(path: string): Promise<Uint8Array<ArrayBuffer>>;
   /** The signed snapshot; `version` is the last accepted one (the `ETag` of SP04 §2). */
   snapshot(options?: { version?: string | null; notOlderThan?: string | null }): Promise<SnapshotResult>;
+  /**
+   * `GET /v1/sessions` (SP03 §2, O1): this person's live sessions, the device of each and never a
+   * token or a hash of one (SP02 §5). Settings → Account lists them and revokes one.
+   */
+  sessions(): Promise<DeviceSession[]>;
+  /** `DELETE /v1/sessions/:id` (SP03 §2, O1): `204`; the host refuses a session that is not ours. */
+  revokeSession(id: Id): Promise<true>;
+  /** `GET /v1/presence` (RF-58): the guild's members with a live session, online first. */
+  presence(): Promise<PresenceEntry[]>;
+  /**
+   * `PUT /v1/keys` (SP03 §3, SP06 §2, K1): publishes this person's X25519 and Ed25519 public keys
+   * — base64url of the raw 32 bytes, the private halves never leave the machine. `204`; the call
+   * replaces whatever the host held, which is what a reset does.
+   */
+  putKeys(keys: PublicKeys): Promise<void>;
+  /**
+   * `POST /v1/shares` (SP03 §3, SP06 §4, K4): one sealed copy per recipient, all of one credential.
+   * The host answers the ids it created; it never sees a secret. The scope checks of SP06 §5 run on
+   * both sides, and this one refuses exactly as the Nod's own check does.
+   */
+  sendShares(request: ShareRequest): Promise<ShareResponse>;
+  /** `POST /v1/shares/:id/accept` (SP03 §3, K4): `204`, the host records the caller as a holder. */
+  acceptShare(id: Id): Promise<true>;
+  /** `POST /v1/shares/:id/decline` (SP03 §3, K4): `204`, the host purges the ciphertext. */
+  declineShare(id: Id): Promise<true>;
+  /**
+   * `GET /v1/meta/app` (SP03 §3, O2): the oldest version this host serves and the update manifest it
+   * points a Nod at. The route is **public** — SP03 §3 — so no bearer is sent: the gate below it
+   * (nothing is pushed to a host this Nod is too old for) has to read even while the session is
+   * gone. The answer is shape-checked like every other document of this client.
+   */
+  appMeta(): Promise<AppMeta>;
 }
 
 /** The whole client: what runs before a pin, and what runs with one. */
@@ -379,6 +422,21 @@ export function createHostClient(deps: HostClientDeps): HostClient {
     return snapshot as Snapshot;
   }
 
+  /**
+   * SP03 §3's `AppMeta`, shape-checked: the one field the gate reads is `minAppVersion`, and
+   * `update` is either a manifest URL or absent — `null` in the document (SP07 sets none). A host
+   * that answers anything else is not a Nod host, like every other document of this client.
+   */
+  function readAppMeta(value: unknown): AppMeta {
+    if (typeof value !== 'object' || value === null) throw notAHost();
+    const meta = value as Partial<AppMeta>;
+    const update = meta.update;
+    if (typeof meta.minAppVersion !== 'string' || meta.minAppVersion === '') throw notAHost();
+    if (update === null || update === undefined) return { minAppVersion: meta.minAppVersion, update: null };
+    if (typeof update !== 'object' || typeof update.url !== 'string' || update.url === '') throw notAHost();
+    return { minAppVersion: meta.minAppVersion, update: { url: update.url } };
+  }
+
   /** SP04 §2's `Nod-Signature: kid=<kid>; sig=<base64url>`. */
   function readSignature(header: string | null): SnapshotSignature {
     if (header === null) throw unsigned();
@@ -504,6 +562,17 @@ export function createHostClient(deps: HostClientDeps): HostClient {
       return { notModified: false, snapshot: verified, raw };
     }
 
+    /**
+     * `GET /v1/meta/app` (SP03 §3, O2) goes out **without** the bearer: it is a public route, and
+     * the gate that reads it has to work while the session is gone (a signed-out Nod is still not
+     * allowed to write to a host it is too old for). Nothing of the answer is echoed anywhere: the
+     * caller compares `minAppVersion` and keeps the value, if it keeps anything.
+     */
+    async function appMeta(): Promise<AppMeta> {
+      const response = await send('GET', `${address}${HOST_ROUTES.appMeta}`, undefined, null);
+      return readAppMeta(await readJson(response));
+    }
+
     return {
       host,
       tokenKey: () => key,
@@ -518,6 +587,26 @@ export function createHostClient(deps: HostClientDeps): HostClient {
       request,
       getBytes,
       snapshot,
+      // O1: the host's list of this person's devices, and the revoke of one row of it (SP03 §2).
+      sessions: () => request<DeviceSession[]>('GET', HOST_ROUTES.sessions),
+      async revokeSession(id: Id): Promise<true> {
+        await request<void>('DELETE', routePath(HOST_ROUTES.session, id));
+        return true;
+      },
+      presence: () => request<PresenceEntry[]>('GET', HOST_ROUTES.presence),
+      // K1: the public halves of this person's E02 pair (SP06 §2). A body of public keys only.
+      putKeys: (keys: PublicKeys) => request<void>('PUT', HOST_ROUTES.keys, keys),
+      // K4: the sealed copies, the recipient's answer and the decline (SP03 §3, SP06 §4).
+      sendShares: (body) => request<ShareResponse>('POST', HOST_ROUTES.shares, body),
+      async acceptShare(id: Id): Promise<true> {
+        await request<void>('POST', routePath(HOST_ROUTES.shareAccept, id));
+        return true;
+      },
+      async declineShare(id: Id): Promise<true> {
+        await request<void>('POST', routePath(HOST_ROUTES.shareDecline, id));
+        return true;
+      },
+      appMeta,
     };
   }
 
@@ -527,4 +616,12 @@ export function createHostClient(deps: HostClientDeps): HostClient {
 /** The keychain item of the bearer (SP02 §5): one per host key and per host person. */
 export function hostTokenKey(kid: string, personId: Id): string {
   return `nod.host.${kid}.${personId}`;
+}
+
+/**
+ * SP03 §2 writes each path once, `:id` for the segment the caller fills. `encodeURIComponent` is
+ * what keeps a host id out of the path structure; a host id is opaque here, never built by this Nod.
+ */
+function routePath(template: string, id: string): string {
+  return template.replace(':id', encodeURIComponent(id));
 }

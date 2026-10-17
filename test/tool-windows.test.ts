@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import { createRepo } from '../backend/repo';
-import { createToolWindows } from '../backend/tool-windows';
+import { createToolWindows, warningScript } from '../backend/tool-windows';
 import { createVault } from '../backend/vault';
 import { memorySqlite } from './helpers/sqlite-bun';
 import type { Repo } from '../backend/repo';
@@ -305,6 +305,9 @@ interface Catalog {
   person: Person;
 }
 
+/** The `vaultKey` of the unlocked session behind these windows (SP02 §8): the vault needs one. */
+const VAULT_KEY = new Uint8Array(32).fill(5);
+
 /** A real repository holding `entry`, with a real vault and one person. */
 function catalog(entry: Entry): Catalog {
   const repo = createRepo(memorySqlite());
@@ -312,7 +315,7 @@ function catalog(entry: Entry): Catalog {
   // The entry's grants are foreign keys into `role`: the roles it names have to exist.
   for (const roleId of entry.roles) repo.saveRole({ id: roleId, name: roleId, admin: false });
   repo.saveEntry(entry);
-  const vault = createVault({ repo, keychain: memoryKeychain() });
+  const vault = createVault({ repo, keychain: memoryKeychain(), vaultKey: () => VAULT_KEY });
   const person = repo.createPerson({
     email: 'ana@example.test',
     name: 'Ana',
@@ -372,6 +375,11 @@ function popup(over: Partial<PopupEvent> = {}): PopupEvent {
 
 /** Lets the pending microtasks run: `void apply(...)` and the open chain continue after awaits. */
 async function settle(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+  // V1 (SP02 §8): reading a credential now opens a `bv1.` value with WebCrypto, whose promise
+  // completes on a later task rather than in the microtask queue. Real task turns drain it without
+  // touching the fake clock the 4 s re-check lives on; the budget covers a loaded machine too.
+  for (let i = 0; i < 256; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
   for (let i = 0; i < 8; i += 1) await Promise.resolve();
 }
 
@@ -1211,5 +1219,49 @@ describe('tool windows — global shortcuts', () => {
     toolWindows.onHotkey('palette');
     expect(handle(env, 'main').show).toBe(1);
     expect(env.pushed).toContainEqual({ event: 'palette', data: null });
+  });
+});
+
+// ---------------------------------------------------------------- the not-from-org warning (B7)
+
+describe('the warning of a tool that did not come from the org (canonico §22)', () => {
+  const PERSONAL: Entry = { ...KANBAN, id: 'notes', scope: 'personal', ownerId: 'p1', views: [] };
+
+  test('an org tool carries neither the title nor the banner', async () => {
+    const env = fakeEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await toolWindows.open('kanban');
+    toolWindows.onNavigate(nav({ kind: 'finish', url: ENTRY_URL }));
+    await settle();
+    expect(env.opened[0].options?.title).toBe('Kanban');
+    // The cascade may still evaluate the adapter (the fixture has a credential); the warning never.
+    expect(handle(env, 'tool_kanban').evals.filter((js) => js.includes('nod-not-from-org'))).toEqual([]);
+  });
+
+  test('a personal tool is titled and gets the banner once it lands on its own origin', async () => {
+    const env = fakeEnvironment();
+    env.state.entries = [PERSONAL];
+    const toolWindows = makeToolWindows(env);
+    await toolWindows.open('notes');
+    expect(env.opened[0].options?.title).toBe('Not from your org — Kanban');
+
+    // A hop through another origin is not the tool's page: no banner there.
+    toolWindows.onNavigate(nav({ window: 'tool_notes', kind: 'finish', url: 'https://idp.example/login' }));
+    await settle();
+    expect(handle(env, 'tool_notes').evals.filter((js) => js.includes('nod-not-from-org'))).toEqual([]);
+
+    toolWindows.onNavigate(nav({ window: 'tool_notes', kind: 'finish', url: ENTRY_URL }));
+    await settle();
+    const banners = handle(env, 'tool_notes').evals.filter((js) => js.includes('nod-not-from-org'));
+    expect(banners).toHaveLength(1);
+    expect(banners[0]).toContain('Not from your org');
+    expect(banners[0]).toContain('window.top !== window');
+  });
+
+  test('warningScript is idempotent by its own id and reads nothing from the page', () => {
+    const script = warningScript();
+    expect(script).toContain("getElementById(\"nod-not-from-org\")");
+    expect(script).toContain('textContent');
+    expect(script).not.toContain('innerHTML');
   });
 });

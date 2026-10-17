@@ -8,9 +8,10 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Database } from 'bun:sqlite';
 
+import type { AppMeta } from '../shared/host-api';
 import { createApp } from './app';
 import { loadBackupSettings, startBackupTimer, type BackupSettings } from './backup';
-import { ConfigError, loadConfig, type HostConfig } from './config';
+import { ConfigError, loadAppMeta, loadConfig, type HostConfig } from './config';
 import { loadOrCreateHostSecret, loadOrCreateSigningKey, type SigningKey } from './keys';
 import { applyMigrations, migrations, openDatabase } from './migrations';
 
@@ -37,9 +38,13 @@ export async function bootHost(config: HostConfig): Promise<Host> {
 
 async function start(): Promise<void> {
   let config: HostConfig;
+  let appMeta: AppMeta;
   let backups: BackupSettings;
   try {
     config = loadConfig(process.env);
+    // SP03 §3, O2: resolved here so a mistyped `NOD_MIN_APP_VERSION` or `NOD_UPDATE_URL` stops the
+    // boot with one line, the way a bad PORT does, instead of failing a request later.
+    appMeta = loadAppMeta(process.env);
     backups = loadBackupSettings(process.env);
   } catch (error) {
     // A bad environment is an operator mistake, not a crash: one line, no stack (repo style).
@@ -49,7 +54,7 @@ async function start(): Promise<void> {
   }
 
   const host = await bootHost(config);
-  const app = createApp({ config, db: host.db });
+  const app = createApp({ config, db: host.db, appMeta });
   // No hostname hardcoded: inside the container the proxy reaches the process on every interface
   // (SP07 §2).
   app.listen({ port: config.port });

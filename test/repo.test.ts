@@ -153,12 +153,13 @@ describe('schema versioning', () => {
     expect(repo.listVault(person.id)).toHaveLength(1);
     expect(userVersion(db)).toBe(SCHEMA_VERSION);
 
-    // The migrated table and a fresh one are the same, column for column.
+    // The migrated table and a fresh one hold the same columns. `ALTER TABLE … ADD COLUMN` appends,
+    // so the order differs by construction; every read names its columns.
     const fresh = memorySqlite();
     createRepo(fresh).migrate();
     const migrated = db.all<{ name: string }>('PRAGMA table_info(vault_item)').map((row) => row.name);
     const created = fresh.all<{ name: string }>('PRAGMA table_info(vault_item)').map((row) => row.name);
-    expect(migrated).toEqual(created);
+    expect([...migrated].sort()).toEqual([...created].sort());
 
     // A second migrate neither throws nor loses what the backfill wrote.
     repo.migrate();
@@ -189,9 +190,9 @@ describe('schema versioning', () => {
   });
 
   test('a version this build does not know is refused by name', () => {
-    // The versioning started at 2, so `1` was never written by any build; `4` is a build from the
+    // The versioning started at 2, so `1` was never written by any build; `6` is a build from the
     // future. Neither is completed — the database is refused whole.
-    for (const version of [1, 4]) {
+    for (const version of [1, 6]) {
       const db = memorySqlite();
       db.exec(`PRAGMA user_version = ${version}`);
       expect(() => createRepo(db).migrate()).toThrow(`unsupported database version: ${version}`);
@@ -877,9 +878,11 @@ describe('meta', () => {
   });
 });
 
-/** The columns SP05 §2 adds to tables that already existed in v2 (and B9's `vault_item.origin`). */
+/** The columns SP05 §2 and block 2 add to tables that already existed in v2. */
 const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['vault_item', 'origin'],
+  ['vault_item', 'credential_id'],
+  ['vault_item', 'scope'],
   ['person', 'password_check'],
   ['person', 'password_algorithm'],
   ['tool', 'scope'],
@@ -888,19 +891,20 @@ const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['event', 'sent_at'],
 ];
 
-describe('schema version 3 — connected mode (SP05 §2)', () => {
-  test('a fresh database is v3, with the two host tables and every column of SP05 §2', () => {
+describe('schema version 5 — connected mode, the pin table and shared credentials (SP05 §2, SP06)', () => {
+  test('a fresh database is v5, with the two host tables, `peer_keys` and every column of SP05 §2 and K4', () => {
     const db = memorySqlite();
     createRepo(db).migrate();
 
-    expect(SCHEMA_VERSION).toBe(3);
-    expect(userVersion(db)).toBe(3);
+    expect(SCHEMA_VERSION).toBe(5);
+    expect(userVersion(db)).toBe(5);
     expect(tableNames(db)).toEqual([
       'event',
       'host',
       'host_outbox',
       'invite',
       'meta',
+      'peer_keys',
       'person',
       'person_role',
       'role',
@@ -953,7 +957,7 @@ describe('schema version 3 — connected mode (SP05 §2)', () => {
     repo.migrate();
 
     // Stamped, completed, and every row of local mode still there, value for value.
-    expect(userVersion(db)).toBe(3);
+    expect(userVersion(db)).toBe(5);
     expect(tableNames(db)).toContain('host');
     expect(tableNames(db)).toContain('host_outbox');
     expect(repo.listPeople().map((p) => p.email)).toEqual(['ana@example.test']);
@@ -980,7 +984,7 @@ describe('schema version 3 — connected mode (SP05 §2)', () => {
 
     // And migrate stays idempotent on the migrated database.
     repo.migrate();
-    expect(userVersion(db)).toBe(3);
+    expect(userVersion(db)).toBe(5);
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
   });
 
@@ -991,8 +995,74 @@ describe('schema version 3 — connected mode (SP05 §2)', () => {
 
     createRepo(db).migrate();
 
-    expect(userVersion(db)).toBe(3);
+    expect(userVersion(db)).toBe(5);
     expect(tableNames(db)).toContain('host_outbox');
+  });
+
+  test('a v3 database gains `peer_keys` and is stamped 5, keeping its rows (SP06 §2, K1–K2)', () => {
+    const db = memorySqlite();
+    const v3 = createRepo(db);
+    v3.migrate();
+    v3.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app' }));
+    v3.setMeta('seed_version', '2');
+    // What a v3 build left behind: this schema without `peer_keys`, `user_version = 3`.
+    db.exec('DROP TABLE peer_keys');
+    db.exec('PRAGMA user_version = 3');
+
+    const repo = createRepo(db);
+    repo.migrate();
+
+    expect(userVersion(db)).toBe(5);
+    expect(tableNames(db)).toContain('peer_keys');
+    expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
+    expect(repo.meta('seed_version')).toBe('2');
+    expect(repo.peerKey('p-anyone')).toBeNull();
+  });
+
+  test('a v4 database gains the sharing columns of K4 and keeps its items, unshared and `role`', () => {
+    const db = memorySqlite();
+    const v4 = createRepo(db);
+    v4.migrate();
+    v4.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app' }));
+    const person = v4.createPerson({
+      email: 'ana@example.test',
+      name: 'Ana',
+      password: PASSWORD,
+      roles: [],
+    });
+    v4.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Alpha',
+      username: 'ana',
+      keychainKey: `nod.cred.${person.id}.alpha`,
+      origin: 'https://alpha.example.test',
+    });
+
+    // What the K1–K2 build left behind: the two block 2 columns absent, `user_version = 4`.
+    db.exec('ALTER TABLE vault_item DROP COLUMN credential_id');
+    db.exec('ALTER TABLE vault_item DROP COLUMN scope');
+    db.exec('PRAGMA user_version = 4');
+
+    const repo = createRepo(db);
+    repo.migrate();
+
+    expect(userVersion(db)).toBe(5);
+    const item = repo.vaultItem(person.id, 'alpha');
+    expect(item).not.toBeNull();
+    // SP06 §3–§5: an item that never travelled has no credential group and the default scope.
+    expect(item?.credentialId).toBeNull();
+    expect(item?.scope).toBe('role');
+    expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
+
+    // A later write of the sharing fields is what turns it into a shared copy.
+    repo.setVaultCredential(person.id, 'alpha', 'c-1');
+    repo.setVaultScope(person.id, 'alpha', 'org');
+    expect(repo.vaultItem(person.id, 'alpha')).toMatchObject({
+      credentialId: 'c-1',
+      scope: 'org',
+      username: 'ana',
+    });
   });
 });
 
@@ -1018,7 +1088,10 @@ CREATE TABLE vault_item (
   origin TEXT,
   UNIQUE (person_id, tool_id)
 );`);
-    db.exec('INSERT INTO vault_item SELECT * FROM vault_item_legacy');
+    db.exec(
+      'INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin) ' +
+        'SELECT id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin FROM vault_item_legacy',
+    );
     db.exec('DROP TABLE vault_item_legacy');
   }
 
@@ -1091,7 +1164,7 @@ CREATE TABLE vault_item (
   });
 
   test('a database of an earlier build is rebuilt: every row kept, the FK to tool dropped', () => {
-    for (const version of [2, 3]) {
+    for (const version of [2, 3, 4]) {
       const { db, personId } = legacyDatabase(version);
       // What the build before this one did with a host-only entry: the insert is refused.
       expect(() => insertVaultItem(db, personId, 'host-only')).toThrow(/FOREIGN KEY/);

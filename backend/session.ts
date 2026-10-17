@@ -3,8 +3,8 @@
 // Nothing here imports `tjs` or `tiny`: repository, keychain, `store` and authenticator come in
 // through `deps`, which keeps this slice testable with `bun test`. A secret never reaches an event,
 // `store`, log or file: the database holds only a verifier — the v1 PBKDF2 `PasswordHash` or the V2
-// `check` of SP02 §6 — and the keychain holds only `nod.bio.<person>`. The keys of an unlock live
-// in this module's memory and `lock()` forgets them (SP02 §6).
+// `check` of SP02 §6 — and the keychain holds `nod.bio.<person>` with `base64url(vaultKey)`
+// (SP02 §9). The keys of an unlock live in this module's memory and `lock()` forgets them (SP02 §6).
 import {
   PBKDF2_ITERATIONS,
   PASSWORD_V2_ALGORITHM,
@@ -17,10 +17,17 @@ import {
   unlockWait,
   validateNewPassword,
   verifyPassword,
-  verifyStoredPassword,
 } from '../shared/auth';
 import { fromBase64url, toBase64url } from '../shared/encoding';
+import {
+  decodeVaultKey,
+  decryptVaultValue,
+  encryptVaultValue,
+  isSealedVaultValue,
+  plainVaultCredential,
+} from '../shared/vault-crypto';
 import { HostError } from './host-client';
+import { reencryptVaultItems } from './vault';
 import type { DerivedKeys, PasswordHashV2 } from '../shared/auth';
 import type { PasswordChangeRequest } from '../shared/host-api';
 import type { EventType, Id, PasswordHash, Person, SecretStore, SessionState, VaultItem } from '../shared/types';
@@ -28,6 +35,12 @@ import type { Repo } from './repo';
 
 /** Last person used: only the id; it drives biometrics and the pre-filled sign-in screen. */
 const LAST_PERSON_KEY = 'last_person';
+/**
+ * SP02 §9/V1: the person whose biometric item was dropped because it held the old marker (the
+ * person id) instead of a `vaultKey`. The next password unlock writes the item again from the key
+ * it derived, without asking the person to enable biometrics a second time.
+ */
+const BIOMETRIC_PENDING_KEY = 'biometric_pending';
 /** Unlock backoff, persisted in `meta` (RF-23). */
 const META_FAILURES = 'unlock_failures';
 const META_LAST_FAILURE = 'unlock_last_failure';
@@ -46,6 +59,10 @@ const SESSION_LOCKED = 'session is locked';
 const NO_BIOMETRICS = 'biometrics are not available on this system';
 const BIOMETRICS_DECLINED = 'biometrics were declined';
 const BIOMETRICS_DISABLED = 'biometrics are not enabled';
+/** A biometric item from before V1 holds the person id, not the key: one password unlock rewrites it. */
+const BIOMETRICS_NEED_PASSWORD = 'unlock with your password once to update biometrics';
+/** SP02 §9: the keychain refusing the item of the unlock gate. */
+const BIOMETRIC_REFUSED = 'the system keychain refused the biometric item';
 /** A connected change needs the row's `authKey` (SP02 §7): a v1 row has none to send. */
 const NOT_CONNECTED = 'this account has no host password to change';
 /**
@@ -100,6 +117,17 @@ export type JoinGate<T> =
   | { kind: 'join'; local: Person | null; answer: T }
   | { kind: 'choose'; person: Person };
 
+/**
+ * SP02 §7/V1: what `Session.onActivated` hands a subscriber once an activation — or the reset that
+ * an activation over an existing local account is — has written the row and the session holds the
+ * new keys. `reset` is true when this Nod's vault of the person was just wiped.
+ */
+export interface ActivationEvent {
+  personId: Id;
+  reset: boolean;
+  vaultKey: Uint8Array<ArrayBuffer>;
+}
+
 /** What `createSession` returns (§4). Declared apart so the contract has a name of its own. */
 export interface Session {
   /** `SessionState` is synchronous logic against the repository plus one keychain read. */
@@ -152,8 +180,33 @@ export interface Session {
   unlock(p: { email: string; password: string }): Promise<SessionState>;
   unlockBiometric(): Promise<SessionState>;
   enableBiometric(password: string): Promise<SessionState>;
-  /** The keys of the unlocked session (SP02 §6); `null` while locked. */
-  keys(): { authKey: Uint8Array; vaultKey: Uint8Array } | null;
+  /**
+   * SP02 §9: removes `nod.bio.<person>` — no biometric item, no biometric unlock. The password
+   * remains the only way into this machine.
+   */
+  disableBiometric(): Promise<SessionState>;
+  /**
+   * The keys of the unlocked session (SP02 §6); `null` while locked. A password unlock gives both;
+   * a biometric unlock has no password behind it, so `authKey` is `null` there while `vaultKey` is
+   * the key the item carried (SP02 §9). An account created moments ago has no key at all (v1).
+   */
+  keys(): { authKey: Uint8Array | null; vaultKey: Uint8Array } | null;
+  /**
+   * SP02 §7/V1: registers a callback that runs after an activation — and after the reset that an
+   * activation of an existing local account is, `reset: true` — once the session holds the new
+   * keys. The `vaultKey` is the one the adoption derived; `session.vaultKey()` returns it too.
+   * Returns a function that removes the callback. Callbacks run in registration order and are
+   * awaited; a callback that throws does not fail the activation (the row is already written) — a
+   * retry is the subscriber's own, so callbacks must be idempotent.
+   */
+  onActivated(cb: (event: ActivationEvent) => void | Promise<void>): () => void;
+  /**
+   * SP02 §8/§9: the `vaultKey` the unlocked session holds, from the password or from the biometric
+   * item (`app.authenticate` + `base64url(vaultKey)`, SP02 §9). `null` while locked — and after an
+   * unlock that had no key to keep (an account created moments ago, whose row is still v1).
+   * `backend/vault.ts` is what reads it.
+   */
+  vaultKey(): Uint8Array<ArrayBuffer> | null;
   /**
    * SP02 §1 over a base64url salt: the derivation behind activation and sign-in. Pure — no state is
    * read or written, so B2 can call it before there is any session.
@@ -166,15 +219,19 @@ export interface Session {
   /**
    * SP02 §7. With `host` (a connected account) the current keys are derived over the current salt
    * and the new ones over a fresh salt; the host is called **first**, so a refusal leaves the local
-   * verifier untouched. Without it the local V2 verifier is rewritten. The OS keychain is never
-   * touched (RF-24).
+   * verifier untouched. Without it the local V2 verifier is rewritten. Before the verifier moves,
+   * every vault value and the biometric item are re-sealed under the new `vaultKey` (§8, V1), so
+   * the vault stays readable with the new password and the old one opens nothing.
    */
   changePassword(
     current: string,
     next: string,
     host?: (request: PasswordChangeRequest) => Promise<void>,
   ): Promise<void>;
-  /** SP02 §7: every `nod.cred.<person>.*` item of the keychain and the index rows of that person. */
+  /**
+   * SP02 §7: every `nod.cred.<person>.*` item of the keychain and the index rows of that person —
+   * and the biometric item, which holds a `vaultKey` the reset has just made useless (SP02 §9).
+   */
   wipeVault(personId: Id): Promise<void>;
   /**
    * F2: the snapshot's `me` (SP04 §2) is the last word on the connected person — its name and its
@@ -199,10 +256,18 @@ export function createSession(deps: SessionDeps): Session {
   let current: Person | null = null;
   // The keys of the unlocked session (SP02 §6): `lock()` forgets them, and nothing else writes them.
   let currentKeys: DerivedKeys | null = null;
+  // SP02 §8/§9: the `vaultKey` alone. A password unlock fills both; a biometric unlock has only
+  // this one (the item carries it), and `vaultKey()` is what `backend/vault.ts` reads.
+  let currentVaultKey: Uint8Array<ArrayBuffer> | null = null;
   // `lock()` is synchronous (§4) and the keychain is asynchronous: the `biometric` field of the
   // state it returns comes from this last read. `state()` (called on unlock, on account creation
   // and by `nod.info`) and `enableBiometric` are what refresh it.
   let knownBiometric = false;
+  // SP02 §7/V1: the person whose vault the last `wipeVault` removed — a reset. The next activation
+  // of that account (or of the local row it replaces) is told to subscribers as `reset: true`.
+  let lastWiped: Id | null = null;
+  // V1/K1: subscribers that need the new keys of an activation, in registration order.
+  const activated: ((event: ActivationEvent) => void | Promise<void>)[] = [];
 
   function now(): Date {
     return deps.now === undefined ? new Date() : deps.now();
@@ -301,12 +366,49 @@ export function createSession(deps: SessionDeps): Session {
   }
 
   /**
-   * SP02 §6: the keys of the unlocked session. `null` while locked — and after a biometric unlock,
-   * which has no password to derive from (SP02 §9 leaves `vaultKey` to the biometric item).
+   * SP02 §6: the keys of the unlocked session. `null` while locked. A biometric unlock has no
+   * password behind it, so its `authKey` is `null` while the item's `vaultKey` is still kept
+   * (SP02 §9) — `vaultKey()` answers the same key on its own.
    */
-  function keys(): { authKey: Uint8Array; vaultKey: Uint8Array } | null {
-    if (currentKeys === null) return null;
-    return { authKey: currentKeys.authKey, vaultKey: currentKeys.vaultKey };
+  function keys(): { authKey: Uint8Array | null; vaultKey: Uint8Array } | null {
+    if (currentVaultKey === null) return null;
+    return {
+      authKey: currentKeys === null ? null : currentKeys.authKey,
+      vaultKey: currentVaultKey,
+    };
+  }
+
+  /** SP02 §8: the key the vault seals with, kept in memory by either unlock (SP02 §9). */
+  function vaultKey(): Uint8Array<ArrayBuffer> | null {
+    return currentVaultKey;
+  }
+
+  /** V1/K1: see the contract. */
+  function onActivated(cb: (event: ActivationEvent) => void | Promise<void>): () => void {
+    activated.push(cb);
+    return () => {
+      const at = activated.indexOf(cb);
+      if (at !== -1) activated.splice(at, 1);
+    };
+  }
+
+  /** Runs the activation subscribers in registration order, after the session holds the new keys. */
+  async function announceActivated(
+    personId: Id,
+    key: Uint8Array<ArrayBuffer>,
+    replaced: Id | null,
+  ): Promise<void> {
+    const reset = lastWiped !== null && (lastWiped === personId || lastWiped === replaced);
+    lastWiped = null;
+    for (const cb of [...activated]) {
+      try {
+        await cb({ personId, reset, vaultKey: key });
+      } catch {
+        // A subscriber is not the activation: the host accepted the person and the row is written.
+        // Failing the call here would leave the host row and the token unsaved, so a subscriber
+        // that needs a retry owns it (and is idempotent by contract).
+      }
+    }
   }
 
   // ---------------------------------------------------------------- state
@@ -365,7 +467,15 @@ export function createSession(deps: SessionDeps): Session {
       if (deps.repo.activeInvite(inviteCodeHash, now()) === null) throw new Error(INVALID_INVITE);
     }
 
+    // SP02 §6: a local account is created with the V2 verifier over a fresh local salt, and the
+    // keys of the typed password are kept in memory — an unlocked session that cannot use the vault
+    // breaks RF-24. The insert still goes through the v1 path (its transaction is the one that
+    // consumes the invite); the V2 record replaces it in place right after, before anyone can see
+    // the row. A crash in between leaves a valid v1 verifier of the same password, which the first
+    // unlock migrates.
     const password = await hashPassword(p.password, iterations);
+    const salt = randomSalt();
+    const keys = await deriveFor(p.password, salt, iterations);
     // The invite is consumed inside `createPersonWithInvite`, in the same transaction that inserts
     // the person (D7): `null` means the code was used up or expired between the two calls.
     const created =
@@ -379,16 +489,47 @@ export function createSession(deps: SessionDeps): Session {
         : deps.repo.createPersonWithInvite({ email, name, password }, inviteCodeHash, now());
     if (created === null) throw new Error(INVALID_INVITE);
 
+    deps.repo.savePasswordCheck(created.id, await passwordHashV2(salt, iterations, keys));
     record('account_created', created.id);
     await deps.store.set(LAST_PERSON_KEY, created.id);
     current = created;
-    // A v1 row: nothing was derived, so there is nothing to keep (SP02 §6 — the keys arrive at the
-    // first unlock, which is what migrates the row to V2).
-    currentKeys = null;
+    currentKeys = keys;
+    currentVaultKey = keys.vaultKey;
     return state();
   }
 
   // ---------------------------------------------------------------- unlock
+
+  /**
+   * SP02 §6 migration: a v1 account — one written before this format; a connected account is
+   * created with V2 at activation — is verified against the old PBKDF2 hash once and rewritten as
+   * V2 with a fresh salt, whose keys are the ones the session keeps. Those keys are also the first
+   * `vaultKey` such an account ever has (SP02 §8).
+   */
+  async function migrateV1Keys(password: string, personId: Id): Promise<DerivedKeys> {
+    const salt = randomSalt();
+    const keys = await deriveFor(password, salt, iterations);
+    deps.repo.savePasswordCheck(personId, await passwordHashV2(salt, iterations, keys));
+    return keys;
+  }
+
+  /**
+   * SP02 §9 (V1): the biometric item holds `base64url(vaultKey)`. A password unlock is when a key
+   * exists, so it is where an item that still holds the old marker (the person id) is rewritten —
+   * and where a person whose marker was dropped after a biometric attempt gets the item back, with
+   * no second "enable" by their hand. A keychain that refuses is not a reason to refuse the unlock:
+   * the next password unlock tries again.
+   */
+  async function refreshBiometricItem(personId: Id, key: Uint8Array<ArrayBuffer>): Promise<void> {
+    if (!deps.biometricAvailable) return;
+    const pending = (await deps.store.get(BIOMETRIC_PENDING_KEY)) === personId;
+    const existing = await deps.keychain.get(biometricKey(personId));
+    if (existing !== null && decodeVaultKey(existing) !== null) return;
+    if (existing === null && !pending) return;
+    if (!(await deps.keychain.set(biometricKey(personId), toBase64url(key)))) return;
+    if (pending) await deps.store.set(BIOMETRIC_PENDING_KEY, null);
+    knownBiometric = true;
+  }
 
   async function unlock(p: { email: string; password: string }): Promise<SessionState> {
     if (waitMs() > 0) throw new Error(WAIT_BEFORE_RETRY);
@@ -420,9 +561,7 @@ export function createSession(deps: SessionDeps): Session {
     // created with V2 at activation — is verified against the old PBKDF2 hash once and rewritten as
     // V2 with a fresh salt, whose keys are the ones the session keeps.
     if (found.password.algorithm !== PASSWORD_V2_ALGORITHM) {
-      const salt = randomSalt();
-      keys = await deriveFor(p.password, salt, iterations);
-      deps.repo.savePasswordCheck(found.person.id, await passwordHashV2(salt, iterations, keys));
+      keys = await migrateV1Keys(p.password, found.person.id);
     }
 
     deps.repo.setMeta(META_FAILURES, '0');
@@ -430,6 +569,10 @@ export function createSession(deps: SessionDeps): Session {
     await deps.store.set(LAST_PERSON_KEY, found.person.id);
     current = found.person;
     currentKeys = keys;
+    currentVaultKey = keys === null ? null : keys.vaultKey;
+    // SP02 §8/§9: with the key in hand, the person's legacy values are sealed and the biometric
+    // item that still holds the old marker becomes a key. Both are idempotent.
+    if (keys !== null) await refreshBiometricItem(found.person.id, keys.vaultKey);
     return state();
   }
 
@@ -439,15 +582,26 @@ export function createSession(deps: SessionDeps): Session {
     const last = await lastPerson();
     if (!(await deps.authenticate(BIOMETRIC_REASON))) throw new Error(BIOMETRICS_DECLINED);
 
-    const key = last === null ? null : await deps.keychain.get(biometricKey(last));
+    const stored = last === null ? null : await deps.keychain.get(biometricKey(last));
     const found = last === null ? null : deps.repo.personById(last);
-    if (key !== last || found === null) throw new Error(BIOMETRICS_DISABLED);
+    if (last === null || stored === null || found === null) throw new Error(BIOMETRICS_DISABLED);
+
+    const key = decodeVaultKey(stored);
+    if (key === null) {
+      // SP02 §9: an item from before V1 holds the person id, and an unlock made with it would have
+      // no `vaultKey` to open the vault. It goes, and the next password unlock writes the key.
+      await deps.keychain.delete(biometricKey(last));
+      await deps.store.set(BIOMETRIC_PENDING_KEY, last);
+      knownBiometric = false;
+      throw new Error(BIOMETRICS_NEED_PASSWORD);
+    }
 
     record('unlocked', found.id, 'biometric');
     current = found;
-    // No password was typed: there is nothing to derive from (SP02 §9 puts `vaultKey` in the
-    // biometric item, which is story V1's).
+    // No password was typed, so there is no `authKey` — but the item carries the `vaultKey`
+    // (SP02 §9), and the vault of this session is readable with it.
     currentKeys = null;
+    currentVaultKey = key;
     return state();
   }
 
@@ -455,13 +609,48 @@ export function createSession(deps: SessionDeps): Session {
     const person = requireUnlocked();
     const found = deps.repo.personAuthByEmail(person.email);
     // `person` came from the repository: `found` is null only if it was revoked during this session.
-    if (found === null || !(await verifyStoredPassword(password, found.password))) {
-      throw new Error(INVALID_CREDENTIALS);
+    if (found === null) throw new Error(INVALID_CREDENTIALS);
+    // The one derivation of a V2 row also verifies the password and hands the `vaultKey` over:
+    // what the item stores is the key, not the person id (SP02 §9, V1).
+    let keys: DerivedKeys | null = null;
+    let matches: boolean;
+    if (found.password.algorithm === PASSWORD_V2_ALGORITHM) {
+      keys = await keysOfV2(password, found.password);
+      matches = keys !== null;
+    } else {
+      matches = await verifyPassword(password, found.password);
     }
+    if (!matches) throw new Error(INVALID_CREDENTIALS);
     if (!deps.biometricAvailable) throw new Error(NO_BIOMETRICS);
 
-    await deps.keychain.set(biometricKey(person.id), person.id);
+    // The password just opened this row, so these are the session's keys as much as an unlock's: a
+    // biometric unlock left no `authKey`, and confirming the password is what brings it back.
+    if (keys === null) {
+      // A v1 row has no `vaultKey` yet (the account was created moments ago); the same rewrite an
+      // unlock would make gives it one, so the item never holds a key that opens nothing.
+      keys = await migrateV1Keys(password, person.id);
+    }
+    currentKeys = keys;
+    currentVaultKey = keys.vaultKey;
+    if (!(await deps.keychain.set(biometricKey(person.id), toBase64url(keys.vaultKey)))) {
+      throw new Error(BIOMETRIC_REFUSED);
+    }
     await deps.store.set(LAST_PERSON_KEY, person.id);
+    return state();
+  }
+
+  /**
+   * SP02 §9: disabling biometrics removes `nod.bio.<person>` — the item that holds the `vaultKey`
+   * is the whole of the feature, so there is nothing else to revoke. A pending rewrite of a legacy
+   * marker is cleared too, or the next password unlock would bring back what was just turned off.
+   */
+  async function disableBiometric(): Promise<SessionState> {
+    const person = requireUnlocked();
+    await deps.keychain.delete(biometricKey(person.id));
+    if ((await deps.store.get(BIOMETRIC_PENDING_KEY)) === person.id) {
+      await deps.store.set(BIOMETRIC_PENDING_KEY, null);
+    }
+    knownBiometric = false;
     return state();
   }
 
@@ -521,7 +710,10 @@ export function createSession(deps: SessionDeps): Session {
         toId: p.personId,
         keychainKeyOf: (item) => credentialKey(p.personId, item.toolId),
       });
-      await moveCredentials(moved, adopt, p.personId);
+      // SP02 §8: the AAD of every value is the keychain key that just changed, and the vaultKey
+      // of the adopted account is the host's — so the values are opened with the key this session
+      // held for the local account and sealed again, never copied.
+      await moveCredentials(moved, adopt, p.personId, currentVaultKey, keys.vaultKey);
     }
     const person = deps.repo.saveConnectedPerson({
       id: p.personId,
@@ -535,6 +727,10 @@ export function createSession(deps: SessionDeps): Session {
     await deps.store.set(LAST_PERSON_KEY, person.id);
     current = person;
     currentKeys = keys;
+    currentVaultKey = keys.vaultKey;
+    // SP02 §7/V1: the row and the session are the host person's now; a subscriber that had to wait
+    // for the keys (K1 regenerates the E02 pairs here) runs before the caller is answered.
+    await announceActivated(person.id, keys.vaultKey, adopt);
     return state();
   }
 
@@ -552,31 +748,64 @@ export function createSession(deps: SessionDeps): Session {
 
   /**
    * F1: the credentials of an adopted account keep working under the host person id. The index rows
-   * already point at the new key (`Repo.adoptPersonId`); this moves the values themselves — read,
-   * write under the new key, delete the old one. A value the index knows and the keychain does not
-   * (an orphan) is nothing to move, and a keychain that refuses stops this where it is: the old item
-   * stays intact and the report names the credential.
+   * already point at the new key (`Repo.adoptPersonId`); this re-seals the values — the keychain key
+   * is the AAD of a `bv1.` value, so a value copied to the new key would not open (SP02 §8). A
+   * legacy plaintext value is sealed for the first time here. A value the index knows and the
+   * keychain does not (an orphan) is nothing to move, and a keychain that refuses stops this where
+   * it is: the old item stays intact and the report names the credential.
    */
-  async function moveCredentials(items: VaultItem[], from: Id, to: Id): Promise<void> {
+  async function moveCredentials(
+    items: VaultItem[],
+    from: Id,
+    to: Id,
+    fromVaultKey: Uint8Array<ArrayBuffer> | null,
+    toVaultKey: Uint8Array<ArrayBuffer>,
+  ): Promise<void> {
     for (const item of items) {
-      const value = await deps.keychain.get(item.keychainKey);
-      if (value === null) continue;
-      if (!(await deps.keychain.set(credentialKey(to, item.toolId), value))) {
+      const raw = await deps.keychain.get(item.keychainKey);
+      if (raw === null) continue;
+      const keychainKey = credentialKey(to, item.toolId);
+      const credential = await openCredential(raw, item.keychainKey, fromVaultKey, toVaultKey);
+      if (credential === null) {
+        // No key of this session opens it (a locked session, or a value written elsewhere): the old
+        // item is left alone rather than overwritten with something that would not open either.
+        throw new Error(`the saved login of ${item.toolId} could not be moved`);
+      }
+      const value = await encryptVaultValue(toVaultKey, keychainKey, credential);
+      if (!(await deps.keychain.set(keychainKey, value))) {
         throw new Error(`the system keychain refused to move the credential of ${item.toolId}`);
       }
       if (!(await deps.keychain.delete(item.keychainKey))) {
         throw new Error(`the credential of ${item.toolId} stayed under its old key`);
       }
     }
-    // SP02 §9: the biometric item is keyed by person id and holds the person id as its marker today
-    // (V1 puts `base64url(vaultKey)` there instead, and the keys of this adoption are in hand). It
-    // moves with the row, or biometrics would go on unlocking nobody.
+    // SP02 §9: the biometric item is keyed by person id and holds `base64url(vaultKey)`. It moves
+    // with the row and takes the key of the adopted account, or biometrics would go on unlocking
+    // this session with a key that opens nothing.
     const marker = await deps.keychain.get(`${BIOMETRIC_PREFIX}${from}`);
     if (marker === null) return;
-    if (!(await deps.keychain.set(`${BIOMETRIC_PREFIX}${to}`, to))) {
+    if (!(await deps.keychain.set(`${BIOMETRIC_PREFIX}${to}`, toBase64url(toVaultKey)))) {
       throw new Error('the system keychain refused to move the biometric item');
     }
     await deps.keychain.delete(`${BIOMETRIC_PREFIX}${from}`);
+  }
+
+  /**
+   * The credential of one keychain value of the vault: opened with the old key, or — a value an
+   * interrupted run already re-sealed — with the new one, and plaintext values read as they are.
+   */
+  async function openCredential(
+    raw: string,
+    keychainKey: string,
+    fromVaultKey: Uint8Array<ArrayBuffer> | null,
+    toVaultKey: Uint8Array<ArrayBuffer>,
+  ): Promise<{ username: string; secret: string } | null> {
+    if (!isSealedVaultValue(raw)) return plainVaultCredential(raw);
+    if (fromVaultKey !== null) {
+      const opened = await decryptVaultValue(fromVaultKey, keychainKey, raw);
+      if (opened !== null) return opened;
+    }
+    return decryptVaultValue(toVaultKey, keychainKey, raw);
   }
 
   // ---------------------------------------------------------------- the local half of a join (F1, F3, F7)
@@ -689,8 +918,22 @@ export function createSession(deps: SessionDeps): Session {
         newAuthKey: toBase64url(newKeys.authKey),
       });
     }
-    // Then the row. The OS keychain stays untouched: the items are the vault's and the autofill
-    // keeps working (RF-24); re-encrypting them with the new `vaultKey` is story V1's.
+    // Then the keychain (SP02 §7, V1): every vault value and the biometric item are re-sealed under
+    // the new `vaultKey` **before** the verifier moves, so the vault stays readable with the new
+    // password. The whole set is opened in memory first: a value that cannot be read aborts with
+    // the old values and the old verifier in place.
+    const previousVaultKey = oldKeys === null ? currentVaultKey : oldKeys.vaultKey;
+    await reencryptVaultItems(
+      { repo: deps.repo, keychain: deps.keychain },
+      person.id,
+      previousVaultKey,
+      newKeys.vaultKey,
+    );
+    const biometric = await deps.keychain.get(biometricKey(person.id));
+    if (biometric !== null && !(await deps.keychain.set(biometricKey(person.id), toBase64url(newKeys.vaultKey)))) {
+      throw new Error(BIOMETRIC_REFUSED);
+    }
+    // Then the row: the vault is readable with the new password and the old one opens nothing.
     deps.repo.savePasswordCheck(person.id, await passwordHashV2(salt, iterations, newKeys));
     if (host !== undefined) {
       // The salt the `host` row caches for offline unlock (SP02 §6) is the host's, and the host just
@@ -699,24 +942,31 @@ export function createSession(deps: SessionDeps): Session {
       deps.repo.saveHostSalt(salt);
     }
     currentKeys = newKeys;
+    currentVaultKey = newKeys.vaultKey;
     record('password_changed', person.id);
   }
 
   /**
    * SP02 §7: the vault of one person is wiped — the index rows and every keychain item they point
-   * at. The caller runs it when a sign-in finds a salt different from the cached one, before
-   * `adoptConnectedAccount`. A `nod.cred.*` item the index does not know cannot be reached:
-   * `SecretStore` has no enumeration.
+   * at, and the biometric item, whose `vaultKey` (SP02 §9) is the one this wipe has just made
+   * useless. The caller runs it when a sign-in or an activation finds a derived key different from
+   * the cached one, before `adoptConnectedAccount`. A `nod.cred.*` item the index does not know
+   * cannot be reached: `SecretStore` has no enumeration.
    */
   async function wipeVault(personId: Id): Promise<void> {
     const removed = deps.repo.removeVaultOf(personId);
     for (const item of removed) await deps.keychain.delete(item.keychainKey);
+    await deps.keychain.delete(biometricKey(personId));
+    // SP02 §7/V1: the next activation of this account (or of the local row it replaces) is a reset,
+    // and `onActivated` subscribers hear it as one.
+    lastWiped = personId;
   }
 
   function lock(): SessionState {
     const id = current === null ? null : current.id;
     current = null;
     currentKeys = null;
+    currentVaultKey = null;
     if (id !== null) record('locked', id);
     return localState(null, knownBiometric);
   }
@@ -734,6 +984,7 @@ export function createSession(deps: SessionDeps): Session {
       record('locked', person.id);
       current = null;
       currentKeys = null;
+      currentVaultKey = null;
       return;
     }
     current = reloaded;
@@ -747,7 +998,10 @@ export function createSession(deps: SessionDeps): Session {
     unlock,
     unlockBiometric,
     enableBiometric,
+    disableBiometric,
     keys,
+    vaultKey,
+    onActivated,
     deriveFor,
     changePassword,
     wipeVault,

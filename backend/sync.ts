@@ -15,6 +15,7 @@ import { fromBase64url } from '../shared/encoding';
 import { HOST_ROUTES } from '../shared/host-api';
 import type { ClientEvent, EventsResponse } from '../shared/host-api';
 import { clearOrgData, outboxVerdict } from '../shared/host-merge';
+import { compareVersions } from '../shared/version';
 import type { HostState } from '../shared/types';
 import { fingerprintOf, HostError } from './host-client';
 import type { HostConnection } from './host-client';
@@ -47,6 +48,14 @@ export const AFTER_WRITE_MS = 1_000;
  */
 export const SIGNED_OUT_ERROR = 'signed out — sign in again';
 
+/**
+ * O2/SP04 §1: what a write to the host is refused with while this Nod is older than the host's
+ * `minAppVersion`. The sync pushes nothing in that state (`runOnce`), and the RPC gate of
+ * `backend/main.ts` answers the methods that write to the host with this sentence, so the screen
+ * shows why the write did not land instead of a status from a host that never saw it.
+ */
+export const UPDATE_REQUIRED_ERROR = 'update required — this guild needs a newer Nod';
+
 /** What `createSync` needs from its runtime. */
 export interface SyncDeps {
   repo: Repo;
@@ -54,6 +63,12 @@ export interface SyncDeps {
   connection: () => HostConnection | null;
   /** Milliseconds since the epoch: the backoff, `syncedAt` and the state's clock. */
   now: () => number;
+  /**
+   * The version of the running app (`app.info().version`), which the O2 gate compares against the
+   * host's `minAppVersion`. `null` while the runtime has not answered it: with nothing to compare,
+   * nothing is refused.
+   */
+  appVersion: () => string | null;
   /** Every state the loop observes, for `host.state` and the sidebar badge (SP05 §3–§4). */
   onState: (state: HostState) => void;
   /** Once per session that ends on a `401`: the app asks for sign-in (SP04 §3, RF-39). */
@@ -69,6 +84,12 @@ export interface Sync {
   syncNow(): Promise<HostState>;
   state(): HostState;
   afterWrite(): void;
+  /**
+   * O2/SP04 §1: the `minAppVersion` a host just told this Nod — from the discovery of a join (the
+   * document already carries it) or from `GET /v1/meta/app` on a sync. The gate is derived from it
+   * on every read, so a host that lowers its minimum restores the writes without a restart.
+   */
+  observeMinVersion(version: string): void;
 }
 
 export function createSync(deps: SyncDeps): Sync {
@@ -94,6 +115,41 @@ export function createSync(deps: SyncDeps): Sync {
   let refusedBatch: string | null = null;
   /** The pinned key's fingerprint, computed once per key (`fingerprintOf` is async). */
   let fingerprint: { kid: string; publicKey: string; value: string } | null = null;
+  /**
+   * O2/SP04 §1: the oldest version the host told this Nod it serves — the discovery of a join or
+   * `GET /v1/meta/app`. Kept in memory only: it is the host's fact, re-read on every sync, and
+   * nothing local is decided by a stale copy of it.
+   */
+  let minAppVersion: string | null = null;
+
+  /**
+   * O2: whether this Nod is too old for the host. A host that answered a `minAppVersion` no one can
+   * parse (or none at all) never sets this. False while this Nod has no `host` row: the flag is
+   * about a guild, and `host.remove` leaves nothing behind.
+   */
+  function updateRequiredNow(): boolean {
+    if (repo.hostRecord() === null) return false;
+    const version = deps.appVersion();
+    return version !== null && minAppVersion !== null && compareVersions(version, minAppVersion) < 0;
+  }
+
+  /**
+   * SP04 §1/SP03 §3: the meta of the run. Best-effort on purpose — the route is public, and a host
+   * that does not answer it (offline, an older host without the route) leaves the last known minimum
+   * in place instead of failing the run: O2's gate must never be the reason a Nod stops syncing.
+   */
+  async function refreshMinVersion(connection: HostConnection): Promise<void> {
+    try {
+      observeMinVersion((await connection.appMeta()).minAppVersion);
+    } catch {
+      // The value of the last answer stands; the run goes on to the outbox and the snapshot.
+    }
+  }
+
+  function observeMinVersion(version: string): void {
+    if (version.trim() === '') return;
+    minAppVersion = version;
+  }
 
   // ---------------------------------------------------------------- timers
 
@@ -223,6 +279,10 @@ export function createSync(deps: SyncDeps): Sync {
     if (connection === null || record === null) return state();
     await rememberFingerprint(record);
     const at = new Date(deps.now()).toISOString();
+    // O2: the minimum version first, before a byte of the person's own data leaves the machine —
+    // the host's answer decides whether this run pushes anything at all.
+    await refreshMinVersion(connection);
+    if (updateRequiredNow()) return publish();
     try {
       // SP04 §3's order: the outbox, then the events, then the state.
       await flushOutbox(connection);
@@ -517,6 +577,9 @@ export function createSync(deps: SyncDeps): Sync {
       lastSyncAt: record === null ? null : record.lastSyncAt,
       lastError: record === null ? null : record.lastError,
       pendingWrites: repo.listOutbox().length,
+      // O2: without a `host` row there is no guild to be too old for, and no minimum to show.
+      updateRequired: updateRequiredNow(),
+      minAppVersion: record === null ? null : minAppVersion,
     };
   }
 
@@ -526,5 +589,5 @@ export function createSync(deps: SyncDeps): Sync {
     return published;
   }
 
-  return { start, stop, syncNow, state, afterWrite };
+  return { start, stop, syncNow, state, afterWrite, observeMinVersion };
 }

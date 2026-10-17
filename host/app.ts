@@ -11,15 +11,20 @@
 import { Elysia, NotFound, ParseError, ValidationError, status } from 'elysia';
 import type { Database } from 'bun:sqlite';
 
-import { HOST_ROUTES } from '../shared/host-api';
+import { HOST_ROUTES, type AppMeta } from '../shared/host-api';
 import { createAuthService, type AuthService } from './auth';
 import type { HostConfig } from './config';
 import { loadOrCreateHostSecret } from './keys';
 import { RepoError, createRepo, type Repo } from './repo';
 import { adminRoutes } from './routes/admin';
+import { assignmentRoutes } from './routes/assignments';
 import { authRoutes } from './routes/auth';
 import { eventRoutes } from './routes/events';
 import { guildRoutes } from './routes/guild';
+import { metaRoutes } from './routes/meta';
+import { personRoutes } from './routes/person';
+import { presenceRoutes } from './routes/presence';
+import { shareRoutes } from './routes/shares';
 import { stateRoutes } from './routes/state';
 
 export type AppDeps = {
@@ -27,6 +32,12 @@ export type AppDeps = {
   config: HostConfig;
   /** The migrated connection of the process (SP01 §1). */
   db: Database;
+  /**
+   * SP03 §3's app metadata, resolved from the environment at boot (`loadAppMeta`). A harness that
+   * builds the app by hand may leave it out, and the two routes that answer it then read the
+   * environment per request (`appMetaOf`) — the same values, resolved the same way.
+   */
+  appMeta?: AppMeta;
 };
 
 /** SP03 §1: 256 KB for every body; a body that carries a tool icon may reach 512 KB. */
@@ -37,6 +48,9 @@ export const MAX_ICON_BODY_BYTES = 512 * 1024;
 export function bodyLimitFor(path: string): number {
   return path.startsWith('/v1/admin/tools') ||
     path.startsWith('/v1/admin/bootstrap') ||
+    // SP03 §2's personal tools carry the same `Entry.icon` as the admin's; SP03 §1's exception is
+    // "the routes whose body can carry an icon", of which this file is the reader.
+    path.startsWith('/v1/personal/tools') ||
     path === HOST_ROUTES.adminGuildIcon
     ? MAX_ICON_BODY_BYTES
     : MAX_BODY_BYTES;
@@ -72,10 +86,10 @@ export function createApp(deps: AppDeps) {
   });
 
   return new Elysia()
-    // All four land on the request context, so the routes of H4 onward read the resolved
-    // configuration, the open connection, the repo and the auth service instead of deriving them
-    // again.
-    .decorate({ config: deps.config, db: deps.db, repo, auth })
+    // All of them land on the request context, so the routes of H4 onward read the resolved
+    // configuration, the open connection, the repo, the auth service and the app metadata of SP03 §3
+    // instead of deriving them again.
+    .decorate({ config: deps.config, db: deps.db, repo, auth, appMeta: deps.appMeta })
 
     // SP03 §1: the size limit, decided before the body is parsed.
     .onRequest(async ({ request }) => {
@@ -99,12 +113,18 @@ export function createApp(deps: AppDeps) {
 
     .get(HOST_ROUTES.health, () => 'ok')
 
-    // SP03 §2: the route groups in one line each, in this order — auth (H4), admin (H5), state
-    // (H6), events (H8), guild (I2h). Each carries its own guards, so a group mounted later keeps its
-    // own access rules and the levels of the groups above stay inside them (H4's regression test).
+    // SP03 §2–§3: the route groups in one line each, in this order — auth (H4), admin (H5), state
+    // (H6), events (H8), guild (I2h), the person group (H7/O1), meta (O2), and block 2's shares and
+    // assignments (E02 K3). Each carries its own guards, so a group mounted later keeps its own
+    // access rules and the levels of the groups above stay inside them (H4's regression test).
     .use(authRoutes)
     .use(adminRoutes)
     .use(stateRoutes)
     .use(eventRoutes)
-    .use(guildRoutes);
+    .use(guildRoutes)
+    .use(personRoutes)
+    .use(metaRoutes)
+    .use(shareRoutes)
+    .use(assignmentRoutes)
+    .use(presenceRoutes);
 }

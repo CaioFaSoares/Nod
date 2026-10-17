@@ -8,8 +8,22 @@
 //
 // The index row also carries the origin of the entry at save time (SP02 §8, RF-38): it is what
 // `backend/tool-windows.ts` compares a window's entry origin against before it fills a form.
+//
+// V1/SP02 §8: the keychain value is never the credential in clear. `save` seals it with the
+// session's `vaultKey` (AAD = the keychain key) through `shared/vault-crypto.ts`, and `read` opens
+// it with the same key. Values without the `bv1.` prefix are legacy plaintext: `read` still opens
+// them so an upgrade never loses a credential, and `migrateLegacy` re-encrypts them at the first
+// unlock of the person (called by `backend/main.ts` after the session has keys).
 import { originOf } from '../shared/catalog';
 import { exportVault, importVault } from '../shared/vault-export';
+import {
+  decryptVaultValue,
+  encryptVaultValue,
+  isSealedVaultValue,
+  plainVaultCredential,
+} from '../shared/vault-crypto';
+import type { VaultCredential } from '../shared/vault-crypto';
+import type { ShareScope } from '../shared/host-api';
 import type { Id, SecretStore, VaultExportItem, VaultItem } from '../shared/types';
 import type { Repo } from './repo';
 
@@ -17,10 +31,20 @@ const USERNAME_REQUIRED = 'a username is required';
 const SECRET_REQUIRED = 'a secret is required';
 const UNKNOWN_TOOL = 'unknown tool';
 const KEYCHAIN_REFUSED = 'the system keychain refused the credential';
+/** SP02 §8: no `vaultKey` in memory (a locked session, or one unlocked without a password). */
+const VAULT_LOCKED = 'the vault is locked — unlock with your password first';
+/** A `bv1.` value that not even the new key opens: the password change has nothing to re-seal. */
+const VAULT_UNREADABLE = 'a saved login could not be opened with the current key';
 
 export interface VaultDeps {
   repo: Repo;
   keychain: SecretStore;
+  /**
+   * SP02 §8: the `vaultKey` of the unlocked session. `backend/main.ts` reads it from
+   * `session.vaultKey()`, which is null while locked — and then the vault can neither read nor
+   * write a sealed value. Missing in tests that never touch a credential: the same refusal.
+   */
+  vaultKey?: () => Uint8Array<ArrayBuffer> | null;
   /** PBKDF2 iterations of the export (§3). The tests pass 1000; default: the pure module's own. */
   iterations?: number;
 }
@@ -31,12 +55,27 @@ export interface Vault {
   list(personId: Id): VaultItem[];
   save(
     personId: Id,
-    p: { toolId: Id; username: string; secret: string; label?: string },
+    p: {
+      toolId: Id;
+      username: string;
+      secret: string;
+      label?: string;
+      /** K4: the credential group an accepted share carries; omit for a plain save. */
+      credentialId?: string | null;
+      /** K6: the scope of an accepted share; omit for a plain save. */
+      scope?: ShareScope;
+    },
   ): Promise<VaultItem>;
   read(personId: Id, toolId: Id): Promise<{ username: string; secret: string } | null>;
   remove(personId: Id, toolId: Id): Promise<void>;
   removeAllOf(personId: Id): Promise<void>;
   removeAllForTool(toolId: Id): Promise<void>;
+  /**
+   * SP02 §8: re-encrypts the legacy plaintext values of one person under the session's `vaultKey`,
+   * value by value in place; a value already sealed and a keychain value that is absent are left
+   * alone, so running it again after a failure is safe. Answers how many values it rewrote.
+   */
+  migrateLegacy(personId: Id): Promise<number>;
   export(personId: Id, password: string): Promise<string>;
   import(personId: Id, blob: string, password: string): Promise<number>;
 }
@@ -50,13 +89,27 @@ export function createVault(deps: VaultDeps): Vault {
     return `nod.cred.${personId}.${toolId}`;
   }
 
+  /** SP02 §8: the key of the unlocked session, or the typed refusal — never a plaintext write. */
+  function requireVaultKey(): Uint8Array<ArrayBuffer> {
+    const found = deps.vaultKey === undefined ? null : deps.vaultKey();
+    if (found === null) throw new Error(VAULT_LOCKED);
+    return found;
+  }
+
   function list(personId: Id): VaultItem[] {
     return deps.repo.listVault(personId);
   }
 
   async function save(
     personId: Id,
-    p: { toolId: Id; username: string; secret: string; label?: string },
+    p: {
+      toolId: Id;
+      username: string;
+      secret: string;
+      label?: string;
+      credentialId?: string | null;
+      scope?: ShareScope;
+    },
   ): Promise<VaultItem> {
     const username = p.username.trim();
     if (username.length === 0) throw new Error(USERNAME_REQUIRED);
@@ -75,10 +128,13 @@ export function createVault(deps: VaultDeps): Vault {
 
     const label = p.label === undefined || p.label.trim().length === 0 ? p.toolId : p.label;
     const keychainKey = key(personId, p.toolId);
-    const stored = await deps.keychain.set(
-      keychainKey,
-      JSON.stringify({ username, secret: p.secret }),
-    );
+    // SP02 §8: sealed before the keychain sees it, with the keychain key as AAD. A locked session
+    // and a value over the keychain limit both refuse here, with nothing written on either side.
+    const value = await encryptVaultValue(requireVaultKey(), keychainKey, {
+      username,
+      secret: p.secret,
+    });
+    const stored = await deps.keychain.set(keychainKey, value);
     if (!stored) throw new Error(KEYCHAIN_REFUSED);
 
     return deps.repo.saveVaultItem({
@@ -88,6 +144,8 @@ export function createVault(deps: VaultDeps): Vault {
       username,
       keychainKey,
       origin,
+      credentialId: p.credentialId,
+      scope: p.scope,
     });
   }
 
@@ -99,16 +157,15 @@ export function createVault(deps: VaultDeps): Vault {
     if (item === null) return null;
     const raw = await deps.keychain.get(item.keychainKey);
     if (raw === null) return null;
-    try {
-      const value: unknown = JSON.parse(raw);
-      if (typeof value !== 'object' || value === null) return null;
-      const record = value as { username?: unknown; secret?: unknown };
-      if (typeof record.username !== 'string' || typeof record.secret !== 'string') return null;
-      return { username: record.username, secret: record.secret };
-    } catch {
-      // Keychain holding junk (or a value swapped by hand): an unreadable credential is an absent one.
-      return null;
+    // SP02 §8: a `bv1.` value opens only with the session's `vaultKey` over this same keychain key.
+    // Without a key (locked) or with one that does not match, the credential is absent, not an error.
+    if (isSealedVaultValue(raw)) {
+      const vaultKey = deps.vaultKey === undefined ? null : deps.vaultKey();
+      if (vaultKey === null) return null;
+      return decryptVaultValue(vaultKey, item.keychainKey, raw);
     }
+    // Legacy plaintext (no prefix): readable until the first unlock re-encrypts it.
+    return plainVaultCredential(raw);
   }
 
   async function remove(personId: Id, toolId: Id): Promise<void> {
@@ -131,6 +188,32 @@ export function createVault(deps: VaultDeps): Vault {
       await deps.keychain.delete(item.keychainKey);
       deps.repo.removeVaultItem(item.personId, toolId);
     }
+  }
+
+  /**
+   * SP02 §8: the first unlock after V1 turns every legacy plaintext value of the person into a
+   * `bv1.` one. It reads through the index, so an item whose keychain value is gone is nothing to
+   * rewrite; a value that does not fit the keychain limit stays plaintext rather than blocking the
+   * rest, and the next unlock tries it again — the run is idempotent by construction.
+   */
+  async function migrateLegacy(personId: Id): Promise<number> {
+    const vaultKey = requireVaultKey();
+    let migrated = 0;
+    for (const item of deps.repo.listVault(personId)) {
+      const raw = await deps.keychain.get(item.keychainKey);
+      if (raw === null || isSealedVaultValue(raw)) continue;
+      const credential = plainVaultCredential(raw);
+      if (credential === null) continue;
+      let value: string;
+      try {
+        value = await encryptVaultValue(vaultKey, item.keychainKey, credential);
+      } catch {
+        continue; // over the limit: the plaintext value stays readable until it is saved again
+      }
+      if (!(await deps.keychain.set(item.keychainKey, value))) throw new Error(KEYCHAIN_REFUSED);
+      migrated += 1;
+    }
+    return migrated;
   }
 
   async function exportItems(personId: Id): Promise<VaultExportItem[]> {
@@ -173,7 +256,50 @@ export function createVault(deps: VaultDeps): Vault {
     remove,
     removeAllOf,
     removeAllForTool,
+    migrateLegacy,
     export: exportToBlob,
     import: importFromBlob,
   };
 }
+
+/**
+ * SP02 §7: the password change re-seals every value of one person under the new `vaultKey` before
+ * the verifier is rewritten, so the vault stays readable with the new password. `from` is the old
+ * key — `null` when the account had none (a v1 row, whose values are plaintext). The whole set is
+ * opened and re-sealed **in memory first**; only then is the keychain written, so a value that
+ * cannot be opened aborts with the old values still in place and readable.
+ *
+ * A value that already opens with `to` was re-sealed by an interrupted earlier run and is accepted
+ * as it is: the operation is safe to repeat. Values the keychain lost are skipped; plaintext values
+ * are sealed under the new key.
+ */
+export async function reencryptVaultItems(
+  deps: { repo: Repo; keychain: SecretStore },
+  personId: Id,
+  from: Uint8Array<ArrayBuffer> | null,
+  to: Uint8Array<ArrayBuffer>,
+): Promise<number> {
+  const planned: { key: string; value: string }[] = [];
+  for (const item of deps.repo.listVault(personId)) {
+    const raw = await deps.keychain.get(item.keychainKey);
+    if (raw === null) continue;
+    let credential: VaultCredential | null;
+    if (isSealedVaultValue(raw)) {
+      credential = from === null ? null : await decryptVaultValue(from, item.keychainKey, raw);
+      if (credential === null) credential = await decryptVaultValue(to, item.keychainKey, raw);
+      if (credential === null) throw new Error(VAULT_UNREADABLE);
+    } else {
+      credential = plainVaultCredential(raw);
+    }
+    if (credential === null) continue;
+    planned.push({
+      key: item.keychainKey,
+      value: await encryptVaultValue(to, item.keychainKey, credential),
+    });
+  }
+  for (const item of planned) {
+    if (!(await deps.keychain.set(item.key, item.value))) throw new Error(KEYCHAIN_REFUSED);
+  }
+  return planned.length;
+}
+

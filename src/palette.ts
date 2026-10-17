@@ -71,6 +71,12 @@ export function openPalette(ctx: {
   isAdmin: boolean;
   go: (target: 'home' | SettingsTab) => void;
   lock: () => void;
+  /** B7: "Add personal tool" — the dialog of `src/app.ts`, opened from the palette. */
+  addPersonalTool: () => void;
+  /** RF-58: "Who's online" — Home's card; null while there is no guild to show. */
+  showOnline: (() => void) | null;
+  /** K4: "Vault inbox" — Settings → Vault, scrolled to the shares waiting; null without a guild. */
+  openInbox: (() => void) | null;
 }): void {
   // One palette at a time: the global shortcut and the push `palette` can both ask for it.
   if (document.getElementById(OVERLAY_ID) !== null) return;
@@ -94,6 +100,20 @@ export function openPalette(ctx: {
   }
   const home = 'Home';
   items.push({ label: home, key: matchKey(home), run: () => ctx.go('home') });
+  // B7/SP05 §4: the dialog of a personal tool, reachable from the keyboard like every action.
+  const addPersonal = 'Add personal tool';
+  items.push({ label: addPersonal, key: matchKey(addPersonal), run: () => ctx.addPersonalTool() });
+  const showOnline = ctx.showOnline;
+  if (showOnline !== null) {
+    const online = "Who's online";
+    items.push({ label: online, key: matchKey(online), run: () => showOnline() });
+  }
+  // K4: the shares waiting for an answer, one keystroke away.
+  const openInbox = ctx.openInbox;
+  if (openInbox !== null) {
+    const inbox = 'Vault inbox';
+    items.push({ label: inbox, key: matchKey(inbox), run: () => openInbox() });
+  }
   for (const tab of SETTINGS_TABS) {
     if (tab.admin && !ctx.isAdmin) continue;
     const label = `Settings › ${tab.label}`;

@@ -26,6 +26,8 @@ under Bun.
 | --- | --- |
 | Key-derivation vectors in Bun, and the same vectors in txiki.js through the smoke | H3 |
 | Seal/open vectors across both runtimes | S0 |
+| Person fingerprint vectors, the pin decision, the sealed key pairs and the pin table against in-memory SQLite (`test/keys.test.ts`) | K1–K2 |
+| The scope decision, the sealed payload and every `invalid share` path, plus a send/accept/decline end to end against the real host app (`test/shares.test.ts`) | K4, K6, K7 |
 | Host route groups against a temp data dir | H4–H8 |
 | Two-instance smoke: a host process plus two Nod app ids (admin and person) | B11, K10 |
 

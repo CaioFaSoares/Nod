@@ -2,7 +2,7 @@
 
 How the next two epics (`docs/epics/E01-connected-mode.md`, `docs/epics/E02-credential-sharing.md`)
 split into stories, how big each one is, and in which of the two effort blocks it lands. E03
-(blocked by B05) and E04 (later phase) stay out of these blocks.
+(blocked by B05), E04 and E05 (later phases) stay out of these blocks.
 
 Evidence: sizes are judgement from `leitura` of the epics, the code and the past handovers. Nothing
 was executed, and no velocity exists yet.

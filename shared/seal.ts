@@ -1,12 +1,17 @@
 // Sealed credential shares: X25519 key agreement, HKDF-SHA256, AES-256-GCM and the Ed25519
 // signature over the sealed body. Wire format: `docs/specs/SP06-credential-sharing.md` §3; the key
-// pairs §2. Pure logic: only WebCrypto, TextEncoder and btoa/atob. No tjs, tiny or DOM.
+// pairs and the person fingerprint §2. Pure logic: only WebCrypto, TextEncoder and btoa/atob. No
+// tjs, tiny or DOM. One import — `shared/host-api.ts` for the Crockford alphabet and the grouping
+// of `personFingerprint`, which is the host key's own fingerprint alphabet (SP04 §1.1).
 // Signatures: docs/arquitetura.md §3.
+import { CODE_ALPHABET, formatCode } from './host-api';
 
 /** First byte of the body and `v` of the payload (SP06 §3). A new format gets a new number. */
 export const SEAL_VERSION = 1;
 /** Raw X25519 / Ed25519 public key: 32 bytes, base64url on the wire. */
 export const SEAL_PUBLIC_LENGTH = 32;
+/** SP06 §2: the fingerprint is the first 10 digest bytes — 16 Crockford characters. */
+export const PERSON_FINGERPRINT_BYTES = 10;
 /** AES-256-GCM nonce (SP06 §3). */
 export const SEAL_NONCE_LENGTH = 12;
 /** Ed25519 signature appended to the body. */
@@ -212,6 +217,39 @@ export async function generateEd25519KeyPair(): Promise<SealKeyPair> {
     publicKey: new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey)),
     privateKey: new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey)),
   };
+}
+
+// ------------------------------------------------------------- fingerprint (SP06 §2)
+
+/**
+ * SP06 §2: the fingerprint of a person — `SHA-256(x25519Public || ed25519Public)`, its first
+ * `PERSON_FINGERPRINT_BYTES` bytes in Crockford base32, grouped `XXXX-XXXX-XXXX-XXXX`. The digest
+ * is taken over the two raw keys concatenated in that order, so the same pair always reads the same
+ * string; this is the string the person reads out loud and Settings → Account shows.
+ *
+ * The alphabet and the grouping are `shared/host-api.ts`'s (SP04 §1.1's host-key fingerprint), so
+ * the product has one Crockford definition and one grouping.
+ */
+export async function personFingerprint(
+  x25519Public: Uint8Array,
+  ed25519Public: Uint8Array,
+): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', concatBytes([x25519Public, ed25519Public])),
+  );
+  let out = '';
+  let buffer = 0;
+  let bits = 0;
+  // 5 bits per character, most significant first; 10 bytes are 80 bits, exactly 16 characters.
+  for (const byte of digest.subarray(0, PERSON_FINGERPRINT_BYTES)) {
+    buffer = (buffer << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      out += CODE_ALPHABET[(buffer >>> bits) & 31];
+    }
+  }
+  return formatCode(out);
 }
 
 // ------------------------------------------------------------- signature (SP06 §3)

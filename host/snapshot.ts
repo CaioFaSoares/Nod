@@ -20,13 +20,16 @@ import {
   CODE_ALPHABET,
   formatCode,
   type Discovery,
+  type Holder,
+  type IncomingShare,
   type PersonalView,
   type Snapshot,
+  type SnapshotPerson,
   type SnapshotSignature,
 } from '../shared/host-api';
 import type { Entry, Id, Role, View } from '../shared/types';
 import type { SigningKey } from './keys';
-import type { HostPerson, HostTool, HostView, Repo } from './repo';
+import type { HostPerson, HostTool, HostView, Repo, ShareRecord } from './repo';
 
 // ---------------------------------------------------------------- source rows (SP04 §2)
 
@@ -50,10 +53,38 @@ export interface SnapshotSource {
    * those from `GET /v1/guild/icon` (SP03 §2).
    */
   guildIcon: string | null;
+  /**
+   * The block 2 rows of SP04 §2: the roster with its public keys (which is how a sender picks a
+   * recipient and seals to them, SP06 §3), the shares waiting for me, the holders of what I hold, and
+   * the credentials I must rotate.
+   */
+  people: SnapshotPerson[];
+  incomingShares: ShareRecord[];
+  /** By credential id; a `repo.ts` holder row is a `Holder` field for field, so nothing is mapped. */
+  holders: Record<string, Holder[]>;
+  rotationPending: Id[];
 }
 
-/** The reads of SP04 §2, in one place: the admin's catalog or the entries my roles are granted. */
-export function snapshotSource(repo: Repo, me: HostPerson): SnapshotSource {
+/**
+ * The reads of SP04 §2, in one place: the admin's catalog or the entries my roles are granted.
+ *
+ * `now` bounds the expired shares and runs the purge of SP06 §4. It defaults to the wall clock so a
+ * caller that only needs the block 1 body keeps its two-argument call; the state route passes its
+ * own instant instead, so one request reads one clock.
+ */
+export function snapshotSource(
+  repo: Repo,
+  me: HostPerson,
+  now: string = new Date().toISOString(),
+): SnapshotSource {
+  // SP06 §4: every read path clears the ciphertext of the shares that reached 14 days. It is a
+  // no-op update when nothing expired, so a poll stays a poll.
+  repo.purgeExpiredShares(now);
+  const keys = repo.keysByPerson();
+  const holders: Record<string, Holder[]> = {};
+  for (const credentialId of repo.heldCredentials(me.id, me.admin)) {
+    holders[credentialId] = repo.holdersOf(credentialId);
+  }
   return {
     me,
     roles: repo.listRoles(),
@@ -62,6 +93,26 @@ export function snapshotSource(repo: Repo, me: HostPerson): SnapshotSource {
     personalViews: repo.listPersonalViews(me.id),
     favorites: repo.favorites(me.id),
     guildIcon: repo.guildIconHash(),
+    // SP04 §2: every non-disabled person of the guild, with the keys of those who have a pair. The
+    // host's own columns of a person row never travel (`SnapshotPerson` has no email on purpose).
+    people: repo
+      .listPeople()
+      .filter((person) => person.disabledAt === null)
+      .map((person) => {
+        const pair = keys.get(person.id);
+        return {
+          id: person.id,
+          name: person.name,
+          roles: person.roles,
+          kind: person.kind,
+          ...(pair === undefined
+            ? {}
+            : { x25519Public: pair.x25519Public, ed25519Public: pair.ed25519Public }),
+        };
+      }),
+    incomingShares: repo.openShares(me.id, now),
+    holders,
+    rotationPending: repo.rotationPending(me.id),
   };
 }
 
@@ -101,6 +152,21 @@ function personalViewOf(row: HostView): PersonalView {
   return { ...viewOf(row), id: row.id, entryId: row.entryId, updatedAt: row.updatedAt };
 }
 
+/** A share row as `IncomingShare`: the wire shape names the sender `from`, and `toId` stays here. */
+function incomingShareOf(row: ShareRecord): IncomingShare {
+  return {
+    id: row.id,
+    credentialId: row.credentialId,
+    toolId: row.toolId,
+    from: row.fromId,
+    scope: row.scope,
+    kind: row.kind,
+    sealed: row.sealed,
+    createdAt: row.createdAt,
+    expiresAt: row.expiresAt,
+  };
+}
+
 /**
  * SP04 §2's body. `me` is built field by field on purpose: the host's private columns of a person row
  * (`salt`, `auth_hash`, `disabledAt`) are columns of `HostPerson` and none of them is a field of `me`.
@@ -130,6 +196,12 @@ export function snapshotDocument(
     // SP04 §2: the digest is inside the signed bytes, so an icon swapped on the host moves the
     // version and a Nod that holds the old signature refuses the new one.
     guildIcon: source.guildIcon,
+    // Block 2, inside the same signed bytes: the roster, my inbox, the holders of what I hold — a
+    // holder row of `repo.ts` is a `Holder` field for field, so only the share rows need mapping.
+    people: source.people,
+    incomingShares: source.incomingShares.map(incomingShareOf),
+    holders: source.holders,
+    rotationPending: source.rotationPending,
   };
 }
 

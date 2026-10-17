@@ -20,6 +20,7 @@ import {
   type BootstrapRequest,
   type BootstrapResponse,
   type CodeResponse,
+  type DeviceSession,
   type HostEvent,
   type OrgTool,
   type PersonCreateRequest,
@@ -67,6 +68,10 @@ export interface HostAdmin {
   createPerson(input: PersonCreateRequest): Promise<PersonCreateResponse>;
   /** `POST /v1/admin/people/:id/code` → a fresh code, the previous one revoked (SP02 §3). */
   issueCode(personId: Id): Promise<CodeResponse>;
+  /** O1/`GET /v1/admin/people/:id/sessions` → that person's devices and their instants (SP03 §2). */
+  sessions(personId: Id): Promise<DeviceSession[]>;
+  /** O1/`DELETE /v1/admin/sessions/:id` → `204`; the person signs out at their next sync (SP03 §2). */
+  revokeSession(id: Id): Promise<true>;
   /** `GET /v1/admin/events` → the guild's log, in the shape the Activity tab renders. */
   listEvents(filter: EventFilter): Promise<AuditEvent[]>;
   /** `POST /v1/admin/bootstrap` → how many org tools were written, or the closed window (B8a). */
@@ -218,6 +223,23 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
         if (error instanceof HostError && error.status === 404) throw new Error(NOT_ON_HOST);
         throw error;
       }
+    },
+
+    /**
+     * O1/SP03 §2: one person's devices, for the People screen. The host answers the live sessions
+     * only — a revoked or expired one is not a device to sign out.
+     */
+    async sessions(personId) {
+      return await connection.request<DeviceSession[]>(
+        'GET',
+        path(HOST_ROUTES.adminPersonSessions, personId),
+      );
+    },
+
+    /** O1/SP03 §2: ends one session of the guild. The person signs out at their next sync (RF-39). */
+    async revokeSession(id) {
+      await connection.request<void>('DELETE', path(HOST_ROUTES.adminSession, id));
+      return true;
     },
 
     async listEvents(filter) {

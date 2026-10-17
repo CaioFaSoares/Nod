@@ -12,9 +12,14 @@
 
 import { Elysia } from 'elysia';
 
-import { HOST_ROUTES, SNAPSHOT_ETAG_HEADER, SNAPSHOT_SIGNATURE_HEADER } from '../../shared/host-api';
+import {
+  HOST_ROUTES,
+  SNAPSHOT_ETAG_HEADER,
+  SNAPSHOT_SIGNATURE_HEADER,
+  type AppMeta,
+} from '../../shared/host-api';
 import { callerOf, personAuth, type HostContext } from '../auth';
-import type { HostConfig } from '../config';
+import { appMetaOf, type HostConfig } from '../config';
 import { loadOrCreateSigningKey, type SigningKey } from '../keys';
 import {
   discoveryDocument,
@@ -31,18 +36,20 @@ import {
 /** SP04 §2 names the request header only in prose; the answer side is the shared constant. */
 const IF_NONE_MATCH_HEADER = 'If-None-Match';
 
-/** SP07 §2's two deployment values of the discovery: `host/compose.yaml` sets both. */
+/** SP07 §2's deployment value of the discovery: `host/compose.yaml` sets it. */
 export const GUILD_NAME_ENV = 'NOD_GUILD_NAME';
-export const MIN_APP_VERSION_ENV = 'NOD_MIN_APP_VERSION';
-/** SP07 §2: the compose default, applied when the deployment leaves the variable unset. */
-export const DEFAULT_MIN_APP_VERSION = '0.3.0';
+// The other deployment value of the discovery — the minimum app version and the update manifest URL
+// — is `host/config.ts`'s since O2: one resolved value (`loadAppMeta`) feeds both this route and
+// `GET /v1/meta/app`. Re-exported here because `host/state.test.ts` and `test/host-admin.test.ts`
+// read these two names from this module.
+export { DEFAULT_MIN_APP_VERSION, MIN_APP_VERSION_ENV } from '../config';
 
 /**
  * What this file reads off the request context. `host/app.ts` decorates `config`, `db`, `repo` and
  * `auth`; `host/auth.ts`'s `HostContext` names three of them, so the cast stays here — confined to
  * `stateOf`, exactly as `hostOf` confines its own.
  */
-type StateContext = HostContext & { config: HostConfig };
+type StateContext = HostContext & { config: HostConfig; appMeta?: AppMeta };
 
 function stateOf(ctx: unknown): StateContext {
   return ctx as StateContext;
@@ -70,13 +77,16 @@ export const stateRoutes = new Elysia({ name: 'host-state-routes' })
   // signs in; this route reads no caller and no table.
   .get(HOST_ROUTES.discovery, async (ctx) => {
     const { config } = stateOf(ctx);
+    // O2: the minimum app version is the one `GET /v1/meta/app` answers, resolved once for the
+    // process (`appMetaOf`) — never a second read of the environment with a second default.
+    const { minAppVersion } = appMetaOf(stateOf(ctx));
     return await discoveryDocument({
       // SP04 §1 annotates `guild` as `meta.guild_name` (SP01 §2), a row nothing writes yet: its
       // origin is the deployment environment of SP07 §2 either way. The exact `host/config.ts` and
       // `host/main.ts` change is in `docs/handovers/h6.md`, "Other owners".
       guild: process.env[GUILD_NAME_ENV]?.trim() ?? '',
       key: await signingKeyOf(config.dataDir),
-      minAppVersion: process.env[MIN_APP_VERSION_ENV]?.trim() || DEFAULT_MIN_APP_VERSION,
+      minAppVersion,
     });
   })
 

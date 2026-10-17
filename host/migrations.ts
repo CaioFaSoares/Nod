@@ -121,6 +121,56 @@ CREATE TABLE events (
 );
 CREATE INDEX events_person_at ON events(person_id, at);
 `,
+
+  // 2 — block 2: every table of SP01 §3, the credential sharing of E02. `sealed` is opaque
+  // ciphertext (SP06 §3) and is cleared after accept, decline or expiry (14 days); the host never
+  // holds a credential's plaintext, a private key or `vaultKey`.
+  `
+CREATE TABLE person_keys (
+  person_id        TEXT PRIMARY KEY REFERENCES people(id) ON DELETE CASCADE,
+  x25519_public    TEXT NOT NULL,                 -- base64url raw 32 bytes
+  ed25519_public   TEXT NOT NULL,                 -- base64url raw 32 bytes
+  created_at       TEXT NOT NULL                  -- replaced on reset (new activation)
+);
+
+CREATE TABLE shares (
+  id              TEXT PRIMARY KEY,
+  credential_id   TEXT NOT NULL,                  -- uuid chosen by the credential's owner; groups holders
+  from_id         TEXT NOT NULL REFERENCES people(id),
+  to_id           TEXT NOT NULL REFERENCES people(id),
+  tool_id         TEXT NOT NULL REFERENCES entries(id),
+  scope           TEXT NOT NULL,                  -- 'role' | 'blocked' | 'org' (blocked never travels; kept for holders)
+  kind            TEXT NOT NULL,                  -- 'send' | 'assign' | 'update'
+  sealed          TEXT NOT NULL,                  -- SP06 §3, base64url
+  created_at      TEXT NOT NULL,
+  expires_at      TEXT NOT NULL,                  -- created_at + 14 days
+  accepted_at     TEXT,
+  declined_at     TEXT,
+  purged_at       TEXT                            -- sealed set to '' after accept/decline/expiry
+);
+CREATE INDEX shares_to_open ON shares(to_id) WHERE accepted_at IS NULL AND declined_at IS NULL AND purged_at IS NULL;
+
+CREATE TABLE credential_holders (
+  credential_id  TEXT NOT NULL,
+  person_id      TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  tool_id        TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  owner          INTEGER NOT NULL DEFAULT 0,      -- 1 for the credential's owner
+  scope          TEXT NOT NULL,
+  via_share_id   TEXT REFERENCES shares(id),
+  since          TEXT NOT NULL,
+  removed_at     TEXT,                            -- revoked from the share
+  PRIMARY KEY (credential_id, person_id)
+);
+
+CREATE TABLE assignments (                        -- admin assigned a credential to a role (E02 K8)
+  credential_id  TEXT NOT NULL,
+  role_id        TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+  tool_id        TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  assigned_by    TEXT NOT NULL REFERENCES people(id),
+  created_at     TEXT NOT NULL,
+  PRIMARY KEY (credential_id, role_id)
+);
+`,
 ];
 
 export const SCHEMA_VERSION_KEY = 'schema_version';
