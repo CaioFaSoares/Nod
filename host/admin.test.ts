@@ -389,7 +389,7 @@ describe('people', () => {
     expect(signIn.status).toBe(401);
   });
 
-  test('the last admin cannot be disabled nor left without an admin role (409)', async () => {
+  test('the owner is never disabled nor left without an admin role, themselves included (403, RF-64)', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
 
@@ -399,10 +399,8 @@ describe('people', () => {
       { disabled: true },
       admin.token,
     );
-    expect(disabled.status).toBe(409);
-    expect(await body<ErrorResponse>(disabled)).toEqual({
-      error: 'the last admin cannot be removed',
-    });
+    expect(disabled.status).toBe(403);
+    expect(await body<ErrorResponse>(disabled)).toEqual({ error: 'the owner cannot be disabled' });
 
     const demoted = await patch(
       host,
@@ -410,9 +408,10 @@ describe('people', () => {
       { roles: [] },
       admin.token,
     );
-    expect(demoted.status).toBe(409);
+    expect(demoted.status).toBe(403);
+    expect(await body<ErrorResponse>(demoted)).toEqual({ error: 'the owner keeps an admin role' });
 
-    // The refusal rolled the write back: the admin is still an enabled admin (SP01 §2).
+    // The refusal rolled the write back: the owner is still an enabled admin (SP01 §2).
     const listed = await body<Array<{ id: string; admin: boolean; disabledAt: string | null }>>(
       await get(host, HOST_ROUTES.adminPeople, admin.token),
     );
@@ -420,6 +419,195 @@ describe('people', () => {
       expect.objectContaining({ id: admin.personId, admin: true, disabledAt: null }),
     ]);
     expect((await personPing(host, admin.token)).status).toBe(200);
+  });
+
+  test('the owner flag marks the setup person, and an invited person is not (RF-64)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+    const person = await createPerson(host, {});
+
+    const people = await body<Array<{ id: string; owner: boolean }>>(
+      await get(host, HOST_ROUTES.adminPeople, admin.token),
+    );
+    // The setup code created the first person, who is the owner; the seeded person is not.
+    expect(people.find((one) => one.id === admin.personId)?.owner).toBe(true);
+    expect(people.find((one) => one.id === person.personId)?.owner).toBe(false);
+  });
+
+  test('only the owner renames or edits an email; the owner can do both (RF-64)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+    const person = await createPerson(host, {});
+
+    // The setup person is the owner: both edits land in one write, the email normalized like
+    // everywhere else (SP01 §2).
+    const renamed = await patch(
+      host,
+      `${HOST_ROUTES.adminPeople}/${person.personId}`,
+      { name: 'Robert', email: '  Bob@Nod.Test ' },
+      admin.token,
+    );
+    expect(renamed.status).toBe(200);
+    expect(await body(renamed)).toMatchObject({
+      id: person.personId,
+      name: 'Robert',
+      email: 'bob@nod.test',
+    });
+
+    // A second admin keeps the admin-level writes (roles, disabled) but not name, email or delete.
+    const carol = await createPerson(host, { email: 'carol@nod.test', name: 'Carol', roles: ['admin'] });
+    const second = await activate(host, 'carol@nod.test', carol.code);
+    const roles = await patch(
+      host,
+      `${HOST_ROUTES.adminPeople}/${person.personId}`,
+      { roles: [] },
+      second.token,
+    );
+    expect(roles.status).toBe(200);
+    for (const edit of [{ name: 'Zed' }, { email: 'zed@nod.test' }]) {
+      const refused = await patch(
+        host,
+        `${HOST_ROUTES.adminPeople}/${person.personId}`,
+        edit,
+        second.token,
+      );
+      expect(refused.status).toBe(403);
+      expect(await body<ErrorResponse>(refused)).toEqual({ error: 'owner only' });
+    }
+    const refusedDelete = await remove(
+      host,
+      `${HOST_ROUTES.adminPeople}/${person.personId}`,
+      second.token,
+    );
+    expect(refusedDelete.status).toBe(403);
+    expect(await body<ErrorResponse>(refusedDelete)).toEqual({ error: 'owner only' });
+    // The refusals wrote nothing.
+    const listed = await body<Array<{ id: string; name: string }>>(
+      await get(host, HOST_ROUTES.adminPeople, admin.token),
+    );
+    expect(listed.find((one) => one.id === person.personId)?.name).toBe('Robert');
+  });
+
+  test('a second admin cannot strip the owner`s admin role, and the owner keeps it through a role edit (RF-64)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+    await put(host, '/v1/admin/roles/team', { name: 'Team', admin: false }, admin.token);
+    const carol = await createPerson(host, { email: 'carol@nod.test', name: 'Carol', roles: ['admin'] });
+    const second = await activate(host, 'carol@nod.test', carol.code);
+
+    // The second admin leaving the owner only a non-admin role is refused: an admin cannot take the
+    // guild from the owner (RF-64).
+    const stripped = await patch(
+      host,
+      `${HOST_ROUTES.adminPeople}/${admin.personId}`,
+      { roles: ['team'] },
+      second.token,
+    );
+    expect(stripped.status).toBe(403);
+    expect(await body<ErrorResponse>(stripped)).toEqual({ error: 'the owner keeps an admin role' });
+
+    // The same edit by the owner, keeping `admin` while gaining a non-admin role, is a plain 200...
+    const gained = await patch(
+      host,
+      `${HOST_ROUTES.adminPeople}/${admin.personId}`,
+      { roles: ['admin', 'team'] },
+      admin.token,
+    );
+    expect(gained.status).toBe(200);
+    expect(await body(gained)).toMatchObject({ id: admin.personId, roles: ['admin', 'team'], admin: true });
+
+    // ...and so is losing that non-admin role again; the admin role stays throughout.
+    const lost = await patch(
+      host,
+      `${HOST_ROUTES.adminPeople}/${admin.personId}`,
+      { roles: ['admin'] },
+      admin.token,
+    );
+    expect(lost.status).toBe(200);
+    expect(await body(lost)).toMatchObject({ roles: ['admin'], admin: true });
+  });
+
+  test('an email another person holds is 409 email taken (RF-64)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+    const person = await createPerson(host, {});
+
+    const taken = await patch(
+      host,
+      `${HOST_ROUTES.adminPeople}/${person.personId}`,
+      { email: ADMIN_EMAIL },
+      admin.token,
+    );
+    expect(taken.status).toBe(409);
+    expect(await body<ErrorResponse>(taken)).toEqual({ error: 'email taken' });
+
+    // The refusal rolled back: the person keeps their email.
+    const listed = await body<Array<{ id: string; email: string }>>(
+      await get(host, HOST_ROUTES.adminPeople, admin.token),
+    );
+    expect(listed.find((one) => one.id === person.personId)?.email).toBe(MEMBER_EMAIL);
+  });
+
+  test('the owner deletes a person: sessions, keys and shares go and the owner logs it (RF-64)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+    const person = await createPerson(host, {});
+    const member = await activate(host, MEMBER_EMAIL, person.code);
+    expect((await personPing(host, member.token)).status).toBe(200);
+    // A key pair and an event, so the delete has rows beyond the person row to clear.
+    const sessionId = host.repo.sessionsOfPerson(person.personId, instant())[0].id;
+    host.repo.savePersonKeys(
+      person.personId,
+      { x25519Public: randomPublicKey(), ed25519Public: randomPublicKey() },
+      null,
+      instant(),
+    );
+    host.repo.addEvents(
+      person.personId,
+      sessionId,
+      [{ id: crypto.randomUUID(), at: instant(), kind: 'login' }],
+      instant(),
+    );
+
+    const deleted = await remove(host, `${HOST_ROUTES.adminPeople}/${person.personId}`, admin.token);
+    expect(deleted.status).toBe(204);
+
+    // Gone from the list, the token they held is dead, and their key pair is gone.
+    const people = await body<Array<{ id: string }>>(
+      await get(host, HOST_ROUTES.adminPeople, admin.token),
+    );
+    expect(people.map((one) => one.id)).toEqual([admin.personId]);
+    expect((await personPing(host, member.token)).status).toBe(401);
+    expect(
+      host.db.query('SELECT person_id FROM person_keys WHERE person_id = ?').all(person.personId),
+    ).toHaveLength(0);
+
+    // The guild log carries the delete in the owner's name and names the removed person — never as
+    // the event's own `person_id` (the row must reference a live person).
+    const events = await body<Array<{ kind: string; personId: string; detail: string | null }>>(
+      await get(host, HOST_ROUTES.adminEvents, admin.token),
+    );
+    const logged = events.find((event) => event.kind === 'person_deleted');
+    expect(logged?.personId).toBe(admin.personId);
+    expect(logged?.detail).toContain('Bob');
+    expect(logged?.detail).toContain(MEMBER_EMAIL);
+  });
+
+  test('the owner is never deleted, and an unknown id is 404 (RF-64)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+
+    const self = await remove(host, `${HOST_ROUTES.adminPeople}/${admin.personId}`, admin.token);
+    expect(self.status).toBe(403);
+    expect(await body<ErrorResponse>(self)).toEqual({ error: 'the owner cannot be deleted' });
+
+    const unknown = await remove(
+      host,
+      `${HOST_ROUTES.adminPeople}/${crypto.randomUUID()}`,
+      admin.token,
+    );
+    expect(unknown.status).toBe(404);
+    expect(await body<ErrorResponse>(unknown)).toEqual({ error: 'unknown person' });
   });
 });
 
@@ -485,7 +673,7 @@ describe('sessions', () => {
 // ---------------------------------------------------------------- roles and grants (SP03 §2)
 
 describe('roles and grants', () => {
-  test('PUT creates and updates a role; the last admin role cannot be demoted or removed', async () => {
+  test('PUT creates and updates a role; the owner`s admin role cannot be demoted or removed (RF-64)', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);
 
@@ -501,15 +689,18 @@ describe('roles and grants', () => {
     ]);
 
     const demote = await put(host, '/v1/admin/roles/admin', { name: 'admin', admin: false }, admin.token);
-    expect(demote.status).toBe(409);
-    expect(await body<ErrorResponse>(demote)).toEqual({ error: 'the last admin cannot be removed' });
+    expect(demote.status).toBe(403);
+    expect(await body<ErrorResponse>(demote)).toEqual({ error: 'the owner keeps an admin role' });
 
     const removed = await remove(host, '/v1/admin/roles/team', admin.token);
     expect(removed.status).toBe(204);
     expect(host.repo.listRoles().map((role) => role.id)).toEqual(['admin']);
 
+    // Deleting the role is the other way to strip the owner's admin: refused with the same 403, and
+    // the role stays (RF-64).
     const lastAdmin = await remove(host, '/v1/admin/roles/admin', admin.token);
-    expect(lastAdmin.status).toBe(409);
+    expect(lastAdmin.status).toBe(403);
+    expect(await body<ErrorResponse>(lastAdmin)).toEqual({ error: 'the owner keeps an admin role' });
     expect(host.repo.listRoles().map((role) => role.id)).toEqual(['admin']);
 
     const unknown = await remove(host, '/v1/admin/roles/ghost', admin.token);
@@ -973,6 +1164,10 @@ describe('access, validation and logs', () => {
       [
         'PATCH /v1/admin/people/:id',
         (token) => patch(host, `${HOST_ROUTES.adminPeople}/${person.personId}`, { name: 'Zed' }, token),
+      ],
+      [
+        'DELETE /v1/admin/people/:id',
+        (token) => remove(host, `${HOST_ROUTES.adminPeople}/${person.personId}`, token),
       ],
       [
         'POST /v1/admin/people/:id/code',

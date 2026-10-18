@@ -41,6 +41,29 @@ export const BOOTSTRAP_CLOSED = 'the guild already has org tools';
 /** SP03 §2's `404` on `POST /v1/admin/invites`: a role the guild does not have. */
 const UNKNOWN_ROLE = 'the guild has no such role';
 
+/**
+ * The invite routes' `404` when every role of the body exists: the host predates 0.5.0 and serves no
+ * `/v1/admin/invites` at all — the same plain `404 {"error":"not found"}` an unauthenticated caller
+ * gets. The Nod never reads a failing body (`backend/host-client.ts`), so it only knows whether the
+ * roles it sent are roles it listed from this host: all known ⇒ the route is missing (RF-64).
+ */
+export const HOST_TOO_OLD = 'this host does not serve invites yet — redeploy the host';
+
+/**
+ * The People screen's two writes on a host older than 0.5.3 (RF-64): that host has no owner concept,
+ * so none of `GET /v1/admin/people`'s rows carries a boolean `owner`, its `PATCH`/`DELETE
+ * /v1/admin/people/:id` do not exist (a plain `404`) and its events route refuses the local
+ * `person_updated`/`person_deleted` kinds with a `400`. The Nod refuses first, with a sentence the
+ * screen can show, so neither the write nor the event is ever attempted.
+ */
+export const HOST_TOO_OLD_PEOPLE = 'this host does not manage people yet — redeploy the host';
+
+/** The one refusal the People screen's two writes share: only the guild owner manages people. */
+const OWNER_ONLY = 'only the guild owner can do this';
+
+/** RF-64: the host's own sentence for the owner as a delete target, written on this side. */
+const OWNER_KEPT = 'the owner cannot be deleted';
+
 /** SP03 §1's `404` everywhere else. */
 const NOT_ON_HOST = 'not found on the host';
 
@@ -60,14 +83,30 @@ export interface HostAdmin {
   listPeople(): Promise<Person[]>;
   /** `PATCH /v1/admin/people/:id { roles }` → the stored person. */
   setRoles(personId: Id, roles: Id[]): Promise<Person>;
+  /**
+   * `PATCH /v1/admin/people/:id { name?, email? }` → the stored person (0.5.3, RF-64). Only the
+   * guild owner may rename or re-email: another admin is the host's own `403`, an email another
+   * person holds its `409`.
+   */
+  updatePerson(personId: Id, input: { name?: string; email?: string }): Promise<Person>;
+  /**
+   * `DELETE /v1/admin/people/:id` → `204` (0.5.3, RF-64). Owner only, and never the owner: either
+   * refusal is the host's own; a person it does not have is `NOT_ON_HOST`.
+   */
+  deletePerson(personId: Id): Promise<true>;
   /** `PATCH /v1/admin/people/:id { disabled: true }` → the person, `disabledAt` filled. */
   disable(personId: Id): Promise<Person>;
   /** `POST /v1/admin/people/:id/code` → a fresh code, the previous one revoked (SP02 §3). */
   issueCode(personId: Id): Promise<CodeResponse>;
   /** `GET /v1/admin/invites` → the guild's invites, newest first (0.5.0, RF-59). */
   listInvites(): Promise<GuildInvite[]>;
-  /** `POST /v1/admin/invites` → the invite and the one code of it, which is never returned again. */
-  createInvite(input: CreateInviteRequest): Promise<CreateInviteResponse>;
+  /**
+   * `POST /v1/admin/invites` → the invite and the one code of it, which is never returned again.
+   * `knownRoles` is this Nod's own list of the guild's role ids (RF-64): it separates the route's
+   * `404` for a role the guild does not have from the `404` of a host that serves no invite route
+   * at all (`HOST_TOO_OLD`).
+   */
+  createInvite(input: CreateInviteRequest, knownRoles: Id[]): Promise<CreateInviteResponse>;
   /** `DELETE /v1/admin/invites/:id` → `204`. A person who already joined keeps their account. */
   revokeInvite(id: Id): Promise<true>;
   /** O1/`GET /v1/admin/people/:id/sessions` → that person's devices and their instants (SP03 §2). */
@@ -95,6 +134,36 @@ export function hostAdminFor(connection: HostConnection | null): HostAdmin | nul
  */
 export function orgViewsOf(views: View[]): View[] {
   return views.filter((view) => view.scope !== 'personal');
+}
+
+/**
+ * 0.5.3 (RF-64): the People screen's two writes (`people.update`, `people.delete`) are the guild
+ * owner's alone, so both RPCs run this gate before they hand anything to the host.
+ *
+ * It reads `GET /v1/admin/people` first. A host older than 0.5.3 carries no boolean `owner` on any
+ * row: its person routes do not exist and its events route refuses the local kinds those writes
+ * record, so the Nod refuses with `HOST_TOO_OLD_PEOPLE` before a write or an event — the deployed
+ * host stays untouched and Activity sync is never jammed by a batch it would reject.
+ *
+ * On a 0.5.3 host, `actorId` is the unlocked person: only the row with `owner: true` may call. For
+ * `people.delete`, `targetId` is the row being removed — the owner may never be deleted, themselves
+ * included. Both are the host's own refusals (`403 owner only`, `403 the owner cannot be deleted`);
+ * checking here as well keeps the sentence the screen shows clear and stops the call before it is
+ * made.
+ */
+export async function ownerGate(
+  admin: HostAdmin,
+  actorId: Id,
+  targetId: Id | null = null,
+): Promise<void> {
+  const people = await admin.listPeople();
+  if (!people.some((person) => typeof person.owner === 'boolean')) {
+    throw new Error(HOST_TOO_OLD_PEOPLE);
+  }
+  if (people.find((person) => person.id === actorId)?.owner !== true) throw new Error(OWNER_ONLY);
+  if (targetId !== null && people.find((person) => person.id === targetId)?.owner === true) {
+    throw new Error(OWNER_KEPT);
+  }
 }
 
 export function createHostAdmin(connection: HostConnection): HostAdmin {
@@ -208,6 +277,35 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
       }
     },
 
+    /**
+     * 0.5.3 (RF-64): rename a person or change their email. Only the owner may — another admin's
+     * `403 owner only` and a taken email's `409 email taken` are the host's own refusals, kept as
+     * they are because the People screen shows them; a person the guild does not have is `NOT_ON_HOST`.
+     */
+    async updatePerson(personId, input) {
+      try {
+        return await connection.request<AdminPerson>('PATCH', path(HOST_ROUTES.adminPerson, personId), input);
+      } catch (error) {
+        if (error instanceof HostError && error.status === 404) throw new Error(NOT_ON_HOST);
+        throw error;
+      }
+    },
+
+    /**
+     * 0.5.3 (RF-64): remove a person from the guild, a hard delete on the host's side. `403 owner
+     * only` (a non-owner admin), `403` for deleting the owner or self and the last-admin `409` all
+     * keep the host's own refusal; only `404` becomes this side's sentence.
+     */
+    async deletePerson(personId) {
+      try {
+        await connection.request<void>('DELETE', path(HOST_ROUTES.adminPerson, personId));
+      } catch (error) {
+        if (error instanceof HostError && error.status === 404) throw new Error(NOT_ON_HOST);
+        throw error;
+      }
+      return true;
+    },
+
     async issueCode(personId) {
       try {
         return await connection.request<CodeResponse>('POST', path(HOST_ROUTES.adminPersonCode, personId));
@@ -221,18 +319,36 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
      * 0.5.0 (RF-59): the guild's invites. `GET` answers revoked ones too (the admin list shows their
      * state); `POST` answers the code exactly once — the host stores its hash and nothing else; and
      * `DELETE` sets `revoked_at` on the host, which is idempotent there.
+     *
+     * A `404` on the `GET` is not "no invites": this Nod sends no id and no role, so an authenticated
+     * `404` means the route itself is absent — the host predates 0.5.0 (RF-64). It keeps `HOST_TOO_OLD`
+     * so the Settings screen learns why; the tab load is what decides to show that as a note rather
+     * than blank the page (`src/settings.ts`).
      */
     async listInvites() {
-      return await connection.request<GuildInvite[]>('GET', HOST_ROUTES.adminInvites);
+      try {
+        return await connection.request<GuildInvite[]>('GET', HOST_ROUTES.adminInvites);
+      } catch (error) {
+        if (error instanceof HostError && error.status === 404) throw new Error(HOST_TOO_OLD);
+        throw error;
+      }
     },
 
-    async createInvite(input) {
+    /**
+     * 0.5.3 (RF-64): `knownRoles` is what this Nod listed of the guild (`rolesOf()`), the only thing
+     * that separates the two meanings of the route's `404` — a role the guild does not have
+     * (`UNKNOWN_ROLE`) from a host whose `/v1/admin/invites` does not exist at all (`HOST_TOO_OLD`).
+     * A `400` (an out-of-range `maxUses` or `expiresInMinutes`) is not something this Nod sends, so
+     * it stays the host's own refusal.
+     */
+    async createInvite(input, knownRoles) {
       try {
         return await connection.request<CreateInviteResponse>('POST', HOST_ROUTES.adminInvites, input);
       } catch (error) {
-        // SP03 §1: the roles of the body must exist on the host; a `400` (an out-of-range `maxUses`
-        // or `expiresInMinutes`) is not something this Nod sends, so it stays the host's own refusal.
-        if (error instanceof HostError && error.status === 404) throw new Error(UNKNOWN_ROLE);
+        if (error instanceof HostError && error.status === 404) {
+          const known = new Set(knownRoles);
+          throw new Error(input.roles.some((role) => !known.has(role)) ? UNKNOWN_ROLE : HOST_TOO_OLD);
+        }
         throw error;
       }
     },

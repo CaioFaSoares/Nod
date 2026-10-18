@@ -117,6 +117,11 @@ export interface Person {
    */
   activatedAt?: string | null;
   disabledAt?: string | null;
+  /**
+   * 0.5.3 (RF-64): connected mode only — `true` for the guild owner, the person the setup code
+   * created (SP03 §2 `AdminPerson.owner`). Absent in local mode and from a host older than 0.5.3.
+   */
+  owner?: boolean;
 }
 
 export interface PasswordHash {
@@ -273,6 +278,13 @@ export type EventType =
   | 'roles_changed'
   | 'invite_issued'
   | 'access_revoked'
+  /**
+   * 0.5.3 (RF-64): the guild owner edits a person's name or email (`people.update`), and the local
+   * event that records the hard delete of a person (`people.delete`) — both carry the id, never a
+   * secret; `person_deleted`'s detail names the removed person's name and email.
+   */
+  | 'person_updated'
+  | 'person_deleted'
   | 'update'
   /**
    * SP04 §4: the Sync loop's own event — the host refused an outbox write for good (`4xx`, `409`
@@ -840,6 +852,16 @@ export interface ApiContract {
 
   'people.list': [void, Person[]];
   'people.setRoles': [{ personId: Id; roles: Id[] }, Person];
+  /**
+   * 0.5.3 (RF-64), connected only: the guild owner renames a person or changes their email
+   * (`PATCH /v1/admin/people/:id { name?, email? }`). Another admin is the host's `403 owner only`.
+   */
+  'people.update': [{ personId: Id; name?: string; email?: string }, Person];
+  /**
+   * 0.5.3 (RF-64), connected only: the guild owner removes a person from the guild
+   * (`DELETE /v1/admin/people/:id`). Nobody removes the owner.
+   */
+  'people.delete': [{ personId: Id }, true];
   /**
    * Local mode: revokes the person and, with `deleteCredentials`, their local credentials (RF-16).
    * Connected (SP05 §3): disables the person on the host (`disabledAt`), which revokes every session

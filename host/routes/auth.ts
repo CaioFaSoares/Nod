@@ -202,6 +202,9 @@ export const authRoutes = new Elysia({ name: 'host-auth-routes' })
         { id: crypto.randomUUID(), email, name: ctx.body.name, roles: [ADMIN_ROLE] },
         now,
       );
+      // RF-64: the setup code always creates the guild owner, so the id is stored in the very
+      // transaction that creates the first admin — the two can never drift (SP01 §2, SP02 §3).
+      repo.setOwner(person.id);
       repo.activatePerson(person.id, { salt: ctx.body.salt, authHash }, now);
       insertSession(repo, person.id, ctx.body.device, tokenHash, now);
       return { token, personId: person.id };

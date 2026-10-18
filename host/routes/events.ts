@@ -51,6 +51,10 @@ const KIND_SET: Readonly<Record<EventType, true>> = {
   seed_applied: true,
   grant_changed: true,
   roles_changed: true,
+  // 0.5.3 (RF-64): the Nod's local events for `people.update` and `people.delete`, pushed through
+  // this route; the host's own `person_deleted` is written directly by the admin route.
+  person_updated: true,
+  person_deleted: true,
   invite_issued: true,
   access_revoked: true,
   update: true,

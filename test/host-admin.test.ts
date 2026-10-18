@@ -18,8 +18,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createHostAdmin, hostAdminFor, type HostAdmin } from '../backend/host-admin';
-import { createHostClient, hostTokenKey, type HostClient, type HostConnection } from '../backend/host-client';
+import { createHostAdmin, HOST_TOO_OLD, HOST_TOO_OLD_PEOPLE, hostAdminFor, ownerGate, type HostAdmin } from '../backend/host-admin';
+import {
+  createHostClient,
+  HostError,
+  hostTokenKey,
+  type HostClient,
+  type HostConnection,
+} from '../backend/host-client';
 import { createConnectedCatalog } from '../backend/connected-catalog';
 import { createRepo as createNodRepo } from '../backend/repo';
 import { createSession, type Session } from '../backend/session';
@@ -35,7 +41,7 @@ import {
   type TokenResponse,
 } from '../shared/host-api';
 import type { Device } from '../shared/host-api';
-import type { Entry, HostState, Id, Role, SecretStore } from '../shared/types';
+import type { Entry, HostState, Id, Person, Role, SecretStore } from '../shared/types';
 import { createApp } from '../host/app';
 import { createRepo as createHostRepo, type Repo } from '../host/repo';
 import { issueSetupCode } from '../host/cli/setup-code';
@@ -271,7 +277,10 @@ async function member(
   admin: HostAdmin,
   input: { email: string; name: string; roles: Id[] },
 ): Promise<Activated> {
-  const created = await admin.createInvite({ roles: input.roles, maxUses: 1, expiresInMinutes: 60 });
+  const created = await admin.createInvite(
+    { roles: input.roles, maxUses: 1, expiresInMinutes: 60 },
+    input.roles,
+  );
   return await joinViaInvite(running, { email: input.email, name: input.name, code: created.code });
 }
 
@@ -384,7 +393,10 @@ describe('the People tab and the guild invites (SP05 §4, 0.5.0 RF-59)', () => {
     await admin.saveRole({ id: 'team', name: 'Team', admin: false });
 
     const before = Date.now();
-    const invited = await admin.createInvite({ roles: ['team'], maxUses: 1, expiresInMinutes: 60 });
+    const invited = await admin.createInvite(
+      { roles: ['team'], maxUses: 1, expiresInMinutes: 60 },
+      ['team'],
+    );
     // The invite code is the long kind: six groups of four (SP02 §3).
     expect(invited.code).toMatch(/^[0-9A-Z]{4}(-[0-9A-Z]{4}){5}$/);
     expect(invited.invite).toMatchObject({ roles: ['team'], maxUses: 1, uses: 0, revokedAt: null });
@@ -426,7 +438,7 @@ describe('the People tab and the guild invites (SP05 §4, 0.5.0 RF-59)', () => {
     // The roles toggle, the revoke, and the list that shows a revoked invite with its state.
     const updated = await admin.setRoles(bob.id, ['team']);
     expect(updated.roles).toEqual(['team']);
-    const created = await admin.createInvite({ roles: [], maxUses: null, expiresInMinutes: null });
+    const created = await admin.createInvite({ roles: [], maxUses: null, expiresInMinutes: null }, []);
     expect(await admin.revokeInvite(created.invite.id)).toBe(true);
     expect((await admin.listInvites()).find((invite) => invite.id === created.invite.id)).toMatchObject({
       revokedAt: expect.any(String),
@@ -446,14 +458,163 @@ describe('the People tab and the guild invites (SP05 §4, 0.5.0 RF-59)', () => {
     const running = await startHost();
     const { admin } = await adminOf(running);
 
-    await expect(admin.createInvite({ roles: ['ghost'], maxUses: null, expiresInMinutes: null })).rejects.toThrow(
-      'the guild has no such role',
-    );
+    await expect(
+      admin.createInvite({ roles: ['ghost'], maxUses: null, expiresInMinutes: null }, []),
+    ).rejects.toThrow('the guild has no such role');
     await expect(admin.revokeInvite('nobody')).rejects.toThrow('not found on the host');
     await expect(admin.issueCode('nobody')).rejects.toThrow('not found on the host');
     // Nothing of the refused writes landed: the guild holds the one admin it started with.
     expect(await admin.listPeople()).toHaveLength(1);
     expect(await admin.listInvites()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------- an old host (RF-64)
+
+/**
+ * A connection whose `request` records the call and answers the scripted failure — the plain
+ * `404 {"error":"not found"}` an old host's missing route produces, which the real host of this file
+ * (every route present) cannot.
+ */
+function scripted(status: number): {
+  sent: { method: string; path: string; body: unknown }[];
+  admin: HostAdmin;
+} {
+  const sent: { method: string; path: string; body: unknown }[] = [];
+  const connection = {
+    request: async (method: string, path: string, body?: unknown) => {
+      sent.push({ method, path, body });
+      throw new HostError('refused', 'refused', status);
+    },
+  } as unknown as HostConnection;
+  return { sent, admin: createHostAdmin(connection) };
+}
+
+/**
+ * A connection whose `GET /v1/admin/people` answers `people` and whose write methods record what
+ * they were handed — so a test can prove the gate refused before a `PATCH`/`DELETE` went out. A write
+ * reaching this connection is a bug in the caller, so it throws.
+ */
+function peopleConnection(people: Person[]): {
+  sent: { method: string; path: string; body: unknown }[];
+  admin: HostAdmin;
+} {
+  const sent: { method: string; path: string; body: unknown }[] = [];
+  const connection = {
+    request: async (method: string, path: string, body?: unknown) => {
+      sent.push({ method, path, body });
+      if (method === 'GET' && path === HOST_ROUTES.adminPeople) return people;
+      throw new Error('no write expected');
+    },
+  } as unknown as HostConnection;
+  return { sent, admin: createHostAdmin(connection) };
+}
+
+describe('an old host and the owner-only people writes (0.5.3, RF-64)', () => {
+  test('the invite routes tell a missing route from a missing role', async () => {
+    const { admin } = scripted(404);
+
+    // Every role is known, or none was sent: the `404` is the route itself — the deployed host
+    // predates 0.5.0 — not a role id this Nod mistyped.
+    await expect(
+      admin.createInvite({ roles: ['team'], maxUses: null, expiresInMinutes: null }, ['team', 'admin']),
+    ).rejects.toThrow(HOST_TOO_OLD);
+    await expect(
+      admin.createInvite({ roles: [], maxUses: null, expiresInMinutes: null }, ['team']),
+    ).rejects.toThrow(HOST_TOO_OLD);
+    // A role this Nod did not list stays the role's own message.
+    await expect(
+      admin.createInvite({ roles: ['ghost'], maxUses: null, expiresInMinutes: null }, ['team']),
+    ).rejects.toThrow('the guild has no such role');
+    // The list carries no role to blame: a 404 on it is always the missing route.
+    await expect(admin.listInvites()).rejects.toThrow(HOST_TOO_OLD);
+  });
+
+  test('updatePerson PATCHes the person route with the changed fields, and maps 404', async () => {
+    const sent: { method: string; path: string; body: unknown }[] = [];
+    const connection = {
+      request: async (method: string, path: string, body?: unknown) => {
+        sent.push({ method, path, body });
+        return { id: 'p1', name: 'Bea' };
+      },
+    } as unknown as HostConnection;
+    const admin = createHostAdmin(connection);
+
+    const updated = await admin.updatePerson('p1', { name: 'Bea', email: 'bea@nod.test' });
+
+    expect(updated.name).toBe('Bea');
+    expect(sent).toEqual([
+      {
+        method: 'PATCH',
+        path: `${HOST_ROUTES.adminPeople}/p1`,
+        body: { name: 'Bea', email: 'bea@nod.test' },
+      },
+    ]);
+    await expect(scripted(404).admin.updatePerson('nobody', { name: 'X' })).rejects.toThrow(
+      'not found on the host',
+    );
+  });
+
+  test('deletePerson DELETEs the person route and maps 404', async () => {
+    const sent: { method: string; path: string; body: unknown }[] = [];
+    const connection = {
+      request: async (method: string, path: string, body?: unknown) => {
+        sent.push({ method, path, body });
+        return undefined;
+      },
+    } as unknown as HostConnection;
+    const admin = createHostAdmin(connection);
+
+    await expect(admin.deletePerson('p2')).resolves.toBe(true);
+    expect(sent).toEqual([
+      { method: 'DELETE', path: `${HOST_ROUTES.adminPeople}/p2`, body: undefined },
+    ]);
+    await expect(scripted(404).admin.deletePerson('nobody')).rejects.toThrow('not found on the host');
+  });
+
+  // RF-64: `ownerGate` is what `backend/main.ts`'s `people.update`/`people.delete` run first, so both
+  // the write and the local `person_updated`/`person_deleted` event are stopped before either leaves.
+
+  test('a host with no owner column refuses both writes before any of them is sent', async () => {
+    const { sent, admin } = peopleConnection([
+      { id: 'p1', email: 'bea@nod.test', name: 'Bea', roles: [], admin: false, createdAt: AT },
+    ]);
+
+    await expect(ownerGate(admin, 'p1')).rejects.toThrow(HOST_TOO_OLD_PEOPLE);
+    await expect(ownerGate(admin, 'p1', 'p1')).rejects.toThrow(HOST_TOO_OLD_PEOPLE);
+
+    expect(sent).toEqual([
+      { method: 'GET', path: HOST_ROUTES.adminPeople, body: undefined },
+      { method: 'GET', path: HOST_ROUTES.adminPeople, body: undefined },
+    ]);
+  });
+
+  test('a caller who is not the guild owner is refused, nothing sent', async () => {
+    const owner: Person = {
+      id: 'owner', email: 'owner@nod.test', name: 'Owner', roles: [], admin: true, createdAt: AT, owner: true,
+    };
+    const other: Person = {
+      id: 'admin', email: 'admin@nod.test', name: 'Admin', roles: [], admin: true, createdAt: AT, owner: false,
+    };
+    const { sent, admin } = peopleConnection([owner, other]);
+
+    await expect(ownerGate(admin, other.id)).rejects.toThrow('only the guild owner can do this');
+    await expect(ownerGate(admin, 'nobody')).rejects.toThrow('only the guild owner can do this');
+
+    expect(sent.map((call) => call.method)).toEqual(['GET', 'GET']);
+  });
+
+  test('the owner is refused as the delete target, before the DELETE', async () => {
+    const owner: Person = {
+      id: 'owner', email: 'owner@nod.test', name: 'Owner', roles: [], admin: true, createdAt: AT, owner: true,
+    };
+    const other: Person = {
+      id: 'admin', email: 'admin@nod.test', name: 'Admin', roles: [], admin: true, createdAt: AT, owner: false,
+    };
+    const { sent, admin } = peopleConnection([owner, other]);
+
+    await expect(ownerGate(admin, owner.id, owner.id)).rejects.toThrow('the owner cannot be deleted');
+    expect(sent.map((call) => call.method)).toEqual(['GET']);
   });
 });
 

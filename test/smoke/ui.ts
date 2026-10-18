@@ -1,4 +1,4 @@
-// Real-page UI smoke of Nod (story checks #24, #25, #27–#38).
+// Real-page UI smoke of Nod (story checks #24, #25, #27–#38, and the RF-64 owner steps).
 //
 //   bun test/smoke/ui.ts            # refuses when resources/seed.json exists
 //   bun test/smoke/ui.ts --force    # moves the private seed to test/smoke/.gerado/seed.json.bak
@@ -12,7 +12,8 @@
 //
 // One host process, four app ids: the admin (launched three times), the person P (twice), and two
 // Nods of their own — #37's invite joiner and #38's seed importer, one launch each. The second
-// member Q and P's second machine are headless (`test/smoke/headless.ts`): Bun calls to the host,
+// member Q, the throwaway member the owner renames and deletes (RF-64) and P's second machine are
+// headless (`test/smoke/headless.ts`): Bun calls to the host,
 // run beside the GUI launch they don't depend on. The host's data dir is the only state that carries
 // between stages; the GUI launches stay sequential because they share `tinyjs.json` and
 // `resources/seed.json` at the project root.
@@ -67,10 +68,13 @@ const ADMIN_EMAIL = 'admin@ui.test';
 const PERSON_EMAIL = 'person@ui.test';
 const OTHER_EMAIL = 'other@ui.test';
 const THIRD_EMAIL = 'third@ui.test';
+/** RF-64 (0.5.3): the throwaway member the owner renames and deletes — a person of their own. */
+const EXTRA_EMAIL = 'extra@ui.test';
 const ADMIN_NAME = 'Smoke Admin';
 const PERSON_NAME = 'Smoke Person';
 const OTHER_NAME = 'Smoke Other';
 const THIRD_NAME = 'Smoke Third';
+const EXTRA_NAME = 'Smoke Extra';
 const GUILD_NAME = 'UI Smoke Guild';
 
 /**
@@ -182,7 +186,8 @@ interface Stage {
 }
 
 /**
- * The order is the data dependency through the host: Q needs the admin's invite, the admin's work
+ * The order is the data dependency through the host: Q needs the admin's invite (and so does the
+ * throwaway member of RF-64, created in the same headless step), the admin's work
  * needs P and Q pinned, Q's accept needs the admin's share, and P's re-key comes after P accepted
  * with the old pair (and before the admin reads the changed key).
  */
@@ -193,7 +198,7 @@ function stages(desk: Desk, address: string): Stage[] {
     {
       gui: { name: 'person-join', appId: PERSON_APP_ID },
       headless: {
-        name: 'setup: the second member joined (headless)',
+        name: 'setup: the second and throwaway members joined (headless)',
         run: async () => {
           other = await joinWithInvite(address, {
             email: OTHER_EMAIL,
@@ -201,7 +206,16 @@ function stages(desk: Desk, address: string): Stage[] {
             password: PASSWORD,
             code: desk.code('other'),
           });
-          return 'Q is a member with keys';
+          // RF-64: the throwaway member the owner renames and deletes on the People tab. They join
+          // the way Q does — a guild invite the admin created, redeemed headlessly — so the steps
+          // never touch P or Q, whose names the later checks read.
+          await joinWithInvite(address, {
+            email: EXTRA_EMAIL,
+            name: EXTRA_NAME,
+            password: PASSWORD,
+            code: desk.code('extra'),
+          });
+          return 'Q and the throwaway member are members with keys';
         },
       },
     },
@@ -306,10 +320,12 @@ function generatePage(
     personEmail: PERSON_EMAIL,
     otherEmail: OTHER_EMAIL,
     thirdEmail: THIRD_EMAIL,
+    extraEmail: EXTRA_EMAIL,
     adminName: ADMIN_NAME,
     personName: PERSON_NAME,
     otherName: OTHER_NAME,
     thirdName: THIRD_NAME,
+    extraName: EXTRA_NAME,
     guildName: GUILD_NAME,
     iconPng: extras.iconPng,
     seedPath: extras.seedPath,
@@ -351,9 +367,10 @@ interface Desk {
    * A code the admin's page handed over; throws when it never arrived. `third` holds the whole
    * `nod://join` link of #37's invite (address, fingerprint and code) — the person pastes a link,
    * and the check must not rebuild one of its own. `import` is set by this runner: the code of #38's
-   * own seed file, which no page ever sees until the check reads it here.
+   * own seed file, which no page ever sees until the check reads it here. `extra` is RF-64's invite:
+   * a member the owner renames and deletes, so no later check's names change.
    */
-  code(who: 'person' | 'other' | 'person2' | 'third' | 'import'): string;
+  code(who: 'person' | 'other' | 'person2' | 'third' | 'import' | 'extra'): string;
   stop(): void;
 }
 
@@ -381,7 +398,7 @@ function startDesk(deps: {
   importCode: string;
   host: HostControl;
 }): Desk {
-  const codes: Partial<Record<'person' | 'other' | 'person2' | 'third' | 'import', string>> = {
+  const codes: Partial<Record<'person' | 'other' | 'person2' | 'third' | 'import' | 'extra', string>> = {
     import: deps.importCode,
   };
   const server = Bun.serve({
@@ -397,7 +414,12 @@ function startDesk(deps: {
         if (typeof body !== 'object' || body === null) return deskJson({ ok: false, error: 'bad body' }, 400);
         const { who, code } = body as { who?: unknown; code?: unknown };
         if (
-          (who !== 'person' && who !== 'other' && who !== 'person2' && who !== 'third' && who !== 'import') ||
+          (who !== 'person' &&
+            who !== 'other' &&
+            who !== 'person2' &&
+            who !== 'third' &&
+            who !== 'import' &&
+            who !== 'extra') ||
           typeof code !== 'string' ||
           code.length === 0
         ) {
@@ -409,7 +431,12 @@ function startDesk(deps: {
       if (url.pathname === '/desk/code' && req.method === 'GET') {
         const who = url.searchParams.get('who') ?? '';
         const known =
-          who === 'person' || who === 'other' || who === 'person2' || who === 'third' || who === 'import'
+          who === 'person' ||
+          who === 'other' ||
+          who === 'person2' ||
+          who === 'third' ||
+          who === 'import' ||
+          who === 'extra'
             ? codes[who]
             : null;
         return deskJson({ ok: true, code: known ?? null });

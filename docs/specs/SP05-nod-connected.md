@@ -11,7 +11,7 @@ still hold: secrets only in the keychain, the page only calls `src/api.ts`, the 
 | --- | --- |
 | `shared/auth.ts` | `deriveKeys`, `PasswordHashV2` (SP02 §1, §6) |
 | `shared/host-api.ts` (new) | Types of SP03/SP04: `Discovery`, `Snapshot`, request/response bodies; **and** the code helpers — `CODE_ALPHABET`, `CODE_BYTES`, `CODE_LENGTH`, `generateCode`, `formatCode`, `normalizeCode`, `validateCode`, `normalizeEmail` (SP02 §3). They landed here, not in `shared/auth.ts` (c1); `shared/auth.ts` keeps the derivation. |
-| `shared/types.ts` | `Entry.scope/ownerId`, `View.id/scope/ownerId`, `HostState`, `AppIconChoice`/`AppIconState`, new `ApiContract` methods (§3) |
+| `shared/types.ts` | `Entry.scope/ownerId`, `View.id/scope/ownerId`, `HostState`, `AppIconChoice`/`AppIconState`, `Person.owner` (RF-64), new `ApiContract` methods (§3) |
 | `shared/host-merge.ts` (new) | Pure: snapshot → local rows (RF-62's `Entry.category`); sidebar order (favorites, org grouped by category, personal); outbox replay decisions; `leftoverLocalTools` (RF-40) |
 | `shared/seal.ts` (new) | The E02 seal: X25519 + HKDF (over HMAC) + AES-256-GCM, Ed25519 sign/verify, `personFingerprint` (SP06 §1–§3) |
 | `shared/version.ts` (new) | `compareVersions`: the semver comparison of the O2 gate (SP04 §1) |
@@ -126,6 +126,7 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
 | `favorites.list` / `favorites.set` | `— / { ids }` | `Id[]` / `true` | unlocked (block 2); the read is B7's addition beside the write |
 | `session.disableBiometric` | — | `SessionState` | unlocked (V1); the delete path of SP02 §9 |
 | `people.sessions` / `people.revokeSession` | `{ personId }` / `{ id }` | `DeviceSession[] / true` | unlocked, admin (O1); the admin's side of the session list |
+| `people.update` / `people.delete` | `{ personId, name?, email? }` / `{ personId }` | `Person` / `true` | unlocked, admin, connected (RF-64, 0.5.3); like `people.setRoles`, both refuse in local mode (`Nod is not connected to a host`) and while this Nod is older than the guild's `minAppVersion`; `update` sends `PATCH /v1/admin/people/:id` and `delete` sends `DELETE` there (SP03 §2), the host owning the owner-only `403 owner only`, the `409 email taken` and the `403 the owner cannot be deleted`; both first read `GET /v1/admin/people` (`ownerGate`, `backend/host-admin.ts`) and refuse before any write or local `person_updated`/`person_deleted` event — `HOST_TOO_OLD_PEOPLE` when no row carries a boolean `owner` (a host older than 0.5.3, whose events route would reject that kind), `only the guild owner can do this` when the caller is not the owner's row, and, for `delete`, `the owner cannot be deleted` when the owner is the target |
 | `host.localLeftovers` / `host.adoptLocalAsPersonal` | `— / { ids }` | `Entry[] / { created: number }` | unlocked (B8b, RF-40); the leftover offer on Add host and the adoption |
 | `keys.mine` / `peers.list` / `peers.confirm` | `— / — / { personId }` | `MineKeys` (`{ fingerprint: string \| null, status: 'ok' \| 'pending' \| 'unavailable', message: string \| null }`) / `PeerKey[]` / `true` | unlocked (K1–K2); the fingerprint card and the pin table, `confirm` promoting a `changed` peer |
 | `vault.copy` / `vault.setScope` | `{ toolId, password? }` / `{ toolId, scope }` | `true` / `VaultItem` | unlocked (K4–K7); `copy` behind the K5 gate, `setScope` the owner's sharing scope |
@@ -202,7 +203,8 @@ ALTER TABLE vault_item ADD COLUMN scope TEXT NOT NULL DEFAULT 'role';
 - **Home** (RF-62): the same order, one section per category with an `h2` and "Other tools" for the
   unfiled org tools; with no category in the catalog it stays the single grid it always was.
 - **Admin tabs**, when connected:
-  - People: email, name, roles; "New access code" shows the code once with a copy button.
+  - People: email, name, roles; an **Owner** badge marks the guild owner's row, and the guild owner gets **Edit** (rename, change email) and **Delete** on every other row — the owner's own row offers neither, and another admin sees no Edit or Delete at all (RF-64, `people.update`/`people.delete`). "New access code" shows the code once with a copy button.
+  - Invites: the guild-invite card (create, list, revoke, RF-59). Against a host that predates 0.5.0 the card shows the old-host message (`HOST_TOO_OLD`, "this host does not serve invites yet — redeploy the host") as a note on the card instead of blanking the page (`backend/host-admin.ts`, `src/settings.ts`).
   - Tools, Roles, Activity: same screens, host data.
 - **Settings → Vault** (block 2): the sharing inbox with Accept/Decline, the scope select (owner
   only, Send hidden for `blocked`), Reveal behind the gate with a 10 s countdown, Copy (the secret
