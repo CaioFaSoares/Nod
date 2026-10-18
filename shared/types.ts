@@ -144,13 +144,21 @@ export interface Invite {
 
 // ---------------------------------------------------------------- vault
 
+/**
+ * One credential in a person's vault. 0.5.5 (RF-65): a tool may hold several — `id` is the
+ * credential's local handle, every `vault.*`, `shares.*` and `assignments.set` call names it as
+ * `itemId`, and `isDefault` marks the one the login cascade fills with.
+ */
 export interface VaultItem {
   id: Id;
   personId: Id;
   toolId: Id;
   label: string;
   username: string;
-  /** key of the item in the OS keychain: nod.cred.<person>.<tool> */
+  /**
+   * Key of the sealed value (RF-63's `secret` table): `nod.cred.<person>.<tool>` for an item made
+   * before 0.5.5, `nod.cred.<person>.<tool>.<id>` for every later one. Stored per row, never derived.
+   */
   keychainKey: string;
   createdAt: string;
   updatedAt: string;
@@ -174,6 +182,11 @@ export interface VaultItem {
    * on the item `vault.save` answered; absent (undefined) from every list and read.
    */
   updateWarning?: string | null;
+  /**
+   * 0.5.5 (RF-65): the credential of this tool the login cascade fills with. Exactly one item per
+   * (person, tool) carries it; the first item of a tool gets it, and `vault.setDefault` moves it.
+   */
+  isDefault: boolean;
 }
 
 /**
@@ -879,24 +892,32 @@ export interface ApiContract {
   'invites.issue': [{ roles: Id[]; days?: number; personId?: Id }, { code: string; expiresAt: string }];
 
   'vault.list': [void, VaultItem[]];
-  'vault.save': [{ toolId: Id; username: string; secret: string; label?: string }, VaultItem];
+  /**
+   * 0.5.5 (RF-65): without `itemId` a new credential is added to the tool, beside the ones it already
+   * has; with `itemId` that credential is replaced (its `toolId` must match). `label` tells the
+   * credentials of one tool apart and defaults to the username.
+   */
+  'vault.save': [{ itemId?: Id; toolId: Id; username: string; secret: string; label?: string }, VaultItem];
+  /** 0.5.5 (RF-65): makes this credential the one its tool fills with. Not gated: nothing is shown. */
+  'vault.setDefault': [{ itemId: Id }, VaultItem];
   /**
    * K5/SP02 §9, SP06 §4: the gate is the backend's — biometrics when this machine has them, the
    * person's password in `password` otherwise. Without either the call fails, which is why the page
    * may pass a password and never sees one come back.
    */
-  'vault.reveal': [{ toolId: Id; password?: string }, { username: string; secret: string }];
+  'vault.reveal': [{ itemId: Id; password?: string }, { username: string; secret: string }];
   /**
    * K5: the same gate, with the secret going to the clipboard through the runtime instead of to the
    * page: nothing of it is returned, so a copy can never leave it in the DOM or in a variable.
    */
-  'vault.copy': [{ toolId: Id; password?: string }, true];
+  'vault.copy': [{ itemId: Id; password?: string }, true];
   /**
    * K6/SP06 §5: the sharing scope of one credential, set by its owner (or by the admin for an
    * assignment). Not gated: nothing secret is shown to change it.
    */
-  'vault.setScope': [{ toolId: Id; scope: ShareScope }, VaultItem];
-  'vault.remove': [{ toolId: Id }, true];
+  'vault.setScope': [{ itemId: Id; scope: ShareScope }, VaultItem];
+  /** Removing the default hands the default to the oldest remaining credential of the tool. */
+  'vault.remove': [{ itemId: Id }, true];
   'vault.exportToFile': [{ password: string; path: string }, true];
   'vault.importFromFile': [{ password: string; path: string }, { items: number }];
 
@@ -904,9 +925,9 @@ export interface ApiContract {
    * K4/SP06 §5: everyone the scope of this credential could reach, each with the state of their key
    * and whether the scope allows them — what the send dialog lists. The host repeats the same check.
    */
-  'shares.recipients': [{ toolId: Id }, ShareRecipient[]];
+  'shares.recipients': [{ itemId: Id }, ShareRecipient[]];
   /** K4/SP06 §4: seals one copy per recipient and sends them. Gated (`password`), as `vault.reveal`. */
-  'shares.send': [{ toolId: Id; to: Id[]; password?: string }, { sent: number }];
+  'shares.send': [{ itemId: Id; to: Id[]; password?: string }, { sent: number }];
   /** K4: the open, unexpired shares addressed to me — metadata only, no sealed copy, no secret. */
   'shares.inbox': [void, InboxShare[]];
   /**
@@ -920,7 +941,7 @@ export interface ApiContract {
    * K9/SP06 §4: the owner (or an admin) revokes one holder; the host marks the credential rotation
    * pending until a new secret is saved. The answer is the item with its fresh `holders`.
    */
-  'shares.removeHolder': [{ toolId: Id; personId: Id }, VaultItem];
+  'shares.removeHolder': [{ itemId: Id; personId: Id }, VaultItem];
 
   /**
    * M7/SP06 §4, RF-54: the holders of every credential of the guild, as the verified snapshot
@@ -939,7 +960,7 @@ export interface ApiContract {
    * and skipped; a direct `personId` that reached nobody throws the key-state reason instead.
    */
   'assignments.set': [
-    { toolId: Id; roleId?: Id; personId?: Id; assigned: boolean; password?: string },
+    { itemId: Id; roleId?: Id; personId?: Id; assigned: boolean; password?: string },
     { sent: number; skipped: number },
   ];
   /**

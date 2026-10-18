@@ -33,7 +33,7 @@ import {
   type Snapshot,
   type TokenResponse,
 } from '../shared/host-api';
-import type { Entry, Id, SecretStore } from '../shared/types';
+import type { Entry, Id, SecretStore, VaultItem } from '../shared/types';
 import { createApp } from '../host/app';
 import { createRepo as createHostRepo, type Repo as HostRepo } from '../host/repo';
 import { issueSetupCode } from '../host/cli/setup-code';
@@ -454,8 +454,13 @@ async function guild(onGate: (reason: string) => void = () => {}): Promise<Guild
 }
 
 /** The admin's credential of one guild tool, saved on the Nod that owns it. */
-async function saveCredential(member: Member, toolId: Id, username: string, secret: string): Promise<void> {
-  await member.nod.vault.save(member.id, { toolId, username, secret, label: tool(toolId).title });
+async function saveCredential(
+  member: Member,
+  toolId: Id,
+  username: string,
+  secret: string,
+): Promise<VaultItem> {
+  return await member.nod.vault.save(member.id, { toolId, username, secret, label: tool(toolId).title });
 }
 
 /** The inbox of one member, synced: what arrived, with the kind the host recorded. */
@@ -469,6 +474,15 @@ async function inboxOf(member: Member): Promise<{ id: Id; kind: string; toolId: 
   return items;
 }
 
+/** The value of the tool's default credential on that Nod — what a reveal of it would return. */
+async function credentialOf(
+  member: Member,
+  toolId: Id,
+): Promise<{ username: string; secret: string } | null> {
+  const item = member.nod.repo.defaultVaultItem(member.id, toolId);
+  return item === null ? null : await member.nod.vault.read(member.id, item.id);
+}
+
 // ---------------------------------------------------------------- #36 acceptance
 
 describe('assignment to a role (K8, SP06 §4)', () => {
@@ -476,17 +490,17 @@ describe('assignment to a role (K8, SP06 §4)', () => {
     const gateCalls: string[] = [];
     const { running, root, alice, bob } = await guild((reason) => gateCalls.push(reason));
 
-    await saveCredential(root, 'figma', CREDENTIAL_USER, CREDENTIAL_SECRET);
+    const figma = await saveCredential(root, 'figma', CREDENTIAL_USER, CREDENTIAL_SECRET);
     // K8/SP06 §4: the assignment writes the host's row and, in the same gated action, seals one
     // copy to every member the host lists as missing. The admin is not in `team`, and the host no
     // longer asks for a role in common of an assignment (SP06 §5 applies to a member's send).
     // M6: the answer reports the two copies sealed to the two `team` members.
     expect(
-      await root.nod.shares.assign({ toolId: 'figma', roleId: 'team', personId: null, assigned: true }),
+      await root.nod.shares.assign({ itemId: figma.id, roleId: 'team', personId: null, assigned: true }),
     ).toEqual({ sent: 2, skipped: 0 });
     expect(gateCalls).toEqual([ASSIGN_GATE_REASON]);
 
-    const credentialId = root.nod.repo.vaultItem(root.id, 'figma')?.credentialId ?? '';
+    const credentialId = root.nod.repo.vaultItemById(root.id, figma.id)?.credentialId ?? '';
     expect(credentialId).not.toBe('');
     // SP06 §4: the sender of the first copy of a credential becomes its owner holder.
     expect(running.repo.holdersOf(credentialId).map((holder) => [holder.name, holder.owner])).toEqual([
@@ -505,7 +519,7 @@ describe('assignment to a role (K8, SP06 §4)', () => {
       expect(inbox[0]).toMatchObject({ kind: 'assign', toolId: 'figma' });
       const accepted = await member.nod.shares.accept(inbox[0].id);
       expect(accepted).toMatchObject({ toolId: 'figma', credentialId, scope: 'role' });
-      expect(await member.nod.vault.read(member.id, 'figma')).toEqual({
+      expect(await credentialOf(member, 'figma')).toEqual({
         username: CREDENTIAL_USER,
         secret: CREDENTIAL_SECRET,
       });
@@ -529,9 +543,9 @@ describe('assignment to a role (K8, SP06 §4)', () => {
   test('a member who joins `team` later is missing until the admin seals their copy after the gate', async () => {
     const gateCalls: string[] = [];
     const { running, admin, root, alice, bob } = await guild((reason) => gateCalls.push(reason));
-    await saveCredential(root, 'figma', CREDENTIAL_USER, CREDENTIAL_SECRET);
-    await root.nod.shares.assign({ toolId: 'figma', roleId: 'team', personId: null, assigned: true });
-    const credentialId = root.nod.repo.vaultItem(root.id, 'figma')?.credentialId ?? '';
+    const figma = await saveCredential(root, 'figma', CREDENTIAL_USER, CREDENTIAL_SECRET);
+    await root.nod.shares.assign({ itemId: figma.id, roleId: 'team', personId: null, assigned: true });
+    const credentialId = root.nod.repo.vaultItemById(root.id, figma.id)?.credentialId ?? '';
     for (const member of [alice, bob]) {
       const inbox = await inboxOf(member);
       await member.nod.shares.accept(inbox[0].id);
@@ -585,7 +599,7 @@ describe('assignment to a role (K8, SP06 §4)', () => {
     expect(inbox[0]).toMatchObject({ kind: 'assign', toolId: 'figma' });
     const accepted = await dave.nod.shares.accept(inbox[0].id);
     expect(accepted).toMatchObject({ credentialId, scope: 'role' });
-    expect(await dave.nod.vault.read(dave.id, 'figma')).toEqual({
+    expect(await credentialOf(dave, 'figma')).toEqual({
       username: CREDENTIAL_USER,
       secret: CREDENTIAL_SECRET,
     });
@@ -609,25 +623,25 @@ describe('assignment to a role (K8, SP06 §4)', () => {
     );
     await admin.grant('team', 'kalendar', true);
     await syncNod(root.nod);
-    await saveCredential(root, 'kalendar', 'kalendar-user', 'kalendar-secret');
+    const kalendar = await saveCredential(root, 'kalendar', 'kalendar-user', 'kalendar-secret');
 
     // K8: a `personId` with no assignment row at all — the admin addressing one person.
     expect(
       await root.nod.shares.assign({
-        toolId: 'kalendar',
+        itemId: kalendar.id,
         roleId: null,
         personId: alice.id,
         assigned: true,
       }),
     ).toEqual({ sent: 1, skipped: 0 });
-    const credentialId = root.nod.repo.vaultItem(root.id, 'kalendar')?.credentialId ?? '';
+    const credentialId = root.nod.repo.vaultItemById(root.id, kalendar.id)?.credentialId ?? '';
     expect(running.db.query<{ one: number }, []>('SELECT 1 AS one FROM assignments').all()).toEqual([]);
 
     const inbox = await inboxOf(alice);
     expect(inbox).toHaveLength(1);
     expect(inbox[0]).toMatchObject({ kind: 'assign', toolId: 'kalendar' });
     await alice.nod.shares.accept(inbox[0].id);
-    expect(await alice.nod.vault.read(alice.id, 'kalendar')).toEqual({
+    expect(await credentialOf(alice, 'kalendar')).toEqual({
       username: 'kalendar-user',
       secret: 'kalendar-secret',
     });
@@ -645,7 +659,7 @@ describe('assignment to a role (K8, SP06 §4)', () => {
 
   test('a direct person assignment with no pinned key raises the reason and persists no id (M6/L6)', async () => {
     const { running, admin, root } = await guild();
-    await saveCredential(root, 'figma', CREDENTIAL_USER, CREDENTIAL_SECRET);
+    const figma = await saveCredential(root, 'figma', CREDENTIAL_USER, CREDENTIAL_SECRET);
 
     // A `team` member who never activated a Nod: he is in the roster but has published no keys.
     const nobodyCreated = await memberWithCode(running, admin, {
@@ -657,7 +671,7 @@ describe('assignment to a role (K8, SP06 §4)', () => {
 
     await expect(
       root.nod.shares.assign({
-        toolId: 'figma',
+        itemId: figma.id,
         roleId: null,
         personId: nobodyCreated.id,
         assigned: true,
@@ -665,6 +679,6 @@ describe('assignment to a role (K8, SP06 §4)', () => {
     ).rejects.toThrow('recipient has no pinned key');
 
     // M6: nothing was sent, so the action is not reported as a success; L6: no orphan credentialId.
-    expect(root.nod.repo.vaultItem(root.id, 'figma')?.credentialId).toBeNull();
+    expect(root.nod.repo.vaultItemById(root.id, figma.id)?.credentialId).toBeNull();
   });
 });

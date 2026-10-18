@@ -6,7 +6,7 @@
 import { call, errorMessage, on } from './api';
 import { mountJoinFlow } from './join';
 import { button, clear, el, field, input, message } from './ui';
-import { categoryOf, originOf, slug } from '../shared/catalog';
+import { categoryOf, groupByCategory, originOf, slug } from '../shared/catalog';
 import { toBase64url } from '../shared/encoding';
 import type { DeviceSession, GuildInvite, ShareKind, ShareScope } from '../shared/host-api';
 import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED } from '../shared/types';
@@ -252,13 +252,15 @@ export function mountSettings(
    * because this machine has no biometrics. Each one names what it acts on, so the card that asked
    * is the one that shows the prompt.
    */
+  // RF-65: a wait names the credential (its local `itemId`), never the tool — a tool with two
+  // credentials has two cards, and the prompt must appear on the one that asked.
   type GateWait =
-    | { kind: 'reveal'; toolId: Id }
-    | { kind: 'copy'; toolId: Id }
-    | { kind: 'send'; toolId: Id }
+    | { kind: 'reveal'; itemId: Id }
+    | { kind: 'copy'; itemId: Id }
+    | { kind: 'send'; itemId: Id }
     | { kind: 'accept'; shareId: Id }
     /** K8/SP06 §4: the admin assigns one credential — one card, one wait. */
-    | { kind: 'assign'; toolId: Id }
+    | { kind: 'assign'; itemId: Id }
     /** K8/SP06 §4: the admin seals the copies of the whole missing list (no single card owns it). */
     | { kind: 'sealMissing' };
 
@@ -336,7 +338,7 @@ export function mountSettings(
      * deadline, not a tick counter: a page whose timer was throttled while hidden still compares
      * the same clock when it wakes, and the countdown text is derived from it.
      */
-    revealed: null as { toolId: Id; username: string; secret: string; expiresAt: number } | null,
+    revealed: null as { itemId: Id; username: string; secret: string; expiresAt: number } | null,
     /**
      * K5/SP02 §9: the action waiting for the person's password, because this machine has no
      * biometrics for the backend to ask itself. Nothing of that action runs until it is typed.
@@ -353,7 +355,7 @@ export function mountSettings(
      * guild. Read again on every `host` push, which is what a new share arrives as.
      */
     inbox: [] as InboxShare[],
-    /** K4: the credential whose send dialog is open, or null. */
+    /** K4: the credential whose send dialog is open (its local id), or null. */
     sendFor: null as Id | null,
     /** K4: the people of that dialog, as `shares.recipients` answered; null while they are read. */
     recipients: null as ShareRecipient[] | null,
@@ -370,7 +372,7 @@ export function mountSettings(
      * host's holder rows arrive); empty for a member and without a host.
      */
     credentialHolders: [] as CredentialHolders[],
-    /** K8: the credential whose assign dialog is open, or null. */
+    /** K8: the credential whose assign dialog is open (its local id), or null. */
     assignFor: null as Id | null,
     /** K8: the role and the person picked in that dialog (`''` for none). */
     assignRole: '' as Id | '',
@@ -382,6 +384,12 @@ export function mountSettings(
     vaultTool: '',
     vaultUsername: '',
     vaultLabel: '',
+    /**
+     * RF-65: the credential the save card replaces, or null while it adds a new one. Holds the
+     * credential's own id and tool — the tool cannot change on an edit, so the RPC's toolId check
+     * matches — and no secret, which is typed again on the form.
+     */
+    vaultEdit: null as { itemId: Id; toolId: Id } | null,
     /** SP05 §3: the one host, as `host.state` or the push `host` last answered. */
     host: ctx.host ?? null,
     /**
@@ -464,6 +472,16 @@ export function mountSettings(
 
   function toolTitle(id: Id): string {
     return state.entries.find((entry) => entry.id === id)?.title ?? id;
+  }
+
+  /**
+   * RF-65: names one credential of a tool the way the person told it apart — its label, then its
+   * tool. The send and assign dialogs and every confirmation use it, so a tool with several
+   * credentials never makes the person guess which one an action reaches.
+   */
+  function credentialTitle(item: VaultItem): string {
+    const tool = toolTitle(item.toolId);
+    return item.label === '' ? tool : `${item.label} — ${tool}`;
   }
 
   function personName(id: Id): string {
@@ -1626,24 +1644,32 @@ export function mountSettings(
 
   // ---------------------------------------------------------------- tab: vault
 
+  /**
+   * RF-65: with `state.vaultEdit` set the form replaces that one credential — its tool is locked
+   * (the RPC refuses an item whose `toolId` differs), and the operator types the new secret. With no
+   * edit it adds a new credential beside the ones the tool already holds.
+   */
   function saveCredentialCard(): HTMLElement {
+    const editing = state.vaultEdit;
     const tool = select(
       'tool',
       [
         { value: '', label: 'Choose a tool' },
         ...state.entries.map((entry) => ({ value: entry.id, label: entry.title })),
       ],
-      state.vaultTool,
+      editing !== null ? editing.toolId : state.vaultTool,
       (value) => {
         state.vaultTool = value;
       },
     );
+    // The credential keeps its tool while it is replaced: the toolId the RPC checks has to match.
+    if (editing !== null) tool.disabled = true;
     const username = input('username', { value: state.vaultUsername });
     username.addEventListener('input', (event) => {
       state.vaultUsername = (event.target as HTMLInputElement).value;
     });
     const secret = input('secret', { type: 'password', autocomplete: 'new-password' });
-    const label = input('label', { value: state.vaultLabel });
+    const label = input('label', { value: state.vaultLabel, placeholder: 'e.g. admin account' });
     label.addEventListener('input', (event) => {
       state.vaultLabel = (event.target as HTMLInputElement).value;
     });
@@ -1651,7 +1677,7 @@ export function mountSettings(
     return el(
       'section',
       { class: 'card stack' },
-      el('h2', {}, 'Save credential'),
+      el('h2', {}, editing !== null ? 'Edit credential' : 'Save credential'),
       el(
         'div',
         { class: 'row' },
@@ -1660,13 +1686,39 @@ export function mountSettings(
         field('Password', secret),
         field('Label', label),
         button(
-          'Save credential',
-          () => void saveCredential(tool.value, username.value, secret.value, label.value),
+          editing !== null ? 'Save changes' : 'Save credential',
+          () =>
+            void saveCredential(
+              tool.value,
+              username.value,
+              secret.value,
+              label.value,
+              editing !== null ? editing.itemId : undefined,
+            ),
           { kind: 'primary' },
         ),
+        editing !== null ? button('Cancel', () => cancelEdit(), { kind: 'ghost' }) : null,
       ),
       el('p', { class: 'muted' }, 'The value goes to the system keychain; the local database keeps only the index.'),
     );
+  }
+
+  /** RF-65: opens the save card on one credential, pre-filled but for the secret. */
+  function openEdit(item: VaultItem): void {
+    state.vaultEdit = { itemId: item.id, toolId: item.toolId };
+    state.vaultTool = item.toolId;
+    state.vaultUsername = item.username;
+    state.vaultLabel = item.label;
+    render();
+  }
+
+  /** RF-65: closes the save card's edit mode and forgets the fields it filled. */
+  function cancelEdit(): void {
+    state.vaultEdit = null;
+    state.vaultTool = '';
+    state.vaultUsername = '';
+    state.vaultLabel = '';
+    render();
   }
 
   function vaultTransferCard(): HTMLElement {
@@ -1730,7 +1782,7 @@ export function mountSettings(
     // K8: the missing-copy list is one card, so every wait of it is that same wait.
     if (current.kind === 'sealMissing') return true;
     return wait.kind === 'reveal' || wait.kind === 'copy' || wait.kind === 'send' || wait.kind === 'assign'
-      ? current.toolId === wait.toolId
+      ? current.itemId === wait.itemId
       : false;
   }
 
@@ -1965,7 +2017,7 @@ export function mountSettings(
   /** K4/SP06 §5: the people the scope allows, each with the state of their key on this machine. */
   function sendDialog(item: VaultItem): HTMLElement {
     const box = el('div', { class: 'card stack send-dialog', role: 'group', aria: { label: 'Send' } });
-    box.append(el('h3', {}, `Send ${toolTitle(item.toolId)}`));
+    box.append(el('h3', {}, `Send ${credentialTitle(item)}`));
     const rows = state.recipients;
     if (rows === null) {
       box.append(el('p', { class: 'muted' }, 'Reading the people…'));
@@ -1977,8 +2029,8 @@ export function mountSettings(
     const send = button(
       'Send',
       () =>
-        gate({ kind: 'send', toolId: item.toolId }, (password) =>
-          sendCredential(item.toolId, password),
+        gate({ kind: 'send', itemId: item.id }, (password) =>
+          sendCredential(item.id, password),
         ),
       { kind: 'primary' },
     );
@@ -2010,10 +2062,10 @@ export function mountSettings(
     }
     box.append(list);
     const footer = el('div', { class: 'row' });
-    if (waiting({ kind: 'send', toolId: item.toolId })) {
+    if (waiting({ kind: 'send', itemId: item.id })) {
       footer.append(
         gatePrompt('sent', (password) =>
-          sendCredential(item.toolId, password),
+          sendCredential(item.id, password),
         ),
       );
     } else {
@@ -2031,7 +2083,7 @@ export function mountSettings(
    */
   function assignDialog(item: VaultItem): HTMLElement {
     const box = el('div', { class: 'card stack assign-dialog', role: 'group', aria: { label: 'Assign' } });
-    box.append(el('h3', {}, `Assign ${toolTitle(item.toolId)}`));
+    box.append(el('h3', {}, `Assign ${credentialTitle(item)}`));
     const role = select(
       'assign-role',
       [
@@ -2069,14 +2121,14 @@ export function mountSettings(
       ),
     );
     const footer = el('div', { class: 'row' });
-    if (waiting({ kind: 'assign', toolId: item.toolId })) {
-      footer.append(gatePrompt('assigned', (password) => assignCredential(item.toolId, password)));
+    if (waiting({ kind: 'assign', itemId: item.id })) {
+      footer.append(gatePrompt('assigned', (password) => assignCredential(item.id, password)));
     } else {
       const assign = button(
         'Assign',
         () =>
-          gate({ kind: 'assign', toolId: item.toolId }, (password) =>
-            assignCredential(item.toolId, password),
+          gate({ kind: 'assign', itemId: item.id }, (password) =>
+            assignCredential(item.id, password),
           ),
         { kind: 'primary' },
       );
@@ -2084,7 +2136,7 @@ export function mountSettings(
       footer.append(assign);
       if (state.assignRole !== '') {
         footer.append(
-          button('Remove assignment', () => void removeAssignment(item.toolId, state.assignRole), {
+          button('Remove assignment', () => void removeAssignment(item.id, state.assignRole), {
             kind: 'danger',
           }),
         );
@@ -2154,17 +2206,20 @@ export function mountSettings(
   }
 
   function vaultItem(item: VaultItem): HTMLElement {
+    // RF-65: every bit of per-credential UI below is keyed by the item's own id — reveal, gate,
+    // dialogs and the default mark. Two credentials of one tool never share a card or a state.
     const revealed =
-      state.revealed !== null && state.revealed.toolId === item.toolId ? state.revealed : null;
+      state.revealed !== null && state.revealed.itemId === item.id ? state.revealed : null;
     const card = el(
       'div',
       { class: 'card stack' },
       el(
         'div',
         { class: 'row' },
-        el('strong', {}, toolTitle(item.toolId)),
-        el('span', { class: 'muted' }, item.username),
-        item.label !== '' ? el('span', { class: 'chip' }, item.label) : null,
+        el('strong', {}, item.label !== '' ? item.label : item.username),
+        item.label !== '' ? el('span', { class: 'muted' }, item.username) : null,
+        // RF-65: the credential the tool's login cascade fills with.
+        item.isDefault ? el('span', { class: 'chip', title: 'autofill uses this one' }, 'Default') : null,
         // K9/SP06 §4: a holder was revoked and the value was not rotated yet.
         item.rotationPending
           ? el(
@@ -2206,36 +2261,41 @@ export function mountSettings(
           render();
         }),
       );
-    } else if (waiting({ kind: 'reveal', toolId: item.toolId })) {
+    } else if (waiting({ kind: 'reveal', itemId: item.id })) {
       actions.append(
         gatePrompt('shown', (password) =>
-          reveal(item.toolId, password),
+          reveal(item.id, password),
         ),
       );
     } else {
       actions.append(
         button('Reveal', () =>
-          gate({ kind: 'reveal', toolId: item.toolId }, (password) => reveal(item.toolId, password)),
+          gate({ kind: 'reveal', itemId: item.id }, (password) => reveal(item.id, password)),
         ),
       );
     }
-    if (waiting({ kind: 'copy', toolId: item.toolId })) {
+    if (waiting({ kind: 'copy', itemId: item.id })) {
       actions.append(
         gatePrompt('copied', (password) =>
-          copySecret(item.toolId, password),
+          copySecret(item.id, password),
         ),
       );
     } else {
       actions.append(
         button('Copy', () =>
-          gate({ kind: 'copy', toolId: item.toolId }, (password) => copySecret(item.toolId, password)),
+          gate({ kind: 'copy', itemId: item.id }, (password) => copySecret(item.id, password)),
         ),
       );
     }
+    // RF-65: only one credential per tool is the default; every other one offers to become it.
+    if (!item.isDefault) {
+      actions.append(button('Use for autofill', () => void setDefault(item)));
+    }
+    actions.append(button('Edit', () => openEdit(item)));
     // K6/SP06 §5: a blocked credential has no send action at all.
     if (sharing() && item.scope !== 'blocked') {
       actions.append(
-        state.sendFor === item.toolId
+        state.sendFor === item.id
           ? button('Close', () => closeSend(), { kind: 'ghost' })
           : button('Send', () => void openSend(item)),
       );
@@ -2244,15 +2304,15 @@ export function mountSettings(
     // without a copy are reached in the same gated action.
     if (sharing() && isAdmin()) {
       actions.append(
-        state.assignFor === item.toolId
+        state.assignFor === item.id
           ? button('Close', () => closeAssign(), { kind: 'ghost' })
           : button('Assign', () => void openAssign(item)),
       );
     }
     actions.append(button('Remove', () => void removeCredential(item), { kind: 'danger' }));
     card.append(actions);
-    if (state.sendFor === item.toolId) card.append(sendDialog(item));
-    if (state.assignFor === item.toolId) card.append(assignDialog(item));
+    if (state.sendFor === item.id) card.append(sendDialog(item));
+    if (state.assignFor === item.id) card.append(assignDialog(item));
     return card;
   }
 
@@ -2337,8 +2397,25 @@ export function mountSettings(
       box.append(el('p', { class: 'empty' }, 'No credentials saved.'));
       return box;
     }
+    // RF-65: several credentials may share a tool, so the list groups them under the tool's heading,
+    // the default first, and every card below is one credential of it.
+    const byTool = new Map<Id, VaultItem[]>();
+    for (const item of state.vault) {
+      const bucket = byTool.get(item.toolId);
+      if (bucket === undefined) byTool.set(item.toolId, [item]);
+      else bucket.push(item);
+    }
     const list = el('div', { class: 'stack' });
-    for (const item of state.vault) list.append(vaultItem(item));
+    for (const [toolId, items] of byTool) {
+      const group = el(
+        'section',
+        { class: 'stack vault-tool', aria: { label: toolTitle(toolId) } },
+        el('h3', {}, toolTitle(toolId)),
+      );
+      items.sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
+      for (const item of items) group.append(vaultItem(item));
+      list.append(group);
+    }
     box.append(list);
     return box;
   }
@@ -2354,10 +2431,10 @@ export function mountSettings(
   }
 
   /** K5/SP02 §9: shows the secret with its ten-second countdown. */
-  function showRevealed(toolId: Id, open: { username: string; secret: string }): void {
+  function showRevealed(itemId: Id, open: { username: string; secret: string }): void {
     hideRevealed();
     state.revealed = {
-      toolId,
+      itemId,
       username: open.username,
       secret: open.secret,
       expiresAt: Date.now() + REVEAL_SECONDS * 1000,
@@ -2384,14 +2461,14 @@ export function mountSettings(
     }, 1000);
   }
 
-  async function reveal(toolId: Id, password?: string): Promise<void> {
+  async function reveal(itemId: Id, password?: string): Promise<void> {
     state.status = null;
     try {
       const open = await call(
         'vault.reveal',
-        password === undefined ? { toolId } : { toolId, password },
+        password === undefined ? { itemId } : { itemId, password },
       );
-      showRevealed(toolId, open);
+      showRevealed(itemId, open);
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
     }
@@ -2402,10 +2479,10 @@ export function mountSettings(
    * K5: the same gate as reveal, with the secret going to the clipboard through the runtime. Nothing
    * of it comes back, so a copy can never leave it in the DOM or in a variable of this window.
    */
-  async function copySecret(toolId: Id, password?: string): Promise<void> {
+  async function copySecret(itemId: Id, password?: string): Promise<void> {
     state.status = null;
     try {
-      await call('vault.copy', password === undefined ? { toolId } : { toolId, password });
+      await call('vault.copy', password === undefined ? { itemId } : { itemId, password });
       state.status = { kind: 'ok', text: 'Copied — paste it now: this page never held it' };
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
@@ -2417,8 +2494,8 @@ export function mountSettings(
   async function setScope(item: VaultItem, scope: ShareScope): Promise<void> {
     state.status = null;
     try {
-      const updated = await call('vault.setScope', { toolId: item.toolId, scope });
-      state.vault = state.vault.map((row) => (row.toolId === updated.toolId ? updated : row));
+      const updated = await call('vault.setScope', { itemId: item.id, scope });
+      state.vault = state.vault.map((row) => (row.id === updated.id ? updated : row));
       state.status = {
         kind: 'ok',
         text:
@@ -2433,15 +2510,31 @@ export function mountSettings(
   }
 
   /**
+   * RF-65: makes one credential the one its tool's login cascade fills with, and takes the mark from
+   * whichever credential carried it. The list is read again because two rows change at once.
+   */
+  async function setDefault(item: VaultItem): Promise<void> {
+    state.status = null;
+    try {
+      await call('vault.setDefault', { itemId: item.id });
+      state.status = { kind: 'ok', text: `Autofill will use ${credentialTitle(item)}` };
+      state.vault = await call('vault.list');
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /**
    * K9/SP06 §4: the owner (or an admin) revokes one holder. The host is the one that decides who
    * may; the local effect is the next snapshot's `rotationPending`, which the chip on the card
    * shows until a new secret is saved (which fans the update out).
    */
   async function revokeHolder(item: VaultItem, holder: VaultItem['holders'][number]): Promise<void> {
-    if (!confirm(`Revoke ${holder.name}'s copy of ${toolTitle(item.toolId)}?`)) return;
+    if (!confirm(`Revoke ${holder.name}'s copy of ${credentialTitle(item)}?`)) return;
     state.status = null;
     try {
-      await call('shares.removeHolder', { toolId: item.toolId, personId: holder.personId });
+      await call('shares.removeHolder', { itemId: item.id, personId: holder.personId });
       // The removal is the host's; a sync is what brings `rotationPending` back in the snapshot.
       if (sharing()) await call('host.syncNow');
       state.vault = await call('vault.list');
@@ -2458,12 +2551,12 @@ export function mountSettings(
   /** K4: opens the send dialog of one credential and reads who its scope allows. */
   async function openSend(item: VaultItem): Promise<void> {
     state.status = null;
-    state.sendFor = item.toolId;
+    state.sendFor = item.id;
     state.recipients = null;
     state.sendTo = [];
     render();
     try {
-      state.recipients = await call('shares.recipients', { toolId: item.toolId });
+      state.recipients = await call('shares.recipients', { itemId: item.id });
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
       closeSend();
@@ -2478,14 +2571,14 @@ export function mountSettings(
   }
 
   /** K4/SP06 §4: seals one copy per ticked recipient and sends them; gated, as `vault.reveal` is. */
-  async function sendCredential(toolId: Id, password?: string): Promise<void> {
+  async function sendCredential(itemId: Id, password?: string): Promise<void> {
     const to = [...state.sendTo];
     if (to.length === 0) return;
     state.status = null;
     try {
       const answer = await call(
         'shares.send',
-        password === undefined ? { toolId, to } : { toolId, to, password },
+        password === undefined ? { itemId, to } : { itemId, to, password },
       );
       state.status = { kind: 'ok', text: `${plural(answer.sent, 'copy', 'copies')} sent` };
       closeSend();
@@ -2501,7 +2594,7 @@ export function mountSettings(
    */
   async function openAssign(item: VaultItem): Promise<void> {
     state.status = null;
-    state.assignFor = item.toolId;
+    state.assignFor = item.id;
     state.assignRole = '';
     state.assignPerson = '';
     render();
@@ -2527,7 +2620,7 @@ export function mountSettings(
    * copy to every member the host lists as missing; with a person picked it seals that one copy
    * directly. The list and the vault are read again, so the card shows what is left.
    */
-  async function assignCredential(toolId: Id, password?: string): Promise<void> {
+  async function assignCredential(itemId: Id, password?: string): Promise<void> {
     const roleId = state.assignRole;
     const personId = state.assignPerson;
     if (roleId === '' && personId === '') {
@@ -2537,7 +2630,7 @@ export function mountSettings(
     }
     state.status = null;
     try {
-      const params: Params<'assignments.set'> = { toolId, assigned: true };
+      const params: Params<'assignments.set'> = { itemId, assigned: true };
       if (roleId !== '') params.roleId = roleId;
       if (personId !== '') params.personId = personId;
       if (password !== undefined) params.password = password;
@@ -2569,10 +2662,10 @@ export function mountSettings(
   }
 
   /** K8/SP06 §4: takes the role's assignment away. Nothing secret is involved, so there is no gate. */
-  async function removeAssignment(toolId: Id, roleId: Id): Promise<void> {
+  async function removeAssignment(itemId: Id, roleId: Id): Promise<void> {
     state.status = null;
     try {
-      await call('assignments.set', { toolId, roleId, assigned: false });
+      await call('assignments.set', { itemId, roleId, assigned: false });
       state.status = { kind: 'ok', text: 'Assignment removed — the holders keep their copies' };
       state.missing = await call('assignments.missing');
       closeAssign();
@@ -2610,7 +2703,7 @@ export function mountSettings(
         'shares.accept',
         password === undefined ? { id: share.id } : { id: share.id, password },
       );
-      state.status = { kind: 'ok', text: `${toolTitle(item.toolId)} is now in your vault` };
+      state.status = { kind: 'ok', text: `${credentialTitle(item)} is now in your vault` };
       state.vault = await call('vault.list');
       state.inbox = await call('shares.inbox');
     } catch (e) {
@@ -2636,6 +2729,7 @@ export function mountSettings(
     username: string,
     secret: string,
     label: string,
+    itemId?: Id,
   ): Promise<void> {
     state.status = null;
     if (toolId === '') {
@@ -2643,11 +2737,14 @@ export function mountSettings(
       render();
       return;
     }
-    const params: { toolId: Id; username: string; secret: string; label?: string } = {
+    // RF-65: no `itemId` adds a new credential to the tool; an `itemId` replaces that one, whose
+    // toolId has to match what the RPC was given.
+    const params: { itemId?: Id; toolId: Id; username: string; secret: string; label?: string } = {
       toolId,
       username,
       secret,
     };
+    if (itemId !== undefined) params.itemId = itemId;
     const trimmed = label.trim();
     if (trimmed !== '') params.label = trimmed;
     try {
@@ -2656,9 +2753,16 @@ export function mountSettings(
       // waits for the next sync) without failing the save.
       state.status =
         saved.updateWarning === undefined || saved.updateWarning === null
-          ? { kind: 'ok', text: 'Credential saved in the keychain' }
+          ? { kind: 'ok', text: itemId === undefined ? 'Credential saved in the keychain' : 'Credential updated' }
           : { kind: 'info', text: saved.updateWarning };
-      // The card is rebuilt, so the password field comes back empty.
+      // A replaced credential closes the edit form; either way the card is rebuilt, so the password
+      // field comes back empty.
+      if (itemId !== undefined) {
+        state.vaultEdit = null;
+        state.vaultTool = '';
+        state.vaultUsername = '';
+        state.vaultLabel = '';
+      }
       state.vault = await call('vault.list');
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
@@ -2667,10 +2771,10 @@ export function mountSettings(
   }
 
   async function removeCredential(item: VaultItem): Promise<void> {
-    if (!confirm(`Remove ${toolTitle(item.toolId)} from the keychain?`)) return;
+    if (!confirm(`Remove ${credentialTitle(item)} from the keychain?`)) return;
     state.status = null;
     try {
-      await call('vault.remove', { toolId: item.toolId });
+      await call('vault.remove', { itemId: item.id });
       hideRevealed();
       state.status = { kind: 'ok', text: 'Credential removed from the keychain' };
       state.vault = await call('vault.list');
@@ -3026,6 +3130,20 @@ export function mountSettings(
     );
   }
 
+  /**
+   * RF-62: one group of the Tools tab — the heading the guild named (or "Other tools", or
+   * "Personal tools"), then one card per tool. The `tool-group` class is what the UI smoke reads to
+   * assert the grouping, mirroring the Vault tab's `vault-tool` groups.
+   */
+  function toolGroup(title: string, entries: Entry[]): HTMLElement {
+    return el(
+      'section',
+      { class: 'stack tool-group', aria: { label: title } },
+      el('h3', { class: 'home-section-title' }, title),
+      ...entries.map(toolItem),
+    );
+  }
+
   function viewTools(): HTMLElement {
     const box = el('section', { class: 'stack' });
     box.append(
@@ -3049,8 +3167,20 @@ export function mountSettings(
       box.append(el('p', { class: 'empty' }, 'No tools in the catalog.'));
       return box;
     }
+    const org = entries.filter((entry) => (entry.scope ?? 'org') !== 'personal');
+    const personal = entries.filter((entry) => entry.scope === 'personal');
     const list = el('div', { class: 'stack' });
-    for (const entry of entries) list.append(toolItem(entry));
+    // RF-62: the same grouping Home shows (`shared/catalog.ts` `groupByCategory`) — a heading per
+    // category, "Other tools" for the org tools the guild filed nowhere. A catalog with no category
+    // keeps the flat list it always had; the person's own tools stay their own section below.
+    if (!org.some((entry) => categoryOf(entry) !== null)) {
+      for (const entry of org) list.append(toolItem(entry));
+    } else {
+      for (const group of groupByCategory(org)) {
+        list.append(toolGroup(group.category ?? 'Other tools', group.entries));
+      }
+    }
+    if (personal.length > 0) list.append(toolGroup('Personal tools', personal));
     box.append(list);
     return box;
   }

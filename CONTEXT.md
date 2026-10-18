@@ -131,7 +131,13 @@ Desde 0.5.1 (RF-63) guarda só o item de biometria `nod.bio.<pessoa>`; os demais
 
 **Cofre** — vault (`VaultItem`):
 As credenciais das ferramentas de uma pessoa, guardadas no chaveiro; o banco guarda só o índice.
+Cada ferramenta pode ter **várias** credenciais, cada uma endereçada pelo próprio `id` (RF-65).
 _Evite_: arquivo de senhas, cofre cifrado
+
+**Credencial padrão** — default credential (`VaultItem.isDefault`):
+A credencial de uma ferramenta que a cascata de login preenche quando a pessoa guarda mais de uma da
+mesma ferramenta; o padrão é o que a janela da ferramenta usa, e a pessoa pode trocá-lo (RF-65).
+_Evite_: credencial principal, senha da ferramenta
 
 **Export do cofre** — vault export (`vault.exportToFile`):
 Arquivo opcional, cifrado pela senha local, só para levar credenciais a outra máquina antes do host.

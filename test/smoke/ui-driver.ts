@@ -1,5 +1,6 @@
-// Driver of the real-page UI smoke (`test/smoke/ui.ts`, story checks #24, #25, #27–#38, and the
-// RF-64 owner steps).
+// Driver of the real-page UI smoke (`test/smoke/ui.ts`, story checks #24, #25, #27–#38, RF-62's
+// grouped tool categories, the RF-64 owner steps and the RF-65 second credential of a tool with its
+// default mark).
 //
 // The generated page imports `src/app.ts` exactly as `index.html` does, then this module. It runs
 // after the app has booted and drives the real screens with DOM events: every acceptance check
@@ -65,10 +66,21 @@ const BLOCKED_SECRET = 'smoke-ui-blocked-1';
 const PERSONAL_TITLE = 'Mine (UI smoke)';
 const ROLE_USERNAME = 'role-user';
 const BLOCKED_USERNAME = 'blocked-user';
+/**
+ * RF-65: the second credential of Tool A the Vault tab check adds through the form, beside the role
+ * one — a different username (and so a different card), so a collapse into one credential fails.
+ */
+const SECOND_USERNAME = 'role-user-2';
+const SECOND_SECRET = 'smoke-ui-second-1';
 const LOCAL_TOOL_TITLE = 'Local Notes';
 const LOCAL_DESK_TITLE = 'Local Desk';
 /** The guild's own tool of #28: created on the host, never in this machine's local tables. */
 const GUILD_ONLY_TITLE = 'Guild Only';
+/** RF-62: the two categories the Tools tab check files its own tools under, and their titles. */
+const CATEGORY_A = 'Support';
+const CATEGORY_B = 'Engineering';
+const CATEGORIZED_A_TITLE = 'Categorized A';
+const CATEGORIZED_B_TITLE = 'Categorized B';
 /** The host's O2 minimum for the last check. Above `tinyjs.json`'s version. */
 const UPDATE_MIN_VERSION = '9.9.9';
 /** #37: the guild's non-admin role of the smoke (`setupAdmin` creates it), as the invite names it. */
@@ -181,7 +193,7 @@ function sidebarTitles(): string[] {
   );
 }
 
-function setValue(field: HTMLInputElement, value: string): void {
+function setValue(field: HTMLInputElement | HTMLSelectElement, value: string): void {
   field.value = value;
   field.dispatchEvent(new Event('input', { bubbles: true }));
   field.dispatchEvent(new Event('change', { bubbles: true }));
@@ -237,6 +249,34 @@ function cardHeading(title: string): HTMLElement | null {
     all<HTMLElement>('section.card').find((card) => {
       const heading = card.querySelector(':scope > h2');
       return text(heading) === title;
+    }) ?? null
+  );
+}
+
+/**
+ * RF-65: the Vault tab groups a tool's credentials under one heading — `section.vault-tool` with its
+ * `<h3>` title, then one card per credential. These read that shape, because a tool may hold several
+ * and `cardOf`'s "the tool title is the card's head" no longer holds.
+ */
+function vaultCards(toolTitle: string): HTMLElement[] {
+  const group = all<HTMLElement>('.vault-tool').find(
+    (section) => text(section.querySelector(':scope > h3')) === toolTitle,
+  );
+  return group === undefined ? [] : all<HTMLElement>(':scope > .card', group);
+}
+
+/**
+ * The card of a tool that names this username: its head is the label (or the username when the
+ * label is empty), and a labelled card carries the username in the muted span beside it. Exact, not
+ * a substring — the second credential of a tool must never answer for the first one.
+ */
+function vaultCard(toolTitle: string, username: string): HTMLElement | null {
+  return (
+    vaultCards(toolTitle).find((card) => {
+      const row = card.querySelector(':scope > .row');
+      if (row === null) return false;
+      if (text(row.querySelector(':scope > strong')) === username) return true;
+      return all<HTMLElement>(':scope > span.muted', row).some((span) => text(span) === username);
     }) ?? null
   );
 }
@@ -617,24 +657,103 @@ async function checkSidebarOrder(): Promise<string> {
   return `sidebar order: favorite ${personalId} first, org tools next; personal card warns`;
 }
 
+/**
+ * RF-62, on the real surface while the guild is connected: the Tools tab's own form files two org
+ * tools under two categories, then both screens draw one group per category with its tool under it.
+ * What is asserted is the DOM — the Tools tab's headings and the cards beneath them, Home's section
+ * headings and its cards — so a category that never reached the host fails here, as it would on the
+ * screen: the screens read the category back from the snapshot, not from the form.
+ */
+async function checkToolCategories(): Promise<string> {
+  await fileToolUnderCategory('cat-a', CATEGORIZED_A_TITLE, CATEGORY_A);
+  await fileToolUnderCategory('cat-b', CATEGORIZED_B_TITLE, CATEGORY_B);
+
+  // The Tools tab: one heading per category, each with its own tool's card under it.
+  const groups = await waitForValue('both category groups in the Tools tab', () => {
+    const found = all<HTMLElement>('.tool-group');
+    const names = found.map((group) => text(group.querySelector(':scope > h3')));
+    return names.includes(CATEGORY_A) && names.includes(CATEGORY_B) ? found : null;
+  });
+  for (const [category, title] of [
+    [CATEGORY_A, CATEGORIZED_A_TITLE],
+    [CATEGORY_B, CATEGORIZED_B_TITLE],
+  ] as const) {
+    const group = groups.find((node) => text(node.querySelector(':scope > h3')) === category);
+    expect(group !== undefined, `the Tools tab has no heading for ${category}`);
+    const cards = all<HTMLElement>(':scope > .card', group);
+    expect(
+      cards.some((card) => text(card).includes(title)),
+      `the ${category} group of the Tools tab does not hold ${title}`,
+    );
+  }
+
+  // Home: the same categories, one section each, its tool's card under it.
+  await openHome();
+  const sections = await waitForValue('both category sections in Home', () => {
+    const found = all<HTMLElement>('.home-section');
+    const names = found.map((section) => text(section.querySelector(':scope > .home-section-title')));
+    return names.includes(CATEGORY_A) && names.includes(CATEGORY_B) ? found : null;
+  });
+  for (const [category, title] of [
+    [CATEGORY_A, CATEGORIZED_A_TITLE],
+    [CATEGORY_B, CATEGORIZED_B_TITLE],
+  ] as const) {
+    const section = sections.find(
+      (node) => text(node.querySelector(':scope > .home-section-title')) === category,
+    );
+    expect(section !== undefined, `Home has no section for ${category}`);
+    const cards = all<HTMLElement>('.tool-card', section);
+    expect(
+      cards.some((card) => text(card.querySelector('.tool-title')) === title),
+      `Home's ${category} section does not hold ${title}`,
+    );
+  }
+  return `Tools and Home group ${CATEGORY_A} and ${CATEGORY_B} with their tools`;
+}
+
+/** RF-62: the Tools tab's own form adds one org tool under a category, and waits for the save. */
+async function fileToolUnderCategory(id: string, title: string, category: string): Promise<void> {
+  await openSettingsTab('Tools');
+  const add = await waitForControl('Add tool');
+  add.click();
+  const card = await waitForValue('the new tool card', () => cardHeading('New tool'));
+  const url = card.querySelector<HTMLInputElement>('input[name=url]');
+  const idField = card.querySelector<HTMLInputElement>('input[name=id]');
+  const titleField = card.querySelector<HTMLInputElement>('input[name=title]');
+  const categoryField = card.querySelector<HTMLInputElement>('input[name=category]');
+  expect(
+    url !== null && idField !== null && titleField !== null && categoryField !== null,
+    'the tool form has no url/id/title/category field',
+  );
+  setValue(url, `${CONFIG.originC}/${id}`);
+  setValue(idField, id);
+  setValue(titleField, title);
+  setValue(categoryField, category);
+  const save = await waitForControl('Save', card);
+  save.click();
+  await waitForStatus(`Tool "${title}" saved`);
+}
+
 async function prepareShares(): Promise<void> {
   const list = (await call('catalog.list')) as unknown as EntryLite[];
   const a = list.find((entry) => entry.title === 'Tool A');
   const b = list.find((entry) => entry.title === 'Tool B');
   expect(a !== undefined && b !== undefined, 'the published tools left the catalog');
 
-  await call('vault.save', {
+  // RF-65: `vault.save` without an `itemId` adds a credential (the tool's first one becomes its
+  // default); every later call names the one it means by `itemId`, never by the tool.
+  const role = await call('vault.save', {
     toolId: a.id,
     username: ROLE_USERNAME,
     secret: SHARED_SECRET,
   });
-  await call('vault.save', {
+  const blocked = await call('vault.save', {
     toolId: b.id,
     username: BLOCKED_USERNAME,
     secret: BLOCKED_SECRET,
   });
-  await call('vault.setScope', { toolId: a.id, scope: 'role' });
-  await call('vault.setScope', { toolId: b.id, scope: 'blocked' });
+  await call('vault.setScope', { itemId: role.id, scope: 'role' });
+  await call('vault.setScope', { itemId: blocked.id, scope: 'blocked' });
 
   const person = await personOfEmail(CONFIG.personEmail);
   const other = await personOfEmail(CONFIG.otherEmail);
@@ -646,7 +765,7 @@ async function prepareShares(): Promise<void> {
     return wanted.length === 2 && wanted.every((peer) => peer.status === 'pinned') ? true : null;
   });
   const sent = await call('shares.send', {
-    toolId: a.id,
+    itemId: role.id,
     to: [person.id, other.id],
     password: PASSWORD,
   });
@@ -657,14 +776,14 @@ async function prepareShares(): Promise<void> {
 async function checkBlockedAndSend(): Promise<string> {
   await openSettingsTab('Vault');
   const blocked = await waitForValue('the blocked credential card', () =>
-    cardOf('Tool B', BLOCKED_USERNAME),
+    vaultCard('Tool B', BLOCKED_USERNAME),
   );
   const blockedSend = all<HTMLButtonElement>('button', blocked).find(textIs('Send'));
   expect(blockedSend === undefined, 'the blocked credential still offers Send');
   const scope = blocked.querySelector('select[name=scope]') as HTMLSelectElement | null;
   expect(scope !== null && scope.value === 'blocked', 'the blocked credential is not on Blocked');
 
-  const role = await waitForValue('the role credential card', () => cardOf('Tool A', ROLE_USERNAME));
+  const role = await waitForValue('the role credential card', () => vaultCard('Tool A', ROLE_USERNAME));
   const send = await waitForControl('Send', role);
   send.click();
   const recipients = await waitForValue('the send dialog recipients', () => {
@@ -693,10 +812,74 @@ async function checkBlockedAndSend(): Promise<string> {
   return `blocked credential has no Send; the Role dialog lists ${recipients.length} recipients`;
 }
 
+/**
+ * RF-65, on the real Vault tab: a tool may hold several credentials, and the person picks which one
+ * autofill uses. The role credential of Tool A is already there (and is the tool's default, being
+ * its first); save a second one through the form (a different username), the tool draws both under
+ * one heading with exactly one "Default" chip on the first, "Use for autofill" on the second moves
+ * the chip, and `vault.list` — the backend's own answer — marks the same one. Two credentials
+ * collapsing into one, or the default not moving, fails here.
+ */
+async function checkSecondCredential(): Promise<string> {
+  const list = (await call('catalog.list')) as unknown as EntryLite[];
+  const a = list.find((entry) => entry.title === 'Tool A');
+  expect(a !== undefined, 'the published tool left the catalog');
+  await openSettingsTab('Vault');
+
+  const form = await waitForValue('the Save credential card', () => cardHeading('Save credential'));
+  const tool = form.querySelector<HTMLSelectElement>('select[name=tool]');
+  const username = form.querySelector<HTMLInputElement>('input[name=username]');
+  const secret = form.querySelector<HTMLInputElement>('input[name=secret]');
+  expect(tool !== null && username !== null && secret !== null, 'the save form is missing a field');
+  setValue(tool, a.id);
+  setValue(username, SECOND_USERNAME);
+  setValue(secret, SECOND_SECRET);
+  (await waitForControl('Save credential', form)).click();
+
+  const cards = await waitForValue('the two credentials of Tool A', () => {
+    const found = vaultCards('Tool A');
+    return found.length === 2 ? found : null;
+  });
+  const firstCard = vaultCard('Tool A', ROLE_USERNAME);
+  const secondCard = vaultCard('Tool A', SECOND_USERNAME);
+  expect(
+    firstCard !== null && secondCard !== null && firstCard !== secondCard,
+    'both credentials do not draw their own card',
+  );
+  const isDefault = (card: HTMLElement): boolean =>
+    all<HTMLElement>('.chip', card).some((chip) => text(chip) === 'Default');
+  const markedNow = cards.filter(isDefault);
+  expect(markedNow.length === 1, `Tool A draws ${markedNow.length} "Default" chip(s)`);
+  expect(markedNow[0] === firstCard, 'the "Default" chip is not on the first credential');
+  expect(!isDefault(secondCard!), 'the second credential came out as the default');
+
+  const use = await waitForControl('Use for autofill', secondCard!);
+  use.click();
+  await waitForValue('the "Default" chip to move to the second credential', () => {
+    const marked = vaultCards('Tool A').filter(isDefault);
+    return marked.length === 1 && marked[0] === vaultCard('Tool A', SECOND_USERNAME) ? true : null;
+  });
+
+  const items = (await call('vault.list')) as unknown as {
+    toolId: string;
+    username: string;
+    isDefault: boolean;
+  }[];
+  const mine = items.filter((item) => item.toolId === a.id);
+  expect(mine.length === 2, `vault.list holds ${mine.length} credential(s) of Tool A`);
+  const marked = mine.filter((item) => item.isDefault);
+  expect(
+    marked.length === 1 && marked[0].username === SECOND_USERNAME,
+    `the backend's default is ${JSON.stringify(marked.map((item) => item.username))}`,
+  );
+  expect(document.body.textContent?.includes(SECOND_SECRET) !== true, 'the second secret reached the DOM');
+  return `Tool A holds 2 credentials under one heading; "Default" moved to ${SECOND_USERNAME}`;
+}
+
 async function checkHolders(): Promise<string> {
   await openSettingsTab('Vault');
   const lines = await waitForValue('the holders list', () => {
-    const card = cardOf('Tool A', ROLE_USERNAME);
+    const card = vaultCard('Tool A', ROLE_USERNAME);
     if (card === null) return null;
     const rows = all<HTMLElement>('.holders-list .holder', card);
     return rows.length >= 2 ? rows.map(text) : null;
@@ -771,14 +954,14 @@ async function acceptShare(): Promise<string> {
     const inbox = document.getElementById('vault-inbox');
     return inbox !== null && text(inbox).includes('No share is waiting.') ? true : null;
   });
-  await waitForValue('the accepted credential', () => cardOf('Tool A', ROLE_USERNAME));
+  await waitForValue('the accepted credential', () => vaultCard('Tool A', ROLE_USERNAME));
   expect(document.body.textContent?.includes(SHARED_SECRET) !== true, 'accepting put the secret in the DOM');
   return 'the share is accepted and the credential is in the vault';
 }
 
 async function revealAndCopy(): Promise<string> {
   const reveal = await waitForValue('the Reveal button', () => {
-    const card = cardOf('Tool A', ROLE_USERNAME);
+    const card = vaultCard('Tool A', ROLE_USERNAME);
     return card === null ? null : controlByText('Reveal', card);
   });
   reveal.click();
@@ -803,7 +986,7 @@ async function revealAndCopy(): Promise<string> {
   );
 
   const copy = await waitForValue('the Copy button', () => {
-    const card = cardOf('Tool A', ROLE_USERNAME);
+    const card = vaultCard('Tool A', ROLE_USERNAME);
     return card === null ? null : controlByText('Copy', card);
   });
   copy.click();
@@ -1428,6 +1611,8 @@ const PHASES: Record<string, { setup?: () => Promise<void>; checks: Steps }> = {
         await prepareShares();
         return await checkBlockedAndSend();
       }],
+      ['RF-65 second credential and the default chip', checkSecondCredential],
+      ['RF-62 tools grouped by category', checkToolCategories],
     ],
   },
   'person-inbox': {

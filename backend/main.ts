@@ -52,6 +52,7 @@ import type {
   SessionState,
   ToolsState,
   UpdateInfo,
+  VaultItem,
 } from '../shared/types';
 import type {
   ActivateRequest,
@@ -95,7 +96,7 @@ import type { HostClient, HostConnection, HostDiscovery } from './host-client';
 import type { Icons } from './icons';
 import type { Keys } from './keys';
 import type { Personal } from './personal';
-import type { Repo } from './repo';
+import type { EventInput, Repo } from './repo';
 import type { Session } from './session';
 import type { Shares } from './shares';
 import type { Sync } from './sync';
@@ -621,17 +622,37 @@ function toolsState(): ToolsState {
   return windows === null ? { tools: [] } : windows.state();
 }
 
+/**
+ * RF-65: the credential a tool window fills with — the default of the tool, because a person may
+ * hold several of one and which one fills is their own choice (`vault.setDefault`). The window knows
+ * its tool; the vault knows the rule.
+ */
 function credentialOf(toolId: Id): Promise<{ username: string; secret: string } | null> {
   const person = currentPerson();
   const store = vault;
-  return store === null || person === null ? Promise.resolve(null) : store.read(person.id, toolId);
+  return store === null || person === null ? Promise.resolve(null) : store.readDefault(person.id, toolId);
 }
 
-/** The origin the person's credential for this tool was saved for; null without an item (RF-38). */
+/** The origin the default credential of this tool was saved for; null without one (RF-38, RF-65). */
 function vaultOriginOf(toolId: Id): string | null {
   const r = repo;
   const person = currentPerson();
   return r === null || person === null ? null : r.vaultOrigin(person.id, toolId);
+}
+
+/**
+ * RF-65/SP06 §6: the two audit events of the vault, built in one place so the rule has one home and
+ * one test (`test/vault-events.test.ts`). The event names the tool and the credential's own id —
+ * **never** its label, which defaults to the username (`VaultItem.label`), and never a value of the
+ * secret: a local event is pushed to the host (`backend/sync.ts`), and the host may not hold a
+ * username of a vault in clear (RF-44). The item id is opaque to the host; the label is not.
+ */
+export function credentialEvent(
+  type: 'credential_saved' | 'credential_removed',
+  personId: Id,
+  item: VaultItem,
+): EventInput {
+  return { personId, toolId: item.toolId, type, url: null, result: null, detail: item.id };
 }
 
 /**
@@ -2578,9 +2599,9 @@ const methods: { [M in Method]: Handler<M> } = {
       const local = withIcons.find((entry) => entry.id === id);
       if (local === undefined) continue;
       const entry = layer.adoptLocalTool(local, local.icon);
-      // The saved credential follows the tool when its id changes (`repo.rekeyVaultTool` keeps the
-      // keychain key, so the sealed value still opens), then the local row — and its views, already
-      // copied above — go.
+      // The saved credentials follow the tool when its id changes (`repo.rekeyVaultTool` keeps each
+      // row's keychain key and its own id, so every sealed value still opens — RF-65), then the local
+      // row — and its views, already copied above — go.
       if (entry.id !== id) r.rekeyVaultTool(id, entry.id);
       r.removeEntry(id);
       created += 1;
@@ -3304,20 +3325,29 @@ const methods: { [M in Method]: Handler<M> } = {
     const person = unlockedPerson('vault.save');
     const p = parameters(params, 'invalid credential');
     const item = await required(vault, 'vault.save').save(person.id, {
+      // RF-65: with an `itemId` this credential is replaced; without one a new credential is added
+      // to the tool, beside the ones it already has.
+      itemId: optional(p.itemId, (value) => text(value, 'invalid credential')),
       toolId: text(p.toolId, 'invalid tool'),
       username: text(p.username, 'invalid username'),
       secret: text(p.secret, 'invalid secret'),
       label: optional(p.label, (value) => text(value, 'invalid label')),
     });
-    r.addEvent({
-      personId: person.id,
-      toolId: item.toolId,
-      type: 'credential_saved',
-      url: null,
-      result: null,
-      detail: item.label,
-    });
+    // The event names the tool and the credential's own id — never the label, which defaults to the
+    // username and would reach the host (RF-65, SP06 §6; `credentialEvent`).
+    r.addEvent(credentialEvent('credential_saved', person.id, item));
     return item;
+  },
+
+  /**
+   * RF-65: the credential of its tool the login cascade fills with — the person's own choice among
+   * the credentials they hold of it. Not gated: nothing secret is shown, and the answer is the item
+   * as the vault holds it (the page refreshes the list around it).
+   */
+  'vault.setDefault': (params) => {
+    const person = unlockedPerson('vault.setDefault');
+    const itemId = text(parameters(params, 'invalid credential').itemId, 'invalid credential');
+    return required(repo, 'vault.setDefault').setVaultDefault(person.id, itemId);
   },
 
   /**
@@ -3328,9 +3358,16 @@ const methods: { [M in Method]: Handler<M> } = {
   'vault.reveal': async (params) => {
     const person = unlockedPerson('vault.reveal');
     const p = parameters(params, 'invalid credential');
-    const toolId = text(p.toolId, 'invalid tool');
+    const itemId = text(p.itemId, 'invalid credential');
+    // RF-65: the id has to be one this person holds before the gate is asked — the index is not a
+    // secret, and a prompt for a credential that is not there is a prompt wasted.
+    if (required(repo, 'vault.reveal').vaultItemById(person.id, itemId) === null) {
+      throw new Error('unknown credential');
+    }
     await authenticate(GATE_REASON.reveal, optionalPassword(p.password));
-    const found = await required(vault, 'vault.reveal').read(person.id, toolId);
+    const found = await required(vault, 'vault.reveal').read(person.id, itemId);
+    // The item is there and its value does not open (a lost keychain item, or a vault written
+    // elsewhere): a different answer from the unknown id above.
     if (found === null) throw new Error('credential not found');
     return found;
   },
@@ -3342,16 +3379,19 @@ const methods: { [M in Method]: Handler<M> } = {
   'vault.copy': async (params): Promise<true> => {
     const person = unlockedPerson('vault.copy');
     const p = parameters(params, 'invalid credential');
-    const toolId = text(p.toolId, 'invalid tool');
+    const itemId = text(p.itemId, 'invalid credential');
+    if (required(repo, 'vault.copy').vaultItemById(person.id, itemId) === null) {
+      throw new Error('unknown credential');
+    }
     await authenticate(GATE_REASON.copy, optionalPassword(p.password));
-    const found = await required(vault, 'vault.copy').read(person.id, toolId);
+    const found = await required(vault, 'vault.copy').read(person.id, itemId);
     if (found === null) throw new Error('credential not found');
     await required(runtime, 'vault.copy').clipboard.write({ text: found.secret });
     return true;
   },
 
   /**
-   * K6/SP06 §5: the scope of a credential, set by its owner (an item that never travelled has no
+   * K6/SP06 §5: the scope of one credential, set by its owner (an item that never travelled has no
    * holder row, so its person is its owner) or by the admin of an assignment. Not gated: nothing
    * secret is shown to change it.
    */
@@ -3361,7 +3401,7 @@ const methods: { [M in Method]: Handler<M> } = {
       throw new Error('invalid scope');
     }
     return await required(shares, 'vault.setScope').setScope(
-      text(p.toolId, 'invalid tool'),
+      text(p.itemId, 'invalid credential'),
       p.scope,
     );
   },
@@ -3369,16 +3409,14 @@ const methods: { [M in Method]: Handler<M> } = {
   'vault.remove': async (params): Promise<true> => {
     const r = required(repo, 'vault.remove');
     const person = unlockedPerson('vault.remove');
-    const toolId = text(parameters(params, 'invalid credential').toolId, 'invalid tool');
-    await required(vault, 'vault.remove').remove(person.id, toolId);
-    r.addEvent({
-      personId: person.id,
-      toolId,
-      type: 'credential_removed',
-      url: null,
-      result: null,
-      detail: null,
-    });
+    const itemId = text(parameters(params, 'invalid credential').itemId, 'invalid credential');
+    // Read before the removal for the event: the tool the credential belonged to and its own id —
+    // never its label, which defaults to the username and would reach the host with the event
+    // (RF-65, SP06 §6). The removal refuses an id this person does not hold, so the row that was
+    // there is the one recorded.
+    const item = r.vaultItemById(person.id, itemId);
+    await required(vault, 'vault.remove').remove(person.id, itemId);
+    if (item !== null) r.addEvent(credentialEvent('credential_removed', person.id, item));
     return true;
   },
 
@@ -3432,17 +3470,17 @@ const methods: { [M in Method]: Handler<M> } = {
    */
   'shares.recipients': (params) => {
     if (disconnected()) return [];
-    const toolId = text(parameters(params, 'invalid credential').toolId, 'invalid tool');
-    return required(shares, 'shares.recipients').recipients(toolId);
+    const itemId = text(parameters(params, 'invalid credential').itemId, 'invalid credential');
+    return required(shares, 'shares.recipients').recipients(itemId);
   },
 
   /** K4/SP06 §4: one sealed copy per recipient. Gated in `backend/shares.ts`. */
   'shares.send': async (params) => {
     const p = parameters(params, 'invalid share');
-    const toolId = text(p.toolId, 'invalid tool');
+    const itemId = text(p.itemId, 'invalid credential');
     if (!Array.isArray(p.to)) throw new Error('invalid recipients');
     const to = p.to.map((value) => text(value, 'invalid recipient'));
-    return await required(shares, 'shares.send').send(toolId, to, optionalPassword(p.password));
+    return await required(shares, 'shares.send').send(itemId, to, optionalPassword(p.password));
   },
 
   /**
@@ -3475,7 +3513,7 @@ const methods: { [M in Method]: Handler<M> } = {
   'shares.removeHolder': async (params) => {
     const p = parameters(params, 'invalid holder');
     return await required(shares, 'shares.removeHolder').removeHolder(
-      text(p.toolId, 'invalid tool'),
+      text(p.itemId, 'invalid credential'),
       text(p.personId, 'invalid recipient'),
     );
   },
@@ -3487,12 +3525,12 @@ const methods: { [M in Method]: Handler<M> } = {
    */
   'assignments.set': async (params): Promise<{ sent: number; skipped: number }> => {
     const p = parameters(params, 'invalid assignment');
-    const toolId = text(p.toolId, 'invalid tool');
+    const itemId = text(p.itemId, 'invalid credential');
     const roleId = p.roleId === undefined ? null : text(p.roleId, 'invalid role');
     const personId = p.personId === undefined ? null : text(p.personId, 'invalid person');
     const assigned = booleanValue(p.assigned, 'invalid assignment');
     return await required(shares, 'assignments.set').assign(
-      { toolId, roleId, personId, assigned },
+      { itemId, roleId, personId, assigned },
       optionalPassword(p.password),
     );
   },

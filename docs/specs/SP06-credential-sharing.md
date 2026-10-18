@@ -107,7 +107,11 @@ for `from` yet — refuses without declining, leaving the share in the inbox (M2
      with the pinned (old) key, so a share signed before the rotation opens. A transient key miss
      (a locked keychain, a sender this Nod never pinned) refuses without declining: the share stays
      in the inbox. Only a real `open`/`match` failure declines with `invalid share`.
-  3. Store it as a vault item with `origin = toolOrigin`, keeping `credentialId` in the index.
+  3. Store it with `origin = toolOrigin`, keeping `credentialId` in the index: when this person
+     already holds an item with that `credentialId` (a later copy of the same credential) the sync
+     replaces it in place; otherwise it is a **new** item of that tool and never overwrites another
+     credential of the tool. It becomes the tool's default only when the tool had no item before
+     (RF-65, SP05 §2).
   4. `POST /v1/shares/:id/accept`.
   5. Two accepts of one share are serialized per share id, so a concurrent sync run cannot
      double-apply or roll back the winner.
@@ -126,7 +130,8 @@ for `from` yet — refuses without declining, leaving the share in the inbox (M2
      with `kind: 'update'`. The owner's save is its own intent — the person just typed the secret —
      so it is not gated a second time; the fan-out is best effort, and a host that cannot be reached
      leaves a pending marker retried on the next sync.
-  2. The receiver's Nod replaces the item on accept. An `update` to a credential already held is
+  2. The receiver's Nod replaces the same-credential item on accept (the item whose `credentialId`
+     matches — never another credential of the tool, RF-65). An `update` to a credential already held is
      applied by the sync that delivers it, with no gate and nothing shown — **but only when its
      `from` is the credential's live owner holder in the verified snapshot**; any other sender's
      `update` waits in the inbox for the gated accept (a member who learned a `credentialId` cannot

@@ -190,9 +190,9 @@ describe('schema versioning', () => {
   });
 
   test('a version this build does not know is refused by name', () => {
-    // The versioning started at 2, so `1` was never written by any build; `8` is a build from the
-    // future. Neither is completed — the database is refused whole.
-    for (const version of [1, 8]) {
+    // The versioning started at 2, so `1` was never written by any build; the one after this
+    // build's is a database from the future. Neither is completed — the database is refused whole.
+    for (const version of [1, SCHEMA_VERSION + 1]) {
       const db = memorySqlite();
       db.exec(`PRAGMA user_version = ${version}`);
       expect(() => createRepo(db).migrate()).toThrow(`unsupported database version: ${version}`);
@@ -512,7 +512,7 @@ describe('invites', () => {
 });
 
 describe('vault', () => {
-  test('saving the same pair updates in place; vaultItemsByTool covers every person', () => {
+  test('saving with the itemId updates that credential; saving without one adds another', () => {
     const repo = newRepo();
     const person = repo.createPerson({ email: 'caio@example.test', name: 'Caio', password: PASSWORD, roles: ['admin'] });
     const other = repo.createPerson({ email: 'bia@example.test', name: 'Bia', password: PASSWORD, roles: [] });
@@ -524,15 +524,17 @@ describe('vault', () => {
       toolId: 'alpha',
       label: 'Alpha',
       username: 'ana',
-      keychainKey: `nod.cred.${person.id}.alpha`,
+      keychainKey: `nod.cred.${person.id}.alpha.one`,
       origin: 'https://alpha.example.test',
     });
+    // RF-65: the same id is the same credential, rewritten in place.
     const second = repo.saveVaultItem({
+      id: first.id,
       personId: person.id,
       toolId: 'alpha',
       label: 'Alpha (new)',
       username: 'bia',
-      keychainKey: `nod.cred.${person.id}.alpha`,
+      keychainKey: `nod.cred.${person.id}.alpha.one`,
       origin: 'https://alpha.example.test',
     });
 
@@ -542,6 +544,23 @@ describe('vault', () => {
     expect(second.createdAt).toBe(first.createdAt);
     expect(repo.listVault(person.id)).toHaveLength(1);
     expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
+
+    // No id: a second credential of the same tool, beside the first.
+    const third = repo.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Alpha — ops',
+      username: 'ops',
+      keychainKey: `nod.cred.${person.id}.alpha.two`,
+      origin: 'https://alpha.example.test',
+    });
+    expect(third.id).not.toBe(first.id);
+    expect(
+      repo
+        .vaultItemsOfTool(person.id, 'alpha')
+        .map((item) => item.label)
+        .sort(),
+    ).toEqual(['Alpha (new)', 'Alpha — ops']);
 
     repo.saveVaultItem({
       personId: other.id,
@@ -560,15 +579,17 @@ describe('vault', () => {
       origin: 'https://beta.example.test',
     });
 
-    expect(repo.vaultItemsByTool('alpha').map((i) => i.personId).sort()).toEqual([person.id, other.id].sort());
+    expect(repo.vaultItemsByTool('alpha').map((i) => i.personId).sort()).toEqual(
+      [person.id, person.id, other.id].sort(),
+    );
     expect(repo.vaultItemsByTool('beta').map((i) => i.toolId)).toEqual(['beta']);
-    expect(repo.vaultItem(person.id, 'beta')?.username).toBe('ana');
+    expect(repo.vaultItemsOfTool(person.id, 'beta')[0]?.username).toBe('ana');
     expect(repo.vaultOrigin(person.id, 'beta')).toBe('https://beta.example.test');
 
-    repo.removeVaultItem(person.id, 'beta');
-    expect(repo.vaultItem(person.id, 'beta')).toBeNull();
-    expect(repo.vaultOrigin(person.id, 'beta')).toBeNull();
-    expect(repo.listVault(person.id)).toHaveLength(1);
+    // One credential goes by its own id; the other two stay.
+    repo.removeVaultItem(person.id, third.id);
+    expect(repo.vaultItemById(person.id, third.id)).toBeNull();
+    expect(repo.listVault(person.id)).toHaveLength(2);
   });
 
   test('the origin belongs to the credential: saving again rewrites it, a moved tool does not', () => {
@@ -578,7 +599,7 @@ describe('vault', () => {
 
     expect(repo.vaultOrigin(person.id, 'alpha')).toBeNull();
 
-    repo.saveVaultItem({
+    const item = repo.saveVaultItem({
       personId: person.id,
       toolId: 'alpha',
       label: 'Alpha',
@@ -594,6 +615,7 @@ describe('vault', () => {
 
     // Saved again on the new address, it follows the entry.
     repo.saveVaultItem({
+      id: item.id,
       personId: person.id,
       toolId: 'alpha',
       label: 'Alpha',
@@ -602,6 +624,153 @@ describe('vault', () => {
       origin: 'https://moved.example.test',
     });
     expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://moved.example.test');
+  });
+
+  /**
+   * RF-65's default rule: exactly one `is_default` per (person, tool) whenever the tool has items —
+   * the first credential of a tool gets it, `setVaultDefault` moves it and the removal of the default
+   * hands it to the oldest credential left. The partial index `vault_item_default` is what makes a
+   * second one impossible at the table's level.
+   */
+  test('the default: the first credential of a tool, moved by setVaultDefault, promoted on removal', () => {
+    const db = memorySqlite();
+    const repo = createRepo(db);
+    repo.migrate();
+    repo.ensureAdminRole();
+    const person = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: [] });
+    const other = repo.createPerson({ email: 'bia@example.test', name: 'Bia', password: PASSWORD, roles: [] });
+    repo.saveEntry(entry('alpha'));
+
+    expect(repo.defaultVaultItem(person.id, 'alpha')).toBeNull();
+
+    const first = repo.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'First',
+      username: 'ana',
+      keychainKey: `nod.cred.${person.id}.alpha.first`,
+      origin: 'https://alpha.example.test',
+    });
+    const second = repo.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Second',
+      username: 'ana',
+      keychainKey: `nod.cred.${person.id}.alpha.second`,
+      origin: 'https://alpha.example.test',
+    });
+    const third = repo.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Third',
+      username: 'ana',
+      keychainKey: `nod.cred.${person.id}.alpha.third`,
+      origin: 'https://alpha.example.test',
+    });
+    // Another person's credential of the same tool has a default of its own.
+    const hers = repo.saveVaultItem({
+      personId: other.id,
+      toolId: 'alpha',
+      label: 'Hers',
+      username: 'bia',
+      keychainKey: `nod.cred.${other.id}.alpha`,
+      origin: 'https://alpha.example.test',
+    });
+
+    expect(first.isDefault).toBe(true);
+    expect(second.isDefault).toBe(false);
+    expect(third.isDefault).toBe(false);
+    expect(hers.isDefault).toBe(true);
+    expect(repo.defaultVaultItem(person.id, 'alpha')?.id).toBe(first.id);
+
+    // Distinct instants, so "the oldest" is a fact of the test and not of the clock: the promotion
+    // reads `created_at` and breaks its ties on the id.
+    for (const [at, item] of [
+      ['2026-10-18T10:00:00.000Z', first],
+      ['2026-10-18T10:01:00.000Z', second],
+      ['2026-10-18T10:02:00.000Z', third],
+    ]) {
+      db.run('UPDATE vault_item SET created_at = ? WHERE id = ?', [at, item.id]);
+    }
+
+    repo.setVaultDefault(person.id, third.id);
+    expect(repo.vaultItemById(person.id, first.id)?.isDefault).toBe(false);
+    expect(repo.defaultVaultItem(person.id, 'alpha')?.id).toBe(third.id);
+    expect(repo.setVaultDefault(person.id, third.id).isDefault).toBe(true);
+    // A migrate of the same database leaves the choice where the person put it: the repair only
+    // touches a group that carries several defaults, and the one chosen here is not the oldest item.
+    repo.migrate();
+    expect(repo.defaultVaultItem(person.id, 'alpha')?.id).toBe(third.id);
+    expect(repo.vaultItemById(person.id, first.id)?.isDefault).toBe(false);
+    expect(() => repo.setVaultDefault(person.id, 'no-such-item')).toThrow('unknown credential');
+    expect(() => repo.setVaultDefault(other.id, third.id)).toThrow('unknown credential');
+
+    // Removing the default hands the flag to the oldest credential left.
+    repo.removeVaultItem(person.id, third.id);
+    expect(repo.defaultVaultItem(person.id, 'alpha')?.id).toBe(first.id);
+    repo.removeVaultItem(person.id, first.id);
+    expect(repo.defaultVaultItem(person.id, 'alpha')?.id).toBe(second.id);
+    // Removing an id that is not there, or one that is not the default, leaves the flag alone.
+    repo.removeVaultItem(person.id, third.id);
+    expect(repo.defaultVaultItem(person.id, 'alpha')?.id).toBe(second.id);
+    // And a tool with no credential left has no default.
+    repo.removeVaultItem(person.id, second.id);
+    expect(repo.defaultVaultItem(person.id, 'alpha')).toBeNull();
+    expect(repo.defaultVaultItem(other.id, 'alpha')?.id).toBe(hers.id);
+  });
+
+  test('a person holds one local copy of a shared credential (SP06 §3)', () => {
+    const repo = newRepo();
+    const person = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: [] });
+    const other = repo.createPerson({ email: 'bia@example.test', name: 'Bia', password: PASSWORD, roles: [] });
+    repo.saveEntry(entry('alpha'));
+    repo.saveEntry(entry('beta'));
+
+    const item = repo.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Alpha',
+      username: 'ana',
+      keychainKey: `nod.cred.${person.id}.alpha`,
+      origin: 'https://alpha.example.test',
+      credentialId: 'c-1',
+    });
+    expect(repo.vaultItemByCredential(person.id, 'c-1')?.id).toBe(item.id);
+    expect(repo.vaultItemByCredential(person.id, 'c-2')).toBeNull();
+    expect(repo.vaultItemByCredential(other.id, 'c-1')).toBeNull();
+
+    // The partial index is on the pair: another person's copy of the same credential is fine, and a
+    // second copy of it in this vault is not.
+    repo.saveVaultItem({
+      personId: other.id,
+      toolId: 'alpha',
+      label: 'Alpha',
+      username: 'ana',
+      keychainKey: `nod.cred.${other.id}.alpha`,
+      origin: 'https://alpha.example.test',
+      credentialId: 'c-1',
+    });
+    expect(() =>
+      repo.saveVaultItem({
+        personId: person.id,
+        toolId: 'beta',
+        label: 'Beta',
+        username: 'ana',
+        keychainKey: `nod.cred.${person.id}.beta`,
+        origin: 'https://beta.example.test',
+        credentialId: 'c-1',
+      }),
+    ).toThrow();
+    // An item that never travelled carries no group at all, and many of those live side by side.
+    repo.saveVaultItem({
+      personId: person.id,
+      toolId: 'beta',
+      label: 'Beta',
+      username: 'ana',
+      keychainKey: `nod.cred.${person.id}.beta`,
+      origin: 'https://beta.example.test',
+    });
+    expect(repo.vaultItemsOfTool(person.id, 'beta')).toHaveLength(1);
   });
 
   test('removeVaultOf returns what it removed and cleans the index', () => {
@@ -878,11 +1047,13 @@ describe('meta', () => {
   });
 });
 
-/** The columns SP05 §2 and block 2 add to tables that already existed in v2. */
+/** The columns SP05 §2, block 2 and RF-65 add to tables that already existed in v2. */
 const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['vault_item', 'origin'],
   ['vault_item', 'credential_id'],
   ['vault_item', 'scope'],
+  // RF-65 (0.5.5): the credential of a tool the login cascade fills with.
+  ['vault_item', 'is_default'],
   ['person', 'password_check'],
   ['person', 'password_algorithm'],
   ['tool', 'scope'],
@@ -893,13 +1064,23 @@ const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['event', 'sent_at'],
 ];
 
-describe('schema version 7 — the sealed `secret` table (RF-63) over the connected and shared schema (SP05 §2, SP06)', () => {
-  test('a fresh database is v7, with the two host tables, `peer_keys`, `secret` and every column of SP05 §2 and K4', () => {
+/**
+ * RF-65's two partial indexes are as new as `is_default` and the dropped constraint: a database of an
+ * earlier build has neither, and SQLite refuses to drop a column an index mentions, so a test that
+ * takes the table back to that shape drops them first.
+ */
+function dropVaultIndexes(db: SqlDb): void {
+  db.exec('DROP INDEX IF EXISTS vault_item_credential');
+  db.exec('DROP INDEX IF EXISTS vault_item_default');
+}
+
+describe('schema version 8 — the sealed `secret` table (RF-63) over the connected and shared schema (SP05 §2, SP06)', () => {
+  test('a fresh database is v8, with the two host tables, `peer_keys`, `secret` and every column of SP05 §2 and K4', () => {
     const db = memorySqlite();
     createRepo(db).migrate();
 
-    expect(SCHEMA_VERSION).toBe(7);
-    expect(userVersion(db)).toBe(7);
+    expect(SCHEMA_VERSION).toBe(8);
+    expect(userVersion(db)).toBe(8);
     expect(tableNames(db)).toEqual([
       'event',
       'host',
@@ -950,6 +1131,7 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
     v2.setMeta('seed_version', '2');
 
     // Back to the shape of that build: SP05 §2's columns gone, the host tables never created.
+    dropVaultIndexes(db);
     for (const [table, column] of LATER_COLUMNS) db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
     db.exec('DROP TABLE host');
     db.exec('DROP TABLE host_outbox');
@@ -960,7 +1142,7 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
     repo.migrate();
 
     // Stamped, completed, and every row of local mode still there, value for value.
-    expect(userVersion(db)).toBe(7);
+    expect(userVersion(db)).toBe(8);
     expect(tableNames(db)).toContain('host');
     expect(tableNames(db)).toContain('host_outbox');
     expect(repo.listPeople().map((p) => p.email)).toEqual(['ana@example.test']);
@@ -987,7 +1169,7 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
 
     // And migrate stays idempotent on the migrated database.
     repo.migrate();
-    expect(userVersion(db)).toBe(7);
+    expect(userVersion(db)).toBe(8);
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
   });
 
@@ -998,11 +1180,11 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
 
     createRepo(db).migrate();
 
-    expect(userVersion(db)).toBe(7);
+    expect(userVersion(db)).toBe(8);
     expect(tableNames(db)).toContain('host_outbox');
   });
 
-  test('a v3 database gains `peer_keys` and is stamped 7, keeping its rows (SP06 §2, K1–K2)', () => {
+  test('a v3 database gains `peer_keys` and is stamped 8, keeping its rows (SP06 §2, K1–K2)', () => {
     const db = memorySqlite();
     const v3 = createRepo(db);
     v3.migrate();
@@ -1015,7 +1197,7 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(7);
+    expect(userVersion(db)).toBe(8);
     expect(tableNames(db)).toContain('peer_keys');
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
     expect(repo.meta('seed_version')).toBe('2');
@@ -1033,7 +1215,7 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
       password: PASSWORD,
       roles: [],
     });
-    v4.saveVaultItem({
+    const saved = v4.saveVaultItem({
       personId: person.id,
       toolId: 'alpha',
       label: 'Alpha',
@@ -1043,6 +1225,7 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
     });
 
     // What the K1–K2 build left behind: the two block 2 columns absent, `user_version = 4`.
+    dropVaultIndexes(db);
     db.exec('ALTER TABLE vault_item DROP COLUMN credential_id');
     db.exec('ALTER TABLE vault_item DROP COLUMN scope');
     db.exec('PRAGMA user_version = 4');
@@ -1050,18 +1233,20 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(7);
-    const item = repo.vaultItem(person.id, 'alpha');
+    expect(userVersion(db)).toBe(8);
+    const item = repo.vaultItemById(person.id, saved.id);
     expect(item).not.toBeNull();
     // SP06 §3–§5: an item that never travelled has no credential group and the default scope.
     expect(item?.credentialId).toBeNull();
     expect(item?.scope).toBe('role');
+    // RF-65: it is the only credential of its tool, so it is the one the fill reads.
+    expect(item?.isDefault).toBe(true);
     expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
 
     // A later write of the sharing fields is what turns it into a shared copy.
-    repo.setVaultCredential(person.id, 'alpha', 'c-1');
-    repo.setVaultScope(person.id, 'alpha', 'org');
-    expect(repo.vaultItem(person.id, 'alpha')).toMatchObject({
+    repo.setVaultCredential(person.id, saved.id, 'c-1');
+    repo.setVaultScope(person.id, saved.id, 'org');
+    expect(repo.vaultItemById(person.id, saved.id)).toMatchObject({
       credentialId: 'c-1',
       scope: 'org',
       username: 'ana',
@@ -1090,7 +1275,7 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(7);
+    expect(userVersion(db)).toBe(8);
     // Every row written before the column is uncategorized, and both scopes survive.
     expect(repo.listEntries().map((e) => [e.id, e.category])).toEqual([
       ['alpha', null],
@@ -1122,7 +1307,7 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(7);
+    expect(userVersion(db)).toBe(8);
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
     expect(repo.secret('nod.cred.p-ana.alpha')).toBeNull();
     repo.setSecret('nod.cred.p-ana.alpha', 'bv1.first');
@@ -1149,9 +1334,11 @@ describe('schema version 7 — the sealed `secret` table (RF-63) over the connec
 /**
  * SP05 §2: `vault_item.tool_id` stops pointing at `tool (id)`, because a credential may belong to a
  * tool that exists only on the host — a connected entry has no local `tool` row, and the insert used
- * to fail with `FOREIGN KEY constraint failed`.
+ * to fail with `FOREIGN KEY constraint failed`. 0.5.5 (RF-65) rebuilds the same table once more:
+ * `UNIQUE (person_id, tool_id)` goes, because a person holds several credentials of one tool from
+ * then on, and `is_default` arrives with the removal.
  */
-describe('vault_item without the tool foreign key (SP05 §2)', () => {
+describe('the `vault_item` rebuilds: the tool foreign key (SP05 §2) and the one-per-tool constraint (RF-65)', () => {
   /** The vault_item of the builds before this one: the same columns, the FK to `tool` in place. */
   function writeLegacyVaultItemTable(db: SqlDb): void {
     db.exec('ALTER TABLE vault_item RENAME TO vault_item_legacy');
@@ -1173,6 +1360,34 @@ CREATE TABLE vault_item (
         'SELECT id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin FROM vault_item_legacy',
     );
     db.exec('DROP TABLE vault_item_legacy');
+  }
+
+  /**
+   * The vault_item of 0.5.3 (schema version `7`): SP05 §2's table, without the FK to `tool` and
+   * without `is_default`, and still one credential per tool by `UNIQUE (person_id, tool_id)`.
+   */
+  function writeV53VaultItemTable(db: SqlDb): void {
+    db.exec('ALTER TABLE vault_item RENAME TO vault_item_v53');
+    db.exec(`
+CREATE TABLE vault_item (
+  id TEXT PRIMARY KEY,
+  person_id TEXT NOT NULL REFERENCES person (id) ON DELETE CASCADE,
+  tool_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  username TEXT NOT NULL,
+  keychain_key TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  origin TEXT,
+  credential_id TEXT,
+  scope TEXT NOT NULL DEFAULT 'role',
+  UNIQUE (person_id, tool_id)
+);`);
+    db.exec(
+      'INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin, credential_id, scope) ' +
+        'SELECT id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin, credential_id, scope FROM vault_item_v53',
+    );
+    db.exec('DROP TABLE vault_item_v53');
   }
 
   /** A database of an earlier build: its people, its tool, its credential, and the FK in place. */
@@ -1200,8 +1415,35 @@ CREATE TABLE vault_item (
     return { db, personId: person.id };
   }
 
-  /** One credential row, written by hand, so `saveVaultItem` is not what is being measured. */
+  /**
+   * One credential row, written by hand, so `saveVaultItem` is not what is being measured. It is the
+   * only credential of its tool, so it carries the default of that tool (`is_default`, RF-65) — the
+   * rule the repository would have applied, and what the fill reads (`vaultOrigin`).
+   */
   function insertVaultItem(db: SqlDb, personId: string, toolId: string): void {
+    db.run(
+      `INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin, is_default)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      [
+        crypto.randomUUID(),
+        personId,
+        toolId,
+        toolId,
+        'ana',
+        `nod.cred.${personId}.${toolId}`,
+        '2026-10-15T10:00:00.000Z',
+        '2026-10-15T10:00:00.000Z',
+        `https://${toolId}.example.test`,
+      ],
+    );
+  }
+
+  /**
+   * The same row for a table of a build before this one: `writeLegacyVaultItemTable` and
+   * `writeV53VaultItemTable` leave a `vault_item` without `is_default`, and an insert of this build
+   * would be refused by the column alone instead of by the constraint under test.
+   */
+  function insertVaultItemOfAnOlderBuild(db: SqlDb, personId: string, toolId: string): void {
     db.run(
       `INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1236,7 +1478,7 @@ CREATE TABLE vault_item (
     });
     // No `tool` row for this entry: that is a tool of the guild that only the host knows (SP05 §2).
     insertVaultItem(db, person.id, 'host-only');
-    expect(repo.vaultItem(person.id, 'host-only')?.label).toBe('host-only');
+    expect(repo.vaultItemsOfTool(person.id, 'host-only')[0]?.label).toBe('host-only');
     expect(repo.vaultOrigin(person.id, 'host-only')).toBe('https://host-only.example.test');
 
     // The constraint that stayed is still enforced.
@@ -1247,7 +1489,7 @@ CREATE TABLE vault_item (
     for (const version of [2, 3, 4]) {
       const { db, personId } = legacyDatabase(version);
       // What the build before this one did with a host-only entry: the insert is refused.
-      expect(() => insertVaultItem(db, personId, 'host-only')).toThrow(/FOREIGN KEY/);
+      expect(() => insertVaultItemOfAnOlderBuild(db, personId, 'host-only')).toThrow(/FOREIGN KEY/);
       expect(foreignKeysOf(db, 'vault_item')).toEqual([
         { table: 'person', from: 'person_id', to: 'id' },
         { table: 'tool', from: 'tool_id', to: 'id' },
@@ -1278,6 +1520,71 @@ CREATE TABLE vault_item (
       expect(repo.vaultOrigin(personId, 'alpha')).toBe('https://alpha.example.test');
       expect(userVersion(db)).toBe(SCHEMA_VERSION);
     }
+  });
+
+  test('a 0.5.3 database keeps its rows, their keys and their secrets, and admits a second credential', () => {
+    const db = memorySqlite();
+    const before = createRepo(db);
+    before.migrate();
+    before.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app' }));
+    const person = before.createPerson({
+      email: 'ana@example.test',
+      name: 'Ana',
+      password: PASSWORD,
+      roles: [],
+    });
+    const kept = before.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Alpha',
+      username: 'ana',
+      keychainKey: `nod.cred.${person.id}.alpha`,
+      origin: 'https://alpha.example.test',
+    });
+    // What 0.5.3 left behind: the FK to `tool` already gone, `UNIQUE (person_id, tool_id)` still
+    // there, no `is_default`, `user_version = 7`.
+    writeV53VaultItemTable(db);
+    db.exec('PRAGMA user_version = 7');
+    // That build refused a second credential of one tool.
+    expect(() => insertVaultItemOfAnOlderBuild(db, person.id, 'alpha')).toThrow(/UNIQUE/);
+
+    const repo = createRepo(db);
+    repo.migrate();
+
+    expect(userVersion(db)).toBe(SCHEMA_VERSION);
+    // The row is the same row — id, keychain key (the AAD of its sealed value, so the credential
+    // still opens) and origin — and it is the default of its tool, which is what it was.
+    const rows = repo.listVault(person.id);
+    expect(rows.map((item) => [item.id, item.label, item.keychainKey, item.isDefault])).toEqual([
+      [kept.id, 'Alpha', `nod.cred.${person.id}.alpha`, true],
+    ]);
+    expect(repo.defaultVaultItem(person.id, 'alpha')?.id).toBe(kept.id);
+    expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
+
+    // The two indexes of the new shape were created after the rebuild (a `DROP TABLE` takes the
+    // indexes of the table with it, so one created before it would not have survived).
+    const indexes = db.all<{ name: string }>('PRAGMA index_list(vault_item)').map((row) => row.name);
+    expect(indexes).toContain('vault_item_credential');
+    expect(indexes).toContain('vault_item_default');
+
+    // The constraint is gone: a second credential of the same tool goes in beside the first, and it
+    // is not the default (RF-65).
+    const second = repo.saveVaultItem({
+      personId: person.id,
+      toolId: 'alpha',
+      label: 'Ops',
+      username: 'ops',
+      keychainKey: `nod.cred.${person.id}.alpha.ops`,
+      origin: 'https://alpha.example.test',
+    });
+    expect(second.isDefault).toBe(false);
+    expect(repo.vaultItemsOfTool(person.id, 'alpha')).toHaveLength(2);
+    expect(repo.defaultVaultItem(person.id, 'alpha')?.id).toBe(kept.id);
+
+    // A second migrate neither throws nor rebuilds anything away.
+    repo.migrate();
+    expect(repo.listVault(person.id)).toHaveLength(2);
+    expect(repo.defaultVaultItem(person.id, 'alpha')?.id).toBe(kept.id);
   });
 
   test('removing a local tool still takes its vault rows with it, with no FK to do it', () => {
@@ -1604,10 +1911,11 @@ describe('the local account an adoption takes over (F1)', () => {
     repo.addEvent({ personId: local.id, toolId: 'alpha', type: 'tool_opened', url: null, result: null, detail: null });
     repo.addEvent({ personId: 'somebody-else', toolId: 'alpha', type: 'tool_opened', url: null, result: null, detail: null });
 
+    // RF-65: the new key the caller derives names the item, because a tool holds several credentials.
     const moved = repo.adoptPersonId({
       fromId: local.id,
       toId: 'guild-1',
-      keychainKeyOf: (item) => `nod.cred.guild-1.${item.toolId}`,
+      keychainKeyOf: (item) => `nod.cred.guild-1.${item.toolId}.${item.id}`,
     });
 
     // The answer carries the items as they were read: their old key is what the caller has to move
@@ -1624,10 +1932,16 @@ describe('the local account an adoption takes over (F1)', () => {
       admin: true,
     });
     expect(repo.listVault(local.id)).toEqual([]);
-    expect(repo.listVault('guild-1').map((i) => i.keychainKey).sort()).toEqual([
-      'nod.cred.guild-1.alpha',
-      'nod.cred.guild-1.beta',
-    ]);
+    expect(
+      repo
+        .listVault('guild-1')
+        .map((i) => i.keychainKey)
+        .sort(),
+    ).toEqual(
+      moved
+        .map((item) => `nod.cred.guild-1.${item.toolId}.${item.id}`)
+        .sort(),
+    );
     expect(repo.vaultOrigin('guild-1', 'alpha')).toBe('https://alpha.example.test');
     expect(repo.listEvents({ personId: 'guild-1' }).map((event) => event.type)).toEqual(['tool_opened']);
     // Somebody else's history is not this person's to move.
@@ -1650,7 +1964,11 @@ describe('the local account an adoption takes over (F1)', () => {
     });
 
     expect(() =>
-      repo.adoptPersonId({ fromId: local.id, toId: other.id, keychainKeyOf: (item) => `nod.cred.${other.id}.${item.toolId}` }),
+      repo.adoptPersonId({
+        fromId: local.id,
+        toId: other.id,
+        keychainKeyOf: (item) => `nod.cred.${other.id}.${item.toolId}.${item.id}`,
+      }),
     ).toThrow('this Nod already holds an account of that guild person');
 
     // Both rows as they were: no id moved, no role, no vault row, no event.

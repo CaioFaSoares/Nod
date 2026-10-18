@@ -1,10 +1,18 @@
 // Credential vault of Nod — docs/arquitetura.md §4; concepts in docs/canonico.md §11.
 //
-// The credential value lives only in the OS keychain (key `nod.cred.<person>.<tool>`); the
+// The credential value lives only in the OS keychain (key `nod.cred.<person>.<tool>.<item>` for
+// every credential 0.5.5 creates — RF-65; the row of one an older build wrote carries the
+// `nod.cred.<person>.<tool>` it was sealed under, and a re-keyed row keeps its own, B8b); the
 // database keeps the index (`VaultItem`), never the secret. Nothing here imports `tjs` or `tiny`:
 // the repository and the keychain come in through `deps`, which keeps the slice testable with
 // `bun test`. The `credential_saved`/`credential_removed`/`vault_exported`/`vault_imported` events
 // belong to `backend/main.ts`: the vault records no event at all.
+//
+// 0.5.5 (RF-65): a person holds as many credentials of one tool as they want, and every call of
+// this slice addresses ONE of them by its own id — `save` with an `itemId` replaces that credential
+// and without one adds a new one beside the others, `read`/`remove` name the item. The single
+// exception is `readDefault`, which the login cascade asks with a tool id: the tool is what a window
+// is, and the credential it fills with is the tool's default.
 //
 // The index row also carries the origin of the entry at save time (SP02 §8, RF-38): it is what
 // `backend/tool-windows.ts` compares a window's entry origin against before it fills a form.
@@ -33,6 +41,10 @@ const USERNAME_REQUIRED = 'a username is required';
 const SECRET_REQUIRED = 'a secret is required';
 const UNKNOWN_TOOL = 'unknown tool';
 const KEYCHAIN_REFUSED = 'the system keychain refused the credential';
+/** RF-65: the id names no credential of this person — of another's, or of none at all. */
+const UNKNOWN_CREDENTIAL = 'unknown credential';
+/** RF-65: a save named an item of another tool. A credential never changes tool through a save. */
+const INVALID_CREDENTIAL = 'invalid credential';
 /** SP02 §8: no `vaultKey` in memory (a locked session, or one unlocked without a password). */
 const VAULT_LOCKED = 'the vault is locked — unlock with your password first';
 /** A `bv1.` value that not even the new key opens: the password change has nothing to re-seal. */
@@ -60,11 +72,17 @@ export interface VaultDeps {
 
 /** What `createVault` returns (§4). Declared apart so the contract has a name of its own. */
 export interface Vault {
-  key(personId: Id, toolId: Id): string;
   list(personId: Id): VaultItem[];
+  /**
+   * RF-65: `itemId` names the credential this save replaces — one this person holds, of the same
+   * tool, or the call is refused. Without it a new credential is added to the tool beside the ones
+   * it already has, and it becomes the one the fill uses when the tool had none. `label` tells the
+   * credentials of one tool apart and defaults to the username.
+   */
   save(
     personId: Id,
     p: {
+      itemId?: Id;
       toolId: Id;
       username: string;
       secret: string;
@@ -75,8 +93,16 @@ export interface Vault {
       scope?: ShareScope;
     },
   ): Promise<VaultItem>;
-  read(personId: Id, toolId: Id): Promise<{ username: string; secret: string } | null>;
-  remove(personId: Id, toolId: Id): Promise<void>;
+  /** One credential of this person, by its own id; `null` when it is not there or will not open. */
+  read(personId: Id, itemId: Id): Promise<{ username: string; secret: string } | null>;
+  /**
+   * RF-65: the credential of a tool the login cascade fills with (`backend/main.ts`'s
+   * `credentialOf`) — the tool's default item. The only read of this slice that goes by tool id:
+   * a tool window knows its tool, and which credential fills it is the vault's own rule.
+   */
+  readDefault(personId: Id, toolId: Id): Promise<{ username: string; secret: string } | null>;
+  /** Removes one credential; an id this person does not hold is refused (`unknown credential`). */
+  remove(personId: Id, itemId: Id): Promise<void>;
   removeAllOf(personId: Id): Promise<void>;
   removeAllForTool(toolId: Id): Promise<void>;
   export(personId: Id, password: string): Promise<string>;
@@ -88,10 +114,6 @@ export interface Vault {
  * path that writes to both, and the index only goes in after the keychain accepted.
  */
 export function createVault(deps: VaultDeps): Vault {
-  function key(personId: Id, toolId: Id): string {
-    return `nod.cred.${personId}.${toolId}`;
-  }
-
   /** SP02 §8: the key of the unlocked session, or the typed refusal — never a plaintext write. */
   function requireVaultKey(): Uint8Array<ArrayBuffer> {
     const found = deps.vaultKey === undefined ? null : deps.vaultKey();
@@ -103,9 +125,29 @@ export function createVault(deps: VaultDeps): Vault {
     return deps.repo.listVault(personId);
   }
 
+  /**
+   * SP02 §8: the value of one index row. It is read by the key the row carries — never by a derived
+   * one — because that string is the AAD the value was sealed with, and an item of an older build
+   * (or one a re-key moved, B8b) carries a key of another shape.
+   */
+  async function open(item: VaultItem): Promise<{ username: string; secret: string } | null> {
+    const raw = await deps.keychain.get(item.keychainKey);
+    if (raw === null) return null;
+    // A `bv1.` value opens only with the session's `vaultKey` over this same keychain key. Without a
+    // key (locked) or with one that does not match, the credential is absent, not an error.
+    if (isSealedVaultValue(raw)) {
+      const vaultKey = deps.vaultKey === undefined ? null : deps.vaultKey();
+      if (vaultKey === null) return null;
+      return decryptVaultValue(vaultKey, item.keychainKey, raw);
+    }
+    // Legacy plaintext (no prefix): readable until the first unlock re-encrypts it.
+    return plainVaultCredential(raw);
+  }
+
   async function save(
     personId: Id,
     p: {
+      itemId?: Id;
       toolId: Id;
       username: string;
       secret: string;
@@ -124,18 +166,24 @@ export function createVault(deps: VaultDeps): Vault {
     // entry there is no origin to bind the credential to (RF-38).
     const entry = deps.repo.entry(p.toolId);
     if (entry === null) throw new Error(UNKNOWN_TOOL);
+    // RF-65: the credential this save replaces, when the caller names one. Both refusals come before
+    // anything is written: an id this person does not hold, and an id of another tool's — a
+    // credential is edited where it is, never moved from one tool to another by a save.
+    const previous = p.itemId === undefined ? null : deps.repo.vaultItemById(personId, p.itemId);
+    if (p.itemId !== undefined && previous === null) throw new Error(UNKNOWN_CREDENTIAL);
+    if (previous !== null && previous.toolId !== p.toolId) throw new Error(INVALID_CREDENTIAL);
     // RF-38: the origin is taken before the keychain write, so a refused write leaves no trace of
     // it either. It is the entry's own canonical origin — the same value the tool window compares
     // its address against.
     const origin = originOf(entry.url);
 
-    const label = p.label === undefined || p.label.trim().length === 0 ? p.toolId : p.label;
-    const keychainKey = key(personId, p.toolId);
-    // B8b's fix: `repo.rekeyVaultTool` moves a credential's index row to a new tool id but keeps the
-    // `keychain_key` it was sealed under, so a re-save — which writes the canonical key — would leave
-    // that item orphaned in the keychain. The old row is read before the write and its value dropped
-    // once the new one landed (bv1's AAD is the canonical key, so the two never share a slot).
-    const previous = deps.repo.vaultItem(personId, p.toolId);
+    const label = p.label === undefined || p.label.trim().length === 0 ? username : p.label;
+    // RF-65: an item keeps the key it was created with, so replacing a credential rewrites the value
+    // under the key the row already carries (nothing is orphaned in the keychain); a credential added
+    // now gets its own key, with its id in it. The key is the AAD of the sealed value: it is written
+    // once, with the row, and never derived again.
+    const itemId = previous?.id ?? crypto.randomUUID();
+    const keychainKey = previous?.keychainKey ?? `nod.cred.${personId}.${p.toolId}.${itemId}`;
     // SP02 §8: sealed before the keychain sees it, with the keychain key as AAD. A locked session
     // and a value over the keychain limit both refuse here, with nothing written on either side.
     const value = await encryptVaultValue(requireVaultKey(), keychainKey, {
@@ -144,11 +192,9 @@ export function createVault(deps: VaultDeps): Vault {
     });
     const stored = await deps.keychain.set(keychainKey, value);
     if (!stored) throw new Error(KEYCHAIN_REFUSED);
-    if (previous !== null && previous.keychainKey !== keychainKey) {
-      await deps.keychain.delete(previous.keychainKey);
-    }
 
     const item = deps.repo.saveVaultItem({
+      id: itemId,
       personId,
       toolId: p.toolId,
       label,
@@ -171,27 +217,27 @@ export function createVault(deps: VaultDeps): Vault {
 
   async function read(
     personId: Id,
-    toolId: Id,
+    itemId: Id,
   ): Promise<{ username: string; secret: string } | null> {
-    const item = deps.repo.vaultItem(personId, toolId);
-    if (item === null) return null;
-    const raw = await deps.keychain.get(item.keychainKey);
-    if (raw === null) return null;
-    // SP02 §8: a `bv1.` value opens only with the session's `vaultKey` over this same keychain key.
-    // Without a key (locked) or with one that does not match, the credential is absent, not an error.
-    if (isSealedVaultValue(raw)) {
-      const vaultKey = deps.vaultKey === undefined ? null : deps.vaultKey();
-      if (vaultKey === null) return null;
-      return decryptVaultValue(vaultKey, item.keychainKey, raw);
-    }
-    // Legacy plaintext (no prefix): readable until the first unlock re-encrypts it.
-    return plainVaultCredential(raw);
+    const item = deps.repo.vaultItemById(personId, itemId);
+    return item === null ? null : await open(item);
   }
 
-  async function remove(personId: Id, toolId: Id): Promise<void> {
-    const item = deps.repo.vaultItem(personId, toolId);
-    if (item !== null) await deps.keychain.delete(item.keychainKey);
-    deps.repo.removeVaultItem(personId, toolId);
+  async function readDefault(
+    personId: Id,
+    toolId: Id,
+  ): Promise<{ username: string; secret: string } | null> {
+    const item = deps.repo.defaultVaultItem(personId, toolId);
+    return item === null ? null : await open(item);
+  }
+
+  async function remove(personId: Id, itemId: Id): Promise<void> {
+    const item = deps.repo.vaultItemById(personId, itemId);
+    if (item === null) throw new Error(UNKNOWN_CREDENTIAL);
+    await deps.keychain.delete(item.keychainKey);
+    // RF-65: the repository hands the default of a tool to the oldest credential left when the one
+    // removed held it, so a tool that still has credentials always has one to fill with.
+    deps.repo.removeVaultItem(personId, itemId);
   }
 
   async function removeAllOf(personId: Id): Promise<void> {
@@ -202,18 +248,21 @@ export function createVault(deps: VaultDeps): Vault {
 
   async function removeAllForTool(toolId: Id): Promise<void> {
     // Removing a tool from the catalog (canonico §8, A6) has to take every person's credential with
-    // it: the keychain item and the index row, or the next `nod.cred.*` read finds a ghost.
+    // it: the keychain item and the index row, or the next `nod.cred.*` read finds a ghost. Every
+    // credential of the tool goes, not just the default (RF-65).
     const items = deps.repo.vaultItemsByTool(toolId);
     for (const item of items) {
       await deps.keychain.delete(item.keychainKey);
-      deps.repo.removeVaultItem(item.personId, toolId);
+      deps.repo.removeVaultItem(item.personId, item.id);
     }
   }
 
   async function exportItems(personId: Id): Promise<VaultExportItem[]> {
     const items: VaultExportItem[] = [];
+    // RF-65: every credential of the person goes to the file, not one per tool — the format is
+    // v1's list of items and it already carries as many of a tool as there are.
     for (const item of deps.repo.listVault(personId)) {
-      const credential = await read(personId, item.toolId);
+      const credential = await open(item);
       if (credential === null) continue;
       items.push({
         toolId: item.toolId,
@@ -232,7 +281,14 @@ export function createVault(deps: VaultDeps): Vault {
   async function importFromBlob(personId: Id, blob: string, password: string): Promise<number> {
     const items = await importVault(blob, password);
     for (const item of items) {
+      // RF-65: a file written before 0.5.5 holds one credential per tool, and importing it again
+      // must not pile copies up: the item of that tool with the same username is replaced in place,
+      // and a username this tool does not have yet is added beside the others.
+      const held = deps.repo
+        .vaultItemsOfTool(personId, item.toolId)
+        .find((stored) => stored.username === item.username);
       await save(personId, {
+        itemId: held?.id,
         toolId: item.toolId,
         username: item.username,
         secret: item.secret,
@@ -243,10 +299,10 @@ export function createVault(deps: VaultDeps): Vault {
   }
 
   return {
-    key,
     list,
     save,
     read,
+    readDefault,
     remove,
     removeAllOf,
     removeAllForTool,

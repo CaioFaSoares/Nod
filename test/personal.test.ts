@@ -460,7 +460,7 @@ describe('adoptLocalTool (RF-40, B8b)', () => {
     const h = harness('connected');
     const local = entry('notes', { url: 'https://notes.example.test/app', scope: 'org', roles: ['admin'] });
     h.repo.saveEntry(local);
-    h.repo.saveVaultItem({
+    const item = h.repo.saveVaultItem({
       personId: h.person.id,
       toolId: 'notes',
       label: 'notes',
@@ -470,8 +470,10 @@ describe('adoptLocalTool (RF-40, B8b)', () => {
     });
     const saved = h.personal.adoptLocalTool(local, null);
     expect(h.repo.rekeyVaultTool('notes', saved.id)).toBe(1);
-    expect(h.repo.vaultItem(h.person.id, saved.id)?.keychainKey).toBe('nod.cred.p.notes');
-    expect(h.repo.vaultItem(h.person.id, 'notes')).toBeNull();
+    // The row moved to the new tool id; its own id and its keychain pointer are what they were.
+    expect(h.repo.vaultItemById(h.person.id, item.id)?.toolId).toBe(saved.id);
+    expect(h.repo.vaultItemById(h.person.id, item.id)?.keychainKey).toBe('nod.cred.p.notes');
+    expect(h.repo.vaultItemsOfTool(h.person.id, 'notes')).toEqual([]);
   });
 });
 

@@ -96,7 +96,9 @@ export const NO_ASSIGNMENT_TARGET = 'assign to a role or to a person';
 
 /**
  * K9: the one `meta` row that remembers the updates a save could not deliver — a JSON map of
- * `credentialId → toolId`. No schema change: it is a `meta` key like the rest.
+ * `credentialId → itemId`. A row from before 0.5.5 carried the tool id; `retryPending` resolves the
+ * item by `credentialId` first, so such a value is tolerated. No schema change: it is a `meta` key
+ * like the rest.
  */
 const PENDING_UPDATES_KEY = 'shares.pendingUpdates';
 
@@ -108,7 +110,7 @@ const PENDING_UPDATES_KEY = 'shares.pendingUpdates';
 const APPLIED_ISSUED_AT_KEY = 'shares.appliedIssuedAt';
 
 /**
- * F4/M4: the third `meta` row of the share flow — a JSON map of `credentialId → { toolId, scope }`
+ * F4/M4: the third `meta` row of the share flow — a JSON map of `credentialId → { itemId, scope }`
  * of the scope changes a set could not deliver (no connection, or a host that could not be
  * reached). The next sync's `retryPending` carries them, exactly as it does the pending updates. A
  * credential the host has no holder row for answers `404 unknown credential` and its scope stays
@@ -234,10 +236,14 @@ export interface SharesDeps {
 
 /** The K4/K6/K7 surface, as `backend/main.ts` wires it into the RPCs. */
 export interface Shares {
-  /** SP06 §5: every person the credential's scope could reach, with their key state. */
-  recipients(toolId: Id): ShareRecipient[];
+  /**
+   * RF-65: one credential, named by its local `itemId` — never "the tool's credential". Two
+   * credentials of one tool have distinct item ids, so the page picks the one it means.
+   * SP06 §5: every person the credential's scope could reach, with their key state.
+   */
+  recipients(itemId: Id): ShareRecipient[];
   /** SP06 §4: seals one copy per recipient and sends them. Gated. */
-  send(toolId: Id, to: Id[], password?: string): Promise<{ sent: number }>;
+  send(itemId: Id, to: Id[], password?: string): Promise<{ sent: number }>;
   /** SP04 §2's `incomingShares`: the metadata of the open shares addressed to me. */
   inbox(): InboxShare[];
   /** SP06 §4: opens, validates, stores and accepts one share. Gated except an update already held. */
@@ -246,7 +252,7 @@ export interface Shares {
   decline(id: Id): Promise<true>;
   /** K6/SP06 §5: the owner (or an admin, for an assignment) sets the sharing scope. M4: async — a
    * credential with holder rows carries the scope on the host first. */
-  setScope(toolId: Id, scope: ShareScope): Promise<VaultItem>;
+  setScope(itemId: Id, scope: ShareScope): Promise<VaultItem>;
   /**
    * K9/SP06 §4: the owner's save re-seals the new value to every live holder with `kind: 'update'`.
    * The person typed the secret, so the save is the gate (SP06 gates the send, not the edit); a
@@ -259,7 +265,7 @@ export interface Shares {
   /** K9/SP06 §4: applies the incoming `update` shares of a credential this Nod already holds. */
   applyUpdates(): Promise<void>;
   /** K9/SP06 §4: the owner (or an admin) revokes one holder over the host; the snapshot carries it. */
-  removeHolder(toolId: Id, personId: Id): Promise<VaultItem>;
+  removeHolder(itemId: Id, personId: Id): Promise<VaultItem>;
   /**
    * K8/SP06 §4, RF-47: the admin assigns one credential to a role (`roleId`) or to one person
    * (`personId`) and, in the same gated step, seals a copy to every member still without one.
@@ -268,7 +274,7 @@ export interface Shares {
    * key-state reason instead of reporting a success that never happened.
    */
   assign(
-    input: { toolId: Id; roleId: Id | null; personId: Id | null; assigned: boolean },
+    input: { itemId: Id; roleId: Id | null; personId: Id | null; assigned: boolean },
     password?: string,
   ): Promise<{ sent: number; skipped: number }>;
   /** K8/RF-47: the members of the assigned roles still without a copy, as the last read left them. */
@@ -528,11 +534,12 @@ export function createShares(deps: SharesDeps): Shares {
 
   // ---------------------------------------------------------------- recipients (SP06 §5)
 
-  function recipients(toolId: Id): ShareRecipient[] {
+  function recipients(itemId: Id): ShareRecipient[] {
     const me = requirePerson();
-    const item = deps.repo.vaultItem(me.id, toolId);
+    // RF-65: the credential is the one the page picked, not "the tool's credential".
+    const item = deps.repo.vaultItemById(me.id, itemId);
     if (item === null) throw new Error(UNKNOWN_CREDENTIAL);
-    const entry = deps.entry(toolId);
+    const entry = deps.entry(item.toolId);
     const tool = entry === null ? null : { scope: entry.scope, roles: entry.roles };
     const listed: ShareRecipient[] = [];
     for (const person of roster()) {
@@ -563,19 +570,20 @@ export function createShares(deps: SharesDeps): Shares {
 
   // ---------------------------------------------------------------- send (SP06 §4)
 
-  async function send(toolId: Id, to: Id[], password?: string): Promise<{ sent: number }> {
+  async function send(itemId: Id, to: Id[], password?: string): Promise<{ sent: number }> {
     const me = requirePerson();
     // K5/SP06 §4: the gate comes before the credential is read.
     await deps.gate(GATE_REASON.send, password);
     if (to.length === 0) throw new Error(NO_RECIPIENTS);
     const connection = requireConnection();
-    const item = deps.repo.vaultItem(me.id, toolId);
+    // RF-65: the send comes from the one credential the page named; its tool follows from it.
+    const item = deps.repo.vaultItemById(me.id, itemId);
     if (item === null) throw new Error(UNKNOWN_CREDENTIAL);
     // SP06 §5: `blocked` has no send action, and the host refuses the same credential.
     if (item.scope === 'blocked') throw new Error(BLOCKED_CREDENTIAL);
-    const entry = deps.entry(toolId);
+    const entry = deps.entry(item.toolId);
     if (entry === null || entry.scope === 'personal') throw new Error(NOT_SHAREABLE);
-    const credential = await deps.vault.read(me.id, toolId);
+    const credential = await deps.vault.read(me.id, item.id);
     if (credential === null) throw new Error(CREDENTIAL_NOT_FOUND);
 
     const own = await deps.keys.ownPrivate();
@@ -607,7 +615,7 @@ export function createShares(deps: SharesDeps): Shares {
       const payload: SealPayload = {
         v: SEAL_VERSION,
         credentialId,
-        toolId,
+        toolId: item.toolId,
         toolOrigin: originOf(entry.url),
         label: item.label,
         username: credential.username,
@@ -625,24 +633,24 @@ export function createShares(deps: SharesDeps): Shares {
 
     await connection.sendShares({
       credentialId,
-      toolId,
+      toolId: item.toolId,
       scope: item.scope,
       kind: 'send',
       items,
     });
     // M6/L6: the host accepted the copies, so the generated uuid is safe to keep on the item now.
-    if (item.credentialId === null) deps.repo.setVaultCredential(me.id, toolId, credentialId);
+    if (item.credentialId === null) deps.repo.setVaultCredential(me.id, item.id, credentialId);
     // E02 §6: one `share.sent` per recipient, after the host took the copies; the detail names the
     // recipient and the scope/kind, never a value of the credential.
     const scope = item.scope === 'org' ? 'org' : 'role';
-    for (const sent of items) record('share.sent', me.id, toolId, `${sent.to} scope=${scope} kind=send`);
+    for (const sent of items) record('share.sent', me.id, item.toolId, `${sent.to} scope=${scope} kind=send`);
     deps.onChanged?.();
     return { sent: items.length };
   }
 
   // ---------------------------------------------------------------- update and revoke (K9, SP06 §4)
 
-  /** K9: the `meta` map of updates a save could not deliver — credentialId → toolId. */
+  /** K9: the `meta` map of updates a save could not deliver — credentialId → itemId. */
   function readPendingUpdates(): Record<string, Id> {
     const raw = deps.repo.meta(PENDING_UPDATES_KEY);
     if (raw === null) return {};
@@ -650,8 +658,8 @@ export function createShares(deps: SharesDeps): Shares {
       const value = JSON.parse(raw) as unknown;
       if (typeof value !== 'object' || value === null) return {};
       const map: Record<string, Id> = {};
-      for (const [credentialId, toolId] of Object.entries(value)) {
-        if (typeof toolId === 'string' && toolId !== '') map[credentialId] = toolId;
+      for (const [credentialId, id] of Object.entries(value)) {
+        if (typeof id === 'string' && id !== '') map[credentialId] = id;
       }
       return map;
     } catch {
@@ -680,7 +688,7 @@ export function createShares(deps: SharesDeps): Shares {
     const connection = deps.connection();
     const entry = deps.entry(item.toolId);
     const own = connection === null ? null : await deps.keys.ownPrivate();
-    const credential = connection === null ? null : await deps.vault.read(personId, item.toolId);
+    const credential = connection === null ? null : await deps.vault.read(personId, item.id);
     if (
       connection === null ||
       entry === null ||
@@ -688,7 +696,7 @@ export function createShares(deps: SharesDeps): Shares {
       own === null ||
       credential === null
     ) {
-      writePendingUpdates({ ...readPendingUpdates(), [credentialId]: item.toolId });
+      writePendingUpdates({ ...readPendingUpdates(), [credentialId]: item.id });
       return UPDATE_PENDING;
     }
     const issuedAt = now().toISOString();
@@ -753,16 +761,16 @@ export function createShares(deps: SharesDeps): Shares {
    * update shares went out (an owner's save after a revocation is a rotation). Offline or a refused
    * host leaves the pending marker, so the next sync's `retryPending` retries the whole save.
    */
-  async function signalRotated(credentialId: string, toolId: Id): Promise<string | null> {
+  async function signalRotated(credentialId: string, itemId: Id): Promise<string | null> {
     const connection = deps.connection();
     if (connection === null) {
-      writePendingUpdates({ ...readPendingUpdates(), [credentialId]: toolId });
+      writePendingUpdates({ ...readPendingUpdates(), [credentialId]: itemId });
       return UPDATE_PENDING;
     }
     try {
       await connection.markRotated(credentialId);
     } catch {
-      writePendingUpdates({ ...readPendingUpdates(), [credentialId]: toolId });
+      writePendingUpdates({ ...readPendingUpdates(), [credentialId]: itemId });
       return UPDATE_PENDING;
     }
     const pending = { ...readPendingUpdates() };
@@ -798,7 +806,7 @@ export function createShares(deps: SharesDeps): Shares {
       // Nobody to fan out to, so the `update` share the host clears on can never exist: the explicit
       // signal is the only witness that the owner saved a new secret (`docs/handovers/k10-smoke.md`
       // finding 1).
-      return await signalRotated(credentialId, item.toolId);
+      return await signalRotated(credentialId, item.id);
     }
     const warning = await sealUpdate(personId, item, credentialId, live);
     if (warning === UPDATE_PENDING) return warning;
@@ -806,26 +814,29 @@ export function createShares(deps: SharesDeps): Shares {
       // The fan-out is host-side proof when it went out, but it does not when every holder was
       // skipped (RF-45), so the explicit signal is sent beside it — idempotent, and the owner's save
       // is the rotation.
-      const signal = await signalRotated(credentialId, item.toolId);
+      const signal = await signalRotated(credentialId, item.id);
       if (signal !== null) return signal;
     }
     return warning;
   }
 
   /** F4/M4: the `meta` map of scope changes a set could not deliver — credentialId → its target. */
-  function readPendingScopes(): Record<string, { toolId: Id; scope: ShareScope }> {
+  function readPendingScopes(): Record<string, { itemId: Id; scope: ShareScope }> {
     const raw = deps.repo.meta(PENDING_SCOPES_KEY);
     if (raw === null) return {};
     try {
       const value = JSON.parse(raw) as unknown;
       if (typeof value !== 'object' || value === null) return {};
-      const map: Record<string, { toolId: Id; scope: ShareScope }> = {};
+      const map: Record<string, { itemId: Id; scope: ShareScope }> = {};
       for (const [credentialId, entry] of Object.entries(value)) {
         if (typeof entry !== 'object' || entry === null) continue;
-        const { toolId, scope } = entry as { toolId?: unknown; scope?: unknown };
-        if (typeof toolId !== 'string' || toolId === '') continue;
+        // A row written before 0.5.5 named the tool (`toolId`); `retryPending` resolves the item by
+        // `credentialId`, so the older field is accepted as it is.
+        const { itemId, toolId, scope } = entry as { itemId?: unknown; toolId?: unknown; scope?: unknown };
+        const id = typeof itemId === 'string' ? itemId : typeof toolId === 'string' ? toolId : '';
+        if (id === '') continue;
         if (scope !== 'role' && scope !== 'org' && scope !== 'blocked') continue;
-        map[credentialId] = { toolId, scope };
+        map[credentialId] = { itemId: id, scope };
       }
       return map;
     } catch {
@@ -834,7 +845,7 @@ export function createShares(deps: SharesDeps): Shares {
   }
 
   /** The scope marker, rewritten whole (one small JSON row; clearing the last key leaves `{}`). */
-  function writePendingScopes(map: Record<string, { toolId: Id; scope: ShareScope }>): void {
+  function writePendingScopes(map: Record<string, { itemId: Id; scope: ShareScope }>): void {
     deps.repo.setMeta(PENDING_SCOPES_KEY, JSON.stringify(map));
   }
 
@@ -853,10 +864,10 @@ export function createShares(deps: SharesDeps): Shares {
    * status, or no connection at all) leaves the `shares.scope.pending` marker that the next sync's
    * `retryPending` retries.
    */
-  async function pushScope(credentialId: string, toolId: Id, scope: ShareScope): Promise<void> {
+  async function pushScope(credentialId: string, itemId: Id, scope: ShareScope): Promise<void> {
     const connection = deps.connection();
     if (connection === null) {
-      writePendingScopes({ ...readPendingScopes(), [credentialId]: { toolId, scope } });
+      writePendingScopes({ ...readPendingScopes(), [credentialId]: { itemId, scope } });
       return;
     }
     try {
@@ -867,7 +878,7 @@ export function createShares(deps: SharesDeps): Shares {
         return;
       }
       if (!(error instanceof HostError) || error.status !== null) throw error;
-      writePendingScopes({ ...readPendingScopes(), [credentialId]: { toolId, scope } });
+      writePendingScopes({ ...readPendingScopes(), [credentialId]: { itemId, scope } });
       return;
     }
     clearPendingScope(credentialId);
@@ -877,14 +888,18 @@ export function createShares(deps: SharesDeps): Shares {
    * K9/F4: one retry of every pending update and every pending scope, on a sync. Nothing without a
    * connection. A scope the host refuses outright is dropped — retrying it would never help — while
    * a network failure leaves the marker for the next run.
+   *
+   * RF-65: the item is resolved by `credentialId`, the one key of a marker, so a row written before
+   * 0.5.5 (whose value was a tool id) resolves just as well, and a credential removed since is
+   * cleared.
    */
   async function retryPending(): Promise<void> {
     if (deps.connection() === null) return;
     const me = deps.session.current();
     if (me === null) return;
-    for (const [credentialId, toolId] of Object.entries(readPendingUpdates())) {
-      const item = deps.repo.vaultItem(me.id, toolId);
-      if (item === null || item.credentialId !== credentialId) {
+    for (const credentialId of Object.keys(readPendingUpdates())) {
+      const item = deps.repo.vaultItemByCredential(me.id, credentialId);
+      if (item === null) {
         const cleared = { ...readPendingUpdates() };
         delete cleared[credentialId];
         writePendingUpdates(cleared);
@@ -893,13 +908,13 @@ export function createShares(deps: SharesDeps): Shares {
       await update(me.id, item);
     }
     for (const [credentialId, entry] of Object.entries(readPendingScopes())) {
-      const item = deps.repo.vaultItem(me.id, entry.toolId);
-      if (item === null || item.credentialId !== credentialId) {
+      const item = deps.repo.vaultItemByCredential(me.id, credentialId);
+      if (item === null) {
         clearPendingScope(credentialId);
         continue;
       }
       try {
-        await pushScope(credentialId, entry.toolId, entry.scope);
+        await pushScope(credentialId, item.id, entry.scope);
       } catch {
         clearPendingScope(credentialId);
       }
@@ -922,8 +937,9 @@ export function createShares(deps: SharesDeps): Shares {
     for (const share of openShares()) {
       if (share.kind !== 'update') continue;
       if (!isLiveOwner(share.credentialId, share.from)) continue;
-      const existing = deps.repo.vaultItem(me.id, share.toolId);
-      if (existing === null || existing.credentialId !== share.credentialId) continue;
+      // RF-65: the item is the local copy of this exact credential, whichever tool it belongs to.
+      const existing = deps.repo.vaultItemByCredential(me.id, share.credentialId);
+      if (existing === null) continue;
       try {
         await accept(share.id);
       } catch {
@@ -937,14 +953,16 @@ export function createShares(deps: SharesDeps): Shares {
    * host sets `removed_at`, and the owner's next snapshot marks the credential `rotationPending`
    * until a new secret is saved. The owner check is the host's; the answer is the fresh item.
    */
-  async function removeHolder(toolId: Id, personId: Id): Promise<VaultItem> {
+  async function removeHolder(itemId: Id, personId: Id): Promise<VaultItem> {
     const me = requirePerson();
-    const item = deps.repo.vaultItem(me.id, toolId);
+    // RF-65: one credential, named by its item id — the other credentials of the tool keep their
+    // holders untouched.
+    const item = deps.repo.vaultItemById(me.id, itemId);
     if (item === null || item.credentialId === null) throw new Error(UNKNOWN_CREDENTIAL);
     const connection = requireConnection();
     await connection.removeHolder(item.credentialId, personId);
     deps.onChanged?.();
-    const stored = deps.repo.vaultItem(me.id, toolId);
+    const stored = deps.repo.vaultItemById(me.id, itemId);
     if (stored === null) throw new Error(UNKNOWN_CREDENTIAL);
     return decorateOne(stored);
   }
@@ -1002,8 +1020,10 @@ export function createShares(deps: SharesDeps): Shares {
     const share = openShares().find((row) => row.id === id);
     if (share === undefined) throw new Error(UNKNOWN_SHARE);
 
-    const existing = deps.repo.vaultItem(me.id, share.toolId);
-    const held = existing !== null && existing.credentialId === share.credentialId;
+    // RF-65: the copy is the item carrying this exact credential, wherever the tool already has
+    // one. A credential not held here lands as a new item of its tool, never over another one.
+    const existing = deps.repo.vaultItemByCredential(me.id, share.credentialId);
+    const held = existing !== null;
     // SP06 §4: accepting an update to a credential already held shows nothing, so no gate.
     // H1: that holds only when the sender is the credential's live owner holder in the verified
     // snapshot; any other `update` is gated like a fresh share and can never be applied silently.
@@ -1069,8 +1089,11 @@ export function createShares(deps: SharesDeps): Shares {
     // The value is in memory, every check passed and the share is valid: the accept needs the host,
     // so a missing connection refuses here — after the verdict, before any write.
     const host = requireConnection();
-    const previousCredential = existing === null ? null : await deps.vault.read(me.id, share.toolId);
-    await deps.vault.save(me.id, {
+    const previousCredential = existing === null ? null : await deps.vault.read(me.id, existing.id);
+    // RF-65: an already-held credential is replaced in place (`itemId`); a fresh one is added beside
+    // the tool's existing items — the login cascade keeps filling the old default.
+    const storedItem = await deps.vault.save(me.id, {
+      itemId: existing?.id,
       toolId: share.toolId,
       username: payload.username,
       secret: payload.secret,
@@ -1083,15 +1106,19 @@ export function createShares(deps: SharesDeps): Shares {
       await host.acceptShare(id);
     } catch (error) {
       if (existing === null || previousCredential === null) {
-        await deps.vault.remove(me.id, share.toolId);
+        await deps.vault.remove(me.id, storedItem.id);
       } else {
+        // RF-65: restore the value, then the sharing state. `vault.save` COALESCEs `credential_id`
+        // (a null cannot clear the group the payload just wrote), so the exact fields are restored
+        // through `setVaultSharing`, which writes both — NULL included.
         await deps.vault.save(me.id, {
+          itemId: existing.id,
           toolId: share.toolId,
           username: previousCredential.username,
           secret: previousCredential.secret,
           label: existing.label,
         });
-        deps.repo.setVaultSharing(me.id, share.toolId, {
+        deps.repo.setVaultSharing(me.id, existing.id, {
           credentialId: existing.credentialId,
           scope: existing.scope,
         });
@@ -1105,7 +1132,7 @@ export function createShares(deps: SharesDeps): Shares {
     // L3: the share is settled; its ciphertext does not stay in the cached row until the next sync.
     stripSettledSealed([id]);
     deps.onChanged?.();
-    const stored = deps.repo.vaultItem(me.id, share.toolId);
+    const stored = deps.repo.vaultItemById(me.id, storedItem.id);
     if (stored === null) throw new Error(UNKNOWN_CREDENTIAL);
     return decorateOne(stored);
   }
@@ -1134,8 +1161,9 @@ export function createShares(deps: SharesDeps): Shares {
 
   /** One member an `assign` copy has to reach (`MissingCopy` reduced to what the seal needs). */
   interface AssignTarget {
+    /** The admin's own item of the credential, or `null` when this Nod does not hold it. */
+    item: VaultItem | null;
     credentialId: string;
-    toolId: Id;
     personId: Id;
   }
 
@@ -1194,12 +1222,12 @@ export function createShares(deps: SharesDeps): Shares {
    * is what a direct `personId` assignment throws when nothing was sent, so the dialog reports the
    * key-state reason (`recipient key changed`, `recipient has no pinned key`) instead of a success.
    */
-  function sealSkipReason(me: Person, target: AssignTarget): string {
-    const item = deps.repo.vaultItem(me.id, target.toolId);
+  function sealSkipReason(target: AssignTarget): string {
+    const item = target.item;
     if (item === null || (item.credentialId !== null && item.credentialId !== target.credentialId)) {
       return UNKNOWN_CREDENTIAL;
     }
-    const tool = deps.entry(target.toolId);
+    const tool = deps.entry(item.toolId);
     if (tool === null || tool.scope === 'personal') return NOT_SHAREABLE;
     if (item.scope === 'blocked') return BLOCKED_CREDENTIAL;
     const pinned = deps.keys.peerKeyFor(target.personId);
@@ -1233,8 +1261,8 @@ export function createShares(deps: SharesDeps): Shares {
     let sent = 0;
     let skipped = 0;
     for (const target of targets) {
-      const item = deps.repo.vaultItem(me.id, target.toolId);
-      const tool = deps.entry(target.toolId);
+      const item = target.item;
+      const tool = item === null ? null : deps.entry(item.toolId);
       const pinned = deps.keys.peerKeyFor(target.personId);
       if (
         item === null ||
@@ -1249,7 +1277,7 @@ export function createShares(deps: SharesDeps): Shares {
         skipped += 1;
         continue;
       }
-      const credential = await deps.vault.read(me.id, target.toolId);
+      const credential = await deps.vault.read(me.id, item.id);
       if (credential === null) {
         skipped += 1;
         continue;
@@ -1259,7 +1287,7 @@ export function createShares(deps: SharesDeps): Shares {
       const payload: SealPayload = {
         v: SEAL_VERSION,
         credentialId: target.credentialId,
-        toolId: target.toolId,
+        toolId: item.toolId,
         toolOrigin: originOf(tool.url),
         label: item.label,
         username: credential.username,
@@ -1271,10 +1299,10 @@ export function createShares(deps: SharesDeps): Shares {
         issuedAt,
       };
       const sealed = await seal(payload, fromBase64url(pinned.x25519), own.ed25519Private);
-      const key = `${target.credentialId}|${target.toolId}|${scope}`;
+      const key = `${target.credentialId}|${item.toolId}|${scope}`;
       let group = groups.get(key);
       if (group === undefined) {
-        group = { credentialId: target.credentialId, toolId: target.toolId, scope, items: [] };
+        group = { credentialId: target.credentialId, toolId: item.toolId, scope, items: [] };
         groups.set(key, group);
       }
       group.items.push({ to: target.personId, sealed });
@@ -1321,7 +1349,7 @@ export function createShares(deps: SharesDeps): Shares {
    * assignment row, or the sealed copy itself — so a refused action leaves no orphan id.
    */
   async function assign(
-    input: { toolId: Id; roleId: Id | null; personId: Id | null; assigned: boolean },
+    input: { itemId: Id; roleId: Id | null; personId: Id | null; assigned: boolean },
     password?: string,
   ): Promise<{ sent: number; skipped: number }> {
     const me = requirePerson();
@@ -1329,7 +1357,8 @@ export function createShares(deps: SharesDeps): Shares {
     const roleId = input.roleId;
     const personId = input.personId;
     if (roleId === null && personId === null) throw new Error(NO_ASSIGNMENT_TARGET);
-    const item = deps.repo.vaultItem(me.id, input.toolId);
+    // RF-65: the admin assigns the exact credential the page named, not "the tool's credential".
+    const item = deps.repo.vaultItemById(me.id, input.itemId);
     if (item === null) throw new Error(UNKNOWN_CREDENTIAL);
     const connection = requireConnection();
     // K4/SP06 §4: the uuid is generated at the first share and kept on the item forever — an
@@ -1342,7 +1371,7 @@ export function createShares(deps: SharesDeps): Shares {
         await connection.putAssignment({
           credentialId,
           roleId,
-          toolId: input.toolId,
+          toolId: item.toolId,
           assigned: false,
         });
         await refreshAssignments();
@@ -1359,33 +1388,36 @@ export function createShares(deps: SharesDeps): Shares {
       await connection.putAssignment({
         credentialId,
         roleId,
-        toolId: input.toolId,
+        toolId: item.toolId,
         assigned: true,
       });
       // L6: the host took the assignment, so the id is safe to keep on the item now.
-      if (newCredentialId) deps.repo.setVaultCredential(me.id, input.toolId, credentialId);
+      if (newCredentialId) deps.repo.setVaultCredential(me.id, item.id, credentialId);
       // The list the assignment just changed is the host's answer to it, so it is read again before
       // the seal: every current member without a copy gets one in this same gated step.
       await refreshAssignments();
+      // RF-65: the missing list is keyed by credentialId; the sealed copy comes from the admin's own
+      // item of that exact credential.
+      const own = deps.repo.vaultItemByCredential(me.id, credentialId) ?? item;
       result = await sealAssigned(
         me,
         missingRows
           .filter((row) => row.credentialId === credentialId)
           .map((row) => ({
+            item: own,
             credentialId: row.credentialId,
-            toolId: row.toolId,
             personId: row.personId,
           })),
       );
     } else {
       // The direct person assignment: the admin addresses one person, with no assignment row.
       if (personId === null) throw new Error(NO_ASSIGNMENT_TARGET);
-      const target: AssignTarget = { credentialId, toolId: input.toolId, personId };
+      const target: AssignTarget = { item, credentialId, personId };
       result = await sealAssigned(me, [target]);
       // M6: nothing was sent, so the action did not happen; report the reason and persist nothing.
-      if (result.sent === 0) throw new Error(sealSkipReason(me, target));
+      if (result.sent === 0) throw new Error(sealSkipReason(target));
       // L6: the host took the copy, so the id is safe to keep on the item now.
-      if (newCredentialId) deps.repo.setVaultCredential(me.id, input.toolId, credentialId);
+      if (newCredentialId) deps.repo.setVaultCredential(me.id, item.id, credentialId);
     }
     await refreshAssignments();
     deps.onChanged?.();
@@ -1400,11 +1432,13 @@ export function createShares(deps: SharesDeps): Shares {
     await deps.gate(GATE_REASON.assign, password);
     requireConnection();
     if (missingRows.length === 0) await refreshAssignments();
+    // RF-65: each missing row names its credential; the copy comes from the admin's own item of that
+    // credential — a tool with several credentials never mixes them.
     const result = await sealAssigned(
       me,
       missingRows.map((row) => ({
+        item: deps.repo.vaultItemByCredential(me.id, row.credentialId),
         credentialId: row.credentialId,
-        toolId: row.toolId,
         personId: row.personId,
       })),
     );
@@ -1426,10 +1460,11 @@ export function createShares(deps: SharesDeps): Shares {
    * failure marks the change pending for the next sync (`retryPending`); a credential with no
    * `credentialId` has never travelled and is local only.
    */
-  async function setScope(toolId: Id, scope: ShareScope): Promise<VaultItem> {
+  async function setScope(itemId: Id, scope: ShareScope): Promise<VaultItem> {
     const me = requirePerson();
     if (scope !== 'role' && scope !== 'blocked' && scope !== 'org') throw new Error(INVALID_SCOPE);
-    const item = deps.repo.vaultItem(me.id, toolId);
+    // RF-65: the scope is the one credential's, named by its item id.
+    const item = deps.repo.vaultItemById(me.id, itemId);
     if (item === null) throw new Error(UNKNOWN_CREDENTIAL);
     const credentialId = item.credentialId;
     if (credentialId !== null) {
@@ -1438,10 +1473,10 @@ export function createShares(deps: SharesDeps): Shares {
       if (holdersOf(credentialId).length > 0 && !isLiveOwner(credentialId, me.id)) {
         throw new Error(OWNER_ONLY);
       }
-      await pushScope(credentialId, toolId, scope);
+      await pushScope(credentialId, item.id, scope);
     }
-    deps.repo.setVaultScope(me.id, toolId, scope);
-    const stored = deps.repo.vaultItem(me.id, toolId);
+    deps.repo.setVaultScope(me.id, item.id, scope);
+    const stored = deps.repo.vaultItemById(me.id, item.id);
     if (stored === null) throw new Error(UNKNOWN_CREDENTIAL);
     return decorateOne(stored);
   }

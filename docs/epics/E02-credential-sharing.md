@@ -31,8 +31,12 @@ Evidence: `leitura`. Nothing here was executed.
 | **Assign** | admin → a person or every member of a role | new hire gets the Kanban login; role "team" gets the shared Jitsi admin |
 | **Share** | the owner of a credential → people, keeping it in sync | the owner rotates the password, and everyone it was shared with gets the new one |
 
-The receiver accepts it into their vault. Revealing, copying or accepting a credential passes the
-local gate (biometrics, or the password where biometrics don't exist).
+The receiver accepts it into their vault. Several credentials of one tool live side by side in a
+vault: an accept lands on the receiver's item of the same `credentialId` (replaced in place) or, if
+they hold none, as a new item of that tool — never over another credential of the same tool; the
+host is untouched by this and keeps pinning a credential to one tool (RF-65, `docs/specs/SP06-credential-sharing.md` §4).
+Revealing, copying or accepting a credential passes the local gate (biometrics, or the password
+where biometrics don't exist).
 
 ### Sharing scope
 
@@ -115,7 +119,8 @@ sequenceDiagram
   Signed by the sender over the ciphertext and the ids.
 - **Bound to the tool's origin.** The share names the tool entry, and the receiver stores it bound
   to that entry's origin (E01 RF-38). A share for a tool the receiver can't see is held until they
-  can, or declined.
+  can, or declined. The stored copy is the receiver's item of the same `credentialId`, or a new item
+  of that tool when they hold none — never another credential of the same tool (RF-65, SP06 §4).
 - **Assign to a role**: the admin's Nod seals one copy per current member of the role.
   - New members later: the host can't produce a copy. The admin's Nod, on its next sync, sees
     "role team has 1 member without the Jitsi login" and seals the missing copy after a gate

@@ -635,7 +635,7 @@ describe('changePassword', () => {
     });
     // A local account is written as v1, and its `vaultKey` arrives at the first unlock (SP02 §6).
     await s.session.unlock({ email: EMAIL, password: PASSWORD });
-    await vault.save(id, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
+    const item = await vault.save(id, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
 
     await s.session.changePassword(PASSWORD, NEW_PASSWORD);
     s.session.lock();
@@ -645,7 +645,7 @@ describe('changePassword', () => {
     );
     expect((await s.session.unlock({ email: EMAIL, password: NEW_PASSWORD })).unlocked).toBe(true);
     // Changing the password does not touch the keychain: the vault item is still there.
-    expect(await vault.read(id, 'kanban')).toEqual({ username: 'ana', secret: 'kanban-secret' });
+    expect(await vault.read(id, item.id)).toEqual({ username: 'ana', secret: 'kanban-secret' });
     expect(eventTypes(s)).toContain('password_changed');
   });
 
@@ -1145,8 +1145,8 @@ describe('keys and deriveFor (SP02 §6)', () => {
       iterations: ITERATIONS,
       vaultKey: () => s.session.vaultKey(),
     });
-    await vault.save(id, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
-    expect(await vault.read(id, 'kanban')).toEqual({ username: 'ana', secret: 'kanban-secret' });
+    const item = await vault.save(id, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
+    expect(await vault.read(id, item.id)).toEqual({ username: 'ana', secret: 'kanban-secret' });
   });
 
   test('creating another account replaces the keys of the one that was unlocked', async () => {
@@ -1198,7 +1198,7 @@ describe('changePassword against the host (SP02 §7)', () => {
       iterations: ITERATIONS,
       vaultKey: () => s.session.vaultKey(),
     });
-    await vault.save(id, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
+    const item = await vault.save(id, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
 
     const requests: PasswordChangeRequest[] = [];
     await s.session.changePassword(GUILD_PASSWORD, NEW_PASSWORD, async (request) => {
@@ -1241,14 +1241,14 @@ describe('changePassword against the host (SP02 §7)', () => {
     // SP02 §7/V1: the keychain was re-sealed under the new `vaultKey` before the verifier moved, so
     // the autofill keeps working after the change and the old key opens nothing.
     expect(s.repo.listVault(id)).toHaveLength(1);
-    const resealed = s.secrets.get(`nod.cred.${id}.kanban`) ?? '';
+    const resealed = s.secrets.get(item.keychainKey) ?? '';
     expect(resealed.startsWith(VAULT_VALUE_PREFIX)).toBe(true);
-    expect(await decryptVaultValue(newKeys.vaultKey, `nod.cred.${id}.kanban`, resealed)).toEqual({
+    expect(await decryptVaultValue(newKeys.vaultKey, item.keychainKey, resealed)).toEqual({
       username: 'ana',
       secret: 'kanban-secret',
     });
-    expect(await decryptVaultValue(oldKeys.vaultKey, `nod.cred.${id}.kanban`, resealed)).toBeNull();
-    expect(await vault.read(id, 'kanban')).toEqual({ username: 'ana', secret: 'kanban-secret' });
+    expect(await decryptVaultValue(oldKeys.vaultKey, item.keychainKey, resealed)).toBeNull();
+    expect(await vault.read(id, item.id)).toEqual({ username: 'ana', secret: 'kanban-secret' });
     expect(eventTypes(s)).toContain('password_changed');
 
     // The salt the `host` row caches for offline unlock moved with the password (SP02 §6), so B2's
@@ -1368,7 +1368,7 @@ describe('changePassword against the host (SP02 §7)', () => {
     });
     await s.session.unlock({ email: EMAIL, password: PASSWORD });
     const oldVaultKey = keysOf(s).vaultKey;
-    await vault.save(id, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
+    const item = await vault.save(id, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
     await s.session.enableBiometric(PASSWORD);
 
     await s.session.changePassword(PASSWORD, NEW_PASSWORD);
@@ -1376,17 +1376,17 @@ describe('changePassword against the host (SP02 §7)', () => {
     const newVaultKey = keysOf(s).vaultKey;
     expect(newVaultKey).not.toBe(oldVaultKey);
     expect(s.secrets.get(`nod.bio.${id}`)).toBe(newVaultKey);
-    const resealed = s.secrets.get(`nod.cred.${id}.kanban`) ?? '';
+    const resealed = s.secrets.get(item.keychainKey) ?? '';
     expect(resealed.startsWith(VAULT_VALUE_PREFIX)).toBe(true);
     expect(
-      await decryptVaultValue(fromBase64url(newVaultKey), `nod.cred.${id}.kanban`, resealed),
+      await decryptVaultValue(fromBase64url(newVaultKey), item.keychainKey, resealed),
     ).toEqual({ username: 'ana', secret: 'kanban-secret' });
-    expect(await decryptVaultValue(fromBase64url(oldVaultKey), `nod.cred.${id}.kanban`, resealed)).toBeNull();
+    expect(await decryptVaultValue(fromBase64url(oldVaultKey), item.keychainKey, resealed)).toBeNull();
 
     // Biometrics opens the session again, and the item's key is the one that opens the vault.
     s.session.lock();
     expect((await s.session.unlockBiometric()).person?.id).toBe(id);
-    expect(await vault.read(id, 'kanban')).toEqual({ username: 'ana', secret: 'kanban-secret' });
+    expect(await vault.read(id, item.id)).toEqual({ username: 'ana', secret: 'kanban-secret' });
   });
 });
 
@@ -1485,7 +1485,7 @@ describe('wipeVault (SP02 §7)', () => {
     });
     // A v1 account's `vaultKey` arrives at its first unlock (SP02 §6); the vault needs it to seal.
     await s.session.unlock({ email: EMAIL, password: PASSWORD });
-    await vault.save(ana, { toolId: 'kanban', username: 'ana', secret: 'ana-secret' });
+    const anaItem = await vault.save(ana, { toolId: 'kanban', username: 'ana', secret: 'ana-secret' });
     // Ana's biometrics, which the reset has to take with the vault (SP02 §9).
     await s.session.enableBiometric(PASSWORD);
 
@@ -1500,20 +1500,20 @@ describe('wipeVault (SP02 §7)', () => {
         })
       ).person?.id ?? '';
     await s.session.unlock({ email: 'bruno@example.test', password: PASSWORD });
-    await vault.save(bruno, { toolId: 'figma', username: 'bruno', secret: 'bruno-secret' });
+    const brunoItem = await vault.save(bruno, { toolId: 'figma', username: 'bruno', secret: 'bruno-secret' });
     s.session.lock();
 
     // The reset of SP02 §7 needs no session: the salt changed before anyone could unlock.
     await s.session.wipeVault(ana);
 
     expect(s.repo.listVault(ana)).toEqual([]);
-    expect(s.secrets.has(`nod.cred.${ana}.kanban`)).toBe(false);
+    expect(s.secrets.has(anaItem.keychainKey)).toBe(false);
     expect(s.secrets.has(`nod.bio.${ana}`)).toBe(false);
     expect(s.repo.listVault(bruno)).toHaveLength(1);
-    expect(s.secrets.has(`nod.cred.${bruno}.figma`)).toBe(true);
+    expect(s.secrets.has(brunoItem.keychainKey)).toBe(true);
     // Nobody was locked out: a wipe is not a revocation, and the other account opens as before.
     expect((await s.session.unlock({ email: 'bruno@example.test', password: PASSWORD })).unlocked).toBe(true);
-    expect(await vault.read(bruno, 'figma')).toEqual({ username: 'bruno', secret: 'bruno-secret' });
+    expect(await vault.read(bruno, brunoItem.id)).toEqual({ username: 'bruno', secret: 'bruno-secret' });
   });
 });
 
@@ -1703,10 +1703,10 @@ describe('adopting a local account (F1)', () => {
     // The keys of a v1 account arrive at its first unlock (SP02 §6).
     await s.session.unlock({ email: EMAIL, password: PASSWORD });
     const localVaultKey = s.session.vaultKey() ?? new Uint8Array();
-    await vault.save(local, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
+    const item = await vault.save(local, { toolId: 'kanban', username: 'ana', secret: 'kanban-secret' });
     // An event of that person, recorded before the join: the audit is that person's own history.
     s.repo.addEvent({ personId: local, toolId: 'kanban', type: 'tool_opened', url: null, result: null, detail: null });
-    expect(s.secrets.has(`nod.cred.${local}.kanban`)).toBe(true);
+    expect(s.secrets.has(item.keychainKey)).toBe(true);
 
     const state = await s.session.adoptConnectedAccount({
       personId: HOST_PERSON_ID,
@@ -1724,23 +1724,23 @@ describe('adopting a local account (F1)', () => {
     expect(state.person?.id).toBe(HOST_PERSON_ID);
     expect(state.person?.roles).toEqual(['admin', 'team']);
     expect(s.repo.personById(local)).toBeNull();
-    // The credential works under the new id: the index and the keychain item moved together.
-    expect(s.secrets.has(`nod.cred.${local}.kanban`)).toBe(false);
-    expect(s.secrets.has(`nod.cred.${HOST_PERSON_ID}.kanban`)).toBe(true);
-    expect(s.repo.listVault(HOST_PERSON_ID).map((item) => item.keychainKey)).toEqual([
-      `nod.cred.${HOST_PERSON_ID}.kanban`,
-    ]);
-    expect(await vault.read(HOST_PERSON_ID, 'kanban')).toEqual({ username: 'ana', secret: 'kanban-secret' });
+    // The credential works under the new id: the index and the keychain item moved together. RF-65
+    // puts the item id in the key, so the person may hold several credentials of one tool.
+    const movedKey = `nod.cred.${HOST_PERSON_ID}.kanban.${item.id}`;
+    expect(s.secrets.has(item.keychainKey)).toBe(false);
+    expect(s.secrets.has(movedKey)).toBe(true);
+    expect(s.repo.listVault(HOST_PERSON_ID).map((held) => held.keychainKey)).toEqual([movedKey]);
+    expect(await vault.read(HOST_PERSON_ID, item.id)).toEqual({ username: 'ana', secret: 'kanban-secret' });
     // SP02 §8: the value was re-sealed, not copied — the old keychain key is its AAD and the
     // adoption changed it, so the key of the host account is the only one that opens it now.
-    const moved = s.secrets.get(`nod.cred.${HOST_PERSON_ID}.kanban`) ?? '';
+    const moved = s.secrets.get(movedKey) ?? '';
     expect(moved.startsWith(VAULT_VALUE_PREFIX)).toBe(true);
     const hostVaultKey = s.session.vaultKey() ?? new Uint8Array();
-    expect(await decryptVaultValue(hostVaultKey, `nod.cred.${HOST_PERSON_ID}.kanban`, moved)).toEqual({
+    expect(await decryptVaultValue(hostVaultKey, movedKey, moved)).toEqual({
       username: 'ana',
       secret: 'kanban-secret',
     });
-    expect(await decryptVaultValue(localVaultKey, `nod.cred.${HOST_PERSON_ID}.kanban`, moved)).toBeNull();
+    expect(await decryptVaultValue(localVaultKey, movedKey, moved)).toBeNull();
     // The history moved with the person, and nothing stayed under the old id.
     const history = s.repo.listEvents({ personId: HOST_PERSON_ID }).map((event) => event.type);
     expect(history).toContain('account_created');
@@ -1800,7 +1800,7 @@ describe('adopting a local account (F1)', () => {
       roles: [],
     });
     s.repo.saveEntry(tool('kanban'));
-    s.repo.saveVaultItem({
+    const goneItem = s.repo.saveVaultItem({
       personId: gone.id,
       toolId: 'kanban',
       label: 'kanban',
@@ -1810,22 +1810,26 @@ describe('adopting a local account (F1)', () => {
     });
     // The legacy keychain form (SP02 §8): a plaintext JSON credential, no `bv1.` prefix.
     const legacy = JSON.stringify({ username: 'ana', secret: 'kanban-value' });
-    await s.keychain.set(`nod.cred.${gone.id}.kanban`, legacy);
+    await s.keychain.set(goneItem.keychainKey, legacy);
     s.repo.revokePerson(gone.id);
 
     const state = await adoptConnected(s, { email: GUILD_EMAIL, adoptLocalId: gone.id });
 
     expect(state.person?.id).toBe(HOST_PERSON_ID);
     expect(s.repo.personById(HOST_PERSON_ID)).toMatchObject({ email: GUILD_EMAIL, name: 'Ana' });
-    expect(s.secrets.has(`nod.cred.${gone.id}.kanban`)).toBe(false);
+    expect(s.secrets.has(goneItem.keychainKey)).toBe(false);
     // The value was legacy plaintext (the revoked row was v1, so no `vaultKey` ever existed); the
-    // adoption seals it under the host key and the new keychain key (SP02 §8).
-    const adopted = s.secrets.get(`nod.cred.${HOST_PERSON_ID}.kanban`) ?? '';
+    // adoption seals it under the host key and the new keychain key — the item id is in it (SP02 §8,
+    // RF-65).
+    const adoptedKey = `nod.cred.${HOST_PERSON_ID}.kanban.${goneItem.id}`;
+    const adopted = s.secrets.get(adoptedKey) ?? '';
     expect(adopted.startsWith(VAULT_VALUE_PREFIX)).toBe(true);
-    expect(
-      await decryptVaultValue(s.session.vaultKey() ?? new Uint8Array(), `nod.cred.${HOST_PERSON_ID}.kanban`, adopted),
-    ).toEqual({ username: 'ana', secret: 'kanban-value' });
+    expect(await decryptVaultValue(s.session.vaultKey() ?? new Uint8Array(), adoptedKey, adopted)).toEqual({
+      username: 'ana',
+      secret: 'kanban-value',
+    });
     expect(s.repo.listVault(HOST_PERSON_ID)).toHaveLength(1);
+    expect(s.repo.listVault(HOST_PERSON_ID).map((item) => item.keychainKey)).toEqual([adoptedKey]);
   });
 
   test('a host person this Nod already holds is refused, and nothing moved (F1)', async () => {
@@ -1924,7 +1928,7 @@ describe('adopting a local account (F1)', () => {
     const s = scene();
     const local = await firstAccount(s);
     s.repo.saveEntry(tool('kanban'));
-    s.repo.saveVaultItem({
+    const item = s.repo.saveVaultItem({
       personId: local,
       toolId: 'kanban',
       label: 'kanban',
@@ -1933,12 +1937,14 @@ describe('adopting a local account (F1)', () => {
       origin: 'https://kanban.example.test/app',
     });
     const legacy = JSON.stringify({ username: 'ana', secret: 'kanban-value' });
-    await s.keychain.set(`nod.cred.${local}.kanban`, legacy);
+    await s.keychain.set(item.keychainKey, legacy);
     const real = s.keychain;
-    // The read goes through; the write of the new key is what a full keychain would refuse.
+    // The read goes through; the write of the new key — the item's own, with the host person id in it
+    // (RF-65) — is what a full keychain would refuse.
+    const movedKey = `nod.cred.${HOST_PERSON_ID}.kanban.${item.id}`;
     const refusing: SecretStore = {
       get: (key) => real.get(key),
-      set: async (key, value) => (key === `nod.cred.${HOST_PERSON_ID}.kanban` ? false : real.set(key, value)),
+      set: async (key, value) => (key === movedKey ? false : real.set(key, value)),
       delete: (key) => real.delete(key),
     };
     const session = createSession({
@@ -1968,11 +1974,9 @@ describe('adopting a local account (F1)', () => {
 
     // The report is what the person sees; the value itself is not lost — it is still under the key it
     // was written with, and the index row moved with the id.
-    expect(s.secrets.get(`nod.cred.${local}.kanban`)).toBe(legacy);
+    expect(s.secrets.get(item.keychainKey)).toBe(legacy);
     expect(s.repo.personById(local)).toBeNull();
-    expect(s.repo.listVault(HOST_PERSON_ID).map((item) => item.keychainKey)).toEqual([
-      `nod.cred.${HOST_PERSON_ID}.kanban`,
-    ]);
+    expect(s.repo.listVault(HOST_PERSON_ID).map((held) => held.keychainKey)).toEqual([movedKey]);
   });
 });
 
