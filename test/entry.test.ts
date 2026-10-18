@@ -208,14 +208,19 @@ describe('the disconnected predicate (O2 + RF-60)', () => {
     expect(h.hostWriteRefused('catalog.save', h.disconnectedSession(false, 'offline', false))).toBe(false);
   });
 
-  test('the guild invite methods are in the two gate tables', async () => {
+  test('the guild invite and owner people methods are in the two gate tables', async () => {
     const h = await backend();
 
     expect(h.hostReadRefused('guildInvites.list', true)).toBe(true);
     expect(h.hostWriteRefused('guildInvites.create', true)).toBe(true);
     expect(h.hostWriteRefused('guildInvites.revoke', true)).toBe(true);
+    // RF-64: the owner's two people writes reach the host too, so an outdated Nod refuses them.
+    expect(h.hostWriteRefused('people.update', true)).toBe(true);
+    expect(h.hostWriteRefused('people.delete', true)).toBe(true);
     // Nothing of the guild is listing or writing while the guild is reachable.
     expect(h.hostReadRefused('guildInvites.list', false)).toBe(false);
+    expect(h.hostWriteRefused('people.update', false)).toBe(false);
+    expect(h.hostWriteRefused('people.delete', false)).toBe(false);
     // The two auth methods the entry screen runs while locked stay outside the tables: the joins
     // refuse themselves over the discovery's minimum instead (`beginAuth`/`discoverFor`).
     expect(h.hostWriteRefused('host.activate', true)).toBe(false);

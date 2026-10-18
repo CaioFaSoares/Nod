@@ -73,7 +73,7 @@ import type {
 import { createConnectedCatalog } from './connected-catalog';
 import { createGuildIcon, GUILD_ICON_FILE } from './guild-icon';
 import { buildCredentialHolders } from './holders';
-import { hostAdminFor, orgViewsOf } from './host-admin';
+import { hostAdminFor, orgViewsOf, ownerGate } from './host-admin';
 import { createHostClient, HostError, hostTokenKey } from './host-client';
 import { bytesToBase64, createIcons } from './icons';
 import { createKeys, keysKey } from './keys';
@@ -815,6 +815,10 @@ const ADMIN_ONLY: Partial<Record<Method, true>> = {
   'roles.grant': true,
   'people.list': true,
   'people.setRoles': true,
+  // 0.5.3 (RF-64): both are the owner's writes; a non-owner admin reaches them and the host is the
+  // one that refuses with `403 owner only`, exactly like a member is refused the rest here.
+  'people.update': true,
+  'people.delete': true,
   'people.revoke': true,
   'people.sessions': true,
   'people.revokeSession': true,
@@ -892,6 +896,9 @@ const HOST_WRITES: Partial<Record<Method, true>> = {
   'roles.remove': true,
   'roles.grant': true,
   'people.setRoles': true,
+  // 0.5.3 (RF-64): `PATCH`/`DELETE /v1/admin/people/:id` are rows on the host's side.
+  'people.update': true,
+  'people.delete': true,
   'people.revoke': true,
   'people.revokeSession': true,
   // O1/SP03 §2: `DELETE /v1/sessions/:id` is a write to the host's session row. It used to stay open
@@ -2391,7 +2398,14 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   // -------------------------------------------------------------- guild invites (0.5.0, RF-59)
-  /** The guild's invites, revoked ones included — the admin screen shows their state. */
+  /**
+   * The guild's invites, revoked ones included — the admin screen shows their state.
+   *
+   * RF-64: on a host older than 0.5.0 the route does not exist and this throws `HOST_TOO_OLD`
+   * (`backend/host-admin.ts`'s `listInvites`). The People tab's invite card treats that as a note and
+   * still renders the person list it already loaded (`src/settings.ts`); this RPC keeps throwing, so
+   * the screen — not the backend — decides how the old host is shown.
+   */
   'guildInvites.list': async (): Promise<GuildInvite[]> => {
     const admin = hostAdminFor(guildConnection());
     if (admin === null) throw new Error('Nod is not connected to a host');
@@ -2422,7 +2436,13 @@ const methods: { [M in Method]: Handler<M> } = {
       expiresInMinutes:
         optional(p.expiresInMinutes, (value) => integer(value, 'invalid expiry')) ?? null,
     };
-    const created = await admin.createInvite(input);
+    const created = await admin.createInvite(
+      input,
+      // RF-64: the guild's role ids, as this Nod listed them (`rolesOf`, SP05 §2). The invite routes'
+      // `404` only means "unknown role" against this list; a role that is here means the host has no
+      // `/v1/admin/invites` at all (`HOST_TOO_OLD`), which is the deployed-host bug this fixes.
+      rolesOf().map((role) => role.id),
+    );
     // Like `invites.issue`: what the log keeps is the roles and the terms, never the code.
     r.addEvent({
       personId: actor.id,
@@ -3060,6 +3080,81 @@ const methods: { [M in Method]: Handler<M> } = {
     });
     await afterChange();
     return updated;
+  },
+
+  /**
+   * 0.5.3 (RF-64): the guild owner renames a person or changes their email
+   * (`PATCH /v1/admin/people/:id { name?, email? }`). Connected only — a local account's name and
+   * email are edited by the person themselves, never from the People screen. At least one field is
+   * required; `name` is trimmed non-empty, `email` trimmed, non-empty and carrying an `@` before the
+   * call, so an obviously wrong body never leaves this machine. The host trims and lowercases the
+   * email and answers `403 owner only` / `409 email taken` for the cases only it can decide — both
+   * kept as its own refusals because the screen shows them. `ownerGate` reads the guild's people
+   * first and refuses a host without an owner (`HOST_TOO_OLD_PEOPLE`) or a caller who is not the
+   * owner, before the `PATCH` is sent.
+   */
+  'people.update': async (params) => {
+    const r = required(repo, 'people.update');
+    const actor = unlockedPerson('people.update');
+    const admin = hostAdminFor(guildConnection());
+    if (admin === null) throw new Error('Nod is not connected to a host');
+    const p = parameters(params, 'invalid person');
+    const personId = text(p.personId, 'invalid person');
+    const name = optional(p.name, (value) => text(value, 'invalid person').trim());
+    const email = optional(p.email, (value) => text(value, 'invalid person').trim());
+    if (name === undefined && email === undefined) throw new Error('invalid person');
+    if (email !== undefined && !email.includes('@')) throw new Error('invalid person');
+    const input: { name?: string; email?: string } = {};
+    if (name !== undefined) input.name = name;
+    if (email !== undefined) input.email = email;
+
+    // RF-64: the gate reads the guild's people first — `HOST_TOO_OLD_PEOPLE` on a host without an
+    // owner, `only the guild owner can do this` for anyone else — before the PATCH is sent.
+    await ownerGate(admin, actor.id);
+    const updated = await admin.updatePerson(personId, input);
+    const fields = [name !== undefined ? 'name' : null, email !== undefined ? 'email' : null]
+      .filter((field): field is string => field !== null)
+      .join(', ');
+    r.addEvent({
+      personId: updated.id,
+      toolId: null,
+      type: 'person_updated',
+      url: null,
+      result: 'updated',
+      detail: fields,
+    });
+    await afterHostWrite();
+    return updated;
+  },
+
+  /**
+   * 0.5.3 (RF-64): the guild owner removes a person from the guild
+   * (`DELETE /v1/admin/people/:id`), a hard delete the host runs in one transaction. Connected
+   * only. `ownerGate` reads the guild's people first and refuses a host without an owner
+   * (`HOST_TOO_OLD_PEOPLE`), a caller who is not the owner and the owner as the delete's target —
+   * before the `DELETE` is sent. The host is the one that refuses a non-owner (`403 owner only`),
+   * the owner's own deletion (`403`) and the last-admin `409`; `people.update`'s log line names the
+   * fields, this one the id.
+   */
+  'people.delete': async (params): Promise<true> => {
+    const r = required(repo, 'people.delete');
+    const actor = unlockedPerson('people.delete');
+    const admin = hostAdminFor(guildConnection());
+    if (admin === null) throw new Error('Nod is not connected to a host');
+    const personId = text(parameters(params, 'invalid person').personId, 'invalid person');
+
+    await ownerGate(admin, actor.id, personId);
+    await admin.deletePerson(personId);
+    r.addEvent({
+      personId,
+      toolId: null,
+      type: 'person_deleted',
+      url: null,
+      result: 'removed from the host',
+      detail: null,
+    });
+    await afterHostWrite();
+    return true;
   },
 
   'people.revoke': async (params): Promise<true> => {

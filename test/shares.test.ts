@@ -1714,7 +1714,10 @@ async function memberWithCode(
   admin: HostAdmin,
   input: { email: string; name: string; roles: Id[] },
 ): Promise<{ id: string; code: string; expiresAt: string }> {
-  const invited = await admin.createInvite({ roles: input.roles, maxUses: 1, expiresInMinutes: 60 });
+  const invited = await admin.createInvite(
+    { roles: input.roles, maxUses: 1, expiresInMinutes: 60 },
+    input.roles,
+  );
   const authKey = randomAuthKey();
   const joined = await running.call('POST', HOST_ROUTES.authJoin, {
     email: input.email,

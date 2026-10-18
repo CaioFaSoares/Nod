@@ -267,11 +267,14 @@ async function memberWithCode(
   input: { email: string; name: string; roles: Id[] },
 ): Promise<{ id: string; code: string; expiresAt: string }> {
   const adminRoles = input.roles.filter((role) => role === 'admin');
-  const invited = await admin.createInvite({
-    roles: input.roles.filter((role) => role !== 'admin'),
-    maxUses: 1,
-    expiresInMinutes: 60,
-  });
+  const invited = await admin.createInvite(
+    {
+      roles: input.roles.filter((role) => role !== 'admin'),
+      maxUses: 1,
+      expiresInMinutes: 60,
+    },
+    input.roles.filter((role) => role !== 'admin'),
+  );
   const authKey = randomAuthKey();
   const joined = await running.call('POST', HOST_ROUTES.authJoin, {
     email: input.email,

@@ -57,6 +57,13 @@ export const EVENTS_DEFAULT_LIMIT = 500;
 export const GUILD_ICON_HASH_KEY = 'guild_icon_sha256';
 export const GUILD_ICON_BYTES_KEY = 'guild_icon_bytes';
 
+/**
+ * The `meta` row holding the guild owner's person id (0.5.3, RF-64). Setup writes it in the
+ * transaction that creates the first admin; migration 7 backfills it from the earliest person on a
+ * database that predates the rule. Every read of a person derives `owner` from it (`PERSON_COLUMNS`).
+ */
+export const OWNER_ID_KEY = 'owner_id';
+
 /** A person row plus the columns the host adds to `Person`. */
 export interface HostPerson extends Person {
   kind: PersonKind;
@@ -64,6 +71,11 @@ export interface HostPerson extends Person {
   activatedAt: string | null;
   /** Set when the host revoked the person: no sign-in, no snapshot (SP01 §2). */
   disabledAt: string | null;
+  /**
+   * 0.5.3 (RF-64): true for the guild owner — the person `POST /v1/auth/setup` created, held in
+   * `meta.owner_id`. Only the owner renames, edits the email of, or deletes a person.
+   */
+  owner: boolean;
 }
 
 /** The only read that carries `auth_hash` (SP02 §2): the sign-in path of `host/auth.ts`. */
@@ -391,9 +403,32 @@ export interface Repo {
   personAuthByEmail(email: string): PersonAuth | null;
   listPeople(): HostPerson[];
   renamePerson(personId: string, name: string): HostPerson;
-  /** Replaces the person's roles and prunes favorites they can no longer see (SP01 §2). */
+  /**
+   * 0.5.3 (RF-64): the guild owner's person id, from `meta.owner_id`, or null on a host built
+   * before the setup route wrote it. `OWNER_ID_KEY`.
+   */
+  ownerId(): string | null;
+  /**
+   * 0.5.3 (RF-64): records `personId` as the guild owner (`meta.owner_id`). The setup route calls it
+   * inside the transaction that creates the first admin, so the owner and the admin cannot drift.
+   */
+  setOwner(personId: string): void;
+  /**
+   * 0.5.3 (RF-64): stores a new email, lowercased and trimmed like every email (SP01 §2). `409
+   * email taken` when another person holds it; unknown id is `404`. The route gates it on the owner.
+   */
+  setEmail(personId: string, email: string): HostPerson;
+  /**
+   * 0.5.3 (RF-64): hard-deletes a person and everything that hangs off them, in one transaction. The
+   * owner and the last admin are refused (`403`/`409`), an unknown id is `404`. Rows with a
+   * non-cascading foreign key into the person — their events, their shares (and the holder rows
+   * pointing at those shares) and any assignment they signed — are handled explicitly; `byId` is the
+   * deleted person's owner, who takes over `assignments.assigned_by` (the FK cannot be left dangling).
+   */
+  deletePerson(personId: string, byId: string, now: string): void;
+  /** Replaces the person's roles and prunes favorites they can no longer see (SP01 §2). The owner keeps an admin role (RF-64). */
   setRoles(personId: string, roles: string[]): HostPerson;
-  /** Disabling revokes every session of the person (SP02 §5, SP03 §2). */
+  /** Disabling revokes every session of the person (SP02 §5, SP03 §2). The owner is never disabled (RF-64). */
   setDisabled(personId: string, disabled: boolean, now: string): HostPerson;
   /** Stores the first salt and hash and stamps `activated_at` once (SP02 §3, §7). */
   activatePerson(personId: string, auth: { salt: string; authHash: string }, now: string): void;
@@ -485,9 +520,9 @@ export interface Repo {
 
   // roles
   listRoles(): Role[];
-  /** Upsert; `409` when demoting the role would leave no admin. */
+  /** Upsert; `409` when demoting the role would leave no admin, `403` when it would take the owner's only admin role (RF-64). */
   saveRole(role: Role): Role;
-  /** `409` when removing the role would leave no admin; `404` when it does not exist. */
+  /** `409` when removing the role would leave no admin, `403` when it would take the owner's only admin role; `404` when it does not exist. */
   removeRole(id: string): void;
   /** Activated, non-disabled people holding an admin role: the count SP01 §2 protects. */
   adminCount(): number;
@@ -636,8 +671,12 @@ export interface Repo {
 
 type Bind = string | number | null;
 
+// `owner` (RF-64) is derived in SQL from the `meta.owner_id` row the setup route writes, so every
+// read of a person carries the flag without a second query: `COALESCE` makes "no owner yet" compare
+// false, never `NULL`. Every `HostPerson` below therefore answers `owner: boolean`.
 const PERSON_COLUMNS = `p.id AS id, p.email AS email, p.name AS name, p.kind AS kind,
   p.created_at AS createdAt, p.activated_at AS activatedAt, p.disabled_at AS disabledAt,
+  (p.id = COALESCE((SELECT value FROM meta WHERE key = 'owner_id'), '')) AS owner,
   pr.role_id AS roleId, r.admin AS roleAdmin`;
 
 const PERSON_JOIN = `FROM people p
@@ -652,6 +691,8 @@ interface PersonRow {
   createdAt: string;
   activatedAt: string | null;
   disabledAt: string | null;
+  /** RF-64: 1 when this person is `meta.owner_id`; SQLite answers 0 for "no owner yet". */
+  owner: number;
   roleId: string | null;
   roleAdmin: number | null;
 }
@@ -854,6 +895,7 @@ export function createRepo(db: Database): Repo {
           createdAt: row.createdAt,
           activatedAt: row.activatedAt,
           disabledAt: row.disabledAt,
+          owner: row.owner === 1,
         };
         people.set(row.id, person);
       }
@@ -916,11 +958,28 @@ export function createRepo(db: Database): Repo {
    * The last-admin guard of SP01 §2: once an admin is activated, the write that would leave none is
    * refused and the whole transaction rolls back. Before the first admin exists the guard is silent,
    * which is what lets an empty host be built.
+   *
+   * RF-64 sits in front of it: the owner keeps an admin role and stays enabled whoever the caller is,
+   * themselves included, so their state is read around every guarded write and a write that takes
+   * either away is the `403`. It is never the last-admin `409` — that rule answers only when the owner
+   * is not the admin being counted (a host with no owner yet, or one whose owner is not activated).
+   * The rule lives here, not in a route, so no path — a role edit, a role demotion or delete, a
+   * disable — can bypass it (SP01 §2, SP03 §2).
    */
   function guarded<T>(write: () => T): T {
     return runInTransaction(() => {
       const before = countAdmins();
+      const ownerBefore = ownerState();
       const result = write();
+      const ownerAfter = ownerState();
+      if (ownerBefore !== null && ownerAfter !== null) {
+        if (ownerBefore.admin && !ownerAfter.admin) {
+          throw new ForbiddenError('the owner keeps an admin role');
+        }
+        if (!ownerBefore.disabled && ownerAfter.disabled) {
+          throw new ForbiddenError('the owner cannot be disabled');
+        }
+      }
       if (before > 0 && countAdmins() === 0) throw new ConflictError('the last admin cannot be removed');
       return result;
     });
@@ -1166,6 +1225,106 @@ export function createRepo(db: Database): Repo {
     const changes = db.query('UPDATE people SET name = ? WHERE id = ?').run(name, personId).changes;
     if (changes !== 1) throw new NotFoundError('unknown person');
     return readPerson('p.id = ?', [personId]) as HostPerson;
+  }
+
+  function ownerId(): string | null {
+    return readMeta(OWNER_ID_KEY);
+  }
+
+  /**
+   * RF-64: the owner's two protected facts, read from `meta.owner_id` — whether they hold an admin
+   * role and whether they are disabled. `null` while no owner is recorded (setup writes it last) or
+   * the recorded id names no row; `guarded` compares this before and after a write, so a write that
+   * would take either away is refused. An owner read as `admin: false` (a database migration 7
+   * backfilled with a non-admin) is left alone, never a reason to refuse somebody else's write.
+   */
+  function ownerState(): { admin: boolean; disabled: boolean } | null {
+    const owner = ownerId();
+    if (owner === null) return null;
+    const row = db
+      .query<{ admin: number; disabled: number }, [string]>(
+        `SELECT
+           EXISTS (SELECT 1 FROM person_roles pr JOIN roles r ON r.id = pr.role_id
+                    WHERE pr.person_id = p.id AND r.admin = 1) AS admin,
+           (p.disabled_at IS NOT NULL) AS disabled
+           FROM people p WHERE p.id = ?`,
+      )
+      .get(owner);
+    return row === null ? null : { admin: row.admin === 1, disabled: row.disabled === 1 };
+  }
+
+  function setOwner(personId: string): void {
+    assertPersonExists(personId);
+    writeMeta(OWNER_ID_KEY, personId);
+  }
+
+  /**
+   * RF-64: an email write is a uniqueness check and an update in one transaction, so two admins
+   * renaming to the same address cannot both pass the check. Re-sending the person's own email is not
+   * a conflict; another person's is the static `409 email taken` (SP01 §2, SP03 §1).
+   */
+  function setEmail(personId: string, email: string): HostPerson {
+    const normalized = normalizeEmail(email);
+    return runInTransaction(() => {
+      const holder = db
+        .query<{ id: string }, [string]>('SELECT id FROM people WHERE email = ?')
+        .get(normalized);
+      if (holder !== null && holder.id !== personId) throw new ConflictError('email taken');
+      const changes = db.query('UPDATE people SET email = ? WHERE id = ?').run(normalized, personId)
+        .changes;
+      if (changes !== 1) throw new NotFoundError('unknown person');
+      return readPerson('p.id = ?', [personId]) as HostPerson;
+    });
+  }
+
+  /**
+   * RF-64: the hard delete of one person. `guarded` gives the last-admin rule of SP01 §2 — a delete
+   * that would leave the guild without an admin is the `409` every other admin write uses — and the
+   * owner is refused first, because the guild always keeps one. The explicit statements below clear
+   * the rows whose foreign key into this person (or into their sessions, personal tools or shares)
+   * has no `ON DELETE CASCADE`; the single `DELETE FROM people` then cascades the rest (SP01 §2–§3).
+   * `_now` is in the signature of the contract's other person writes; here the clock the route needs
+   * is its `person_deleted` event's.
+   */
+  function deletePerson(personId: string, byId: string, _now: string): void {
+    guarded(() => {
+      assertPersonExists(personId);
+      if (ownerId() === personId) throw new ForbiddenError('the owner cannot be deleted');
+
+      // `events.person_id` and `events.session_id` are plain references: the person's events, and any
+      // event one of their sessions wrote, go before the sessions and the person row do.
+      db.query(
+        `DELETE FROM events WHERE person_id = ?
+          OR session_id IN (SELECT id FROM sessions WHERE person_id = ?)`,
+      ).run(personId, personId);
+
+      // `shares.from_id`/`to_id` and `shares.tool_id` are plain references too. A share the person
+      // sent or received dies with them, and so does one carrying a personal tool of theirs — those
+      // tools cascade below, so a share left pointing at one would block the delete. The holder rows
+      // that point at those shares are cleared *first*: `credential_holders.via_share_id` has no
+      // cascade, and SQLite checks that FK on the `DELETE FROM shares` itself.
+      const shareScope = `FROM shares WHERE from_id = ? OR to_id = ?
+        OR tool_id IN (SELECT id FROM entries WHERE owner_id = ?)`;
+      db.query(
+        `UPDATE credential_holders SET via_share_id = NULL
+          WHERE via_share_id IN (SELECT id ${shareScope})`,
+      ).run(personId, personId, personId);
+      db.query(`DELETE ${shareScope}`).run(personId, personId, personId);
+
+      // `assignments.assigned_by` has no cascade either: rather than lose the record of who assigned
+      // the credential, the deleting owner — the only caller this route accepts — takes the signature
+      // over, so no row references an id about to vanish.
+      db.query('UPDATE assignments SET assigned_by = ? WHERE assigned_by = ?').run(byId, personId);
+
+      // `guild_invites.created_by` is deliberately not a foreign key (migration 5), but the id it
+      // holds still names a person: the deleting owner takes it over rather than let an invite cite an
+      // id the guild no longer has.
+      db.query('UPDATE guild_invites SET created_by = ? WHERE created_by = ?').run(byId, personId);
+
+      // One statement for the rest: `sessions`, `person_roles`, `access_codes`, personal
+      // `entries`/`views`, `favorites` and the person's `credential_holders` rows all cascade.
+      db.query('DELETE FROM people WHERE id = ?').run(personId);
+    });
   }
 
   function setRoles(personId: string, roles: string[]): HostPerson {
@@ -2533,6 +2692,10 @@ export function createRepo(db: Database): Repo {
     personAuthByEmail,
     listPeople,
     renamePerson,
+    ownerId,
+    setOwner,
+    setEmail,
+    deletePerson,
     setRoles,
     setDisabled,
     activatePerson,

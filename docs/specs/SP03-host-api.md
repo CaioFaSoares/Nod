@@ -32,9 +32,9 @@ body with a `t.*` schema derived from them.
 | --- | --- |
 | 400 | body fails its schema; message names the field |
 | 401 | missing or invalid token; `invalid credentials`; `invalid code`; `invalid invite` (RF-59: a dead, expired, revoked or used-up invite, or one whose role has since been made admin) |
-| 403 | authenticated but not allowed (`admin only`, `not yours`, `the credential is blocked`, `tool not visible to sender`) |
+| 403 | authenticated but not allowed (`admin only`, `owner only`, `not yours`, `the owner keeps an admin role`, `the owner cannot be disabled`, `the credential is blocked`, `tool not visible to sender`) |
 | 404 | an id no query ever sees (`unknown person`, `unknown session`, `unknown tool`, `unknown credential`, `unknown invite`, `unknown role`); an id that exists but belongs to someone else answers 403. `POST /v1/auth/invite` answers `404 invalid invite` for a code that names no live invite |
-| 409 | conflict: email taken, `this email already has an account in the guild — sign in instead` (the join of RF-59), last admin, stale `updatedAt`, `recipient has no keys`, `credential belongs to another tool`, `the owner cannot be removed`, `a shared credential keeps the tool` |
+| 409 | conflict: email taken, `this email already has an account in the guild — sign in instead` (the join of RF-59), last admin, `the owner cannot be deleted`, stale `updatedAt`, `recipient has no keys`, `credential belongs to another tool`, `the owner cannot be removed`, `a shared credential keeps the tool` |
 | 413 | body over the limit (see above) |
 | 429 | rate limit (SP02 §5) |
 
@@ -105,16 +105,17 @@ the personal tool and view writes and the favorites write are B7. The Nod method
 
 | Route | Body | Response |
 | --- | --- | --- |
-| `GET /v1/admin/people` | — | `AdminPerson[]` (no salt or hash) |
-| `PATCH /v1/admin/people/:id` | `{ name?, roles?, disabled? }` | `AdminPerson`; disabling revokes their sessions |
+| `GET /v1/admin/people` | — | `AdminPerson[]` (no salt or hash), each carrying `owner: boolean` (RF-64) |
+| `PATCH /v1/admin/people/:id` | `{ name?, email?, roles?, disabled? }` | `AdminPerson`; `name` and `email` are **owner only** — any other admin answers `403 owner only` — and `email` is lowercased and trimmed, already held → `409 email taken`; `roles` and `disabled` stay admin-level, except that the owner keeps an admin role — `roles` without an admin role is `403 the owner keeps an admin role` and `disabled: true` is `403 the owner cannot be disabled`, whoever asks, the owner included — and disabling revokes their sessions |
+| `DELETE /v1/admin/people/:id` | — | `204`; **owner only** (`403 owner only`); a hard delete of the person with everything cascading (below); deleting the owner, themselves included, → `403 the owner cannot be deleted`; an unknown id → `404 unknown person`; a delete that would leave the guild with no admin → the existing `409` |
 | `POST /v1/admin/people/:id/code` | — | `{ code, expiresAt }`; revokes the previous code |
 | `GET /v1/admin/people/:id/sessions` | — | `DeviceSession[]` |
 | `POST /v1/admin/invites` | `{ roles, maxUses, expiresInMinutes }` | `{ invite, code }`, the code shown once; `400` when a role carries `admin = 1` (RF-59) |
 | `GET /v1/admin/invites` | — | `GuildInvite[]`, newest first, revoked ones included |
 | `DELETE /v1/admin/invites/:id` | — | `204`; sets `revokedAt` (`404` for an unknown id, `204` again for one already revoked) |
 | `DELETE /v1/admin/sessions/:id` | — | `204` |
-| `PUT /v1/admin/roles/:id` | `{ name, admin }` | `Role` |
-| `DELETE /v1/admin/roles/:id` | — | `204`; `409` if it would leave no admin |
+| `PUT /v1/admin/roles/:id` | `{ name, admin }` | `Role`; demoting the owner's only admin role is `403 the owner keeps an admin role`, then `409` if it would leave no admin |
+| `DELETE /v1/admin/roles/:id` | — | `204`; deleting the owner's only admin role is `403 the owner keeps an admin role`, then `409` if it would leave no admin |
 | `PUT /v1/admin/grants` | `{ roleId, entryId, granted }` | `204` |
 | `PUT /v1/admin/tools/:id` | `OrgTool` (Entry + views) | `OrgTool`; RF-62's `category` (a name of ≤ 40 characters, or `null`) travels in and out, and a body's name is trimmed |
 | `DELETE /v1/admin/tools/:id` | — | `204`; `409` while a share still names the tool (`a shared credential keeps the tool`) |
@@ -127,6 +128,25 @@ the personal tool and view writes and the favorites write are B7. The Nod method
 `POST /v1/admin/people` — the email-bound "create person + one access code" — is gone in 0.5.0: a
 guild invite creates a person (RF-59). `POST /v1/admin/people/:id/code` stays: it is the reissue for
 a person the guild already has, and it is what a reset uses.
+
+The guild owner (RF-64) is the person the setup code created, stored as the `meta` key `owner_id`
+(SP01 §4). It is the only person allowed to rename somebody or edit their email, and the
+only one who may delete somebody: the same routes an admin already reaches answer `403 owner only`
+for every other admin, while `roles` and `disabled` stay at the admin level — except that the owner
+never loses their own admin role and is never disabled: `roles` without an admin role aimed at the
+owner is `403 the owner keeps an admin role` and `disabled: true` aimed at the owner is
+`403 the owner cannot be disabled`, whoever the caller is, the owner included. The same rule guards
+the roles surface, because a role edit is another way to strip the owner: demoting the owner's only
+admin role (`PUT /v1/admin/roles/:id`) or deleting it (`DELETE /v1/admin/roles/:id`) is that same
+`403`, not the last-admin `409` the owner is also the subject of. `DELETE
+/v1/admin/people/:id` is a **hard delete in one transaction** — the person row and everything
+cascading, plus the rows whose foreign keys do not cascade: the person's events (`events.person_id`,
+`events.session_id`) and their shares (`shares.from_id`/`to_id`) are deleted, holder rows'
+`via_share_id` pointing at a deleted share is set NULL, and `credential_assignments.assigned_by` is
+reassigned to the deleting owner. The host records a `person_deleted` event written by the owner,
+whose `detail` names the deleted person's name and email and never a code or a secret. The owner
+themselves cannot be deleted by anyone, the owner included (`403 the owner cannot be deleted`), and
+no delete may leave the guild with no admin (the existing `409`).
 
 The guild invites of RF-59: the admin hands out a link — `nod://join?host=<address>&fp=<fingerprint>&code=<code>`,
 built by the Nod's `shared/join-link.ts` — and whoever opens it sees the guild and creates the

@@ -95,6 +95,11 @@ _Evite_: permissão, acesso
 A pessoa que edita catálogo, papéis e concessões, e emite convites.
 _Evite_: root, dono, superusuário
 
+**Guild owner** — owner (`AdminPerson.owner`, host `meta.owner_id`):
+A pessoa que criou a guilda com o código de setup — a primeira conta de um host. Só ela renomeia
+pessoas, edita e-mails e apaga pessoas da guilda; ninguém apaga o owner, nem ele próprio (RF-64).
+_Evite_: dono, superusuário, root, primeiro admin
+
 **Host**:
 O servidor da empresa que, no futuro, guarda catálogo, contas, concessões e eventos. Hoje não existe.
 _Evite_: servidor, backend, nuvem

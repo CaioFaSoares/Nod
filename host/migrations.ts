@@ -4,8 +4,9 @@
 // released migration is never edited — block 2 tables (SP01 §3) arrived as entry 2, and the
 // `person_keys.private_sealed` column of the one-pair-per-person rule (`docs/canonico.md` §22) as
 // entry 3, the `credential_holders.rotated_at` column of the explicit rotation signal (RF-48) as
-// entry 4, the `guild_invites` table of RF-59 as entry 5, and the `entries.category` column of
-// RF-62's tool categories as entry 6. H2 appends the block 1 tables
+// entry 4, the `guild_invites` table of RF-59 as entry 5, the `entries.category` column of RF-62's
+// tool categories as entry 6, and the `meta.owner_id` row of RF-64's guild owner as entry 7. H2
+// appends the block 1 tables
 // (`people`, `sessions`, `access_codes`,
 // `roles`, `person_roles`, `entries`, `views`, `grants`, `favorites`, `events`) to migration 1 while
 // block 1 is unreleased, so a fresh `/data` still reports `schema_version = 1` (SP01 §5).
@@ -224,6 +225,19 @@ CREATE TABLE guild_invites (
   // The name itself is bounded by the admin route's schema and by `shared/catalog.ts`'s validator.
   `
 ALTER TABLE entries ADD COLUMN category TEXT;
+`,
+
+  // 7 — the guild owner (0.5.3, RF-64; SP01 §2, SP02 §3). `meta.owner_id` is the id of the person the
+  // setup code created: the only one who renames, edits the email of, or deletes a person, and the one
+  // nobody deletes. `POST /v1/auth/setup` writes it in the transaction that creates the first admin;
+  // this backfill gives an older `/data` the row too, naming its earliest-created person — the setup
+  // code always made the first one (`ORDER BY created_at, id`, so a tie still lands on one row). A
+  // database with no people inserts nothing and keeps answering `owner: false` until a setup runs.
+  `
+INSERT INTO meta (key, value)
+  SELECT 'owner_id', id FROM people
+   WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key = 'owner_id')
+   ORDER BY created_at, id LIMIT 1;
 `,
 ];
 

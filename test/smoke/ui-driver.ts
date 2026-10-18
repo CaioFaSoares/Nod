@@ -1,16 +1,18 @@
-// Driver of the real-page UI smoke (`test/smoke/ui.ts`, story checks #24, #25, #27–#38).
+// Driver of the real-page UI smoke (`test/smoke/ui.ts`, story checks #24, #25, #27–#38, and the
+// RF-64 owner steps).
 //
 // The generated page imports `src/app.ts` exactly as `index.html` does, then this module. It runs
 // after the app has booted and drives the real screens with DOM events: every acceptance check
 // below reads what the page shows and clicks or types on it. `call` is used only to set the world
 // up (create the account, publish tools, create people, save and share credentials, restart the
-// host) and to read the two states a screen cannot show by itself (the session's mode for #36/#37,
-// the seed version for #38); a check never asserts an RPC answer otherwise.
+// host) and to read the states a screen cannot show by itself (the session's mode for #36/#37, the
+// seed version for #38, and the roster the host holds for RF-64); a check never asserts an RPC
+// answer otherwise.
 //
 // Only the machines whose screens are checked run this page (the admin, P, #37's invite joiner and
-// #38's seed importer). The second member Q and P's second machine are headless Bun calls in the
-// runner (`test/smoke/headless.ts`): they had no check of their own, and a `tinyjs dev` launch each
-// was most of the smoke's time.
+// #38's seed importer). The second member Q, the throwaway member the owner renames and deletes
+// (RF-64) and P's second machine are headless Bun calls in the runner (`test/smoke/headless.ts`):
+// they had no check of their own, and a `tinyjs dev` launch each was most of the smoke's time.
 //
 // Nothing here prints a code, a password or a credential value: the codes arrive through the
 // runner's desk and live in memory, and the driver's own throwaway values are never echoed. The
@@ -28,10 +30,13 @@ interface DriverConfig {
   personEmail: string;
   otherEmail: string;
   thirdEmail: string;
+  /** RF-64: the throwaway member the owner renames and deletes on the People tab. */
+  extraEmail: string;
   adminName: string;
   personName: string;
   otherName: string;
   thirdName: string;
+  extraName: string;
   /** The guild's name on the host, as the invite card and the offline banner print it. */
   guildName: string;
   /** #37: the PNG the admin uploads (`resources/tray.png`), base64url, as `host.setGuildIcon` takes. */
@@ -71,6 +76,9 @@ const TEAM_ROLE_NAME = 'Team';
 /** #38: the role and the tool the imported seed brings — the tool shows only with that role. */
 const IMPORT_ROLE_ID = 'imported';
 const IMPORT_TOOL_TITLE = 'Imported One';
+/** RF-64: the name and the address the owner gives the throwaway member before deleting them. */
+const EXTRA_NEW_NAME = 'Smoke Extra Renamed';
+const EXTRA_NEW_EMAIL = 'extra-renamed@ui.test';
 
 const POLL_MS = 100;
 const STATE_TIMEOUT_MS = 20_000;
@@ -286,7 +294,7 @@ async function desk(path: string, body?: unknown): Promise<Record<string, unknow
  * `nod://join` link of the invite the admin created — the joiner pastes a link, so the check must not
  * rebuild one.
  */
-async function handover(who: 'person' | 'other' | 'person2' | 'third' | 'import'): Promise<string> {
+async function handover(who: 'person' | 'other' | 'person2' | 'third' | 'import' | 'extra'): Promise<string> {
   const answer = await desk(`/desk/code?who=${who}`);
   const code = answer.code;
   if (typeof code !== 'string' || code.length === 0) {
@@ -400,6 +408,9 @@ async function setupAdmin(): Promise<void> {
   for (const [name, who] of [
     [CONFIG.personName, 'person'],
     [CONFIG.otherName, 'other'],
+    // RF-64: one more invite, for the throwaway member the owner renames and deletes. Joining them
+    // through the same path keeps P and Q — the names the later checks read — untouched.
+    [CONFIG.extraName, 'extra'],
   ] as const) {
     const answer = await call('guildInvites.create', {
       roles: ['team'],
@@ -1210,6 +1221,96 @@ async function thirdMemberOnRoster(): Promise<string> {
   return `${CONFIG.thirdName} is on the roster with ${TEAM_ROLE_NAME} ticked and Admin not`;
 }
 
+/**
+ * RF-64 (0.5.3), on the real People tab: the guild owner — the person the setup code created — is
+ * the one the roster badges, and the only one the cards let manage a person. The checks below drive
+ * the owner's card, Edit and Delete through the page; `people.list` is the host's own answer to the
+ * same question (the list the tab reloads after each write), read beside the screen.
+ */
+async function checkOwnerChip(): Promise<string> {
+  await openSettingsTab('People');
+  const card = await waitForValue('the owner card', () => {
+    const found = cardOf(CONFIG.adminName, CONFIG.adminEmail);
+    return found !== null && controlByText('Edit', found) !== null ? found : null;
+  });
+  const chips = all<HTMLElement>('.chip', card).map(text);
+  expect(chips.includes('Owner'), `the owner card carries ${JSON.stringify(chips)}`);
+  // The owner's own row has no Delete: the host refuses deleting the owner, and the page knows it.
+  expect(controlByText('Delete', card) === null, 'the owner card offers Delete');
+
+  const extra = await waitForValue('the throwaway member card', () =>
+    cardOf(CONFIG.extraName, CONFIG.extraEmail),
+  );
+  const extraChips = all<HTMLElement>('.chip', extra).map(text);
+  expect(
+    !extraChips.includes('Owner'),
+    `the throwaway member is badged Owner: ${JSON.stringify(extraChips)}`,
+  );
+  expect(controlByText('Delete', extra) !== null, 'the throwaway member offers no Delete');
+  return `the owner card carries ${JSON.stringify(chips)} and no Delete; ${CONFIG.extraName} carries no Owner chip and offers Edit and Delete`;
+}
+
+/** RF-64: the owner opens Edit on a member card, changes the name and the email, and saves. */
+async function renamePerson(): Promise<string> {
+  await openSettingsTab('People');
+  const edit = await waitForValue('the Edit button of the throwaway member', () => {
+    const card = cardOf(CONFIG.extraName, CONFIG.extraEmail);
+    return card === null ? null : controlByText('Edit', card);
+  });
+  edit.click();
+  // The form is the card's own; the two fields come prefilled with what the host holds.
+  const form = await waitForValue('the person editor', () => {
+    const card = cardOf(CONFIG.extraName, CONFIG.extraEmail);
+    if (card === null) return null;
+    const name = card.querySelector<HTMLInputElement>('input[name=person-edit-name]');
+    const email = card.querySelector<HTMLInputElement>('input[name=person-edit-email]');
+    return name !== null && email !== null ? { card, name, email } : null;
+  });
+  expect(form.name.value === CONFIG.extraName, `the name field reads ${JSON.stringify(form.name.value)}`);
+  expect(form.email.value === CONFIG.extraEmail, `the email field reads ${JSON.stringify(form.email.value)}`);
+  setValue(form.name, EXTRA_NEW_NAME);
+  setValue(form.email, EXTRA_NEW_EMAIL);
+  (await waitForValue('the Save button of the person editor', () => controlByText('Save', form.card))).click();
+  await waitForStatus('Saved');
+
+  // The card the tab reloaded carries the new name and email, and the host holds the same person.
+  const card = await waitForValue('the renamed member card', () =>
+    cardOf(EXTRA_NEW_NAME, EXTRA_NEW_EMAIL),
+  );
+  expect(controlByText('Edit', card) !== null, 'the renamed card lost its Edit');
+  const roster = (await call('people.list')) as unknown as { name: string; email: string }[];
+  const renamed = roster.find((person) => person.email === EXTRA_NEW_EMAIL) ?? null;
+  expect(
+    renamed !== null && renamed.name === EXTRA_NEW_NAME,
+    `the host lists ${JSON.stringify(renamed)}`,
+  );
+  expect(
+    !roster.some((person) => person.email === CONFIG.extraEmail),
+    'the host still lists the old email',
+  );
+  return `the card shows ${EXTRA_NEW_NAME} <${EXTRA_NEW_EMAIL}> and the host lists the same name and email`;
+}
+
+/** RF-64: the owner deletes a member — a native `confirm` the driver answers, then the card goes. */
+async function deletePerson(): Promise<string> {
+  await openSettingsTab('People');
+  const remove = await waitForValue('the Delete button of the renamed member', () => {
+    const card = cardOf(EXTRA_NEW_NAME, EXTRA_NEW_EMAIL);
+    return card === null ? null : controlByText('Delete', card);
+  });
+  remove.click();
+  await waitForStatus('Removed');
+  await waitForValue('the card to leave the roster', () =>
+    cardOf(EXTRA_NEW_NAME, EXTRA_NEW_EMAIL) === null ? true : null,
+  );
+  const roster = (await call('people.list')) as unknown as { email: string }[];
+  expect(
+    !roster.some((person) => person.email === EXTRA_NEW_EMAIL),
+    'the host still lists the deleted member',
+  );
+  return `${EXTRA_NEW_NAME} left the roster and the host's people list`;
+}
+
 async function updateRequiredBanner(): Promise<string> {
   // The tool this check turns on: an org tool of the guild's catalog that this machine's local
   // tables never held. The store's own A and B are local rows too, so they stay in the sidebar either
@@ -1349,6 +1450,11 @@ const PHASES: Record<string, { setup?: () => Promise<void>; checks: Steps }> = {
       ['#30 changed colleague key', confirmChangedKey],
       ['#27 admin sees the person devices', checkAdminDevices],
       ["#37 the invite's role on the roster", thirdMemberOnRoster],
+      // RF-64 runs while the guild is connected: the two steps after these take the host's version
+      // away (the O2 banner), and `people.*` needs the guild.
+      ['RF-64 owner chip on the roster', checkOwnerChip],
+      ['RF-64 the owner renames a member', renamePerson],
+      ['RF-64 the owner deletes a member', deletePerson],
       ['#36 offline tile entry', offlineEntry],
       ['#28 update-required banner', updateRequiredBanner],
     ],
@@ -1389,6 +1495,12 @@ async function run(): Promise<void> {
   window.confirm = () => true;
   try {
     await waitForTiny();
+    // The runtime throttles an occluded or hidden window (`docs/tinyjs.md` §3, §10.11), and a
+    // scripted run's window sits behind whatever the person has on screen. There the reveal's
+    // ten-second countdown — ten seconds with nothing crossing the native bridge — was followed by
+    // calls that never returned, and the smoke stalled in `person-inbox` after `#32`. The driver
+    // brings its own app up front first, so the page it drives is the live surface the checks read.
+    await tiny.win.show({ activate: true });
     window.confirm = () => true;
     await waitForValue('the app root', () =>
       document.getElementById('app')?.childElementCount !== undefined &&

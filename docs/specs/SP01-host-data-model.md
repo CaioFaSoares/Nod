@@ -19,7 +19,8 @@ SQLite through `bun:sqlite`, one file `/data/host.db`, opened with `PRAGMA journ
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- keys: schema_version; guild_icon_sha256 and guild_icon_bytes (the guild icon, SP03 §2);
---       guild_name and created_at are still unwritten (the discovery reads NOD_GUILD_NAME, h6)
+--       owner_id — the guild owner's person id, migration 7 (RF-64); guild_name and created_at are
+--       still unwritten (the discovery reads NOD_GUILD_NAME, h6)
 
 CREATE TABLE people (
   id            TEXT PRIMARY KEY,                 -- uuid
@@ -159,8 +160,9 @@ CREATE TABLE guild_invites (
   email-taken `409` of RF-59, or any later failure, rolls the spend back with the row.
 - `roles` may name `admin`: the invite's creator decides what it grants (`host/routes/admin.ts`
   passes the ids straight through, and the repo checks that each one exists).
-- `created_by` carries no foreign key: `people` rows are disabled, never deleted, and the column is
-  what the admin list shows as the invite's author.
+- `created_by` carries no foreign key: the column is what the admin list shows as the invite's
+  author, and it survives that author's row — a person the owner deletes (RF-64, a hard delete,
+  SP03 §2) leaves the invites they created in place, with a `created_by` that names nobody.
 
 ## 3. Tables (block 2)
 
@@ -224,13 +226,21 @@ edits an earlier one. The block 1 schema is migration 1; block 2 tables are migr
 `person_keys.private_sealed` (one key pair per person across machines, `docs/canonico.md` §22) is
 migration 3; `credential_holders.rotated_at` (the owner's explicit rotation signal, RF-48) is
 migration 4; `guild_invites` (the guild invites of RF-59, read by the preview and the join) is
-migration 5.
+migration 5; `entries.category` (RF-62's display category of an org tool) is migration 6; and the
+guild owner's `meta` key `owner_id` (RF-64) is migration 7.
+
+Migration 7 (RF-64) writes the `meta` key `owner_id` and backfills it with the earliest-created
+person (`ORDER BY created_at, id LIMIT 1`) — the setup code always creates the first person, so that
+is the owner on a host set up before this migration. `POST /v1/auth/setup` (SP03 §2) writes the key
+in the same transaction that creates the first admin, so a fresh host is born with it. The owner's
+name, email and delete rights are guarded in the routes (SP03 §2); nothing about the owner is a
+column of `people` — one key in `meta` says who owns the guild.
 
 ## 5. Acceptance
 
 - A fresh `/data` boots, creates both key files with mode 0600, applies migrations, and reports
-  `schema_version = 5` (block 1's migration 1, block 2's migration 2, `person_keys.private_sealed`
-  as migration 3, `credential_holders.rotated_at` as migration 4, and `guild_invites` as migration
-  5).
+  `schema_version = 7` (block 1's migration 1, block 2's migration 2, `person_keys.private_sealed`
+  as migration 3, `credential_holders.rotated_at` as migration 4, `guild_invites` as migration 5,
+  `entries.category` as migration 6, and `meta.owner_id` as migration 7).
 - Restarting the container keeps every row (volume at `/data`).
 - Inserting a personal entry without `owner_id`, or a grant on a personal entry, fails.

@@ -70,11 +70,11 @@ describe('boot', () => {
     const version = host.db
       .query<{ value: string }, [string]>('SELECT value FROM meta WHERE key = ?')
       .get(SCHEMA_VERSION_KEY);
-    // Migration 6 landed with the org tool's display category (RF-62), on top of migration 5's guild
-    // invites (RF-59), migration 4's rotation signal (RF-48), migration 3's one-pair-per-person rule
-    // (`docs/canonico.md` §22) and migration 2's block 2 tables (SP01 §3–§4): a fresh `/data` now
-    // reports 6.
-    expect(version?.value).toBe('6');
+    // Migration 7 landed with the guild owner (RF-64), on top of migration 6's org tool display
+    // category (RF-62), migration 5's guild invites (RF-59), migration 4's rotation signal (RF-48),
+    // migration 3's one-pair-per-person rule (`docs/canonico.md` §22) and migration 2's block 2 tables
+    // (SP01 §3–§4): a fresh `/data` now reports 7.
+    expect(version?.value).toBe('7');
 
     host.close();
   });

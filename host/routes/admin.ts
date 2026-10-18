@@ -69,6 +69,8 @@ const entryIdParams = t.Object({ id: entryIdSchema });
 
 /** Bounds as in `routes/auth.ts`: the shapes are SP01 §2's, the lengths only keep a body finite. */
 const nameSchema = t.String({ minLength: 1, maxLength: 200 });
+/** SP01 §2's email bound, the same `routes/auth.ts` uses; the repo lowercases and trims it. */
+const emailSchema = t.String({ minLength: 1, maxLength: 320 });
 const textSchema = t.String({ minLength: 1, maxLength: 2048 });
 /** The org tool ids a write cites; a role id is a slug by SP01 §2 but nothing validates it there. */
 const roleIds = t.Array(idSchema);
@@ -106,6 +108,8 @@ const toolBody = t.Object({
 /** SP03 §2: "only what the caller sends changes", so every field is optional. */
 const personUpdateBody = t.Object({
   name: t.Optional(nameSchema),
+  /** RF-64: the owner's only, like `name`; the repo lowercases and trims it (SP01 §2). */
+  email: t.Optional(emailSchema),
   roles: t.Optional(roleIds),
   disabled: t.Optional(t.Boolean()),
 });
@@ -243,16 +247,59 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
   .patch(HOST_ROUTES.adminPerson, { params: idParams, body: personUpdateBody }, (ctx) => {
     const { repo, auth } = hostOf(ctx);
     const { id } = ctx.params;
-    const { name, roles, disabled } = ctx.body;
+    const { name, email, roles, disabled } = ctx.body;
+    // RF-64: a rename and an email edit are the guild owner's only, refused before any write; `roles`
+    // and `disabled` stay admin-level, which is why the gate is per field, not on the whole route. The
+    // repo still refuses a `roles`/`disabled` write that would take the owner's admin role or disable
+    // them — whoever the caller is, the owner included (`guarded`), and the transaction rolls back.
+    if ((name !== undefined || email !== undefined) && !callerOf(ctx).person.owner) {
+      throw new ForbiddenError('owner only');
+    }
     const updated: AdminPerson = repo.transaction(() => {
       let person: HostPerson | null = null;
       if (name !== undefined) person = repo.renamePerson(id, name);
+      if (email !== undefined) person = repo.setEmail(id, email);
       if (roles !== undefined) person = repo.setRoles(id, roles);
       if (disabled !== undefined) person = repo.setDisabled(id, disabled, auth.now());
       // An empty body answers the stored person; an id nobody holds is the 404 of SP03 §1.
       return person ?? repo.personById(id) ?? unknown('person');
     });
     return updated;
+  })
+
+  /**
+   * RF-64: the owner hard-deletes a person and everything of theirs — the repo refuses the owner
+   * (including the caller) and the last admin, and clears the rows no cascade reaches. The
+   * `person_deleted` event is written after the delete, and its `person_id` is the owner's: the
+   * removed id must not be referenced by a row, and the log names the removed person, never a secret.
+   */
+  .delete(HOST_ROUTES.adminPerson, { params: idParams }, (ctx) => {
+    const { repo, auth } = hostOf(ctx);
+    const { person, session } = callerOf(ctx);
+    const { id } = ctx.params;
+    // Owner-only like the name/email fields: another admin gets `403 owner only` before anything is
+    // read or written (SP03 §2, RF-64).
+    if (!person.owner) throw new ForbiddenError('owner only');
+    const target = repo.personById(id);
+    if (target === null) unknown('person');
+    const now = auth.now();
+    repo.deletePerson(id, person.id, now);
+    // The guild's own log, after the delete (the row must exist first — `events.person_id` is a real
+    // sender, never the deleted id): who was removed, name and email, nothing that could join.
+    repo.addEvents(
+      person.id,
+      session.id,
+      [
+        {
+          id: crypto.randomUUID(),
+          at: now,
+          kind: 'person_deleted',
+          detail: `${target.name} <${target.email}>`,
+        },
+      ],
+      now,
+    );
+    return status(204);
   })
 
   /** SP03 §2: a reissued code replaces the previous one — the repo revokes it as it stores the new. */
@@ -352,13 +399,21 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
 
   // -------------------------------------------------------------- roles, grants
 
-  /** SP03 §2: upsert; demoting the last admin role is the repo's 409 (SP01 §2). */
+  /**
+   * SP03 §2: upsert. The repo refuses the demotion of the last admin role with the `409` (SP01 §2)
+   * and, first, the demotion of the owner's only admin role with the RF-64 `403` — the same rule the
+   * person routes carry, because a role is another way to strip the owner's admin.
+   */
   .put(HOST_ROUTES.adminRole, { params: idParams, body: roleBody }, (ctx): Role => {
     const { repo } = hostOf(ctx);
     return repo.saveRole({ id: ctx.params.id, name: ctx.body.name, admin: ctx.body.admin });
   })
 
-  /** SP03 §2: `409` when removing the role would leave the guild without an admin. */
+  /**
+   * SP03 §2: `409` when removing the role would leave the guild without an admin, and the RF-64 `403`
+   * (`the owner keeps an admin role`) when the role is the owner's only admin one — deleting it is the
+   * other way an admin could take the guild from the owner.
+   */
   .delete(HOST_ROUTES.adminRole, { params: idParams }, (ctx) => {
     hostOf(ctx).repo.removeRole(ctx.params.id);
     return status(204);

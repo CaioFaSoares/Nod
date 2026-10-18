@@ -314,6 +314,14 @@ export function mountSettings(
     inviteExpiresIn: '1440' as string,
     createdInvite: null as { code: string; link: string } | null,
     guildInvites: [] as GuildInvite[],
+    /** RF-64 (0.5.3): the person card open for editing in the People tab, and the fields typed in it. */
+    personEdit: null as { id: Id; name: string; email: string } | null,
+    /**
+     * RF-64 (0.5.3): why the Invites card offers no form — set when `guildInvites.list` failed
+     * because the connected host predates 0.5.0 and serves no invite route at all. The People list
+     * below still renders; the card carries the reason instead of the create form.
+     */
+    invitesUnavailable: null as string | null,
     /** B8a: set once the publish offer was answered — it is offered at most one time */
     publishClosed: false,
     /**
@@ -674,9 +682,21 @@ export function mountSettings(
         case 'people':
           state.people = await call('people.list');
           state.roles = await call('roles.list');
+          // RF-64: leaving the tab closes the editor; the card then re-opens it from `state.people`.
+          state.personEdit = null;
           // 0.5.0 (RF-59): the guild's invites are the host's; a local Nod has none to list and
           // nothing to create them with.
-          state.guildInvites = hasHost() ? await call('guildInvites.list') : [];
+          state.guildInvites = [];
+          state.invitesUnavailable = null;
+          if (hasHost()) {
+            try {
+              state.guildInvites = await call('guildInvites.list');
+            } catch (e) {
+              // RF-64 (0.5.3): a host older than 0.5.0 serves no invite route, so this call is the
+              // one that fails — that must not blank the People list. The card shows the reason.
+              state.invitesUnavailable = errorMessage(e);
+            }
+          }
           break;
         case 'activity':
           state.entries = await call('catalog.list');
@@ -3363,10 +3383,16 @@ export function mountSettings(
    * lists what is still open, with the status the host's own clock answers.
    */
   function invitesCard(): HTMLElement {
-    const card = el(
-      'section',
-      { class: 'card stack' },
-      el('h2', {}, 'Invites'),
+    const card = el('section', { class: 'card stack' }, el('h2', {}, 'Invites'));
+    // RF-64 (0.5.3): a host older than 0.5.0 serves no invite route at all, so the card carries
+    // the reason in place of a form whose calls would fail the same way.
+    if (state.invitesUnavailable !== null) {
+      const note = el('div');
+      message(note, 'error', state.invitesUnavailable);
+      card.append(note);
+      return card;
+    }
+    card.append(
       el(
         'p',
         { class: 'muted' },
@@ -3475,6 +3501,8 @@ export function mountSettings(
         el('strong', {}, target.name),
         el('span', { class: 'muted' }, target.email),
         target.admin ? el('span', { class: 'chip' }, 'admin') : null,
+        // RF-64: the guild owner is the person the setup code created; the badge names them.
+        target.owner === true ? el('span', { class: 'chip' }, 'Owner') : null,
         // The two columns only the host keeps (SP03 §2): undefined in local mode.
         target.disabledAt != null ? el('span', { class: 'chip' }, 'revoked') : null,
         target.activatedAt === null ? el('span', { class: 'chip' }, 'not activated') : null,
@@ -3510,6 +3538,21 @@ export function mountSettings(
           button('Revoke', () => void revokePerson(target, deleteCredentials.checked), { kind: 'danger' }),
         ),
       );
+    }
+    // RF-64 (0.5.3): only the guild owner manages people — Edit opens the name and email fields on
+    // the card, Delete removes the account (the host refuses deleting the owner's own row).
+    const me = person();
+    if (me !== null && state.people.find((entry) => entry.id === me.id)?.owner === true) {
+      const draft = state.personEdit !== null && state.personEdit.id === target.id ? state.personEdit : null;
+      if (draft !== null) {
+        card.append(personEditForm(target, draft));
+      } else {
+        const row = el('div', { class: 'row' }, button('Edit', () => openPersonEdit(target)));
+        if (target.owner !== true) {
+          row.append(button('Delete', () => void deletePerson(target), { kind: 'danger' }));
+        }
+        card.append(row);
+      }
     }
     // O1: the devices of one person of the guild, opened on demand — the list is the host's, read
     // when the button is used, not part of the `people.list` the tab already holds.
@@ -3555,6 +3598,79 @@ export function mountSettings(
       state.invite = await call('invites.issue', { personId: target.id, roles: [...target.roles] });
       state.inviteFor = target.id;
       state.status = { kind: 'ok', text: `New code for ${target.name}` };
+      state.people = await call('people.list');
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** RF-64: opens one person card's name and email fields, prefilled with what the host holds. */
+  function openPersonEdit(target: Person): void {
+    state.personEdit = { id: target.id, name: target.name, email: target.email };
+    state.status = null;
+    render();
+  }
+
+  /** RF-64: the two prefilled fields of a person card; the draft is the shared `state.personEdit`. */
+  function personEditForm(target: Person, draft: { id: Id; name: string; email: string }): HTMLElement {
+    const name = input('person-edit-name', { value: draft.name });
+    name.addEventListener('input', (event) => {
+      draft.name = (event.target as HTMLInputElement).value;
+    });
+    const email = input('person-edit-email', { type: 'email', value: draft.email });
+    email.addEventListener('input', (event) => {
+      draft.email = (event.target as HTMLInputElement).value;
+    });
+    return el(
+      'div',
+      { class: 'stack' },
+      el('div', { class: 'row' }, field('Name', name), field('Email', email)),
+      el(
+        'div',
+        { class: 'row' },
+        button('Save', () => void savePersonEdit(target), { kind: 'primary' }),
+        button('Cancel', () => {
+          state.personEdit = null;
+          render();
+        }),
+      ),
+    );
+  }
+
+  /** RF-64: saves the open person card — only the fields that changed travel to the host. */
+  async function savePersonEdit(target: Person): Promise<void> {
+    const draft = state.personEdit;
+    if (draft === null) return;
+    const name = draft.name.trim();
+    // The host lowercases and trims the email; compare on what it would store to spare a write.
+    const email = draft.email.trim().toLowerCase();
+    const changed: { name?: string; email?: string } = {};
+    if (name !== target.name) changed.name = name;
+    if (email !== target.email.toLowerCase()) changed.email = email;
+    state.status = null;
+    try {
+      if (changed.name !== undefined || changed.email !== undefined) {
+        await call('people.update', { personId: target.id, ...changed });
+        state.people = await call('people.list');
+      }
+      state.personEdit = null;
+      state.status = { kind: 'ok', text: `Saved ${name}` };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /** RF-64: removes a person from the guild — a hard delete the host does in one transaction. */
+  async function deletePerson(target: Person): Promise<void> {
+    if (!confirm(`Remove ${target.name} from the guild? Their account and everything on it are deleted.`)) {
+      return;
+    }
+    state.status = null;
+    try {
+      await call('people.delete', { personId: target.id });
+      state.status = { kind: 'ok', text: `Removed ${target.name}` };
       state.people = await call('people.list');
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };

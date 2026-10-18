@@ -52,6 +52,10 @@ export const HOST_ROUTES = {
   /** `200 image/png` raw bytes with `ETag: "<sha256>"`, no `Content-Type` negotiation (SP03 §2). */
   guildIcon: '/v1/guild/icon',
   adminPeople: '/v1/admin/people',
+  /**
+   * `PATCH` updates the person (`name`/`email` are the guild owner's only, 0.5.3 RF-64); `DELETE`
+   * removes the person from the guild, `204`, the guild owner only (0.5.3, RF-64).
+   */
   adminPerson: '/v1/admin/people/:id',
   adminPersonCode: '/v1/admin/people/:id/code',
   adminPersonSessions: '/v1/admin/people/:id/sessions',
@@ -282,11 +286,22 @@ export interface AdminPerson extends Person {
   activatedAt: string | null;
   /** Set when the host disabled the person: no sign-in, no snapshot (SP01 §2). */
   disabledAt: string | null;
+  /**
+   * 0.5.3 (RF-64): `true` for the guild owner — the person the setup code created (SP02 §3). Only
+   * the owner renames, edits the email of, or deletes a person; nobody deletes the owner.
+   */
+  owner: boolean;
 }
 
-/** `PATCH /v1/admin/people/:id`: only what the caller sends changes (SP03 §2). */
+/**
+ * `PATCH /v1/admin/people/:id`: only what the caller sends changes (SP03 §2). `name` and `email`
+ * are the guild owner's only (0.5.3, RF-64): another admin gets `403 owner only`. An email another
+ * person already holds is `409 email taken`.
+ */
 export interface PersonUpdateRequest {
   name?: string;
+  /** 0.5.3 (RF-64): lowercased and trimmed by the host, like every stored email (SP01 §2). */
+  email?: string;
   roles?: Id[];
   /** `true` revokes every session of that person (SP02 §5). */
   disabled?: boolean;
