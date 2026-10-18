@@ -1016,8 +1016,8 @@ describe('F1 — a join whose email is already an account of this Nod', () => {
     nod.repo.saveEntry(tool('kanban'));
     // A local account is written as v1; its `vaultKey` arrives at the first unlock (SP02 §6).
     await nod.session.unlock({ email: LOCAL_EMAIL, password: NOD_PASSWORD });
-    await nod.vault.save(localId, { toolId: 'kanban', username: 'bob', secret: 'kanban-secret' });
-    expect(await nod.vault.read(localId, 'kanban')).toEqual({ username: 'bob', secret: 'kanban-secret' });
+    const item = await nod.vault.save(localId, { toolId: 'kanban', username: 'bob', secret: 'kanban-secret' });
+    expect(await nod.vault.read(localId, item.id)).toEqual({ username: 'bob', secret: 'kanban-secret' });
 
     const joined = await activateAs(running, nod, {
       email: LOCAL_EMAIL,
@@ -1037,11 +1037,11 @@ describe('F1 — a join whose email is already an account of this Nod', () => {
     });
     expect(nod.session.current()?.id).toBe(created.id);
     // The credential is readable under the new id, the index moved with it and the old keychain key
-    // is gone: the item was renamed, not copied.
-    expect(await nod.vault.read(created.id, 'kanban')).toEqual({ username: 'bob', secret: 'kanban-secret' });
-    expect(await nod.secrets.get(`nod.cred.${localId}.kanban`)).toBeNull();
-    expect(nod.repo.listVault(created.id).map((item) => item.keychainKey)).toEqual([
-      `nod.cred.${created.id}.kanban`,
+    // is gone: the item was renamed, not copied (RF-65 puts the item id in the new key).
+    expect(await nod.vault.read(created.id, item.id)).toEqual({ username: 'bob', secret: 'kanban-secret' });
+    expect(await nod.secrets.get(item.keychainKey)).toBeNull();
+    expect(nod.repo.listVault(created.id).map((held) => held.keychainKey)).toEqual([
+      `nod.cred.${created.id}.kanban.${item.id}`,
     ]);
     // The host holds that person under the very id this machine now uses (SP05 §2).
     expect(running.repo.personById(created.id)).toMatchObject({ email: LOCAL_EMAIL, name: 'Bob Guild' });
@@ -1246,3 +1246,51 @@ describe('device sessions (O1, SP03 §2)', () => {
     expect((await running.call('GET', HOST_ROUTES.state, undefined, ana.token)).status).toBe(200);
   });
 });
+
+// ---------------------------------------------------------------- RF-62: the tool category
+
+describe('the Tools form\'s category reaches the host (RF-62)', () => {
+  test('saveTool sends the category it was given, and null for an unfiled tool', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+
+    // A filed tool: the body carries the name, and the host answers what it stored.
+    const filed = await admin.saveTool(tool('jitsi', { category: 'Support' }));
+    expect(filed.category).toBe('Support');
+
+    // The same tool saved with no category: `orgTool` sends `null`, so the host files it nowhere.
+    const unfiled = await admin.saveTool(tool('jitsi'));
+    expect(unfiled.category).toBeNull();
+
+    // And back under a category, which the host reads over the wire again.
+    expect((await admin.saveTool(tool('jitsi', { category: 'Support' }))).category).toBe('Support');
+  });
+
+  test('the category survives the snapshot a member reads', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+    await admin.saveRole({ id: 'team', name: 'Team', admin: false });
+    await admin.saveTool(tool('jitsi', { category: 'Support', roles: ['team'] }));
+
+    const ana = await member(running, admin, { email: 'ana@nod.test', name: 'Ana', roles: ['team'] });
+    const snapshot = await snapshotOf(running, ana);
+    expect(snapshot.orgTools.map((entry) => [entry.id, entry.category])).toEqual([
+      ['jitsi', 'Support'],
+    ]);
+  });
+
+  test('bootstrap publishes each tool under its category', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+
+    const tools: Entry[] = [tool('jitsi', { category: 'Support' }), tool('notes', { order: 2 })];
+    const first = await admin.bootstrap(tools, []);
+    expect(first).toEqual({ created: 2, refused: false });
+
+    expect(running.repo.listOrgTools().map((row) => [row.id, row.category])).toEqual([
+      ['jitsi', 'Support'],
+      ['notes', null],
+    ]);
+  });
+});
+

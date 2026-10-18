@@ -383,12 +383,17 @@
           return 'wrong password refused; unlocked with the right one; tool-a restored';
         }
 
-        // 14 — cleanup: both credentials leave the vault.
+        // 14 — cleanup: both credentials leave the vault (RF-65: each one by its own item id).
         async function step14() {
-          await call('vault.remove', { toolId: 'tool-a' });
-          await call('vault.remove', { toolId: 'tool-c' });
           const items = await call('vault.list');
-          const left = items.filter((i) => i.toolId === 'tool-a' || i.toolId === 'tool-c').map((i) => i.toolId);
+          const a = items.find((i) => i.toolId === 'tool-a') || null;
+          const c = items.find((i) => i.toolId === 'tool-c') || null;
+          expect(a !== null && c !== null, 'a credential left the vault before the cleanup');
+          await call('vault.remove', { itemId: a.id });
+          await call('vault.remove', { itemId: c.id });
+          const left = (await call('vault.list'))
+            .filter((i) => i.toolId === 'tool-a' || i.toolId === 'tool-c')
+            .map((i) => i.toolId);
           expect(left.length === 0, 'still in the vault: ' + JSON.stringify(left));
           return 'credentials of tool-a and tool-c removed';
         }

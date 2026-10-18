@@ -49,12 +49,15 @@
 //   phase person-cleared     SP05 §6    P's next sync deletes the file and puts the bundle icon back
 //   phase admin-share        K2/K4/K6   the admin's `peers.list` shows both members pinned with the
 //                                       fingerprints they reported; the personal tool and the
-//                                       favorite read back out of the snapshot; one credential of
-//                                       the granted tool is saved, scoped `role` and sent to both
-//                                       members; a second one is assigned to role `team` (K8)
+//                                       favorite read back out of the snapshot; a second credential
+//                                       of the granted tool is saved beside the pre-join one (both
+//                                       listed, exactly one default, `vault.setDefault` moves it),
+//                                       scoped `role` and sent to both members; a credential of the
+//                                       other tool is assigned to role `team` (K8)
 //   phase person-share       K4/K7      P's inbox holds the send and the assign; the send is
-//                                       accepted behind the gate, `vault.reveal` gives the sender's
-//                                       value back and the holders list both people (RF-54)
+//                                       accepted behind the gate as its own item of the tool (P's
+//                                       own credential untouched), `vault.reveal` gives the sender's
+//                                       value and username back and the holders list both people
 //   phase person2-accept     K4         Q accepts the same two shares; the value it reveals is the
 //                                       one the admin saved
 //   phase admin-update       K9         both credentials hold the three people; the owner saves a new
@@ -703,13 +706,21 @@ function adminVault(): AdminVault {
   if (!existsSync(file)) return { lines: ["the admin's database is missing"], personId: null, keychainKey: null };
   const db = new Database(file, { readonly: true });
   try {
-    const row = db.query('SELECT person_id, keychain_key FROM vault_item WHERE tool_id = ?').get(TOOL_A_ID) as
-      | { person_id: string; keychain_key: string }
-      | null;
+    // RF-65: 0.5.5 lets one tool hold several credentials, so the row this proof is about is the
+    // first one of the tool (`created_at`, `id`) — the credential saved before the join. Its key is
+    // read from the row, never derived: a pre-0.5.5 row keeps `nod.cred.<person>.<tool>`, a later
+    // one carries the item's own id too.
+    const rows = db
+      .query(
+        'SELECT person_id, keychain_key FROM vault_item WHERE tool_id = ? ORDER BY created_at ASC, id ASC',
+      )
+      .all(TOOL_A_ID) as { person_id: string; keychain_key: string }[];
+    const row = rows[0] ?? null;
     const people = db.query('SELECT COUNT(*) AS n FROM person').get() as { n: number };
     return {
       lines: [
         `people: ${people.n} (expected 1: the adopted account)`,
+        `credentials of ${TOOL_A_ID}: ${rows.length} (the first one is the pre-join credential)`,
         `vault row of ${TOOL_A_ID}: ${
           row === null ? '(missing)' : `person ${row.person_id}, key ${row.keychain_key}`
         }`,
@@ -737,6 +748,8 @@ interface PersonVault {
   origin: string | null;
   /** Local `tool` rows of the granted entry id: the fix is about this being zero. */
   localRows: number;
+  /** RF-65: how many credentials of the granted tool P holds (its own + the accepted copy). */
+  items: number;
   /** K4: the credential the accepted share belongs to, in the index row. */
   credentialId: string | null;
   /** K6: the scope the share travelled with, stored on the item. */
@@ -746,21 +759,40 @@ interface PersonVault {
 function personVault(expectedOrigin: string): PersonVault {
   const file = join(dataDir(PERSON_APP_ID), 'nod.db');
   if (!existsSync(file))
-    return { lines: ["P's database is missing"], origin: null, localRows: -1, credentialId: null, scope: null };
+    return {
+      lines: ["P's database is missing"],
+      origin: null,
+      localRows: -1,
+      items: -1,
+      credentialId: null,
+      scope: null,
+    };
   const db = new Database(file, { readonly: true });
   try {
     // bun:sqlite hands `get()` back as `unknown`; these reads are the shape of this query's own
     // SELECT, the way `hostRows` reads the host's.
-    const item = db.query('SELECT origin, credential_id, scope FROM vault_item WHERE tool_id = ?').get(TOOL_A_ID) as
+    //
+    // RF-65: P may hold more than one credential of the granted tool — its own from step 3.7 and the
+    // accepted share. The accepted one is the row with a `credential_id`; a tool row with two items
+    // is the proof the accept landed beside P's own instead of replacing it.
+    const item = db
+      .query(
+        'SELECT origin, credential_id, scope FROM vault_item WHERE tool_id = ? AND credential_id IS NOT NULL',
+      )
+      .get(TOOL_A_ID) as
       | { origin: string | null; credential_id: string | null; scope: string | null }
       | null;
     const local = db.query('SELECT COUNT(*) AS n FROM tool WHERE id = ?').get(TOOL_A_ID) as {
       n: number;
     };
     const all = db.query('SELECT COUNT(*) AS n FROM vault_item').get() as { n: number };
+    const ofTool = db.query('SELECT COUNT(*) AS n FROM vault_item WHERE tool_id = ?').get(TOOL_A_ID) as {
+      n: number;
+    };
     return {
       lines: [
         `vault items: ${all.n}`,
+        `credentials of ${TOOL_A_ID}: ${ofTool.n} (expected 2: P's own and the accepted share)`,
         `item of ${TOOL_A_ID}: ${
           item === null ? '(missing)' : `origin ${JSON.stringify(item.origin)}`
         } (expected ${JSON.stringify(expectedOrigin)})`,
@@ -772,6 +804,7 @@ function personVault(expectedOrigin: string): PersonVault {
       ],
       origin: item?.origin ?? null,
       localRows: local.n,
+      items: ofTool.n,
       credentialId: item?.credential_id ?? null,
       scope: item?.scope ?? null,
     };
@@ -916,6 +949,14 @@ async function main(): Promise<number> {
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
 
+  // A backup already in place means another smoke is running (or one was killed before it
+  // restored): moving `resources/seed.json` now would put that run's temporary seed over the
+  // owner's private one. Refused before anything moves; restore the backup by hand.
+  if (existsSync(SEED_BACKUP)) {
+    console.error(`refused: ${SEED_BACKUP} exists — another smoke is running, or restore it to ${SEED} by hand`);
+    process.exit(1);
+  }
+
   try {
     if (existsSync(SEED)) {
       renameSync(SEED, SEED_BACKUP);
@@ -1048,6 +1089,15 @@ async function main(): Promise<number> {
       );
       failed = true;
     }
+    // RF-65: the accepted share landed as its own item of the tool — P's own credential (step 3.7,
+    // username `person@test`) is what the accept must not have overwritten. Two rows, not one.
+    if (vaultRows.items !== 2) {
+      console.error(
+        `P holds ${vaultRows.items} credential(s) of ${TOOL_A_ID}, expected 2 ` +
+          "(its own and the accepted copy): the share replaced one instead of landing beside it",
+      );
+      failed = true;
+    }
     // K4/K6: the item P accepted belongs to the credential the sender owns and kept the scope the
     // share travelled with. The id itself is not printed: it is the group's key, not a value.
     if (vaultRows.credentialId === null) {
@@ -1095,6 +1145,8 @@ async function main(): Promise<number> {
     // F1: the admin Nod had a local account with the guild's email and a credential saved before
     // the join. The join adopted it, so the vault row has to carry the guild's person id and the
     // keychain key of that id — the page's own reveal (step 2.4c) is what proves the value moved.
+    // The key's exact shape comes from the row (an old row keeps `nod.cred.<person>.<tool>`, a later
+    // one carries its item id too); what F1 asks is that it was renamed to the guild person.
     const guildPerson = hostPersonId(ADMIN_EMAIL);
     const adopted = adminVault();
     console.log("\nthe admin Nod's vault row after the adopt (F1):");
@@ -1110,10 +1162,13 @@ async function main(): Promise<number> {
         );
         failed = true;
       }
-      if (adopted.keychainKey !== `nod.cred.${guildPerson}.${TOOL_A_ID}`) {
+      if (
+        adopted.keychainKey === null ||
+        !adopted.keychainKey.startsWith(`nod.cred.${guildPerson}.${TOOL_A_ID}`)
+      ) {
         console.error(
           `the keychain key of ${TOOL_A_ID} is ${JSON.stringify(adopted.keychainKey)}, ` +
-            `expected nod.cred.${guildPerson}.${TOOL_A_ID}`,
+            `not under the guild person ${guildPerson}`,
         );
         failed = true;
       }

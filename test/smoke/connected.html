@@ -41,11 +41,14 @@
       //   person-cleared     SP05 §6    P's next sync deletes the file and drops the guild option
       //   admin-share        K2/K4/K6   both members pinned with the fingerprints they reported, the
       //                                 personal tool and the favorite read back out of the snapshot;
-      //                                 a credential of the granted tool saved, scoped `role` and
-      //                                 sent to both members; a second one assigned to `team` (K8)
+      //                                 a second credential of the granted tool saved beside the
+      //                                 pre-join one (two items, one default; `vault.setDefault`
+      //                                 moves it), scoped `role` and sent to both members; a
+      //                                 credential of the other tool assigned to `team` (K8)
       //   person-share       K4/K7      P's inbox holds the send and the assign; the send is
-      //                                 accepted behind the gate, `vault.reveal` gives the sender's
-      //                                 value back and the holders list both people
+      //                                 accepted behind the gate as its own item of the tool (P's
+      //                                 own credential untouched), `vault.reveal` gives the sender's
+      //                                 value and username back and the holders list both people
       //   person2-accept     K4         Q accepts the same two shares and reveals the same value
       //   admin-update       K9         the owner saves a new secret, which fans an update out
       //   person-update      K9         P's next sync applies it with no gate and the vault moves
@@ -123,6 +126,15 @@
           assignId: null,
           sharedToolId: null,
           assignedToolId: null,
+          /**
+           * RF-65: the local handle of the credential each step means — the one saved to share, the
+           * one K8 assigns — and the group key of the accepted copy (`credentialId`, stable across
+           * machines). A tool holds several credentials, so no step names one by its tool alone.
+           */
+          sharedItemId: null,
+          assignedItemId: null,
+          sharedCredentialId: null,
+          assignedCredentialId: null,
           /** K1/K2: the two members of `team` on the roster, as the admin's phase reads them. */
           otherPersonId: null,
         };
@@ -261,9 +273,17 @@
                 ' view(s))';
         }
 
-        /** One credential of a `vault.list` answer, or null when there is none for that tool. */
-        function vaultItemOf(items, toolId) {
-          return (items || []).find((item) => item.toolId === toolId) || null;
+        /** The credentials of one tool in a `vault.list` answer (RF-65: a tool may hold several). */
+        function vaultItemsOfTool(items, toolId) {
+          return (items || []).filter((item) => item.toolId === toolId);
+        }
+
+        /**
+         * One credential of a tool by the username it carries — how a step names the one it means
+         * now that a tool has several. Every credential this smoke shares carries SHARE_USERNAME.
+         */
+        function vaultItemOfUsername(items, toolId, username) {
+          return vaultItemsOfTool(items, toolId).find((item) => item.username === username) || null;
         }
 
         /**
@@ -332,10 +352,12 @@
           const list = await call('catalog.list');
           const entry = entryOfOrigin(list, CONFIG.originA);
           expect(entry !== null, 'Tool A is not in the local catalog (' + list.length + ' entries)');
-          await call('vault.save', { toolId: entry.id, username: 'smoke', secret: LOCAL_SECRET });
+          const item = await call('vault.save', { toolId: entry.id, username: 'smoke', secret: LOCAL_SECRET });
+          // RF-65: the first credential of a tool is the one its login cascade fills with.
+          expect(item.isDefault === true, 'the first credential of the tool is not the default');
           const items = await call('vault.list');
           expect(
-            items.some((item) => item.toolId === entry.id),
+            items.some((row) => row.toolId === entry.id),
             'the credential is not in the vault index',
           );
           shared.localToolId = entry.id;
@@ -423,12 +445,17 @@
             item.personId === shared.guildPersonId,
             'the item belongs to ' + summarize(item.personId) + ', not to the guild person',
           );
+          // RF-65: the key is read off the row, never derived — a row made before 0.5.5 keeps
+          // `nod.cred.<person>.<tool>`, a later one carries the item's own id too. What the adoption
+          // promises is that the key is the guild person's now.
           expect(
-            item.keychainKey === 'nod.cred.' + shared.guildPersonId + '.' + shared.localToolId,
+            typeof item.keychainKey === 'string' &&
+              item.keychainKey.indexOf('nod.cred.' + shared.guildPersonId + '.') === 0,
             'the keychain key is ' + summarize(item.keychainKey),
           );
+          expect(item.isDefault === true, 'the adopted credential is no longer the default');
           const revealed = await call('vault.reveal', {
-            toolId: shared.localToolId,
+            itemId: item.id,
             password: ACCOUNT_PASSWORD,
           });
           expect(
@@ -757,7 +784,13 @@
         }
 
         async function stepVaultSave() {
-          await call('vault.save', { toolId: shared.toolId, username: 'person@test', secret: 'secret-a' });
+          const saved = await call('vault.save', {
+            toolId: shared.toolId,
+            username: 'person@test',
+            secret: 'secret-a',
+          });
+          // RF-65: P's only credential of the tool is its first, so it is the one autofill fills.
+          expect(saved.isDefault === true, 'the first credential of the tool is not the default');
           const items = await call('vault.list');
           expect(
             items.some((item) => item.toolId === shared.toolId),
@@ -1067,6 +1100,8 @@
         /** K4/SP06 §4: the credential the owner is about to share, with the value of the run. */
         async function stepSaveShared() {
           expect(shared.toolId !== null, 'the granted tool is not known');
+          // RF-65: no `itemId` adds this credential beside the tool's existing one (the pre-join
+          // credential of F1) instead of replacing it; the tool's first credential keeps the mark.
           const item = await call('vault.save', {
             toolId: shared.toolId,
             username: SHARE_USERNAME,
@@ -1074,14 +1109,61 @@
           });
           expect(!!item && item.toolId === shared.toolId, 'vault.save answered ' + summarize(item));
           expect(item.scope === 'role', 'a new credential carries scope ' + JSON.stringify(item.scope));
-          return 'the credential of ' + item.toolId + ' saved (value only in the keychain)';
+          expect(item.isDefault === false, 'the second credential of the tool came out as the default');
+          shared.sharedItemId = item.id;
+          return 'the credential of ' + item.toolId + ' saved beside the tool\'s first one (value only in the keychain)';
+        }
+
+        /**
+         * RF-65: the tool now holds two credentials, and `vault.list` says so — two distinct ids,
+         * exactly one `isDefault`, on the first one (the credential saved before the join).
+         */
+        async function stepTwoCredentials() {
+          const items = await call('vault.list');
+          const mine = vaultItemsOfTool(items, shared.toolId);
+          expect(mine.length === 2, 'the tool holds ' + mine.length + ' credential(s)');
+          expect(
+            mine[0].id !== mine[1].id,
+            'both credentials came back under one id: ' + summarize(mine.map((item) => item.id)),
+          );
+          const defaults = mine.filter((item) => item.isDefault);
+          expect(defaults.length === 1, 'the tool carries ' + defaults.length + ' default(s)');
+          expect(
+            defaults[0].username === 'smoke',
+            'the default is ' + JSON.stringify(defaults[0].username) + ', not the first credential',
+          );
+          const sharedItem = vaultItemOfUsername(items, shared.toolId, SHARE_USERNAME);
+          expect(sharedItem !== null, 'the credential just saved is not in the list');
+          expect(sharedItem.id === shared.sharedItemId, 'the second credential changed id');
+          return 'two credentials of ' + shared.toolId + ', one default (the pre-join one)';
+        }
+
+        /** RF-65: `vault.setDefault` moves the mark to the credential the person chose. */
+        async function stepSetDefault() {
+          expect(shared.sharedItemId !== null, 'the shared credential is not known');
+          const item = await call('vault.setDefault', { itemId: shared.sharedItemId });
+          expect(
+            item.id === shared.sharedItemId && item.isDefault === true,
+            'vault.setDefault answered ' + summarize(item),
+          );
+          const mine = vaultItemsOfTool(await call('vault.list'), shared.toolId);
+          const defaults = mine.filter((row) => row.isDefault);
+          expect(
+            defaults.length === 1 && defaults[0].id === shared.sharedItemId,
+            'the default did not move: ' + summarize(defaults.map((row) => row.id)),
+          );
+          return 'the default moved to the shared credential (one default, the chosen one)';
         }
 
         /** K6/SP06 §5: the scope of a credential is its owner's to set, and `role` is the default. */
         async function stepScopeRole() {
-          const item = await call('vault.setScope', { toolId: shared.toolId, scope: 'role' });
+          expect(shared.sharedItemId !== null, 'the shared credential is not known');
+          const item = await call('vault.setScope', {
+            itemId: shared.sharedItemId,
+            scope: 'role',
+          });
           expect(item.scope === 'role', 'the scope read back as ' + JSON.stringify(item.scope));
-          const recipients = await call('shares.recipients', { toolId: shared.toolId });
+          const recipients = await call('shares.recipients', { itemId: shared.sharedItemId });
           const allowed = recipients.filter((row) => row.allowed);
           expect(
             allowed.length === 2 && recipients.length === 2,
@@ -1100,8 +1182,11 @@
         /** K4/SP06 §4: one sealed copy per recipient, behind the gate — the password, here. */
         async function stepSendShared() {
           expect(shared.personId !== null && shared.otherPersonId !== null, 'the members are not known');
+          expect(shared.sharedItemId !== null, 'the shared credential is not known');
+          // RF-65: the item id is what is sent — not "the tool's credential" — so only the second
+          // credential of the tool travels, with its own value.
           const answer = await call('shares.send', {
-            toolId: shared.toolId,
+            itemId: shared.sharedItemId,
             to: [shared.personId, shared.otherPersonId],
             password: ACCOUNT_PASSWORD,
           });
@@ -1113,7 +1198,7 @@
         async function stepHoldersAfterSend() {
           const state = await call('host.syncNow');
           expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
-          const item = vaultItemOf(await call('vault.list'), shared.toolId);
+          const item = vaultItemOfUsername(await call('vault.list'), shared.toolId, SHARE_USERNAME);
           expect(item !== null, 'the credential left the vault');
           expect(item.rotationPending === false, 'rotationPending = ' + JSON.stringify(item.rotationPending));
           const owners = (item.holders || []).filter((holder) => holder.owner);
@@ -1133,6 +1218,9 @@
             secret: ASSIGNED_SECRET,
           });
           expect(!!item && item.toolId === shared.toolBId, 'vault.save answered ' + summarize(item));
+          // RF-65: the tool's first credential is its default, whatever happens later.
+          expect(item.isDefault === true, 'the first credential of the second tool is not the default');
+          shared.assignedItemId = item.id;
           return 'the credential of ' + item.toolId + ' saved for the assignment (value in the keychain)';
         }
 
@@ -1143,8 +1231,9 @@
          */
         async function stepAssignTeam() {
           expect(shared.toolBId !== null, 'the assigned tool is not known');
+          expect(shared.assignedItemId !== null, 'the assigned credential is not known');
           const result = await call('assignments.set', {
-            toolId: shared.toolBId,
+            itemId: shared.assignedItemId,
             roleId: 'team',
             assigned: true,
             password: ACCOUNT_PASSWORD,
@@ -1189,6 +1278,11 @@
           shared.assignId = assigned.id;
           shared.sharedToolId = sent.toolId;
           shared.assignedToolId = assigned.toolId;
+          // RF-65: the share names the credential by its group key; the copy that lands carries the
+          // same `credentialId`, which is how the steps below pick it out of a tool that may hold
+          // several credentials.
+          shared.sharedCredentialId = sent.credentialId;
+          shared.assignedCredentialId = assigned.credentialId;
           return (
             'two open shares: a send of ' + sent.toolId + ' and an assign of ' + assigned.toolId + ' (metadata only)'
           );
@@ -1202,14 +1296,49 @@
             typeof item.credentialId === 'string' && item.credentialId.length > 0,
             'the item carries no credentialId',
           );
+          expect(
+            shared.sharedCredentialId === null || item.credentialId === shared.sharedCredentialId,
+            'the accepted copy belongs to another credential: ' + summarize(item.credentialId),
+          );
           expect(item.scope === 'role', 'the scope landed as ' + JSON.stringify(item.scope));
+          shared.sharedItemId = item.id;
           return 'accepted: the copy is in the vault under the credential its sender owns';
+        }
+
+        /**
+         * RF-65: the accepted copy is its own item of the tool. P already saved a credential for
+         * this tool in step 3.7, so the accept must have added a row beside it: both ids are there,
+         * P's own is still the tool's default (a new credential does not take the mark from an
+         * existing one), and P's own value still opens unchanged.
+         */
+        async function stepOwnCredentialKept() {
+          const items = await call('vault.list');
+          const mine = vaultItemsOfTool(items, shared.sharedToolId);
+          expect(mine.length === 2, 'P holds ' + mine.length + ' credential(s) of the tool');
+          const own = mine.find((item) => item.username === 'person@test') || null;
+          const accepted = vaultItemOfUsername(items, shared.sharedToolId, SHARE_USERNAME);
+          expect(own !== null, 'the credential P saved itself is gone');
+          expect(accepted !== null, 'the accepted copy is not in the list');
+          expect(own.id !== accepted.id, 'both credentials share one id');
+          expect(own.isDefault === true, 'the accept took the default from P\'s own credential');
+          expect(accepted.isDefault === false, 'the accepted copy came out as the default');
+          const revealed = await call('vault.reveal', {
+            itemId: own.id,
+            password: ACCOUNT_PASSWORD,
+          });
+          expect(
+            !!revealed && revealed.secret === 'secret-a' && revealed.username === 'person@test',
+            'P\'s own credential no longer opens with its value',
+          );
+          return 'P keeps its own credential (' + own.id + ') and the copy landed as a separate item';
         }
 
         /** K4: the value is the one the admin saved, read back through the gate. */
         async function stepRevealedShared() {
+          const item = vaultItemOfUsername(await call('vault.list'), shared.sharedToolId, SHARE_USERNAME);
+          expect(item !== null, 'the accepted credential left the vault');
           const revealed = await call('vault.reveal', {
-            toolId: shared.sharedToolId,
+            itemId: item.id,
             password: ACCOUNT_PASSWORD,
           });
           expect(!!revealed && revealed.secret === SHARED_1, 'the revealed value is not the one the admin saved');
@@ -1219,7 +1348,9 @@
 
         /** K5: the same gate, and the secret goes to the runtime's clipboard instead of the page. */
         async function stepCopiedShared() {
-          const ok = await call('vault.copy', { toolId: shared.sharedToolId, password: ACCOUNT_PASSWORD });
+          const item = vaultItemOfUsername(await call('vault.list'), shared.sharedToolId, SHARE_USERNAME);
+          expect(item !== null, 'the accepted credential left the vault');
+          const ok = await call('vault.copy', { itemId: item.id, password: ACCOUNT_PASSWORD });
           expect(ok === true, 'vault.copy answered ' + summarize(ok));
           return 'copied through the gate: the answer is true, and the value never came back to the page';
         }
@@ -1228,7 +1359,7 @@
         async function stepHoldersBoth() {
           const state = await call('host.syncNow');
           expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
-          const item = vaultItemOf(await call('vault.list'), shared.sharedToolId);
+          const item = vaultItemOfUsername(await call('vault.list'), shared.sharedToolId, SHARE_USERNAME);
           expect(item !== null, 'the credential left the vault');
           const holders = item.holders || [];
           expect(holders.length === 2, 'the holder rows are ' + summarize(holders.map((row) => row.name)));
@@ -1258,6 +1389,10 @@
             typeof item.credentialId === 'string' && item.credentialId.length > 0,
             'the assigned item carries no credentialId',
           );
+          expect(
+            shared.assignedCredentialId === null || item.credentialId === shared.assignedCredentialId,
+            'the assigned copy belongs to another credential: ' + summarize(item.credentialId),
+          );
           return 'the assigned copy is in the vault (' + item.toolId + ')';
         }
 
@@ -1279,7 +1414,9 @@
           shared.guildPersonId = ids.me.id;
           const items = await call('vault.list');
           for (const toolId of [ids.toolA.id, ids.toolB.id]) {
-            const item = vaultItemOf(items, toolId);
+            // RF-65: the credential both members accepted is the one that carries SHARE_USERNAME;
+            // the tool also holds whatever this Nod saved before (F1's, on Tool A).
+            const item = vaultItemOfUsername(items, toolId, SHARE_USERNAME);
             expect(item !== null, 'no credential for ' + toolId);
             const holders = item.holders || [];
             expect(holders.length === 3, toolId + ': the holder rows are ' + summarize(holders.map((row) => row.name)));
@@ -1297,13 +1434,17 @@
 
         /** K9/SP06 §4: the owner's save re-seals the new value to every live holder. */
         async function stepOwnerSavesAgain() {
-          const before = vaultItemOf(await call('vault.list'), shared.toolId);
+          const before = vaultItemOfUsername(await call('vault.list'), shared.toolId, SHARE_USERNAME);
           expect(before !== null, 'the credential left the vault');
+          // RF-65: the save names the credential it replaces by `itemId`; without it, the call would
+          // add a third credential of the tool instead of fanning the new value out.
           const item = await call('vault.save', {
+            itemId: before.id,
             toolId: shared.toolId,
             username: SHARE_USERNAME,
             secret: SHARED_2,
           });
+          expect(item.id === before.id, 'the save created another credential');
           expect(item.credentialId === before.credentialId, 'the credential id changed on the save');
           expect(
             item.updateWarning === null || item.updateWarning === undefined,
@@ -1341,9 +1482,14 @@
           const list = await call('catalog.list');
           const entry = entryOfOrigin(list, CONFIG.originA);
           expect(entry !== null, 'the granted tool left the catalog');
-          const revealed = await call('vault.reveal', { toolId: entry.id, password: ACCOUNT_PASSWORD });
+          // RF-65: the tool also holds P's own credential (username `person@test`); the update was
+          // for the accepted one, so the reveal names that item and leaves P's own alone.
+          const item = vaultItemOfUsername(await call('vault.list'), entry.id, SHARE_USERNAME);
+          expect(item !== null, 'the accepted credential left the vault');
+          const revealed = await call('vault.reveal', { itemId: item.id, password: ACCOUNT_PASSWORD });
           expect(!!revealed && revealed.secret === SHARED_2, 'the vault did not move to the new value');
-          return 'the vault holds the value the owner saved last (not printed)';
+          expect(revealed.username === SHARE_USERNAME, 'the revealed username is not the shared one');
+          return 'the accepted credential holds the value the owner saved last (not printed)';
         }
 
         async function stepInboxEmpty() {
@@ -1362,14 +1508,18 @@
           const ids = await adminIds();
           shared.toolId = ids.toolA.id;
           shared.personId = ids.person.id;
+          // RF-65: the revoked credential is the shared one, by its item id — the tool's other
+          // credential (F1's) never travelled and has no holder to revoke.
+          const target = vaultItemOfUsername(await call('vault.list'), shared.toolId, SHARE_USERNAME);
+          expect(target !== null, 'the shared credential left the vault');
           const item = await call('shares.removeHolder', {
-            toolId: shared.toolId,
+            itemId: target.id,
             personId: shared.personId,
           });
-          expect(!!item && item.toolId === shared.toolId, 'shares.removeHolder answered ' + summarize(item));
+          expect(!!item && item.id === target.id, 'shares.removeHolder answered ' + summarize(item));
           const state = await call('host.syncNow');
           expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
-          const rotated = vaultItemOf(await call('vault.list'), shared.toolId);
+          const rotated = vaultItemOfUsername(await call('vault.list'), shared.toolId, SHARE_USERNAME);
           expect(rotated !== null, 'the credential left the vault');
           expect(
             rotated.rotationPending === true,
@@ -1387,18 +1537,23 @@
 
         /** K9/SP06 §4: the save that follows reaches the remaining holder and clears the state. */
         async function stepRotationCleared() {
+          const target = vaultItemOfUsername(await call('vault.list'), shared.toolId, SHARE_USERNAME);
+          expect(target !== null, 'the shared credential left the vault');
+          // RF-65: replace that credential, never add a third one of the tool.
           const item = await call('vault.save', {
+            itemId: target.id,
             toolId: shared.toolId,
             username: SHARE_USERNAME,
             secret: SHARED_3,
           });
+          expect(item.id === target.id, 'the rotation save created another credential');
           expect(
             item.updateWarning === null || item.updateWarning === undefined,
             'the save answered ' + summarize(item.updateWarning),
           );
           const state = await call('host.syncNow');
           expect(state.status === 'connected', 'host.state.status = ' + JSON.stringify(state.status));
-          const rotated = vaultItemOf(await call('vault.list'), shared.toolId);
+          const rotated = vaultItemOfUsername(await call('vault.list'), shared.toolId, SHARE_USERNAME);
           expect(rotated !== null, 'the credential left the vault');
           expect(
             rotated.rotationPending === false,
@@ -1639,6 +1794,8 @@
             ['7.1 peers.list (both members pinned, K2/RF-45)', stepPeersPinned],
             ['7.2 catalog.list/favorites.list (the personal half, B7)', stepPersonalFromSnapshot],
             ['7.3 vault.save (the credential to share, K4)', stepSaveShared],
+            ['7.3b vault.list (two credentials, one default, RF-65)', stepTwoCredentials],
+            ['7.3c vault.setDefault (the mark moves, RF-65)', stepSetDefault],
             ['7.4 vault.setScope/shares.recipients (role, K6)', stepScopeRole],
             ['7.5 shares.send (one copy per member, K4)', stepSendShared],
             ['7.6 host.syncNow (the holders, K7)', stepHoldersAfterSend],
@@ -1650,6 +1807,7 @@
             ['8.2 host.syncNow (the shares arrive)', stepPersonSync],
             ['8.3 shares.inbox (the send and the assign, K4)', stepInboxShares],
             ['8.4 shares.accept (the send, gated, K4)', stepAcceptShare],
+            ["8.4b vault.list/reveal (P's own credential untouched, RF-65)", stepOwnCredentialKept],
             ['8.5 vault.reveal (the sender\'s value, K5)', stepRevealedShared],
             ['8.5b vault.copy (the same gate, the clipboard, K5)', stepCopiedShared],
             ['8.6 host.syncNow + vault.list (both holders, K7/RF-54)', stepHoldersBoth],

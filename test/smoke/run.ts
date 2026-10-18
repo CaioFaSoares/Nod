@@ -728,6 +728,14 @@ async function main(): Promise<number> {
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
 
+  // A backup already in place means another smoke is running (or one was killed before it
+  // restored): moving `resources/seed.json` now would put that run's temporary seed over the
+  // owner's private one. Refused before anything moves; restore the backup by hand.
+  if (existsSync(SEED_BACKUP)) {
+    console.error(`refused: ${SEED_BACKUP} exists — another smoke is running, or restore it to ${SEED} by hand`);
+    process.exit(1);
+  }
+
   try {
     if (existsSync(SEED)) {
       renameSync(SEED, SEED_BACKUP);

@@ -183,6 +183,10 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
       title: tool.title,
       url: tool.url,
       icon: tool.icon ?? null,
+      // RF-62: the guild's category travels on every org write — the host route accepts it and the
+      // snapshot reads it back. Dropping it here is what left every category set while connected
+      // ungrouped on the host; `?? null` is "the guild filed it nowhere" (SP03 §2, host's own null).
+      category: tool.category ?? null,
       order: tool.order,
       roles: [...tool.roles],
       views: orgViewsOf(tool.views).map((view) => ({

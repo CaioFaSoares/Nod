@@ -294,7 +294,8 @@ export interface Session {
   ): Promise<void>;
   /**
    * SP02 §7: every `nod.cred.<person>.*` item of the keychain and the index rows of that person —
-   * and the biometric item, which holds a `vaultKey` the reset has just made useless (SP02 §9).
+   * every credential of theirs, the default and the rest (RF-65) — and the biometric item, which
+   * holds a `vaultKey` the reset has just made useless (SP02 §9).
    */
   wipeVault(personId: Id): Promise<void>;
   /**
@@ -880,7 +881,7 @@ export function createSession(deps: SessionDeps): Session {
       const moved = deps.repo.adoptPersonId({
         fromId: adopt,
         toId: p.personId,
-        keychainKeyOf: (item) => credentialKey(p.personId, item.toolId),
+        keychainKeyOf: (item) => credentialKey(p.personId, item.toolId, item.id),
       });
       // SP02 §8: the AAD of every value is the keychain key that just changed, and the vaultKey
       // of the adopted account is the host's — so the values are opened with the key this session
@@ -916,18 +917,25 @@ export function createSession(deps: SessionDeps): Session {
     return admin ? [...rest, adminRoleId] : rest;
   }
 
-  /** The keychain key of one credential: `nod.cred.<person>.<tool>` (`backend/vault.ts`). */
-  function credentialKey(personId: Id, toolId: Id): string {
-    return `nod.cred.${personId}.${toolId}`;
+  /**
+   * RF-65: the keychain key of one credential of an adopted account —
+   * `nod.cred.<person>.<tool>.<item>` (`backend/vault.ts`). The item id is part of it because the
+   * person may hold several credentials of one tool, and because the key is the AAD of the sealed
+   * value: the row that moves gets a key no other credential of this person can collide with.
+   */
+  function credentialKey(personId: Id, toolId: Id, itemId: Id): string {
+    return `nod.cred.${personId}.${toolId}.${itemId}`;
   }
 
   /**
    * F1: the credentials of an adopted account keep working under the host person id. The index rows
    * already point at the new key (`Repo.adoptPersonId`); this re-seals the values — the keychain key
-   * is the AAD of a `bv1.` value, so a value copied to the new key would not open (SP02 §8). A
-   * legacy plaintext value is sealed for the first time here. A value the index knows and the
-   * keychain does not (an orphan) is nothing to move, and a keychain that refuses stops this where
-   * it is: the old item stays intact and the report names the credential.
+   * is the AAD of a `bv1.` value, so a value copied to the new key would not open (SP02 §8). The
+   * person id in the key changed, so every value moves, and RF-65 puts the item id in the key: the
+   * person may hold several credentials of one tool, and each keeps its own slot. A legacy plaintext
+   * value is sealed for the first time here. A value the index knows and the keychain does not (an
+   * orphan) is nothing to move, and a keychain that refuses stops this where it is: the old item
+   * stays intact and the report names the credential.
    */
   async function moveCredentials(
     items: VaultItem[],
@@ -939,11 +947,13 @@ export function createSession(deps: SessionDeps): Session {
     for (const item of items) {
       const raw = await deps.keychain.get(item.keychainKey);
       if (raw === null) continue;
-      const keychainKey = credentialKey(to, item.toolId);
+      const keychainKey = credentialKey(to, item.toolId, item.id);
       const credential = await openCredential(raw, item.keychainKey, fromVaultKey, toVaultKey);
       if (credential === null) {
         // No key of this session opens it (a locked session, or a value written elsewhere): the old
-        // item is left alone rather than overwritten with something that would not open either.
+        // item is left alone rather than overwritten with something that would not open either. The
+        // message names the tool, never the credential's label — which defaults to the username
+        // (RF-65) and no text of a credential may carry one.
         throw new Error(`the saved login of ${item.toolId} could not be moved`);
       }
       const value = await encryptVaultValue(toVaultKey, keychainKey, credential);

@@ -332,7 +332,8 @@ function makeCatalogToolWindows(env: FakeEnvironment, catalog: Catalog): ToolWin
     entries: () => catalog.repo.listEntries().filter((entry) => entry.active),
     credential: async (toolId) => {
       env.calls.credential += 1;
-      return catalog.vault.read(catalog.person.id, toolId);
+      // RF-65: the window knows its tool; which credential fills it is the vault's own rule.
+      return catalog.vault.readDefault(catalog.person.id, toolId);
     },
     vaultOrigin: (toolId) => catalog.repo.vaultOrigin(catalog.person.id, toolId),
   });
@@ -862,6 +863,41 @@ describe('tool windows — login cascade', () => {
     expect(handle(env, 'tool_kanban').evals[0]).toContain('"fill":true');
     expect(handle(env, 'tool_kanban').evals[0]).toContain('"username":"ana"');
     expect(handle(env, 'tool_kanban').evals[0]).toContain('"secret":"s3cret"');
+  });
+
+  test('the fill reads the default credential when the tool holds several (RF-65)', async () => {
+    const env = fakeEnvironment();
+    const c = catalog(KANBAN);
+    await c.vault.save(c.person.id, { toolId: 'kanban', username: 'ana', secret: 's3cret' });
+    const ops = await c.vault.save(c.person.id, {
+      toolId: 'kanban',
+      username: 'ops',
+      secret: 'other',
+      label: 'Ops',
+    });
+    const toolWindows = makeCatalogToolWindows(env, c);
+
+    // The first credential of the tool is the default: that is the one the window receives.
+    await toolWindows.open('kanban');
+    toolWindows.onNavigate(nav({ kind: 'finish', url: FINISH_URL }));
+    await settle();
+
+    expect(handle(env, 'tool_kanban').evals).toHaveLength(1);
+    expect(handle(env, 'tool_kanban').evals[0]).toContain('"username":"ana"');
+    expect(handle(env, 'tool_kanban').evals[0]).toContain('"secret":"s3cret"');
+
+    // The person picks the other credential; a fresh window fills with that one instead.
+    c.repo.setVaultDefault(c.person.id, ops.id);
+    const second = fakeEnvironment();
+    const other = makeCatalogToolWindows(second, c);
+    await other.open('kanban');
+    other.onNavigate(nav({ kind: 'finish', url: FINISH_URL }));
+    await settle();
+
+    expect(handle(second, 'tool_kanban').evals).toHaveLength(1);
+    expect(handle(second, 'tool_kanban').evals[0]).toContain('"username":"ops"');
+    expect(handle(second, 'tool_kanban').evals[0]).toContain('"secret":"other"');
+    expect(handle(second, 'tool_kanban').evals[0]).not.toContain('s3cret');
   });
 
   test('a local edit that moves the tool to another origin stops the fill (RF-38)', async () => {

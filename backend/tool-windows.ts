@@ -91,11 +91,16 @@ export interface ToolWindowsDeps {
   entries(): Entry[];
   /** icon of the entry as a data URI */
   icon(id: Id): string | null;
+  /**
+   * RF-65: the credential this tool's window fills with — the default of the tool, because a person
+   * may hold several of one and which one fills is their own choice (`backend/main.ts`'s
+   * `credentialOf` reads `Vault.readDefault`). The window knows its tool, never a credential id.
+   */
   credential(toolId: Id): Promise<{ username: string; secret: string } | null>;
   /**
-   * The origin the person's credential for this tool was saved for (SP02 §8, RF-38); `null` when
-   * the vault index holds no item — or one with no origin on record, which no fill may use either.
-   * Synchronous on purpose: the cascade needs the answer before it decides to inject
+   * The origin the default credential of this tool was saved for (SP02 §8, RF-38, RF-65); `null`
+   * when the person holds no credential of the tool — or one with no origin on record, which no fill
+   * may use either. Synchronous on purpose: the cascade needs the answer before it decides to inject
    * (`shared/login-cascade.ts` rule 4), and the attempt it counts decides whether a `no-form` report
    * reads `filled` or `session` (rule 5).
    */

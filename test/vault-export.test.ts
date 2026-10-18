@@ -27,6 +27,22 @@ describe('exportVault / importVault', () => {
     expect(await importVault(blob, PASSWORD)).toEqual(ITEMS);
   });
 
+  /**
+   * RF-65: a tool may hold several credentials, and the v1 file is a list of items — two of one tool
+   * travel as two of them, told apart by their label and username. It is what lets the vault write
+   * every credential of a tool to the file and read them all back.
+   */
+  test('several credentials of one tool travel as several items', async () => {
+    const sameTool: VaultExportItem[] = [
+      { toolId: 'kanban', label: 'Work', username: 'ana', secret: 'secret-work' },
+      { toolId: 'kanban', label: 'Ops', username: 'ops', secret: 'secret-ops' },
+    ];
+    const blob = await exportVault(sameTool, PASSWORD, ITERATIONS);
+
+    expect(blob).not.toContain('secret-work');
+    expect(await importVault(blob, PASSWORD)).toEqual(sameTool);
+  });
+
   test('an empty vault also comes back empty', async () => {
     const blob = await exportVault([], PASSWORD, ITERATIONS);
     expect(await importVault(blob, PASSWORD)).toEqual([]);

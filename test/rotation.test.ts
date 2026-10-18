@@ -190,6 +190,29 @@ async function openAccount(nod: Nod, roles: Id[] = []): Promise<Id> {
   return id;
 }
 
+/**
+ * RF-65: the tool's default credential on the session's Nod — the item every single-credential test
+ * of this file speaks of.
+ */
+function itemOf(nod: Nod, toolId: Id): VaultItem {
+  const person = nod.session.current();
+  if (person === null) throw new Error('the test needs an unlocked session');
+  const item = nod.repo.defaultVaultItem(person.id, toolId);
+  if (item === null) throw new Error(`no credential of ${toolId}`);
+  return item;
+}
+
+/** The value of the tool's default credential — what a reveal of it would return. */
+async function readDefault(
+  nod: Nod,
+  toolId: Id,
+): Promise<{ username: string; secret: string } | null> {
+  const person = nod.session.current();
+  if (person === null) throw new Error('the test needs an unlocked session');
+  const item = nod.repo.defaultVaultItem(person.id, toolId);
+  return item === null ? null : await nod.vault.read(person.id, item.id);
+}
+
 /** A host row plus the cached snapshot the share flow reads (`backend/shares.ts`). */
 function installSnapshot(
   nod: Nod,
@@ -343,7 +366,7 @@ async function ownedCredential(
     secret: CREDENTIAL_SECRET,
     label: 'Figma',
   });
-  nod.repo.setVaultCredential(meId, 'figma', 'c1');
+  nod.repo.setVaultCredential(meId, itemOf(nod, 'figma').id, 'c1');
   installSnapshot(nod, { holders: { c1: holders } });
   return { meId, credentialId: 'c1' };
 }
@@ -376,6 +399,8 @@ describe('the owner edit re-seals the new value (K9, SP06 §4)', () => {
     nod.link.current = connection;
 
     const saved = await nod.vault.save(meId, {
+      // RF-65: the edit names the credential it replaces; without `itemId` the save adds a new one.
+      itemId: itemOf(nod, 'figma').id,
       toolId: 'figma',
       username: CREDENTIAL_USER,
       secret: ROTATED_SECRET,
@@ -418,6 +443,8 @@ describe('the owner edit re-seals the new value (K9, SP06 §4)', () => {
     nod.link.current = connection;
 
     const saved = await nod.vault.save(meId, {
+      // RF-65: the edit names the credential it replaces; without `itemId` the save adds a new one.
+      itemId: itemOf(nod, 'figma').id,
       toolId: 'figma',
       username: CREDENTIAL_USER,
       secret: ROTATED_SECRET,
@@ -452,6 +479,8 @@ describe('the owner edit re-seals the new value (K9, SP06 §4)', () => {
     nod.link.current = null;
 
     const saved = await nod.vault.save(meId, {
+      // RF-65: the edit names the credential it replaces; without `itemId` the save adds a new one.
+      itemId: itemOf(nod, 'figma').id,
       toolId: 'figma',
       username: CREDENTIAL_USER,
       secret: ROTATED_SECRET,
@@ -485,6 +514,7 @@ describe('the owner edit re-seals the new value (K9, SP06 §4)', () => {
     nod.link.current = connection;
 
     await nod.vault.save(meId, {
+      itemId: itemOf(nod, 'figma').id,
       toolId: 'figma',
       username: CREDENTIAL_USER,
       secret: ROTATED_SECRET,
@@ -509,7 +539,7 @@ describe('revoking a holder (K9, SP06 §4)', () => {
     const connection = fakeConnection();
     nod.link.current = connection;
 
-    const item = await nod.shares.removeHolder('figma', 'carol');
+    const item = await nod.shares.removeHolder(itemOf(nod, 'figma').id, 'carol');
 
     expect(connection.calls).toEqual(['remove:c1:carol']);
     expect(item).toMatchObject({ toolId: 'figma', credentialId: 'c1' });
@@ -528,7 +558,7 @@ describe('revoking a holder (K9, SP06 §4)', () => {
     const connection = fakeConnection();
     nod.link.current = connection;
 
-    await expect(nod.shares.removeHolder('figma', 'carol')).rejects.toThrow('unknown credential');
+    await expect(nod.shares.removeHolder(itemOf(nod, 'figma').id, 'carol')).rejects.toThrow('unknown credential');
     expect(connection.calls).toEqual([]);
   });
 
@@ -546,6 +576,8 @@ describe('revoking a holder (K9, SP06 §4)', () => {
     nod.link.current = null;
 
     const saved = await nod.vault.save(meId, {
+      // RF-65: the edit names the credential it replaces; without `itemId` the save adds a new one.
+      itemId: itemOf(nod, 'figma').id,
       toolId: 'figma',
       username: CREDENTIAL_USER,
       secret: ROTATED_SECRET,
@@ -587,8 +619,8 @@ describe('an incoming update of a held credential (K9, SP06 §4)', () => {
       secret: 'old-secret',
       label: 'Figma',
     });
-    nod.repo.setVaultCredential(meId, 'figma', 'c1');
-    nod.repo.setVaultScope(meId, 'figma', 'role');
+    nod.repo.setVaultCredential(meId, itemOf(nod, 'figma').id, 'c1');
+    nod.repo.setVaultScope(meId, itemOf(nod, 'figma').id, 'role');
 
     const aliceX = await generateX25519KeyPair();
     const aliceEd = await generateEd25519KeyPair();
@@ -639,7 +671,7 @@ describe('an incoming update of a held credential (K9, SP06 §4)', () => {
 
     expect(connection.calls).toEqual(['accept:share-1']);
     expect(nod.repo.listVault(meId)).toHaveLength(1);
-    expect(await nod.vault.read(meId, 'figma')).toEqual({ username: 'new', secret: 'new-secret' });
+    expect(await readDefault(nod, 'figma')).toEqual({ username: 'new', secret: 'new-secret' });
     expect(nod.repo.vaultOrigin(meId, 'figma')).toBe(TOOL_ORIGIN);
   });
 
@@ -926,10 +958,10 @@ describe('the rotation acceptance against the real host (K9)', () => {
       secret: CREDENTIAL_SECRET,
       label: 'Figma',
     });
-    expect((await aliceNod.shares.setScope('figma', 'org')).scope).toBe('org');
-    const sent = await aliceNod.shares.send('figma', [bob.id, carol.id]);
+    expect((await aliceNod.shares.setScope(itemOf(aliceNod, 'figma').id, 'org')).scope).toBe('org');
+    const sent = await aliceNod.shares.send(itemOf(aliceNod, 'figma').id, [bob.id, carol.id]);
     expect(sent).toEqual({ sent: 2 });
-    const credentialId = aliceNod.repo.vaultItem(alice.id, 'figma')?.credentialId;
+    const credentialId = itemOf(aliceNod, 'figma').credentialId;
     expect(credentialId).not.toBeNull();
 
     for (const [nod, person] of [
@@ -951,6 +983,8 @@ describe('the rotation acceptance against the real host (K9)', () => {
 
     // Acceptance 1: the owner edits the shared credential; the holders get it at their next sync.
     const saved = await aliceNod.vault.save(alice.id, {
+      // RF-65: the owner's edit names the shared credential; without `itemId` it would add a new one.
+      itemId: itemOf(aliceNod, 'figma').id,
       toolId: 'figma',
       username: CREDENTIAL_USER,
       secret: ROTATED_SECRET,
@@ -962,7 +996,7 @@ describe('the rotation acceptance against the real host (K9)', () => {
     const update = bobNod.shares.inbox().find((share) => share.kind === 'update');
     if (update === undefined) throw new Error('the holder did not receive the update');
     await bobNod.shares.applyUpdates();
-    expect(await bobNod.vault.read(bob.id, 'figma')).toEqual({
+    expect(await readDefault(bobNod, 'figma')).toEqual({
       username: CREDENTIAL_USER,
       secret: ROTATED_SECRET,
     });
@@ -970,13 +1004,14 @@ describe('the rotation acceptance against the real host (K9)', () => {
 
     // Acceptance 2: removing a holder marks the credential rotation pending for the owner until a
     // new secret is saved — which is what triggers the update that clears it.
-    await aliceNod.shares.removeHolder('figma', carol.id);
+    await aliceNod.shares.removeHolder(itemOf(aliceNod, 'figma').id, carol.id);
     await syncNod(aliceNod);
     const pending = vaultItemOf(aliceNod, alice.id);
     expect(pending.rotationPending).toBe(true);
     expect(pending.holders.find((holder) => holder.personId === carol.id)?.removedAt).not.toBeNull();
 
     await aliceNod.vault.save(alice.id, {
+      itemId: itemOf(aliceNod, 'figma').id,
       toolId: 'figma',
       username: CREDENTIAL_USER,
       secret: ROTATED_AGAIN,
@@ -988,7 +1023,7 @@ describe('the rotation acceptance against the real host (K9)', () => {
     // The remaining holder got the rotated value, and the host never saw a plaintext byte of it.
     await syncNod(bobNod);
     await bobNod.shares.applyUpdates();
-    expect(await bobNod.vault.read(bob.id, 'figma')).toEqual({
+    expect(await readDefault(bobNod, 'figma')).toEqual({
       username: CREDENTIAL_USER,
       secret: ROTATED_AGAIN,
     });
@@ -1018,21 +1053,23 @@ describe('the rotation acceptance against the real host (K9)', () => {
       secret: CREDENTIAL_SECRET,
       label: 'Figma',
     });
-    expect((await aliceNod.shares.setScope('figma', 'org')).scope).toBe('org');
-    expect(await aliceNod.shares.send('figma', [bob.id])).toEqual({ sent: 1 });
+    expect((await aliceNod.shares.setScope(itemOf(aliceNod, 'figma').id, 'org')).scope).toBe('org');
+    expect(await aliceNod.shares.send(itemOf(aliceNod, 'figma').id, [bob.id])).toEqual({ sent: 1 });
 
     await syncNod(bobNod);
     await bobNod.shares.accept(bobNod.shares.inbox()[0].id);
     await syncNod(aliceNod);
 
     // Alice revokes Bob — her only other holder — and the credential turns rotation pending.
-    await aliceNod.shares.removeHolder('figma', bob.id);
+    await aliceNod.shares.removeHolder(itemOf(aliceNod, 'figma').id, bob.id);
     await syncNod(aliceNod);
     expect(vaultItemOf(aliceNod, alice.id).rotationPending).toBe(true);
 
     // Nobody is left to fan an update out to, so the explicit rotation signal is the only witness;
     // the owner's save still ends the state (RF-48, `docs/handovers/k10-smoke.md` finding 1).
     const saved = await aliceNod.vault.save(alice.id, {
+      // RF-65: the owner's edit names the shared credential; without `itemId` it would add a new one.
+      itemId: itemOf(aliceNod, 'figma').id,
       toolId: 'figma',
       username: CREDENTIAL_USER,
       secret: ROTATED_SECRET,

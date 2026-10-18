@@ -37,7 +37,9 @@ import type {
 //
 // A *constraint* that a later build removes from a table that already exists is the same problem the
 // other way round: SQLite cannot drop one with an `ALTER`, so `migrate()` rebuilds the table
-// (`rebuildVaultItem`, for the foreign key to `tool` that SP05 §2 takes off `vault_item`).
+// (`rebuildVaultItem`, for the foreign key to `tool` that SP05 §2 takes off `vault_item` and for the
+// `UNIQUE (person_id, tool_id)` that 0.5.5's RF-65 takes off it, a person holding several credentials
+// of one tool from then on).
 //
 // The `host` and `host_outbox` tables of SP05 §2 are new: no earlier build wrote them, so the
 // `IF NOT EXISTS` here creates them on a fresh database and on an existing one alike. `host` has no
@@ -104,7 +106,7 @@ CREATE TABLE IF NOT EXISTS vault_item (
   origin TEXT,
   credential_id TEXT,
   scope TEXT NOT NULL DEFAULT 'role',
-  UNIQUE (person_id, tool_id)
+  is_default INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS invite (
   id TEXT PRIMARY KEY,
@@ -181,7 +183,7 @@ CREATE TABLE IF NOT EXISTS secret (
  * `3` is SP05 §2's connected schema: the two `host` tables, the event's client id and sent time,
  * the local password V2 columns and the tool's scope/owner. A `2` database gets them by presence
  * (`addColumns`), with its people, tools and vault rows untouched; `0` covers everything written
- * before the versioning, which is completed the same way. Only 0 and the versions 2 to 5 are known
+ * before the versioning, which is completed the same way. Only 0 and the versions 2 to 7 are known
  * beside the current one — anything else is a database from a build this one cannot reason about.
  *
  * `4` is K1–K2's `peer_keys` (SP06 §2): one more table and no other change, so a `3` database gets
@@ -200,11 +202,19 @@ CREATE TABLE IF NOT EXISTS secret (
  * be one keychain item each — credentials, the E02 pair, the guild bearer — sealed under the
  * person's `vaultKey` and kept here, so the system keychain holds only the biometric item. One new
  * table and no other change, so a `6` database gets it from the `CREATE … IF NOT EXISTS` above.
+ *
+ * `8` is 0.5.5's several credentials per tool (RF-65): `vault_item.is_default` — the one credential
+ * of a tool the login cascade fills with — and, with it, the removal of `UNIQUE (person_id,
+ * tool_id)`, which is a constraint and not a column: a `7` database gets the column from
+ * `rebuildVaultItem` (the same rebuild that drops the constraint) and every row it holds becomes the
+ * default of its tool, which is what it was. Two partial unique indexes are created after that
+ * rebuild: one credential copy per person (`vault_item_credential`) and one default per tool
+ * (`vault_item_default`).
  */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
-/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2–v6, current. */
-const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, 5, 6, SCHEMA_VERSION];
+/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2–v7, current. */
+const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION];
 
 /**
  * The database was created by an older Nod (v1, in Portuguese). `migrate` throws this and touches
@@ -279,6 +289,8 @@ interface VaultRow {
   credential_id: string | null;
   /** K6: the sharing scope (`role`, `blocked` or `org`). */
   scope: string;
+  /** RF-65: `1` for the credential of this tool the login cascade fills with. */
+  is_default: number;
 }
 
 interface InviteRow {
@@ -411,6 +423,13 @@ export interface PeerKeyRecord {
 const LOGIN_RESULTS: readonly LoginResult[] = ['session', 'filled', 'provider', 'manual', 'failed'];
 
 /**
+ * RF-65: the refusal of a vault write addressed by id — an item id this person does not hold, or one
+ * that belongs to somebody else. It is the same string every `vault.*` and `shares.*` call answers
+ * (`backend/shares.ts` keeps its own constant for the reads it makes itself).
+ */
+const UNKNOWN_CREDENTIAL = 'unknown credential';
+
+/**
  * SP04 §5: an event on its way to the host. `clientId` is the one a pushed event cannot lack —
  * `unsentEvents` fills a row that predates the column before it answers — while `AuditEvent` keeps it
  * optional, because a read that does not go through the push (`listEvents`) may see such a row first.
@@ -485,7 +504,7 @@ export interface Repo {
    * `person` row (the id, and nothing else of it), its `person_role` rows, its `vault_item` rows and
    * every `event` that named it (the audit is that person's own history, `docs/canonico.md` §13).
    *
-   * A credential's keychain key carries the person id (`nod.cred.<person>.<tool>`,
+   * A credential's keychain key carries the person id (`nod.cred.<person>.<tool>.<item>`,
    * `backend/vault.ts`), so each row's `keychain_key` is rewritten with `keychainKeyOf(item)` and the
    * answer carries the items exactly as they were read — the old key included. Renaming the keychain
    * items themselves is the caller's: only the session reaches the keychain.
@@ -538,17 +557,43 @@ export interface Repo {
   activeInvite(codeHash: string, now: Date): Invite | null;
   listInvites(): Invite[];
   // vault index
-  listVault(personId: Id): VaultItem[];
-  vaultItem(personId: Id, toolId: Id): VaultItem | null;
   /**
-   * The origin that person's credential for that tool was saved for (SP02 §8, RF-38): the origin a
-   * tool window must be on for the fill to run. `null` when the index holds no item — or an item
-   * with no origin, which no fill may use either.
+   * Every credential of that person, oldest first within a tool. 0.5.5 (RF-65): a tool may hold
+   * several, and only the item's own id (`VaultItem.id`) addresses one of them.
+   */
+  listVault(personId: Id): VaultItem[];
+  /** One credential of that person by its own id; `null` for an id of somebody else's, too. */
+  vaultItemById(personId: Id, itemId: Id): VaultItem | null;
+  /**
+   * That person's local copy of a shared credential (SP06 §3): the item that carries
+   * `credentialId`, or `null` when the credential is not in this vault. The partial unique index
+   * `vault_item_credential` is what makes the answer single.
+   */
+  vaultItemByCredential(personId: Id, credentialId: string): VaultItem | null;
+  /** Every credential that person holds of one tool, oldest first (`created_at`, then `id`). */
+  vaultItemsOfTool(personId: Id, toolId: Id): VaultItem[];
+  /**
+   * The credential of a tool the login cascade fills with (RF-65): the item `is_default`, and the
+   * only read of this section that goes by tool id — the fill asks about a tool, not a credential.
+   */
+  defaultVaultItem(personId: Id, toolId: Id): VaultItem | null;
+  /**
+   * The origin the default credential of that tool was saved for (SP02 §8, RF-38): the origin a tool
+   * window must be on for the fill to run. `null` when the person holds no credential of the tool —
+   * or one with no origin, which no fill may use either.
    */
   vaultOrigin(personId: Id, toolId: Id): string | null;
   /** Every person's item of that tool (to clean the keychain when a tool is removed). */
   vaultItemsByTool(toolId: Id): VaultItem[];
+  /**
+   * Writes one credential of the index, by id: with `id` it updates that row in place (its
+   * `created_at` and its `is_default` stay), without one it adds a row — and a new row is the
+   * default of its tool when the tool had none, which is how the first credential of a tool becomes
+   * the one the fill uses (RF-65). A caller that names an `id` owns its meaning: `backend/vault.ts`
+   * is what refuses an unknown one before the call.
+   */
   saveVaultItem(i: {
+    id?: Id;
     personId: Id;
     toolId: Id;
     label: string;
@@ -562,25 +607,36 @@ export interface Repo {
     scope?: ShareScope;
   }): VaultItem;
   /** K4/SP06 §4: writes the credential group of an item the moment it is first shared. */
-  setVaultCredential(personId: Id, toolId: Id, credentialId: string): void;
+  setVaultCredential(personId: Id, itemId: Id, credentialId: string): void;
   /** K6/SP06 §5: stores a new sharing scope for one item (the owner's choice, or an accept). */
-  setVaultScope(personId: Id, toolId: Id, scope: ShareScope): void;
+  setVaultScope(personId: Id, itemId: Id, scope: ShareScope): void;
   /**
    * K4: both sharing fields at once, `null` included — the rollback of a failed accept restores the
    * item exactly as it was, credential group and scope alike.
    */
   setVaultSharing(
     personId: Id,
-    toolId: Id,
+    itemId: Id,
     p: { credentialId: string | null; scope: ShareScope },
   ): void;
-  removeVaultItem(personId: Id, toolId: Id): void;
+  /**
+   * RF-65: makes this credential the one its tool fills with, and takes the flag from whichever
+   * credential of the tool held it — one transaction, so the tool is never without a default.
+   * Throws `unknown credential` for an id that person does not hold (the RPC's refusal).
+   */
+  setVaultDefault(personId: Id, itemId: Id): VaultItem;
+  /**
+   * Removes one credential of that person. RF-65: when it was the default of its tool, the oldest
+   * credential left becomes the default, so a tool that still holds credentials always has one.
+   */
+  removeVaultItem(personId: Id, itemId: Id): void;
   /**
    * B8b/RF-40: re-points the vault index rows of one tool id to another — what a local tool turned
    * into a personal tool needs, so a credential saved for the old id stays usable under the new one.
    * `keychain_key` is left untouched on purpose: the value in the keychain is sealed with that string
    * as AAD and `backend/vault.ts` reads by the stored key, so the credential opens unchanged without
-   * the `vaultKey` on hand. Answers how many rows moved.
+   * the `vaultKey` on hand. A moved row that would be a second default of the new tool loses the
+   * flag instead (RF-65): the person's default there stays theirs. Answers how many rows moved.
    */
   rekeyVaultTool(fromToolId: Id, toToolId: Id): number;
   /** Returns what it removed: the caller needs the keys to clean the keychain. */
@@ -799,17 +855,21 @@ export function createRepo(db: SqlDb): Repo {
    * SP05 §2: `vault_item.tool_id` no longer has a foreign key to `tool (id)`. A credential may
    * belong to a tool that exists only on the host — a connected entry has no local `tool` row — and
    * with `PRAGMA foreign_keys = ON` (B9's schema) that insert would fail with `FOREIGN KEY
-   * constraint failed`. The DDL above is already the new shape; a database whose `vault_item` was
-   * created with the constraint keeps it, because `CREATE TABLE IF NOT EXISTS` skips the whole
-   * statement — so the table is rebuilt here.
+   * constraint failed`. 0.5.5 (RF-65) takes a second constraint off the same table: `UNIQUE
+   * (person_id, tool_id)`, because a person now holds as many credentials of one tool as they want,
+   * and adds `is_default` to it. The DDL above is already the new shape; a database whose
+   * `vault_item` was created with either constraint keeps it, because `CREATE TABLE IF NOT EXISTS`
+   * skips the whole statement — so the table is rebuilt here.
    *
-   * The guard is the constraint itself and not `user_version`: a v2 database and a block-1 one both
-   * carry it (both are completed, unversioned or stamped), and a database this build already
-   * rebuilt answers `false` here, which is what makes `migrate()` idempotent. The recipe is the
-   * SQLite documentation's "making other kinds of table schema changes": `foreign_keys` off —
-   * outside the transaction, where the pragma is a silent no-op —, the new table, the rows, `DROP`,
-   * `RENAME`, all inside one transaction, and the pragma back where it was. Every row, the
-   * constraint on `person`, the `UNIQUE (person_id, tool_id)` and the `origin` column come along.
+   * The guard is the shape itself and not `user_version`: a v2 database and a block-1 one both carry
+   * the foreign key, a `7` one carries the `UNIQUE` and no `is_default` (both are completed,
+   * unversioned or stamped), and a database this build already rebuilt answers `false` here, which
+   * is what makes `migrate()` idempotent. The recipe is the SQLite documentation's "making other
+   * kinds of table schema changes": `foreign_keys` off — outside the transaction, where the pragma
+   * is a silent no-op —, the new table, the rows, `DROP`, `RENAME`, all inside one transaction, and
+   * the pragma back where it was. Every row, the constraint on `person` and the `origin` column come
+   * along; a row of a table without `is_default` was the only credential of its tool, so it becomes
+   * the default of that tool (`1`).
    *
    * Removing a local tool still takes its vault rows with it: with the FK gone that is
    * `removeEntry`'s explicit `DELETE FROM vault_item WHERE tool_id = ?`, which it already does.
@@ -818,7 +878,14 @@ export function createRepo(db: SqlDb): Repo {
     const pointsAtTool = db
       .all<{ table: string }>('PRAGMA foreign_key_list(vault_item)')
       .some((row) => row.table === 'tool');
-    if (!pointsAtTool) return;
+    const columns = db.all<{ name: string }>('PRAGMA table_info(vault_item)').map((row) => row.name);
+    const hasDefault = columns.includes('is_default');
+    const onePerTool = /UNIQUE\s*\(\s*person_id\s*,\s*tool_id\s*\)/i.test(
+      singleRow<{ sql: string }>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vault_item'",
+      )?.sql ?? '',
+    );
+    if (!pointsAtTool && !onePerTool && hasDefault) return;
     const foreignKeysOn = singleRow<{ foreign_keys: number }>('PRAGMA foreign_keys')?.foreign_keys === 1;
     if (foreignKeysOn) db.exec('PRAGMA foreign_keys = OFF');
     try {
@@ -838,14 +905,14 @@ CREATE TABLE vault_item_rebuilt (
   origin TEXT,
   credential_id TEXT,
   scope TEXT NOT NULL DEFAULT 'role',
-  UNIQUE (person_id, tool_id)
+  is_default INTEGER NOT NULL DEFAULT 0
 );`);
         db.run(
           `INSERT INTO vault_item_rebuilt
              (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin,
-              credential_id, scope)
+              credential_id, scope, is_default)
            SELECT id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin,
-                  credential_id, scope
+                  credential_id, scope, ${hasDefault ? 'is_default' : '1'}
              FROM vault_item`,
         );
         db.exec('DROP TABLE vault_item');
@@ -855,6 +922,62 @@ CREATE TABLE vault_item_rebuilt (
       // Back on before anything else runs: the rest of the session relies on it (B9).
       if (foreignKeysOn) db.exec('PRAGMA foreign_keys = ON');
     }
+  }
+
+  /**
+   * RF-65: the rules of the new `vault_item`, established over whatever the database holds and then
+   * enforced by two partial unique indexes. A `DROP TABLE` takes every index of the table with it,
+   * so this runs after `rebuildVaultItem` — by then the table is the final one.
+   *
+   * The rows are repaired first, because `CREATE UNIQUE INDEX` over data that breaks a rule fails
+   * the whole migration and the app would not open. Each repair is the rule itself: a person holds
+   * one local copy of a shared credential (SP06 §3) — the oldest item keeps the group and a second
+   * copy of it loses it, which is the state an accept would have left anyway; a tool with
+   * credentials has exactly one default (RF-65) — a tool whose items carry none hands the flag to its
+   * oldest item, and a tool that somehow carries several keeps it on the first default of the group,
+   * never on one the person did not choose. `NULL` is never a duplicate: an item that never travelled
+   * has no credential group.
+   */
+  function ensureVaultInvariants(): void {
+    db.run(
+      `UPDATE vault_item
+          SET credential_id = NULL
+        WHERE credential_id IS NOT NULL
+          AND id <> (SELECT keeper.id FROM vault_item keeper
+                      WHERE keeper.person_id = vault_item.person_id
+                        AND keeper.credential_id = vault_item.credential_id
+                      ORDER BY keeper.created_at, keeper.id
+                      LIMIT 1)`,
+    );
+    db.run(
+      `UPDATE vault_item
+          SET is_default = 0
+        WHERE is_default = 1
+          AND id <> (SELECT keeper.id FROM vault_item keeper
+                      WHERE keeper.person_id = vault_item.person_id
+                        AND keeper.tool_id = vault_item.tool_id
+                        AND keeper.is_default = 1
+                      ORDER BY keeper.created_at, keeper.id
+                      LIMIT 1)`,
+    );
+    db.run(
+      `UPDATE vault_item
+          SET is_default = 1
+        WHERE is_default = 0
+          AND NOT EXISTS (SELECT 1 FROM vault_item other
+                           WHERE other.person_id = vault_item.person_id
+                             AND other.tool_id = vault_item.tool_id
+                             AND other.is_default = 1)
+          AND id = (SELECT keeper.id FROM vault_item keeper
+                     WHERE keeper.person_id = vault_item.person_id
+                       AND keeper.tool_id = vault_item.tool_id
+                     ORDER BY keeper.created_at, keeper.id
+                     LIMIT 1)`,
+    );
+    db.exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS vault_item_credential ON vault_item (person_id, credential_id) WHERE credential_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, tool_id) WHERE is_default = 1;
+`);
   }
 
   /**
@@ -880,7 +1003,9 @@ CREATE TABLE vault_item_rebuilt (
    * items written before that column is filled in there. Nothing here rewrites the *values* of a v2
    * database: local-mode data — people, tools, views, grants, vault items, events — is left exactly
    * as it was. What does move is the shape of `vault_item`, whose foreign key to `tool` SP05 §2
-   * takes off (`rebuildVaultItem`), and even that keeps every row as it stands.
+   * takes off (`rebuildVaultItem`) and whose `UNIQUE (person_id, tool_id)` 0.5.5's RF-65 takes off
+   * with `is_default` in its place, and even that keeps every row as it stands. The rules of the new
+   * shape come last (`ensureVaultInvariants`), after the table they belong to is the final one.
    */
   function migrate(): void {
     const version = singleRow<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
@@ -893,6 +1018,7 @@ CREATE TABLE vault_item_rebuilt (
     db.exec(SCHEMA);
     addColumns();
     rebuildVaultItem();
+    ensureVaultInvariants();
     backfillVaultOrigin();
     if (version !== SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
@@ -1101,9 +1227,10 @@ CREATE TABLE vault_item_rebuilt (
     keychainKeyOf: (item: VaultItem) => string;
   }): VaultItem[] {
     return transaction(() => {
-      // A `person` row already holding `toId` is not adoptable: two rows would merge and their
-      // `vault_item`s would collide on `UNIQUE (person_id, tool_id)`. Refusing here keeps the join
-      // from ending in a raw SQLite message — and the transaction leaves both rows as they were.
+      // A `person` row already holding `toId` is not adoptable: the join would merge two accounts —
+      // their roles, their events and their vault — into one row, which is not what adopting the
+      // local account of this guild person means. Refusing here keeps the join from ending in a raw
+      // SQLite message — and the transaction leaves both rows as they were.
       if (singleRow<{ id: Id }>('SELECT id FROM person WHERE id = ?', [p.toId]) !== null) {
         throw new Error('this Nod already holds an account of that guild person');
       }
@@ -1431,25 +1558,60 @@ CREATE TABLE vault_item_rebuilt (
       scope: l.scope as ShareScope,
       rotationPending: false,
       holders: [],
+      isDefault: l.is_default === 1,
     };
   }
 
   function listVault(personId: Id): VaultItem[] {
+    // Label first because that is how the vault screen groups them, and a tool may now hold several:
+    // the creation order breaks the tie of two credentials with the same label.
     return db
-      .all<VaultRow>('SELECT * FROM vault_item WHERE person_id = ? ORDER BY label COLLATE NOCASE, tool_id', [personId])
+      .all<VaultRow>(
+        'SELECT * FROM vault_item WHERE person_id = ? ORDER BY label COLLATE NOCASE, tool_id, created_at, id',
+        [personId],
+      )
       .map(buildVaultItem);
   }
 
-  function vaultItem(personId: Id, toolId: Id): VaultItem | null {
-    const row = singleRow<VaultRow>('SELECT * FROM vault_item WHERE person_id = ? AND tool_id = ?', [personId, toolId]);
+  function vaultItemById(personId: Id, itemId: Id): VaultItem | null {
+    const row = singleRow<VaultRow>('SELECT * FROM vault_item WHERE person_id = ? AND id = ?', [
+      personId,
+      itemId,
+    ]);
+    return row === null ? null : buildVaultItem(row);
+  }
+
+  function vaultItemByCredential(personId: Id, credentialId: string): VaultItem | null {
+    const row = singleRow<VaultRow>(
+      'SELECT * FROM vault_item WHERE person_id = ? AND credential_id = ? ORDER BY created_at, id',
+      [personId, credentialId],
+    );
+    return row === null ? null : buildVaultItem(row);
+  }
+
+  function vaultItemsOfTool(personId: Id, toolId: Id): VaultItem[] {
+    return db
+      .all<VaultRow>(
+        'SELECT * FROM vault_item WHERE person_id = ? AND tool_id = ? ORDER BY created_at, id',
+        [personId, toolId],
+      )
+      .map(buildVaultItem);
+  }
+
+  function defaultVaultItem(personId: Id, toolId: Id): VaultItem | null {
+    const row = singleRow<VaultRow>(
+      'SELECT * FROM vault_item WHERE person_id = ? AND tool_id = ? AND is_default = 1',
+      [personId, toolId],
+    );
     return row === null ? null : buildVaultItem(row);
   }
 
   function vaultOrigin(personId: Id, toolId: Id): string | null {
-    // An item with no origin (`NULL`) answers `null` on purpose: an origin nobody recorded is not
-    // an origin the fill may run in (RF-38 fails closed).
+    // RF-65: the origin belongs to the credential the fill would use, and that is the default. An
+    // item with no origin (`NULL`) answers `null` on purpose: an origin nobody recorded is not an
+    // origin the fill may run in (RF-38 fails closed).
     const row = singleRow<{ origin: string | null }>(
-      'SELECT origin FROM vault_item WHERE person_id = ? AND tool_id = ?',
+      'SELECT origin FROM vault_item WHERE person_id = ? AND tool_id = ? AND is_default = 1',
       [personId, toolId],
     );
     return row?.origin ?? null;
@@ -1462,6 +1624,7 @@ CREATE TABLE vault_item_rebuilt (
   }
 
   function saveVaultItem(i: {
+    id?: Id;
     personId: Id;
     toolId: Id;
     label: string;
@@ -1474,26 +1637,33 @@ CREATE TABLE vault_item_rebuilt (
     scope?: ShareScope;
   }): VaultItem {
     const at = nowIso();
-    // One item per (person, tool) pair: saving again updates in place and keeps the same id. The
-    // origin is rewritten with the rest: it belongs to the credential as it is now, and it is what
-    // the fill compares the window's entry origin against (B9, RF-38). `credential_id` and `scope`
-    // (K4/K6) are only overwritten by a caller that knows them: a later plain `vault.save` must not
-    // forget that this copy belongs to a shared credential. `scope` is `NOT NULL`, so a plain save
-    // inserts the default `role` and the `CASE` leaves the stored value untouched on a conflict.
+    // RF-65: the write is keyed by the item's own id, not by the tool — a person holds as many
+    // credentials of one tool as they want. The origin is rewritten with the rest: it belongs to the
+    // credential as it is now, and it is what the fill compares the window's entry origin against
+    // (B9, RF-38). `credential_id` and `scope` (K4/K6) are only overwritten by a caller that knows
+    // them: a later plain `vault.save` must not forget that this copy belongs to a shared
+    // credential. `scope` is `NOT NULL`, so a plain save inserts the default `role` and the `CASE`
+    // leaves the stored value untouched on a conflict. `is_default` is decided only for a row that
+    // did not exist — the first credential of a tool is the one the fill uses, and an update keeps
+    // the flag where it is; `created_at` is the row's own and never moves.
     const hasScope = i.scope === undefined ? 0 : 1;
+    const id = i.id ?? crypto.randomUUID();
+    const isDefault = defaultVaultItem(i.personId, i.toolId) === null ? 1 : 0;
     db.run(
-      `INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin, credential_id, scope)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN ? ELSE 'role' END)
-       ON CONFLICT (person_id, tool_id) DO UPDATE SET
+      `INSERT INTO vault_item (id, person_id, tool_id, label, username, keychain_key, created_at, updated_at, origin, credential_id, scope, is_default)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN ? ELSE 'role' END, ?)
+       ON CONFLICT (id) DO UPDATE SET
+         tool_id = excluded.tool_id,
          label = excluded.label,
          username = excluded.username,
          keychain_key = excluded.keychain_key,
          updated_at = excluded.updated_at,
          origin = excluded.origin,
          credential_id = COALESCE(excluded.credential_id, vault_item.credential_id),
-         scope = CASE WHEN ? = 1 THEN excluded.scope ELSE vault_item.scope END`,
+         scope = CASE WHEN ? = 1 THEN excluded.scope ELSE vault_item.scope END
+       WHERE vault_item.person_id = ?`,
       [
-        crypto.randomUUID(),
+        id,
         i.personId,
         i.toolId,
         i.label,
@@ -1505,53 +1675,105 @@ CREATE TABLE vault_item_rebuilt (
         i.credentialId ?? null,
         hasScope,
         i.scope ?? 'role',
+        isDefault,
         hasScope,
+        // An id of somebody else's is not this person's to write: the update takes no row and the
+        // read below refuses it. The caller refuses it first (`backend/vault.ts`).
+        i.personId,
       ],
     );
-    return orFail(vaultItem(i.personId, i.toolId), 'vault item not found');
+    return orFail(vaultItemById(i.personId, id), 'vault item not found');
   }
 
   /** K4/SP06 §4: stores the credential group of an item the moment it is first shared. */
-  function setVaultCredential(personId: Id, toolId: Id, credentialId: string): void {
-    db.run('UPDATE vault_item SET credential_id = ? WHERE person_id = ? AND tool_id = ?', [
+  function setVaultCredential(personId: Id, itemId: Id, credentialId: string): void {
+    db.run('UPDATE vault_item SET credential_id = ? WHERE person_id = ? AND id = ?', [
       credentialId,
       personId,
-      toolId,
+      itemId,
     ]);
   }
 
   /** K6/SP06 §5: stores a new sharing scope for one item (the owner's choice, or an accept). */
-  function setVaultScope(personId: Id, toolId: Id, scope: ShareScope): void {
-    db.run('UPDATE vault_item SET scope = ? WHERE person_id = ? AND tool_id = ?', [
+  function setVaultScope(personId: Id, itemId: Id, scope: ShareScope): void {
+    db.run('UPDATE vault_item SET scope = ? WHERE person_id = ? AND id = ?', [
       scope,
       personId,
-      toolId,
+      itemId,
     ]);
+  }
+
+  /**
+   * RF-65: the flag moves in one transaction — the credential that held it loses it and this one
+   * takes it — so no reader ever sees a tool with two defaults (or none). The id has to be one this
+   * person holds: the same refusal every `vault.*` call by id gives.
+   */
+  function setVaultDefault(personId: Id, itemId: Id): VaultItem {
+    const item = orFail(vaultItemById(personId, itemId), UNKNOWN_CREDENTIAL);
+    transaction(() => {
+      db.run('UPDATE vault_item SET is_default = 0 WHERE person_id = ? AND tool_id = ?', [
+        personId,
+        item.toolId,
+      ]);
+      db.run('UPDATE vault_item SET is_default = 1 WHERE person_id = ? AND id = ?', [personId, itemId]);
+    });
+    return orFail(vaultItemById(personId, itemId), UNKNOWN_CREDENTIAL);
   }
 
   /** K4: the pair of sharing fields in one write, `NULL` included (the accept rollback). */
   function setVaultSharing(
     personId: Id,
-    toolId: Id,
+    itemId: Id,
     p: { credentialId: string | null; scope: ShareScope },
   ): void {
     db.run(
-      'UPDATE vault_item SET credential_id = ?, scope = ? WHERE person_id = ? AND tool_id = ?',
-      [p.credentialId, p.scope, personId, toolId],
+      'UPDATE vault_item SET credential_id = ?, scope = ? WHERE person_id = ? AND id = ?',
+      [p.credentialId, p.scope, personId, itemId],
     );
   }
 
-  function removeVaultItem(personId: Id, toolId: Id): void {
-    db.run('DELETE FROM vault_item WHERE person_id = ? AND tool_id = ?', [personId, toolId]);
+  /**
+   * RF-65: the delete carries the default rule with it. A tool whose default just went away hands
+   * the flag to the credential that has been in the vault longest (`created_at`, then `id`), inside
+   * the same transaction — a tool that still holds credentials always has one to fill with.
+   */
+  function removeVaultItem(personId: Id, itemId: Id): void {
+    transaction(() => {
+      const item = singleRow<VaultRow>('SELECT * FROM vault_item WHERE person_id = ? AND id = ?', [
+        personId,
+        itemId,
+      ]);
+      if (item === null) return;
+      db.run('DELETE FROM vault_item WHERE person_id = ? AND id = ?', [personId, itemId]);
+      if (item.is_default !== 1) return;
+      const oldest = singleRow<{ id: Id }>(
+        `SELECT id FROM vault_item WHERE person_id = ? AND tool_id = ?
+          ORDER BY created_at, id LIMIT 1`,
+        [personId, item.tool_id],
+      );
+      if (oldest !== null) db.run('UPDATE vault_item SET is_default = 1 WHERE id = ?', [oldest.id]);
+    });
   }
 
   function rekeyVaultTool(fromToolId: Id, toToolId: Id): number {
     // Only `tool_id` moves: `keychain_key` names the sealed value, which the vault reads back by
     // that stored key (its AAD is the same string), so the credential opens unchanged without the
-    // `vaultKey` on hand. A row already at `toToolId` is left alone: `UNIQUE (person_id, tool_id)`
-    // would otherwise fail the whole update.
-    db.run('UPDATE OR IGNORE vault_item SET tool_id = ? WHERE tool_id = ?', [toToolId, fromToolId]);
-    return rowsChanged();
+    // `vaultKey` on hand. A moved row keeps its own `id`, which is what addresses it from then on.
+    return transaction(() => {
+      const moved = db.all<VaultRow>('SELECT * FROM vault_item WHERE tool_id = ?', [fromToolId]);
+      for (const row of moved) {
+        // RF-65: a person who already holds a default of the new tool keeps it — the flag of the
+        // moved row is dropped, or the tool would have two (the `vault_item_default` index).
+        const clash =
+          row.is_default === 1 && defaultVaultItem(row.person_id, toToolId) !== null;
+        db.run('UPDATE vault_item SET tool_id = ?, is_default = ? WHERE id = ?', [
+          toToolId,
+          clash ? 0 : row.is_default,
+          row.id,
+        ]);
+      }
+      return moved.length;
+    });
   }
 
   function removeVaultOf(personId: Id): VaultItem[] {
@@ -1983,13 +2205,17 @@ CREATE TABLE vault_item_rebuilt (
     activeInvite,
     listInvites,
     listVault,
-    vaultItem,
+    vaultItemById,
+    vaultItemByCredential,
+    vaultItemsOfTool,
+    defaultVaultItem,
     vaultOrigin,
     vaultItemsByTool,
     saveVaultItem,
     setVaultCredential,
     setVaultScope,
     setVaultSharing,
+    setVaultDefault,
     removeVaultItem,
     rekeyVaultTool,
     removeVaultOf,

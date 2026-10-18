@@ -53,7 +53,7 @@ import {
   SEAL_VERSION,
 } from '../shared/seal';
 import type { SealKeyPair, SealPayload } from '../shared/seal';
-import type { Entry, Id, SecretStore } from '../shared/types';
+import type { Entry, Id, SecretStore, VaultItem } from '../shared/types';
 import { decryptVaultBytes } from '../shared/vault-crypto';
 import { createApp } from '../host/app';
 import { createRepo as createHostRepo, type Repo as HostRepo } from '../host/repo';
@@ -185,6 +185,29 @@ async function openAccount(nod: Nod, roles: Id[] = []): Promise<Id> {
   return id;
 }
 
+/**
+ * RF-65: the tool's default credential on the session's Nod — the one the login cascade fills with,
+ * and the item every single-credential test speaks of.
+ */
+function itemOf(nod: Nod, toolId: Id): VaultItem {
+  const person = nod.session.current();
+  if (person === null) throw new Error('the test needs an unlocked session');
+  const item = nod.repo.defaultVaultItem(person.id, toolId);
+  if (item === null) throw new Error(`no credential of ${toolId}`);
+  return item;
+}
+
+/** The value of the tool's default credential — what a reveal of it would return. */
+async function readDefault(
+  nod: Nod,
+  toolId: Id,
+): Promise<{ username: string; secret: string } | null> {
+  const person = nod.session.current();
+  if (person === null) throw new Error('the test needs an unlocked session');
+  const item = nod.repo.defaultVaultItem(person.id, toolId);
+  return item === null ? null : await nod.vault.read(person.id, item.id);
+}
+
 /** A host row plus the cached snapshot the share flow reads (`shares.inbox`, the scope, holders). */
 function installSnapshot(
   nod: Nod,
@@ -283,8 +306,9 @@ function fakeConnection(): FakeConnection {
       calls.push(`decline:${id}`);
       return true;
     },
-    // K9: `backend/shares.removeHolder` is the only caller; this double has no holder row.
-    async removeHolder() {
+    // K9: `backend/shares.removeHolder` is the only caller; this double records and holds no row.
+    async removeHolder(credentialId, personId) {
+      calls.push(`remove:${credentialId}:${personId}`);
       return true;
     },
     // RF-48: `backend/shares.update` calls this after an owner's save of a revoked credential.
@@ -637,7 +661,7 @@ describe('accept (SP06 §3–§4)', () => {
       username: 'ana',
     });
     expect(fixture.nod.repo.vaultOrigin(fixture.meId, 'figma')).toBe(TOOL_ORIGIN);
-    expect(await fixture.nod.vault.read(fixture.meId, 'figma')).toEqual({
+    expect(await readDefault(fixture.nod, 'figma')).toEqual({
       username: 'ana',
       secret: 's3cret',
     });
@@ -894,7 +918,7 @@ describe('accept (SP06 §3–§4)', () => {
 
     expect(gated).toBe(0);
     expect(item.username).toBe('new');
-    expect(await fixture.nod.vault.read(fixture.meId, 'figma')).toEqual({
+    expect(await readDefault(fixture.nod, 'figma')).toEqual({
       username: 'new',
       secret: 'new-secret',
     });
@@ -963,7 +987,7 @@ describe('accept (SP06 §3–§4)', () => {
     expect(gated).toBe(0);
     expect(connection.calls).toEqual([]);
     expect(shares.inbox()).toHaveLength(1);
-    expect(await fixture.nod.vault.read(fixture.meId, 'figma')).toEqual({
+    expect(await readDefault(fixture.nod, 'figma')).toEqual({
       username: 'old',
       secret: 'old-secret',
     });
@@ -1011,7 +1035,7 @@ describe('accept (SP06 §3–§4)', () => {
     await expect(shares.accept('replay')).rejects.toThrow('invalid share');
 
     expect(connection.calls).toEqual(['accept:share-1', 'decline:replay']);
-    expect(await fixture.nod.vault.read(fixture.meId, 'figma')).toEqual({
+    expect(await readDefault(fixture.nod, 'figma')).toEqual({
       username: 'new',
       secret: 'new-secret',
     });
@@ -1078,7 +1102,7 @@ describe('accept (SP06 §3–§4)', () => {
     expect(connection.calls).toEqual(['accept:share-1']);
     expect(first.status).toBe('fulfilled');
     expect(second.status).toBe('rejected');
-    expect(await fixture.nod.vault.read(fixture.meId, 'figma')).toEqual({
+    expect(await readDefault(fixture.nod, 'figma')).toEqual({
       username: 'new',
       secret: 'new-secret',
     });
@@ -1155,22 +1179,55 @@ describe('accept (SP06 §3–§4)', () => {
     connection.acceptShare = async () => {
       throw new Error('the host refused the request');
     };
+    // RF-65: the item already holds this credential, so the accept replaces it in place and the
+    // rollback has to put the old value AND the old sharing state back.
     await fixture.nod.vault.save(fixture.meId, {
       toolId: 'figma',
       username: 'old',
       secret: 'old-secret',
       label: 'Tool figma',
+      credentialId: 'c1',
+      scope: 'org',
     });
     installSnapshot(fixture.nod, { incomingShares: await share(fixture, { secret: 'new-secret' }) });
     const shares = createSharesFor(fixture.nod, connection);
 
     await expect(shares.accept('share-1')).rejects.toThrow('the host refused the request');
 
-    expect(await fixture.nod.vault.read(fixture.meId, 'figma')).toEqual({
+    expect(fixture.nod.repo.listVault(fixture.meId)).toHaveLength(1);
+    expect(await readDefault(fixture.nod, 'figma')).toEqual({
       username: 'old',
       secret: 'old-secret',
     });
-    expect(fixture.nod.repo.vaultItem(fixture.meId, 'figma')?.credentialId).toBeNull();
+    expect(itemOf(fixture.nod, 'figma')).toMatchObject({ credentialId: 'c1', scope: 'org' });
+  });
+
+  test('a failed accept of a new credential of the tool removes exactly that item', async () => {
+    const fixture = await acceptFixture();
+    const connection = fakeConnection();
+    fixture.nod.link.current = connection;
+    connection.acceptShare = async () => {
+      throw new Error('the host refused the request');
+    };
+    // The tool already has a credential of its own (`c1` absent), so the incoming `c1` is a new item
+    // beside it; the failed accept must drop that new item and leave the first one untouched.
+    await fixture.nod.vault.save(fixture.meId, {
+      toolId: 'figma',
+      username: 'mine',
+      secret: 'mine-secret',
+      label: 'Mine',
+    });
+    installSnapshot(fixture.nod, { incomingShares: await share(fixture, { secret: 'new-secret' }) });
+    const shares = createSharesFor(fixture.nod, connection);
+
+    await expect(shares.accept('share-1')).rejects.toThrow('the host refused the request');
+
+    expect(fixture.nod.repo.listVault(fixture.meId)).toHaveLength(1);
+    expect(await readDefault(fixture.nod, 'figma')).toEqual({
+      username: 'mine',
+      secret: 'mine-secret',
+    });
+    expect(itemOf(fixture.nod, 'figma')?.credentialId).toBeNull();
   });
 });
 
@@ -1233,7 +1290,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     const connection = fakeConnection();
     const shares = createSharesFor(nod, connection);
 
-    const rows = shares.recipients('figma');
+    const rows = shares.recipients(itemOf(nod, 'figma').id);
     const byId = new Map(rows.map((row) => [row.personId, row]));
 
     expect(byId.get('bob')).toMatchObject({ allowed: true, keyStatus: 'pinned', reason: null });
@@ -1255,7 +1312,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     const connection = fakeConnection();
     const shares = createSharesFor(nod, connection);
 
-    const answer = await shares.send('figma', ['bob']);
+    const answer = await shares.send(itemOf(nod, 'figma').id, ['bob']);
 
     expect(answer).toEqual({ sent: 1 });
     expect(connection.sent).toHaveLength(1);
@@ -1264,7 +1321,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     expect(request.items).toHaveLength(1);
     expect(request.items[0].to).toBe('bob');
     // The uuid lives on the item from the first share and never moves.
-    const item = nod.repo.vaultItem(meId, 'figma');
+    const item = itemOf(nod, 'figma');
     expect(item?.credentialId).toBe(request.credentialId);
 
     const opened = await openSealed(request.items[0].sealed, {
@@ -1301,7 +1358,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     const { nod } = await sendFixture();
     const connection = fakeConnection();
     const shares = createSharesFor(nod, connection);
-    await expect(shares.send('figma', ['carol'])).rejects.toThrow('no role in common');
+    await expect(shares.send(itemOf(nod, 'figma').id, ['carol'])).rejects.toThrow('no role in common');
     expect(connection.sent).toEqual([]);
   });
 
@@ -1316,24 +1373,24 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
       fingerprint: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ',
       since: AT,
     });
-    await expect(shares.send('figma', ['bob'])).rejects.toThrow('recipient key changed');
+    await expect(shares.send(itemOf(nod, 'figma').id, ['bob'])).rejects.toThrow('recipient key changed');
     expect(connection.sent).toEqual([]);
   });
 
   test('a first send the host refuses leaves no credentialId behind (L6)', async () => {
-    const { nod, meId } = await sendFixture();
+    const { nod } = await sendFixture();
     const connection = fakeConnection();
     connection.sendShares = async () => {
       throw new Error('the host refused the request');
     };
     const shares = createSharesFor(nod, connection);
 
-    await expect(shares.send('figma', ['bob'])).rejects.toThrow('the host refused the request');
+    await expect(shares.send(itemOf(nod, 'figma').id, ['bob'])).rejects.toThrow('the host refused the request');
 
     // L6: the id is persisted only after the host took the copies, so the item stays shareable and
     // the scope can still be set.
-    expect(nod.repo.vaultItem(meId, 'figma')?.credentialId).toBeNull();
-    expect(await shares.setScope('figma', 'blocked')).toMatchObject({ scope: 'blocked' });
+    expect(itemOf(nod, 'figma')?.credentialId).toBeNull();
+    expect(await shares.setScope(itemOf(nod, 'figma').id, 'blocked')).toMatchObject({ scope: 'blocked' });
   });
 
   test('a blocked credential has no send and a personal tool is not shareable', async () => {
@@ -1341,18 +1398,18 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     const connection = fakeConnection();
     const shares = createSharesFor(nod, connection);
 
-    await shares.setScope('figma', 'blocked');
-    await expect(shares.send('figma', ['bob'])).rejects.toThrow('blocked credential');
+    await shares.setScope(itemOf(nod, 'figma').id, 'blocked');
+    await expect(shares.send(itemOf(nod, 'figma').id, ['bob'])).rejects.toThrow('blocked credential');
     expect(connection.sent).toEqual([]);
 
-    await shares.setScope('figma', 'role');
+    await shares.setScope(itemOf(nod, 'figma').id, 'role');
     nod.repo.saveEntry(tool('personal', { scope: 'personal', ownerId: nod.session.current()?.id }));
     await nod.vault.save(nod.session.current()?.id ?? '', {
       toolId: 'personal',
       username: 'me',
       secret: 'mine',
     });
-    await expect(shares.send('personal', ['bob'])).rejects.toThrow('only org tools can be shared');
+    await expect(shares.send(itemOf(nod, 'personal').id, ['bob'])).rejects.toThrow('only org tools can be shared');
   });
 
   test('a cancelled gate sends nothing', async () => {
@@ -1361,7 +1418,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     const shares = createSharesFor(nod, connection, async () => {
       throw new Error('authentication cancelled');
     });
-    await expect(shares.send('figma', ['bob'])).rejects.toThrow('authentication cancelled');
+    await expect(shares.send(itemOf(nod, 'figma').id, ['bob'])).rejects.toThrow('authentication cancelled');
     expect(connection.sent).toEqual([]);
   });
 
@@ -1369,7 +1426,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     const { nod, meId } = await sendFixture();
     const shares = createSharesFor(nod, fakeConnection());
 
-    await shares.send('figma', ['bob']);
+    await shares.send(itemOf(nod, 'figma').id, ['bob']);
 
     const events = nod.repo.listEvents({}).filter((event) => event.type === 'share.sent');
     expect(events).toHaveLength(1);
@@ -1389,8 +1446,8 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     const { nod, meId } = await sendFixture();
     const connection = fakeConnection();
     const shares = createSharesFor(nod, connection);
-    await shares.send('figma', ['bob']);
-    const credentialId = nod.repo.vaultItem(meId, 'figma')?.credentialId ?? '';
+    await shares.send(itemOf(nod, 'figma').id, ['bob']);
+    const credentialId = itemOf(nod, 'figma')?.credentialId ?? '';
     // The snapshot says I own the credential and Bob is a live holder: the fan-out of K9.
     installSnapshot(nod, {
       people: [{ id: 'bob', name: 'Bob', roles: ['team'], kind: 'member' }],
@@ -1401,7 +1458,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
         ],
       },
     });
-    const stored = nod.repo.vaultItem(meId, 'figma');
+    const stored = itemOf(nod, 'figma');
     if (stored === null) throw new Error('the fixture needs the shared item');
 
     const warning = await shares.update(meId, stored);
@@ -1418,8 +1475,8 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     const { nod, meId } = await sendFixture();
     const connection = fakeConnection();
     const shares = createSharesFor(nod, connection);
-    await shares.send('figma', ['bob']);
-    const credentialId = nod.repo.vaultItem(meId, 'figma')?.credentialId ?? '';
+    await shares.send(itemOf(nod, 'figma').id, ['bob']);
+    const credentialId = itemOf(nod, 'figma')?.credentialId ?? '';
     // The host snapshot says Bob is the owner of this credential, not me.
     installSnapshot(nod, {
       people: [{ id: 'bob', name: 'Bob', roles: ['team'], kind: 'member' }],
@@ -1429,7 +1486,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
         ],
       },
     });
-    expect(() => shares.setScope('figma', 'org')).toThrow('only the owner can change the scope');
+    expect(() => shares.setScope(itemOf(nod, 'figma').id, 'org')).toThrow('only the owner can change the scope');
 
     installSnapshot(nod, {
       holders: {
@@ -1439,35 +1496,35 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
       },
     });
     // M4: the credential has holder rows, so the scope reaches the host before the local store.
-    expect(await shares.setScope('figma', 'org')).toMatchObject({ scope: 'org' });
+    expect(await shares.setScope(itemOf(nod, 'figma').id, 'org')).toMatchObject({ scope: 'org' });
     expect(connection.calls).toEqual([`scope:${credentialId}:org`]);
   });
 
   test('a scope set with no credentialId is local; with one the host is told (M4/L6/F4)', async () => {
-    const { nod, meId } = await sendFixture();
+    const { nod } = await sendFixture();
     const connection = fakeConnection();
     const shares = createSharesFor(nod, connection);
 
     // No credentialId yet: the scope travels on the first send, so this is local only.
-    expect(await shares.setScope('figma', 'org')).toMatchObject({ scope: 'org' });
+    expect(await shares.setScope(itemOf(nod, 'figma').id, 'org')).toMatchObject({ scope: 'org' });
     expect(connection.calls).toEqual([]);
 
     // L6: a first send the host refused leaves a credentialId but no holder row. F4: the scope
     // reaches the host anyway — a cached snapshot without the row is not proof the host has none.
-    await shares.send('figma', ['bob']);
-    const credentialId = nod.repo.vaultItem(meId, 'figma')?.credentialId ?? '';
+    await shares.send(itemOf(nod, 'figma').id, ['bob']);
+    const credentialId = itemOf(nod, 'figma')?.credentialId ?? '';
     installSnapshot(nod, { holders: {} });
-    expect(await shares.setScope('figma', 'blocked')).toMatchObject({ scope: 'blocked' });
+    expect(await shares.setScope(itemOf(nod, 'figma').id, 'blocked')).toMatchObject({ scope: 'blocked' });
     expect(connection.calls).toEqual([`scope:${credentialId}:blocked`]);
     expect(credentialId).not.toBe('');
   });
 
   test('a scope set offline is pending, and the next sync retries it (F4)', async () => {
     const { nod, meId } = await sendFixture();
-    nod.repo.setVaultCredential(meId, 'figma', 'cred-offline');
+    nod.repo.setVaultCredential(meId, itemOf(nod, 'figma').id, 'cred-offline');
 
     const offline = createSharesFor(nod, null);
-    expect(await offline.setScope('figma', 'blocked')).toMatchObject({ scope: 'blocked' });
+    expect(await offline.setScope(itemOf(nod, 'figma').id, 'blocked')).toMatchObject({ scope: 'blocked' });
     expect(nod.repo.meta('shares.scope.pending')).toContain('cred-offline');
 
     // The next sync has a connection: `retryPending` carries the scope and clears the marker.
@@ -1480,7 +1537,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
 
   test('a scope the host could not be reached for is pending, and a retry lands it (F4)', async () => {
     const { nod, meId } = await sendFixture();
-    nod.repo.setVaultCredential(meId, 'figma', 'cred-net');
+    nod.repo.setVaultCredential(meId, itemOf(nod, 'figma').id, 'cred-net');
     const connection = fakeConnection();
     let offline = true;
     connection.setCredentialScope = async (credentialId, scope) => {
@@ -1490,7 +1547,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     };
     const shares = createSharesFor(nod, connection);
 
-    expect(await shares.setScope('figma', 'org')).toMatchObject({ scope: 'org' });
+    expect(await shares.setScope(itemOf(nod, 'figma').id, 'org')).toMatchObject({ scope: 'org' });
     expect(nod.repo.meta('shares.scope.pending')).toContain('cred-net');
 
     offline = false;
@@ -1501,7 +1558,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
 
   test('a credential the host does not know keeps its scope locally, with nothing pending (F4)', async () => {
     const { nod, meId } = await sendFixture();
-    nod.repo.setVaultCredential(meId, 'figma', 'cred-unknown');
+    nod.repo.setVaultCredential(meId, itemOf(nod, 'figma').id, 'cred-unknown');
     const connection = fakeConnection();
     connection.setCredentialScope = async () => {
       throw new HostError('refused', 'unknown credential', 404);
@@ -1510,7 +1567,7 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
 
     // The host's `404 unknown credential` says the credential is not there yet: the scope stays
     // local and travels on the first send, so there is nothing to retry.
-    expect(await shares.setScope('figma', 'blocked')).toMatchObject({ scope: 'blocked' });
+    expect(await shares.setScope(itemOf(nod, 'figma').id, 'blocked')).toMatchObject({ scope: 'blocked' });
     expect(nod.repo.meta('shares.scope.pending')).toBe('{}');
   });
 
@@ -1518,8 +1575,8 @@ describe('send and the recipient list (SP06 §4–§5)', () => {
     const { nod, meId } = await sendFixture();
     const connection = fakeConnection();
     const shares = createSharesFor(nod, connection);
-    await shares.send('figma', ['bob']);
-    const credentialId = nod.repo.vaultItem(meId, 'figma')?.credentialId ?? '';
+    await shares.send(itemOf(nod, 'figma').id, ['bob']);
+    const credentialId = itemOf(nod, 'figma')?.credentialId ?? '';
     installSnapshot(nod, {
       holders: {
         [credentialId]: [
@@ -1558,8 +1615,8 @@ describe('assignment sealing (F1, K8/SP06 §4)', () => {
       secret: 'kalendar-secret',
       label: 'Tool kalendar',
     });
-    nod.repo.setVaultCredential(meId, 'figma', 'cred-figma');
-    nod.repo.setVaultCredential(meId, 'kalendar', 'cred-kalendar');
+    nod.repo.setVaultCredential(meId, itemOf(nod, 'figma').id, 'cred-figma');
+    nod.repo.setVaultCredential(meId, itemOf(nod, 'kalendar').id, 'cred-kalendar');
     for (const personId of ['alice', 'bob']) {
       const x = await generateX25519KeyPair();
       const ed = await generateEd25519KeyPair();
@@ -1574,6 +1631,40 @@ describe('assignment sealing (F1, K8/SP06 §4)', () => {
     }
     return { nod, meId };
   }
+
+  test('a role assignment seals the named credential, not another of the same tool (RF-65)', async () => {
+    const { nod, meId } = await assignmentFixture();
+    // A second credential of `figma`, beside the one the fixture already shared (`cred-figma`).
+    const second = await nod.vault.save(meId, {
+      toolId: 'figma',
+      username: 'second-user',
+      secret: 'second-secret',
+      label: 'Second figma',
+    });
+    nod.repo.setVaultCredential(meId, second.id, 'cred-figma-2');
+    const connection = fakeConnection();
+    // The host lists alice missing only the second credential's copy.
+    connection.missing.push({
+      credentialId: 'cred-figma-2',
+      toolId: 'figma',
+      roleId: 'team',
+      personId: 'alice',
+    });
+    const shares = createSharesFor(nod, connection);
+
+    const result = await shares.assign({
+      itemId: second.id,
+      roleId: 'team',
+      personId: null,
+      assigned: true,
+    });
+
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    // One request, for the assigned credential alone; the other figma credential is untouched.
+    expect(connection.sent.map((request) => request.credentialId)).toEqual(['cred-figma-2']);
+    expect(nod.repo.vaultItemById(meId, second.id)?.credentialId).toBe('cred-figma-2');
+    expect(itemOf(nod, 'figma').credentialId).toBe('cred-figma');
+  });
 
   test('a credential the host refuses is skipped, and the others still travel (F1)', async () => {
     const { nod } = await assignmentFixture();
@@ -1597,6 +1688,240 @@ describe('assignment sealing (F1, K8/SP06 §4)', () => {
     expect(connection.sent.map((request) => request.toolId)).toEqual(['figma']);
     const events = nod.repo.listEvents({}).filter((event) => event.type === 'share.sent');
     expect(events.map((event) => event.detail)).toEqual(['alice scope=role kind=assign']);
+  });
+});
+
+// ---------------------------------------------------------------- several credentials of one tool
+
+/**
+ * RF-65: one person holds several credentials of one tool at the same time. Every one of them has
+ * its own item id, its own keychain slot and — once shared — its own credential id; a send, an
+ * update or a revocation names exactly one of them. These tests drive the two ways a second
+ * credential appears: a save the person makes, and a share the person accepts.
+ */
+describe('several credentials of one tool (RF-65)', () => {
+  async function multiFixture(): Promise<{
+    nod: Nod;
+    meId: Id;
+    aliceEd: SealKeyPair;
+    bobX: SealKeyPair;
+  }> {
+    const nod = newNod();
+    nod.repo.saveRole({ id: 'team', name: 'Team', admin: false });
+    const meId = await openAccount(nod, ['team']);
+    nod.repo.saveEntry(tool('figma', { url: `${TOOL_ORIGIN}/app`, roles: ['team'] }));
+    const aliceEd = await generateEd25519KeyPair();
+    const aliceX = await generateX25519KeyPair();
+    const bobEd = await generateEd25519KeyPair();
+    const bobX = await generateX25519KeyPair();
+    for (const [personId, x, ed] of [
+      ['alice', aliceX, aliceEd],
+      ['bob', bobX, bobEd],
+    ] as const) {
+      nod.repo.pinPeerKey({
+        personId,
+        x25519: toBase64url(x.publicKey),
+        ed25519: toBase64url(ed.publicKey),
+        fingerprint: await personFingerprint(x.publicKey, ed.publicKey),
+        firstSeen: AT,
+        confirmedAt: AT,
+      });
+    }
+    installSnapshot(nod, {
+      people: [
+        { id: 'alice', name: 'Alice', roles: ['team'], kind: 'member' },
+        { id: 'bob', name: 'Bob', roles: ['team'], kind: 'member' },
+      ],
+    });
+    return { nod, meId, aliceEd, bobX };
+  }
+
+  /** Two saved credentials of `figma`, the first the default — the shape every test here starts in. */
+  async function twoCredentials(
+    nod: Nod,
+    meId: Id,
+  ): Promise<{ first: VaultItem; second: VaultItem }> {
+    const first = await nod.vault.save(meId, {
+      toolId: 'figma',
+      username: 'first-user',
+      secret: 'first-secret',
+      label: 'First',
+    });
+    const second = await nod.vault.save(meId, {
+      toolId: 'figma',
+      username: 'second-user',
+      secret: 'second-secret',
+      label: 'Second',
+    });
+    return { first, second };
+  }
+
+  test('the first credential of a tool is the login default; the second is a distinct item', async () => {
+    const { nod, meId } = await multiFixture();
+    const { first, second } = await twoCredentials(nod, meId);
+
+    expect(second.id).not.toBe(first.id);
+    expect(
+      nod.repo
+        .vaultItemsOfTool(meId, 'figma')
+        .map((item) => item.id)
+        .sort(),
+    ).toEqual([first.id, second.id].sort());
+    expect(nod.repo.defaultVaultItem(meId, 'figma')?.id).toBe(first.id);
+    expect(await readDefault(nod, 'figma')).toEqual({
+      username: 'first-user',
+      secret: 'first-secret',
+    });
+  });
+
+  test('only the credential the page names travels; the other stays unshared', async () => {
+    const { nod, meId, bobX } = await multiFixture();
+    const { first, second } = await twoCredentials(nod, meId);
+    const connection = fakeConnection();
+    const shares = createSharesFor(nod, connection);
+
+    await shares.send(second.id, ['bob']);
+
+    expect(connection.sent).toHaveLength(1);
+    const request = connection.sent[0];
+    // The named credential took the credential id; the other one never travelled.
+    expect(nod.repo.vaultItemById(meId, second.id)?.credentialId).toBe(request.credentialId);
+    expect(nod.repo.vaultItemById(meId, first.id)?.credentialId).toBeNull();
+    // The recipient got exactly the second credential's value.
+    const opened = await openSealed(request.items[0].sealed, {
+      recipientPrivateKey: bobX.privateKey,
+      recipientPublicKey: bobX.publicKey,
+      senderPublicKey: (await nod.keys.ownPrivate())?.ed25519Public ?? new Uint8Array(),
+      credentialId: request.credentialId,
+      to: 'bob',
+    });
+    expect(opened).toMatchObject({
+      username: 'second-user',
+      secret: 'second-secret',
+      credentialId: request.credentialId,
+    });
+  });
+
+  test('accepting a second credential of a held tool adds an item, it does not overwrite one', async () => {
+    const { nod, meId, aliceEd } = await multiFixture();
+    const mine = await nod.vault.save(meId, {
+      toolId: 'figma',
+      username: 'mine-user',
+      secret: 'mine-secret',
+      label: 'Mine',
+    });
+    const own = await nod.keys.ownPrivate();
+    if (own === null) throw new Error('the fixture needs the Nod key pair');
+    const sealed = await sealedShare({
+      credentialId: 'c2',
+      toolId: 'figma',
+      toolOrigin: TOOL_ORIGIN,
+      from: 'alice',
+      to: meId,
+      sender: aliceEd,
+      recipient: { publicKey: own.x25519Public, privateKey: own.x25519Private },
+      username: 'shared-user',
+      secret: 'shared-secret',
+    });
+    installSnapshot(nod, {
+      people: [{ id: 'alice', name: 'Alice', roles: ['team'], kind: 'member' }],
+      holders: {
+        c2: [
+          { personId: 'alice', name: 'Alice', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+        ],
+      },
+      incomingShares: [
+        {
+          id: 'share-1',
+          credentialId: 'c2',
+          toolId: 'figma',
+          from: 'alice',
+          scope: 'role',
+          kind: 'send',
+          sealed,
+          createdAt: AT,
+          expiresAt: '2026-10-31T10:00:00.000Z',
+        },
+      ],
+    });
+    const connection = fakeConnection();
+    const shares = createSharesFor(nod, connection);
+
+    const accepted = await shares.accept('share-1');
+
+    expect(accepted).toMatchObject({ toolId: 'figma', credentialId: 'c2' });
+    expect(accepted.id).not.toBe(mine.id);
+    expect(nod.repo.vaultItemsOfTool(meId, 'figma')).toHaveLength(2);
+    // The item that was already there is untouched, and the new one did not steal the default.
+    expect(nod.repo.vaultItemById(meId, mine.id)).toMatchObject({
+      username: 'mine-user',
+      credentialId: null,
+    });
+    expect(nod.repo.defaultVaultItem(meId, 'figma')?.id).toBe(mine.id);
+  });
+
+  test('an update of one credential leaves the other credential of the tool alone', async () => {
+    const { nod, meId } = await multiFixture();
+    const { first, second } = await twoCredentials(nod, meId);
+    nod.repo.setVaultCredential(meId, first.id, 'c1');
+    nod.repo.setVaultCredential(meId, second.id, 'c2');
+    const holders: Record<string, Holder[]> = {
+      c1: [
+        { personId: meId, name: 'Me', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+        { personId: 'bob', name: 'Bob', owner: false, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+      ],
+      c2: [
+        { personId: meId, name: 'Me', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+        { personId: 'bob', name: 'Bob', owner: false, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+      ],
+    };
+    installSnapshot(nod, { people: [{ id: 'bob', name: 'Bob', roles: ['team'], kind: 'member' }], holders });
+    const connection = fakeConnection();
+    const shares = createSharesFor(nod, connection);
+
+    const stored = nod.repo.vaultItemById(meId, second.id);
+    if (stored === null) throw new Error('the fixture needs the second item');
+    await shares.update(meId, stored);
+
+    // One fan-out, keyed to the credential that was saved; the other keeps its id and value.
+    expect(connection.sent).toHaveLength(1);
+    expect(connection.sent[0].credentialId).toBe('c2');
+    expect(nod.repo.vaultItemById(meId, first.id)).toMatchObject({
+      credentialId: 'c1',
+      username: 'first-user',
+    });
+    expect(await readDefault(nod, 'figma')).toEqual({
+      username: 'first-user',
+      secret: 'first-secret',
+    });
+  });
+
+  test('removing a holder of one credential leaves the other credential’s holders', async () => {
+    const { nod, meId } = await multiFixture();
+    const { first, second } = await twoCredentials(nod, meId);
+    nod.repo.setVaultCredential(meId, first.id, 'c1');
+    nod.repo.setVaultCredential(meId, second.id, 'c2');
+    installSnapshot(nod, {
+      holders: {
+        c1: [
+          { personId: meId, name: 'Me', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+          { personId: 'bob', name: 'Bob', owner: false, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+        ],
+        c2: [
+          { personId: meId, name: 'Me', owner: true, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+          { personId: 'alice', name: 'Alice', owner: false, scope: 'role', since: AT, toolId: 'figma', removedAt: null },
+        ],
+      },
+    });
+    const connection = fakeConnection();
+    const shares = createSharesFor(nod, connection);
+
+    const removed = await shares.removeHolder(second.id, 'alice');
+
+    expect(connection.calls).toEqual(['remove:c2:alice']);
+    expect(removed).toMatchObject({ id: second.id, credentialId: 'c2' });
+    const other = shares.decorate(nod.vault.list(meId)).find((item) => item.id === first.id);
+    expect(other?.holders.map((holder) => holder.personId)).toEqual([meId, 'bob']);
   });
 });
 
@@ -1855,12 +2180,12 @@ describe('send and accept against the real host (K4, K6, K7)', () => {
       secret: CREDENTIAL_SECRET,
       label: 'Figma',
     });
-    const recipients = aliceNod.shares.recipients('figma');
+    const recipients = aliceNod.shares.recipients(itemOf(aliceNod, 'figma').id);
     expect(recipients.find((row) => row.personId === bob.id)).toMatchObject({ allowed: true });
 
-    const sent = await aliceNod.shares.send('figma', [bob.id]);
+    const sent = await aliceNod.shares.send(itemOf(aliceNod, 'figma').id, [bob.id]);
     expect(sent).toEqual({ sent: 1 });
-    const credentialId = aliceNod.repo.vaultItem(alice.id, 'figma')?.credentialId;
+    const credentialId = itemOf(aliceNod, 'figma').credentialId;
     expect(credentialId).not.toBeNull();
 
     // RF-44: the host holds the metadata and the sealed body, never a username or a secret.
@@ -1888,7 +2213,7 @@ describe('send and accept against the real host (K4, K6, K7)', () => {
     const accepted = await bobNod.shares.accept(inbox[0].id);
     expect(accepted).toMatchObject({ toolId: 'figma', credentialId: credentialId ?? '', scope: 'role' });
     expect(bobNod.repo.vaultOrigin(bob.id, 'figma')).toBe(TOOL_ORIGIN);
-    expect(await bobNod.vault.read(bob.id, 'figma')).toEqual({
+    expect(await readDefault(bobNod, 'figma')).toEqual({
       username: CREDENTIAL_USER,
       secret: CREDENTIAL_SECRET,
     });
@@ -1914,16 +2239,16 @@ describe('send and accept against the real host (K4, K6, K7)', () => {
 
     // K6: a `role` share to somebody with no role in common is refused on the Nod.
     const carolId = aliceSnapshot.people?.find((person) => person.name === 'Carol')?.id ?? '';
-    await expect(aliceNod.shares.send('figma', [carolId])).rejects.toThrow('no role in common');
+    await expect(aliceNod.shares.send(itemOf(aliceNod, 'figma').id, [carolId])).rejects.toThrow('no role in common');
 
     // K6: a blocked credential refuses a send, and the host would refuse it too. M4: the credential
     // already has holder rows, so the scope reaches the host before the local store.
-    expect((await aliceNod.shares.setScope('figma', 'blocked')).scope).toBe('blocked');
-    await expect(aliceNod.shares.send('figma', [bob.id])).rejects.toThrow('blocked credential');
-    expect((await aliceNod.shares.setScope('figma', 'role')).scope).toBe('role');
+    expect((await aliceNod.shares.setScope(itemOf(aliceNod, 'figma').id, 'blocked')).scope).toBe('blocked');
+    await expect(aliceNod.shares.send(itemOf(aliceNod, 'figma').id, [bob.id])).rejects.toThrow('blocked credential');
+    expect((await aliceNod.shares.setScope(itemOf(aliceNod, 'figma').id, 'role')).scope).toBe('role');
 
     // SP06 §3: a share whose bytes were changed after the host stored it is declined.
-    await aliceNod.shares.send('figma', [bob.id]);
+    await aliceNod.shares.send(itemOf(aliceNod, 'figma').id, [bob.id]);
     await syncNod(bobNod);
     const open = bobNod.shares.inbox()[0];
     const cached = JSON.parse(bobNod.repo.hostRecord()?.snapshot ?? '{}') as Snapshot;
