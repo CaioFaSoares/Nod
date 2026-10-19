@@ -9,6 +9,7 @@ import { call, errorMessage, on } from './api';
 import { mountEntry, resetEntry, showEntryInvite } from './entry';
 import { openPalette } from './palette';
 import { mountSettings } from './settings';
+import { runGate } from './vault-gate';
 import { activeTab, createEmbedLayer, mountTabs, reportSlot, tabsApi } from './tabs';
 import type { EmbedLayer, TabsApi, TabsHandle } from './tabs';
 import { button, clear, el, field, glyph, initials, input, message } from './ui';
@@ -28,7 +29,9 @@ import type {
   ToolStatus,
   ToolsState,
   UpdateInfo,
+  VaultItem,
 } from '../shared/types';
+import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED } from '../shared/types';
 import { categoryOf, groupByCategory } from '../shared/catalog';
 import type { PresenceEntry } from '../shared/host-api';
 
@@ -120,6 +123,19 @@ let tabView: TabsHandle | null = null;
  * embedded tool (RF-50); `destroyTabView` hides it instead of detaching its iframes.
  */
 let embeds: EmbedLayer | null = null;
+/**
+ * 0.6.0b (RF-69): the person's vault metadata, read lazily for the embedded tab's Sign in control.
+ * Settings reads it when its Vault tab opens; there is no vault push, so this cache is refreshed
+ * when an embedded tab lands on the panel (and after a conversion). It holds usernames and labels,
+ * never a secret — the password only ever travels inside the gated `vault.copy`.
+ */
+let vaultItems: VaultItem[] | null = null;
+/** The `vault.list` call in flight, so a redraw does not repeat it. */
+let vaultPending: Promise<void> | null = null;
+/** Bumped on every session change: a read that lands after a lock cannot feed the next session. */
+let vaultEpoch = 0;
+/** 0.6.0b: a system prompt failed in this unlocked session, so the gate asks for the password. */
+let gateFallback = false;
 
 // ------------------------------------------------------------------ helpers
 
@@ -272,7 +288,47 @@ function renderSidebar(): void {
   mark.addEventListener('click', () => {
     go('home');
   });
-  shell.sidebar.replaceChildren(mark, el('span', { class: 'rail-separator', aria: { hidden: 'true' } }), list, footer);
+  const tabs = sidebarTabs();
+  shell.sidebar.replaceChildren(
+    mark,
+    ...(tabs === null ? [] : [tabs]),
+    el('span', { class: 'rail-separator', aria: { hidden: 'true' } }),
+    list,
+    footer,
+  );
+}
+
+/**
+ * E03 (RF-49): the way back to the strip of docked mode from anywhere else — Home, one Settings
+ * tab. The button sits under the mark, in the mark's own size and style, and only docked mode has a
+ * tab view at all (RF-52). It is disabled, not hidden, while the strip is empty: the rail keeps its
+ * shape and the tooltip says why. The click is the path a sidebar tool click takes once its answer
+ * lands — `openTabView` — with no backend call of its own.
+ */
+function sidebarTabs(): HTMLButtonElement | null {
+  const state = tabsState;
+  if (state === null || state.mode !== 'docked') return null;
+  const count = state.tabs.length;
+  const current = view === 'tab';
+  const label = count === 0 ? 'No open tabs' : 'Open tabs';
+  const node = el(
+    'button',
+    {
+      class: current ? 'mark mark-tabs current' : 'mark mark-tabs',
+      title: label,
+      aria: current ? { label, current: 'true' } : { label },
+      attrs: { type: 'button' },
+    },
+    el('span', { class: 'mark-tabs-glyph', aria: { hidden: 'true' } }, '▤'),
+    count === 0
+      ? null
+      : el('span', { class: 'badge sidebar-action-badge tabs-badge', aria: { hidden: 'true' } }, String(count)),
+  );
+  node.disabled = count === 0;
+  node.addEventListener('click', () => {
+    openTabView();
+  });
+  return node;
 }
 
 /**
@@ -463,6 +519,13 @@ function renderContent(): void {
 function renderTabView(): void {
   const state = tabsState;
   if (shell === null || state === null) return;
+  const active = activeTab(state);
+  // 0.6.0b (RF-69): the Sign in control of an embedded tab needs the vault metadata. There is no
+  // vault push, so it is read when the view mounts — which is also how a change made in Settings →
+  // Vault is picked up — and while it is still unknown when an embedded tab becomes active in place.
+  if (active !== null && active.embedded && active.toolId !== null) {
+    if (tabView === null || vaultItems === null) void readVault();
+  }
   if (tabView !== null) {
     tabView.update(state);
     return;
@@ -476,6 +539,8 @@ function renderTabView(): void {
     openLink: () => openLinkDialog(),
     // RF-69: the iframes of the embedded tabs, mounted by the shell and kept across views.
     embeds: ensureEmbeds(),
+    // 0.6.0b: the credential of an embedded tool, for the Sign in control (metadata only).
+    credential: defaultCredential,
   });
 }
 
@@ -823,7 +888,9 @@ function toolCard(entry: Entry): HTMLElement {
   );
   if (open) {
     actions.append(
-      button('Close', () => runTools(() => call('tools.close', { id: entry.id })), {
+      button('Close', () => {
+        void runTools(() => call('tools.close', { id: entry.id }));
+      }, {
         kind: 'ghost',
         title: `Close ${entry.title}`,
       }),
@@ -831,7 +898,9 @@ function toolCard(entry: Entry): HTMLElement {
   }
   if (tool !== null && tool.error !== null) {
     actions.append(
-      button('Try again', () => runTools(() => call('tools.reload', { id: entry.id })), {
+      button('Try again', () => {
+        void runTools(() => call('tools.reload', { id: entry.id }));
+      }, {
         kind: 'ghost',
         title: `Try ${entry.title} again`,
       }),
@@ -1065,16 +1134,17 @@ async function dismissNotice(version: string): Promise<void> {
   renderNotices();
 }
 
-async function runTools(action: () => Promise<ToolsState>): Promise<void> {
+async function runTools(action: () => Promise<ToolsState>): Promise<boolean> {
   clearBanner();
   let state: ToolsState;
   try {
     state = await action();
   } catch (e) {
     showBanner(e);
-    return;
+    return false;
   }
   applyToolsState(state);
+  return true;
 }
 
 async function openTool(id: Id): Promise<void> {
@@ -1094,6 +1164,12 @@ const tabActions: TabsApi = tabsApi({
   setEmbedded: (toolId, embedded) => {
     void applyEmbedded(toolId, embedded);
   },
+  copyUsername: (item) => {
+    void copyUsername(item);
+  },
+  copyPassword: (item) => {
+    copyPassword(item);
+  },
 });
 
 /**
@@ -1102,6 +1178,155 @@ const tabActions: TabsApi = tabsApi({
  */
 function tabOnPanel(): TabState | null {
   return tabsState === null ? null : activeTab(tabsState);
+}
+
+/**
+ * 0.6.0b (RF-69): the credential the login cascade uses for `toolId` — the default one, or the
+ * tool's first while the list holds no default. Only metadata comes from `vault.list`; the page
+ * never holds a secret.
+ */
+function defaultCredential(toolId: Id): VaultItem | null {
+  if (vaultItems === null) return null;
+  const forTool = vaultItems.filter((item) => item.toolId === toolId);
+  return forTool.find((item) => item.isDefault) ?? forTool[0] ?? null;
+}
+
+/**
+ * 0.6.0b (RF-69): reads the vault's metadata for the embedded tab's Sign in control. There is no
+ * vault push, so the read happens when an embedded tab lands on the panel and after a conversion;
+ * the answer redraws the toolbar in place, and a failure keeps the last knowledge for the next
+ * mount to retry. Settings → Vault reads the same list when its tab opens.
+ */
+function readVault(): Promise<void> {
+  if (vaultPending !== null) return vaultPending;
+  const epoch = vaultEpoch;
+  const pending: Promise<void> = call('vault.list')
+    .then((items) => {
+      if (epoch === vaultEpoch) vaultItems = items;
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      if (vaultPending === pending) vaultPending = null;
+      if (epoch === vaultEpoch && view === 'tab' && tabView !== null && tabsState !== null) {
+        tabView.update(tabsState);
+      }
+    })
+    .then(() => undefined);
+  vaultPending = pending;
+  return pending;
+}
+
+/** 0.6.0b: the username is on screen in Settings → Vault, so it is copied as ordinary text. */
+async function copyUsername(item: VaultItem): Promise<void> {
+  clearBanner();
+  try {
+    await navigator.clipboard.writeText(item.username);
+    if (shell !== null) message(shell.banner, 'ok', 'Username copied');
+  } catch {
+    if (shell !== null) {
+      message(shell.banner, 'error', 'Could not copy; select it in Settings → Vault and copy it by hand');
+    }
+  }
+}
+
+/** 0.6.0b: the password prompt of a gate outside Settings — the Sign in control of an embedded tab. */
+const GATE_DIALOG_ID = 'gate-dialog';
+
+/**
+ * K5/SP02 §9: renders the password prompt `runGate` asks for. The decision to ask, and the
+ * system-prompt → password fallback, are the same helper Settings → Vault uses; only the place the
+ * prompt appears differs (a dialog here, the card itself there). The typed value goes back to the
+ * action and is never kept: the field is cleared before the call.
+ */
+function askGatePassword(note: string | null, run: (password?: string) => Promise<void>): void {
+  if (document.getElementById(GATE_DIALOG_ID) !== null) return;
+  const password = input('gate-password', { type: 'password', autocomplete: 'current-password' });
+  password.classList.add('gate-password');
+  const overlay = el('div', { id: GATE_DIALOG_ID, class: 'overlay' });
+
+  const close = (): void => {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+  };
+
+  function onKey(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    close();
+  }
+
+  const confirm = button(
+    'Confirm',
+    () => {
+      const typed = password.value;
+      // Read once and cleared right away: neither the field nor this window keeps it.
+      password.value = '';
+      close();
+      return run(typed === '' ? undefined : typed);
+    },
+    { kind: 'primary' },
+  );
+  const hint =
+    note !== null
+      ? note
+      : info !== null && info.biometricAvailable
+        ? 'This is a development run: the action takes your password.'
+        : 'This machine has no biometrics: the action asks for your password.';
+  const card = el(
+    'div',
+    { class: 'palette', role: 'dialog', aria: { modal: 'true', label: 'Password' } },
+    el('h2', { class: 'dialog-title' }, 'Password'),
+    el('p', { class: 'muted' }, 'Nod asks for your password before it copies the credential.'),
+    field('Password', password, hint),
+    el('div', { class: 'row' }, confirm, button('Cancel', () => close(), { kind: 'ghost' })),
+  );
+  password.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    confirm.click();
+  });
+  overlay.append(card);
+  overlay.addEventListener('mousedown', (event) => {
+    if (event.target === overlay) close();
+  });
+  document.addEventListener('keydown', onKey);
+  document.body.append(overlay);
+  password.focus();
+}
+
+/**
+ * 0.6.0b (RF-69): copies the credential's password through the gated `vault.copy`, exactly as
+ * Settings → Vault's Copy does — the same item, the same fallback flow (`runGate`), and the same
+ * wording. Nothing of the secret comes back to the page.
+ */
+function copyPassword(item: VaultItem): void {
+  clearBanner();
+  let failure: string | null = null;
+  const run = async (password?: string): Promise<void> => {
+    failure = null;
+    try {
+      await call('vault.copy', password === undefined ? { itemId: item.id } : { itemId: item.id, password });
+      if (shell !== null) message(shell.banner, 'ok', 'Copied — paste it now: this page never held it');
+    } catch (e) {
+      failure = errorMessage(e);
+      // A gate answer asks for the password; every other refusal is the window's banner.
+      if (failure !== GATE_PROMPT_FAILED && failure !== GATE_PASSWORD_REQUIRED && shell !== null) {
+        message(shell.banner, 'error', failure);
+      }
+    }
+  };
+  runGate({
+    systemPrompt:
+      session !== null &&
+      !gateFallback &&
+      (session.biometric || (info !== null && info.biometricAvailable && !info.devRun)),
+    run,
+    failure: () => failure,
+    systemPromptFailed: () => {
+      gateFallback = true;
+    },
+    ask: (note, submit) => askGatePassword(note, submit),
+  });
 }
 
 /**
@@ -1132,7 +1357,20 @@ async function applyEmbedded(toolId: Id, embedded: boolean): Promise<void> {
       return;
     }
   }
-  await runTools(() => call('tabs.setEmbedded', { toolId, embedded }));
+  const applied = await runTools(() => call('tabs.setEmbedded', { toolId, embedded }));
+  if (!applied || !embedded) return;
+  // 0.6.0b (RF-69): no script reaches a subframe, so an embedded tool is never filled by the
+  // login cascade. The person's saved credential is still useful through the tab's Sign in control;
+  // say so after the conversion has landed, without blocking the new tab.
+  await readVault();
+  if (defaultCredential(toolId) !== null && shell !== null) {
+    const title = tools.find((tool) => tool.id === toolId)?.title ?? 'This tool';
+    message(
+      shell.banner,
+      'info',
+      `${title} will not be signed in automatically inside Nod — use Sign in on the tab to copy your login.`,
+    );
+  }
 }
 
 /**
@@ -1161,6 +1399,19 @@ function showActiveTab(state: ToolsState): void {
   if (state.mode !== 'docked') return;
   if (state.active === null && state.tabs.length === 0) return;
   view = 'tab';
+}
+
+/**
+ * E03 (RF-49): "Open tabs" of the sidebar and of the palette — the tab view on the active tab,
+ * or the strip alone while every tab is detached (`showActiveTab` keeps that case on the strip,
+ * which is where the ⤓ of a detached tab lives, RF-51). This is the path a sidebar tool click takes
+ * once the backend has answered, without any call of its own: the page already holds the state.
+ */
+function openTabView(): void {
+  const state = tabsState;
+  if (state === null || state.mode !== 'docked' || state.tabs.length === 0) return;
+  showActiveTab(state);
+  refreshChrome();
 }
 
 /**
@@ -1297,6 +1548,12 @@ async function lockSession(): Promise<void> {
   tools = [];
   // E03: the tab view went with the shell (`teardownShell`), and a locked window has no tabs.
   tabsState = null;
+  // 0.6.0b: a locked window holds no vault metadata, and the gate starts from the system prompt
+  // again for the next unlocked session.
+  vaultEpoch += 1;
+  vaultItems = null;
+  vaultPending = null;
+  gateFallback = false;
   catalog = [];
   favorites = [];
   // Locked windows cannot read `host.state` (SP05 §3): the badge waits for the next unlock.
@@ -1313,6 +1570,12 @@ async function lockSession(): Promise<void> {
 
 async function loadUnlocked(): Promise<void> {
   let state: ToolsState;
+  // 0.6.0b: every unlock starts with no vault metadata (the Sign in control reads it lazily) and
+  // with the gate trying the system prompt first.
+  vaultEpoch += 1;
+  vaultItems = null;
+  vaultPending = null;
+  gateFallback = false;
   try {
     const [answer, entries, hostState, ids, tiles] = await Promise.all([
       call('tools.state'),
@@ -1358,6 +1621,10 @@ async function startUnlocked(): Promise<void> {
  */
 function go(target: 'home' | SettingsTab): void {
   view = target;
+  // E03: the sidebar says where the window is — the "Open tabs" button's `aria-current` and its
+  // ring are the view's, so the rail is drawn again even when a mounted Settings screen is only
+  // asked to change tab.
+  renderSidebar();
   if (target !== 'home' && settings !== null) {
     settingsTab = target;
     settings.setTab(target);
@@ -1369,6 +1636,7 @@ function go(target: 'home' | SettingsTab): void {
 
 function openPaletteNow(): void {
   if (session === null || !session.unlocked || shell === null) return;
+  const panelTab = tabOnPanel();
   openPalette({
     tools,
     entries: catalog,
@@ -1398,6 +1666,14 @@ function openPaletteNow(): void {
           document.getElementById('vault-inbox')?.focus();
         }
       : null,
+    // E03: "Open tabs" — the strip of docked mode, from the state the page already holds ("the
+    // path a tool click takes after its answer"); nothing to offer in Windows mode or empty.
+    openTabs:
+      tabsState !== null && tabsState.mode === 'docked' && tabsState.tabs.length > 0
+        ? () => {
+            openTabView();
+          }
+        : null,
     // E03: a tool and a view open through the app, so a docked tab lands on the center panel
     // (RF-49); a failure goes to the window's banner, as it does for the sidebar and Home.
     openTool: (id) => {
@@ -1416,8 +1692,13 @@ function openPaletteNow(): void {
     tabs:
       tabsState !== null && tabsState.mode === 'docked'
         ? {
-            active: tabOnPanel(),
+            active: panelTab,
             open: tabsState.tabs,
+            // 0.6.0b: the Sign in rows of an embedded tab; the metadata is read by the tab view.
+            credential:
+              panelTab !== null && panelTab.toolId !== null
+                ? defaultCredential(panelTab.toolId)
+                : null,
             ...tabActions,
           }
         : null,
@@ -1467,6 +1748,11 @@ on('session', (next) => {
     tools = [];
     // E03: the tab view went with the shell, and a locked window has no tabs.
     tabsState = null;
+    // 0.6.0b: a locked window holds no vault metadata and no gate fallback from the old session.
+    vaultEpoch += 1;
+    vaultItems = null;
+    vaultPending = null;
+    gateFallback = false;
     catalog = [];
     favorites = [];
     host = null;

@@ -5,11 +5,11 @@
 // the file of an export or import (docs/arquitetura.md §2).
 import { call, errorMessage, on } from './api';
 import { mountJoinFlow } from './join';
+import { attemptGate, runGate } from './vault-gate';
 import { button, clear, el, field, input, message } from './ui';
 import { categoryOf, groupByCategory, originOf, slug } from '../shared/catalog';
 import { toBase64url } from '../shared/encoding';
 import type { DeviceSession, GuildInvite, ShareKind, ShareScope } from '../shared/host-api';
-import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED } from '../shared/types';
 import type {
   AppIconChoice,
   AppIconState,
@@ -1906,33 +1906,40 @@ export function mountSettings(
    * is per OS, so a Windows machine without Hello reports it and then fails every prompt. That
    * failure re-opens the same action on the password prompt. A cancel, an empty field or a wrong
    * password leaves the action undone.
+   *
+   * The fallback itself is `runGate`, shared with the embedded tab's "Sign in" control; this screen
+   * owns the inline prompt and the status the fallback reads.
    */
   function gate(wait: GateWait, run: (password?: string) => Promise<void>): void {
-    const systemPrompt =
-      !state.gateFallback && (state.session.biometric || (state.info.biometricAvailable && !state.info.devRun));
-    if (systemPrompt) {
-      attempt(wait, run);
-      return;
-    }
-    askPassword(wait, null);
+    runGate({
+      systemPrompt:
+        !state.gateFallback && (state.session.biometric || (state.info.biometricAvailable && !state.info.devRun)),
+      run,
+      failure: () =>
+        state.status !== null && state.status.kind === 'error' ? state.status.text : null,
+      systemPromptFailed: () => {
+        state.gateFallback = true;
+      },
+      ask: (note, _submit) =>
+        askPassword(wait, note === null ? null : { kind: 'info', text: note }),
+    });
   }
 
   /**
-   * Runs the action with no password and lets the backend decide: an action it needs no gate for
-   * just goes through. A system prompt that did not confirm switches this session to the password
-   * (`gateFallback`); a call that needed a factor and had none (`GATE_PASSWORD_REQUIRED`) asks for
-   * it. Either way the same action comes back on the password prompt.
+   * Runs the action with no password and lets the backend decide (the Accept of a credential
+   * update, which the backend gates only when the host asks): the shared `attemptGate` holds the
+   * fallback, and this screen renders its prompt.
    */
   function attempt(wait: GateWait, run: (password?: string) => Promise<void>): void {
-    void run(undefined).then(() => {
-      const failed = state.status;
-      if (failed === null || failed.kind !== 'error') return;
-      if (failed.text === GATE_PROMPT_FAILED) {
+    attemptGate({
+      run,
+      failure: () =>
+        state.status !== null && state.status.kind === 'error' ? state.status.text : null,
+      systemPromptFailed: () => {
         state.gateFallback = true;
-        askPassword(wait, { kind: 'info', text: 'The system prompt did not confirm — use your Nod password instead' });
-      } else if (failed.text === GATE_PASSWORD_REQUIRED) {
-        askPassword(wait, { kind: 'info', text: 'This needs your password' });
-      }
+      },
+      ask: (note, _submit) =>
+        askPassword(wait, note === null ? null : { kind: 'info', text: note }),
     });
   }
 

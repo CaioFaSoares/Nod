@@ -663,6 +663,14 @@ button {
   border-bottom: 1px solid var(--line);
 }
 
+/* 0.6.0b (RF-69): the caption before the embedded tab's two copy actions. The buttons stay the
+   toolbar's own ghost buttons; the caption only names what they are. */
+.tab-signin {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* RF-49: the slot the backend lays the active docked tab on. It carries nothing of the page's own:
    while the window is away — being placed, hidden with the main window — only this neutral
    background shows, so nothing reads as a gap. */
@@ -854,6 +862,53 @@ button {
 .tile-mark {
   display: grid;
   place-items: center;
+}
+
+/* E03: the way back to the strip, right under the guild mark — the mark's own box and size, with
+   the accent ring and the rail pill only while the tab view is the panel's face. */
+.mark-tabs {
+  color: var(--muted);
+  border-color: var(--line);
+  border-radius: var(--rail-round);
+}
+
+.mark-tabs::before {
+  height: 0;
+}
+
+.mark-tabs.current {
+  color: var(--fg);
+  border-color: var(--accent);
+  border-radius: var(--rail-square);
+}
+
+.mark-tabs.current::before {
+  height: 20px;
+  background: var(--accent);
+}
+
+.mark-tabs:disabled {
+  color: var(--muted);
+  background: var(--bg-raised);
+  border-color: var(--line);
+  border-radius: var(--rail-round);
+  cursor: default;
+}
+
+.mark-tabs:disabled::before {
+  height: 0;
+}
+
+.mark-tabs-glyph {
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* E03: the count of open tabs sits where the Settings action's inbox badge sits. */
+.tabs-badge {
+  color: var(--info);
+  background: var(--bg-sidebar);
+  border-color: var(--info);
 }
 
 /* The one separator of both rails: under the mark, between Offline and the guilds, above the

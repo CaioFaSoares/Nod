@@ -10,7 +10,7 @@
 import { call } from './api';
 import { button, el, glyph } from './ui';
 import { rectEquals } from '../shared/tabs';
-import type { Id, SlotRect, TabState, ToolStatus, ToolsState } from '../shared/types';
+import type { Id, SlotRect, TabState, ToolStatus, ToolsState, VaultItem } from '../shared/types';
 
 /** RF-66: the mark of a tab that is not a tool — an address opened by hand or adopted from a tool. */
 const LINK_GLYPH = '🔗';
@@ -43,6 +43,16 @@ export interface TabsApi {
    * stores the preference and converts the tool's open tabs in place.
    */
   setEmbedded: (toolId: Id, embedded: boolean) => void;
+  /**
+   * 0.6.0b (RF-69): the credential's username goes to the clipboard — it is already on screen in
+   * Settings → Vault, never a secret.
+   */
+  copyUsername: (item: VaultItem) => void;
+  /**
+   * 0.6.0b (RF-69): the credential's password goes to the clipboard through the gated `vault.copy`,
+   * exactly as Settings → Vault does; nothing of it reaches this page.
+   */
+  copyPassword: (item: VaultItem) => void;
 }
 
 /** What the two halves of the page hand each other. */
@@ -53,6 +63,10 @@ export interface TabsDeps {
   save: (id: string) => void;
   /** RF-69: the app's half of the embedding toggle — the frameability check and its message. */
   setEmbedded: (toolId: Id, embedded: boolean) => void;
+  /** 0.6.0b: the app's clipboard copy of a credential's username. */
+  copyUsername: (item: VaultItem) => void;
+  /** 0.6.0b: the app's gated copy of a credential's password. */
+  copyPassword: (item: VaultItem) => void;
 }
 
 /** E03: one definition of each action, shared by the strip, the palette and the keyboard. */
@@ -72,6 +86,8 @@ export function tabsApi(deps: TabsDeps): TabsApi {
     next: (step) => deps.run(() => call('tabs.next', { step })),
     save: deps.save,
     setEmbedded: deps.setEmbedded,
+    copyUsername: deps.copyUsername,
+    copyPassword: deps.copyPassword,
   };
 }
 
@@ -103,6 +119,11 @@ export interface TabsViewCtx {
   openLink: () => void;
   /** RF-69: the iframes of the embedded tabs, mounted once by the shell and kept across views */
   embeds: EmbedLayer;
+  /**
+   * 0.6.0b: the credential the login cascade would use for a tool — the default one — or null while
+   * the page does not know the vault. Only metadata (never a secret) is returned.
+   */
+  credential: (toolId: Id) => VaultItem | null;
 }
 
 /**
@@ -484,6 +505,24 @@ function toolbarButtons(active: TabState | null, ctx: TabsViewCtx): HTMLElement[
               kind: 'ghost',
               title: `Show ${active.title} inside Nod instead of a window`,
             }),
+      );
+    }
+    // 0.6.0b (RF-69): no script reaches a subframe, so an embedded tool cannot be autofilled. When
+    // the person holds a credential for it, the tab offers the login as two copy actions: the
+    // username (already shown in Settings → Vault, not a secret) and the password through the gated
+    // `vault.copy`. The vault metadata is read lazily by `src/app.ts`.
+    const credential = active.embedded && toolId !== null ? ctx.credential(toolId) : null;
+    if (credential !== null) {
+      buttons.push(
+        el('span', { class: 'tab-signin', aria: { hidden: 'true' } }, 'Sign in'),
+        button('Copy username', () => ctx.actions.copyUsername(credential), {
+          kind: 'ghost',
+          title: `Copy the username for ${credential.label !== '' ? credential.label : credential.username}`,
+        }),
+        button('Copy password', () => ctx.actions.copyPassword(credential), {
+          kind: 'ghost',
+          title: 'Copy the password — Nod asks for the gate exactly as Settings → Vault does',
+        }),
       );
     }
     buttons.push(

@@ -633,7 +633,6 @@ async function runPhase(
     for (let tick = 0; tick < 25; tick += 1) {
       await Bun.sleep(1_000);
       if (storedResult(storePath, nonce) !== null) return;
-      if ((await ownWindows(pid.value)).length > 0) return;
       if (app.exitCode !== null) break;
     }
     bootFailed.resolve({
@@ -698,8 +697,10 @@ async function driverParseError(): Promise<string | null> {
     throw: false,
   });
   rmSync(join(GENERATED_DIR, 'parse-check'), { recursive: true, force: true });
-  if (result.success) return null;
-  return result.logs.map((log) => String(log)).join('\n').slice(0, 1200);
+  if (!result.success) return result.logs.map((log) => String(log)).join('\n').slice(0, 1200);
+  const source = readFileSync(join(import.meta.dir, 'tabs-driver.ts'), 'utf8');
+  const nodeImport = /^import\s[^;]*from\s+['"](node:|bun)/m.exec(source);
+  return nodeImport === null ? null : `the page module imports a runtime builtin: ${nodeImport[0]}`;
 }
 
 async function main(): Promise<number> {
