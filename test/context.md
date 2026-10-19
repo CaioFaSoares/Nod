@@ -8,6 +8,7 @@ Two kinds of proof, matching `AGENTS.md`'s rule that nothing is "verified" witho
 | Smoke, local | `test/smoke/` (`run.ts`, `smoke.html`, `tools.ts`) | `bun test/smoke/run.ts` | The real Nod app under tinyjs, with local fake tools, a throwaway app id (`NOD_APP_ID`), a free dev port and a page file named after the launch's nonce (so a `tinyjs dev` a previous smoke left behind can neither serve nor reload this launch's page), and its own data dir |
 | Smoke, connected | `test/smoke/` (`connected.ts`, `connected.html`, `tools.ts`) | `bun test/smoke/connected.ts [--force]` | The real Nod under four app ids beside a real host process: SP05 §5 steps 2–5 and block 2's sharing (SP06 §4–§6, B7, K1–K9), no external network, no container |
 | Smoke, real page | `test/smoke/` (`ui.ts`, `ui-driver.ts`, `tools.ts`) | `bun test/smoke/ui.ts [--force]` | The real `index.html` entry (`src/app.ts` + `src/settings.ts`) inside tinyjs, driven through its own DOM: block 2's screens (#24, #25, #27–#35), beside a real host process, no external network, no container. The generated page points `frontend.devUrl` at the dev server's copy of itself (`test/smoke/.gerado/ui/`), so the window is the real `http://` page with the runtime bridge — not a re-written test page |
+| Smoke, docked tabs | `test/smoke/` (`tabs.ts`, `tabs-driver.ts`, `tools.ts`, `winlist.swift`) | `bun test/smoke/tabs.ts [--force]` | E03 on the real surface (RF-49…RF-52, RF-66…RF-68, T6): a local account, two org tools and real tool windows per tab, with three reporting tool pages (`startTabTools`) that measure themselves. No host process. The real frame of every window comes from `CGWindowListCopyWindowInfo` (`winlist.swift`), because a webview reports `window.screenX/screenY` as `0,1490` and `window.outerWidth/outerHeight` as `0x0`, and a tool page cannot call `tiny.win.getState()` (api-gated). A step whose subject needs the panel's slot is reported **blocked** — never passed — when the page is hidden (a locked screen), which `src/tabs.ts` answers with an empty slot by design |
 
 `test/helpers/sqlite-bun.ts` adapts `bun:sqlite` to the backend's `SqlDb`, so `backend/repo.ts` runs
 under Bun.
@@ -121,3 +122,43 @@ file, a log or `store.json`.
 The driver's only RPC use is setup (account, host join, publish, people and codes, credentials,
 scope, send, Q's accept, the second machine, P's new code); every acceptance above reads the DOM.
 `docs/handovers/ui-smoke.md` carries the last run's step lines.
+
+## The docked-tabs smoke (`test/smoke/tabs.ts`)
+
+E03's own surface, and the smallest of the three: no host process, no headless work, one launch.
+`bun test/smoke/tabs.ts` refuses while `resources/seed.json` exists and moves it to
+`test/smoke/.gerado/seed.json.bak` with `--force`, like the others. The generated page imports
+`/src/app.ts` and then `test/smoke/tabs-driver.ts`; the account is local (`session.createAccount`
+with no code, RF-60) and the temporary seed names two org tools on two reporting servers
+(`startTabTools`, `test/smoke/tools.ts`).
+
+What makes the geometry checkable at all, all measured on this machine:
+
+| Fact | What it means for the smoke |
+| --- | --- |
+| `window.screenX/screenY` are `0,1490` and `window.outerWidth/outerHeight` are `0x0` in a WKWebView (`backend/tiny.d.ts`, `TinyWinState.outer`) | a page cannot report where its own window is |
+| a tool page's `tiny.win.getState()` is refused — `"win.getState" is disabled by tinyjs.json "api"` (`scripts/gen-config.ts` gives a tool origin only `login.report`/`media.*`) | the reported page box (`innerWidth/innerHeight`), `performance.timeOrigin` and its draft are what a tool page brings |
+| `CGWindowListCopyWindowInfo` (`test/smoke/winlist.swift`) gives the real frame of every window | the on-screen truth, and the runner hands it to the driver over the desk |
+| that list is in the window server's units, not the app's points (a 1100 pt window is `990` of them, with an offset) | the map is read at every measurement from the main window itself — its real frame against its own `getState()` — and applied to the tool window |
+| a hidden page reports no slot (`src/tabs.ts` `currentRect`), and a **locked screen** hides every window | the placement steps say **blocked** with their numbers instead of pretending |
+
+| Step | Story | Surface |
+| --- | --- | --- |
+| RF-52 default mode | RF-52 | `tools.state()`: `mode=docked`, `dockable=true` on macOS, no strip with no tab |
+| RF-49 the docked tab lands on the slot | RF-49 | the slot's screen rect (`getState()` of main + the slot's `getBoundingClientRect()`) against the tool window's real frame |
+| RF-49 it follows a resize | RF-49 | `tiny.win.setSize` on the main window; the tab's frame lands on the new slot within 1 s |
+| RF-50 a second tab, RF-50 switching | RF-50 | the strip's `+`, three strip clicks, the page's `timeOrigin` and draft kept, one load |
+| RF-51 detach, RF-51 dock back | RF-51 | the OS frame that comes back and leaves; the same window both ways |
+| RF-66 a popup, RF-66 Open link… | RF-66 | a link a tool opens lands right after its tab; the dialog's own field and Enter |
+| RF-68 no API for an ad-hoc tab | RF-68 | the same `login.report` on a tool tab (`ok`) and on two ad-hoc tabs (refused) |
+| RF-67 a view, RF-67 a tool | RF-67 | `catalog.list` gains a view of Tool B and a personal tool with its probed title |
+| RF-52 Windows mode, RF-19 | RF-52, RF-19 | the Account card, a framed window with no strip, a second open that never reloads |
+| T6 | T6 | lock from the sidebar, enter through the Offline tile: the tabs reopen in order, ad-hoc ones do not |
+
+A run prints its steps as they land, each `ok`, `FAILED` or `blocked`; `blocked` is for a step whose
+subject the session made unobservable (a locked screen hides the page, and `src/tabs.ts` then reports
+no slot by design) — it is never counted as a pass. Last run with the screen unlocked: 17 steps, 0
+blocked, `ok`, 25.2 s (RF-49's landing and resize-follow measured against `CGWindowList` frames, with
+OmniWM active and the smoke floating its own windows); with the screen locked the same smoke reports
+the four slot steps as `blocked` with their numbers. `docs/handovers/e03-smoke.md` carries the step
+lines, the three-run tally and every number.

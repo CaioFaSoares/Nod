@@ -79,16 +79,29 @@ interface FakeScreen extends Rect {
 }
 
 interface FakeHandle {
-  show: number;
+  /** one entry per `show()`, true when it asked for the focus (`activate` was not false) */
+  shows: boolean[];
+  /** `hide()` calls — a docked tab put away with `{ app: false }` (RF-50) */
+  hides: number;
   close: number;
   evals: string[];
   position: number[] | null;
   size: number[] | null;
+  /** the last `setChrome` call (E03/RF-51), or null when the window was never re-chromed */
+  chrome: { frame?: boolean } | null;
 }
 
 interface OpenedWindow {
   id: string;
-  options: { page?: string; title?: string; size?: string; x?: number; y?: number };
+  options: {
+    page?: string;
+    title?: string;
+    size?: string;
+    x?: number;
+    y?: number;
+    /** E03/RF-49: `{ frame: false }` is how a docked tab is born frameless (S1) */
+    chrome?: { frame?: boolean };
+  };
 }
 
 interface RecordedEvent {
@@ -103,6 +116,13 @@ interface FakeState {
   entries: Entry[];
   screens: FakeScreen[];
   main: Rect | null;
+  /** the footprint of main, decorations included — what the slot formula reads (spikes §3) */
+  outer: { width: number; height: number };
+  visible: boolean;
+  minimized: boolean;
+  focused: boolean;
+  /** Wayland answers false, and there docked mode is never offered (RF-49) */
+  canPosition: boolean;
   credential: { username: string; secret: string } | null;
   /** The vault index: the origin the credential was saved for. It decides the fill, and it is
    *  independent of `credential` (the keychain) — the desync case is a real one. */
@@ -122,7 +142,7 @@ interface FakeEnvironment {
   pushed: { event: string; data?: unknown }[];
   registered: { id: string; combo: string }[];
   unregistered: string[];
-  calls: { credential: number };
+  calls: { credential: number; saveTab: string[] };
   store: Map<string, unknown>;
   /** A window the runtime opened by itself: a popup that became a window never goes through
    *  `win.open`, so its handle exists before the module touches it. */
@@ -146,6 +166,11 @@ function fakeEnvironment(): FakeEnvironment {
     entries: [KANBAN, MAIL],
     screens: [BIG_SCREEN],
     main: { x: 100, y: 80, width: 900, height: 600 },
+    outer: { width: 900, height: 632 },
+    visible: true,
+    minimized: false,
+    focused: false,
+    canPosition: true,
     credential: { username: 'ana', secret: 's3cret' },
     vaultOrigin: 'https://kanban.example',
     failEval: false,
@@ -157,15 +182,30 @@ function fakeEnvironment(): FakeEnvironment {
   const pushed: { event: string; data?: unknown }[] = [];
   const registered: { id: string; combo: string }[] = [];
   const unregistered: string[] = [];
-  const calls = { credential: 0 };
-  const store = new Map<string, unknown>();
+  const calls = { credential: 0, saveTab: [] as string[] };
+  // The fixture runs in Windows mode: the day-one behavior these tests pin (RF-52). A docked test
+  // asks for the other setting with `env.store.set('window_mode', 'docked')`.
+  const store = new Map<string, unknown>([['window_mode', 'windows']]);
 
   function handle(id: string): FakeHandle {
     const existing = handles.get(id);
     if (existing !== undefined) return existing;
-    const created: FakeHandle = { show: 0, close: 0, evals: [], position: null, size: null };
+    const created: FakeHandle = { shows: [], hides: 0, close: 0, evals: [], position: null, size: null, chrome: null };
     handles.set(id, created);
     return created;
+  }
+
+  /** Main as `win.getState()` answers: the rect the tests set, plus what the OS says of it. */
+  function mainState(): Record<string, unknown> | null {
+    if (state.main === null) return null;
+    return {
+      ...state.main,
+      outer: state.outer,
+      visible: state.visible,
+      minimized: state.minimized,
+      focused: state.focused,
+      canPosition: state.canPosition,
+    };
   }
 
   const app = {
@@ -178,14 +218,17 @@ function fakeEnvironment(): FakeEnvironment {
         opened.push({ id, options: options ?? {} });
         handle(id);
       },
-      getState: async () => state.main,
+      getState: async () => mainState(),
     },
     window: (id: string) => {
       const record = handle(id);
       return {
         id,
-        show: () => {
-          record.show += 1;
+        show: (opts?: { activate?: boolean }) => {
+          record.shows.push(opts === undefined || opts.activate !== false);
+        },
+        hide: () => {
+          record.hides += 1;
         },
         close: () => {
           record.close += 1;
@@ -200,6 +243,9 @@ function fakeEnvironment(): FakeEnvironment {
         },
         setSize: (width: number, height: number) => {
           record.size = [width, height];
+        },
+        setChrome: (opts: { frame?: boolean }) => {
+          record.chrome = opts;
         },
       };
     },
@@ -240,6 +286,10 @@ function fakeEnvironment(): FakeEnvironment {
     },
     os: 'macos',
     hotkeys: true,
+    saveTab: async (id) => {
+      calls.saveTab.push(id);
+      return { kind: 'view', entryId: 'kanban' };
+    },
   };
 
   return {
@@ -374,6 +424,30 @@ function popup(over: Partial<PopupEvent> = {}): PopupEvent {
   return { window: null, opener: 'tool_kanban', url: ENTRY_URL, kind: 'policy', ...over };
 }
 
+/** A window state event, the way `backend/main.ts`'s `onWindowState` hands it down (E03/RF-49). */
+function winState(win: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { win, fullscreen: false, maximized: false, minimized: false, focused: true, ...over };
+}
+
+/** The same fake, with the Docked setting and the panel the main page reports (E03/RF-49). */
+function dockedEnvironment(): FakeEnvironment {
+  const env = fakeEnvironment();
+  env.store.set('window_mode', 'docked');
+  return env;
+}
+
+/** The slot as the page measures it: the center panel of a 900×600 main page at 100,80. */
+const SLOT = { x: 40, y: 60, width: 500, height: 340 };
+/** …and where it lands: dx 0, dy 32 (the title bar) — `docs/handovers/e03-spikes.md` §3. */
+const SLOT_SCREEN = { x: 140, y: 172, width: 500, height: 340 };
+
+/** Opens `kanban` docked on a known slot, the state the E03 tests start from. */
+async function dockedKanban(toolWindows: ToolWindows): Promise<void> {
+  expect(toolWindows.setSlot(SLOT)).toBe(true);
+  await settle();
+  await toolWindows.open('kanban');
+}
+
 /** Lets the pending microtasks run: `void apply(...)` and the open chain continue after awaits. */
 async function settle(): Promise<void> {
   for (let i = 0; i < 8; i += 1) await Promise.resolve();
@@ -401,7 +475,7 @@ describe('tool windows — opening', () => {
     await toolWindows.open('kanban');
     await toolWindows.open('kanban');
     expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban']);
-    expect(handle(env, 'tool_kanban').show).toBe(1);
+    expect(handle(env, 'tool_kanban').shows.length).toBe(1);
     expect(handle(env, 'tool_kanban').evals).toEqual([]); // nothing reloads (RF-19)
     expect(tool(toolWindows, 'kanban').openWindows).toBe(1);
   });
@@ -582,7 +656,7 @@ describe('tool windows — views', () => {
     await toolWindows.openView('kanban', 0);
     await toolWindows.openView('kanban', 0);
     expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban_0']);
-    expect(handle(env, 'tool_kanban_0').show).toBe(1);
+    expect(handle(env, 'tool_kanban_0').shows.length).toBe(1);
   });
 
   test('a navigate-mode view on a cold tool opens the window straight at the view address', async () => {
@@ -603,7 +677,7 @@ describe('tool windows — views', () => {
     await toolWindows.open('mail');
     await toolWindows.openView('mail', 1);
     expect(env.opened.map((entry) => entry.id)).toEqual(['tool_mail']);
-    expect(handle(env, 'tool_mail').show).toBe(1);
+    expect(handle(env, 'tool_mail').shows.length).toBe(1);
     expect(handle(env, 'tool_mail').evals).toEqual([
       'location.href = "https://mail.example/archive"',
     ]);
@@ -1093,12 +1167,15 @@ describe('tool windows — closing and restoring', () => {
     const toolWindows = makeToolWindows(env);
     await toolWindows.open('kanban');
     await toolWindows.open('mail');
-    expect(openTools(env)).toEqual([{ toolId: 'kanban' }, { toolId: 'mail' }]);
+    expect(openTools(env)).toEqual([
+      { toolId: 'kanban', url: ENTRY_AUDIT },
+      { toolId: 'mail', url: 'https://mail.example/web' },
+    ]);
     const before = handle(env, 'tool_kanban');
     const state = toolWindows.close('kanban');
     expect(before.close).toBe(1);
     expect(state.tools.find((status) => status.id === 'kanban')?.openWindows).toBe(0);
-    expect(openTools(env)).toEqual([{ toolId: 'mail' }]);
+    expect(openTools(env)).toEqual([{ toolId: 'mail', url: 'https://mail.example/web' }]);
   });
 
   test('a window the person closed leaves the persisted list', async () => {
@@ -1107,7 +1184,7 @@ describe('tool windows — closing and restoring', () => {
     await toolWindows.open('kanban');
     await toolWindows.open('mail');
     toolWindows.onWindowClosed('tool_mail');
-    expect(openTools(env)).toEqual([{ toolId: 'kanban' }]);
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT }]);
     expect(tool(toolWindows, 'mail').openWindows).toBe(0);
     expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'tool_mail']);
   });
@@ -1118,7 +1195,7 @@ describe('tool windows — closing and restoring', () => {
     await toolWindows.open('kanban');
     toolWindows.closeAll();
     toolWindows.onWindowClosed('tool_kanban'); // the late event of a window we closed
-    expect(openTools(env)).toEqual([{ toolId: 'kanban' }]);
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT }]);
   });
 
   test('closeAll closes the windows and keeps the list; restore reopens only visible tools', async () => {
@@ -1128,12 +1205,15 @@ describe('tool windows — closing and restoring', () => {
     await toolWindows.open('mail');
     toolWindows.closeAll();
     expect(env.handles.size).toBe(0);
-    expect(openTools(env)).toEqual([{ toolId: 'kanban' }, { toolId: 'mail' }]);
+    expect(openTools(env)).toEqual([
+      { toolId: 'kanban', url: ENTRY_AUDIT },
+      { toolId: 'mail', url: 'https://mail.example/web' },
+    ]);
     env.state.entries = [KANBAN];
     await toolWindows.restore();
     expect(env.handles.has('tool_kanban')).toBe(true);
     expect(env.handles.has('tool_mail')).toBe(false);
-    expect(openTools(env)).toEqual([{ toolId: 'kanban' }]);
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT }]);
     expect(tool(toolWindows, 'kanban').loading).toBe(true);
   });
 
@@ -1141,7 +1221,7 @@ describe('tool windows — closing and restoring', () => {
     const env = fakeEnvironment();
     const toolWindows = makeToolWindows(env);
     await toolWindows.openView('kanban', 0);
-    expect(openTools(env)).toEqual([{ toolId: 'kanban', view: 0 }]);
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', view: 0, url: 'https://kanban.example/boards/42' }]);
     toolWindows.closeAll();
     await toolWindows.restore();
     expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban_0', 'tool_kanban_0']);
@@ -1168,7 +1248,7 @@ describe('tool windows — closing and restoring', () => {
     expect(before.close).toBe(1);
     expect(env.handles.has('tool_kanban')).toBe(true);
     expect(toolWindows.state().tools.map((status) => status.id)).toEqual(['kanban']);
-    expect(openTools(env)).toEqual([{ toolId: 'kanban' }]);
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT }]);
   });
 
   test('reconcile while nothing is visible keeps the persisted list for the next unlock', async () => {
@@ -1178,7 +1258,7 @@ describe('tool windows — closing and restoring', () => {
     toolWindows.closeAll();
     env.state.entries = []; // locked: no entry is visible
     toolWindows.reconcile();
-    expect(openTools(env)).toEqual([{ toolId: 'kanban' }]);
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT }]);
   });
 
   test('reload opens the tool again from scratch', async () => {
@@ -1205,17 +1285,17 @@ describe('tool windows — global shortcuts', () => {
     const env = fakeEnvironment();
     const toolWindows = makeToolWindows(env);
     await toolWindows.open('kanban');
-    toolWindows.onFocus('tool_kanban', true);
+    toolWindows.onWindowState(winState('tool_kanban'));
     const ids = ['digit-1', 'digit-2', 'digit-3', 'digit-4', 'digit-5', 'digit-6', 'digit-7', 'digit-8', 'digit-9', 'palette'];
     expect(env.registered.map((entry) => entry.id)).toEqual(ids);
     expect(env.registered[0].combo).toBe('cmd+1');
     expect(env.registered[9].combo).toBe('cmd+k');
-    toolWindows.onFocus('tool_kanban', true); // focusing again registers nothing
+    toolWindows.onWindowState(winState('tool_kanban')); // focusing again registers nothing
     expect(env.registered.map((entry) => entry.id)).toEqual(ids);
-    toolWindows.onFocus('main', true);
-    toolWindows.onFocus('tool_kanban', false);
+    toolWindows.onWindowState(winState('main'));
+    toolWindows.onWindowState(winState('tool_kanban', { focused: false }));
     expect(env.unregistered).toEqual([]); // the main window is still focused
-    toolWindows.onFocus('main', false);
+    toolWindows.onWindowState(winState('main', { focused: false }));
     expect(env.unregistered).toEqual(ids);
     expect(env.registered.map((entry) => entry.id)).toEqual(ids); // no double registration
   });
@@ -1223,15 +1303,15 @@ describe('tool windows — global shortcuts', () => {
   test('a window that is not ours does not hold the shortcuts', async () => {
     const env = fakeEnvironment();
     const toolWindows = makeToolWindows(env);
-    toolWindows.onFocus('tool_kanban', true); // not open
-    toolWindows.onFocus('some_other_app', true);
+    toolWindows.onWindowState(winState('tool_kanban')); // not open
+    toolWindows.onWindowState(winState('some_other_app'));
     expect(env.registered).toEqual([]);
   });
 
   test('without the capability no shortcut is ever registered', async () => {
     const env = fakeEnvironment();
     const toolWindows = makeToolWindows(env, { ...env.deps, hotkeys: false });
-    toolWindows.onFocus('main', true);
+    toolWindows.onWindowState(winState('main'));
     expect(env.registered).toEqual([]);
     expect(env.unregistered).toEqual([]);
   });
@@ -1253,7 +1333,7 @@ describe('tool windows — global shortcuts', () => {
     const env = fakeEnvironment();
     const toolWindows = makeToolWindows(env);
     toolWindows.onHotkey('palette');
-    expect(handle(env, 'main').show).toBe(1);
+    expect(handle(env, 'main').shows.length).toBe(1);
     expect(env.pushed).toContainEqual({ event: 'palette', data: null });
   });
 });
@@ -1299,5 +1379,626 @@ describe('the warning of a tool that did not come from the org (canonico §22)',
     expect(script).toContain("getElementById(\"nod-not-from-org\")");
     expect(script).toContain('textContent');
     expect(script).not.toContain('innerHTML');
+  });
+});
+
+// ---------------------------------------------------------------- tabs and docked mode (E03)
+
+describe('tabs — docked mode (RF-49…RF-52, RF-66…RF-68)', () => {
+  test('a new tab opens frameless exactly on the slot, and the panel shows it', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+
+    expect(env.opened).toEqual([
+      {
+        id: 'tool_kanban',
+        options: {
+          page: ENTRY_URL,
+          title: 'Kanban',
+          x: SLOT_SCREEN.x,
+          y: SLOT_SCREEN.y,
+          size: '500x340',
+          chrome: { frame: false },
+        },
+      },
+    ]);
+    // S0: the geometry lands on the handle too, in the same tick as the open.
+    expect(handle(env, 'tool_kanban').position).toEqual([140, 172]);
+    expect(handle(env, 'tool_kanban').size).toEqual([500, 340]);
+    expect(toolWindows.state().tabs).toEqual([
+      {
+        id: 'tool_kanban',
+        toolId: 'kanban',
+        title: 'Kanban',
+        url: ENTRY_AUDIT,
+        docked: true,
+        adhoc: false,
+        loading: true,
+        error: null,
+      },
+    ]);
+    expect(toolWindows.state()).toMatchObject({
+      mode: 'docked',
+      dockable: true,
+      tabHotkeys: true,
+      active: 'tool_kanban',
+    });
+    // The backend opened it on its own, so the page is told which tab to show.
+    expect(env.pushed).toContainEqual({ event: 'tab', data: 'tool_kanban' });
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT, active: true }]);
+  });
+
+  test('a second tab of the tool is tool_kanban_t2, and the first is hidden alive (RF-50)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+
+    await toolWindows.newTab('kanban');
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'tool_kanban_t2']);
+    expect(env.opened[1].options).toMatchObject({
+      page: ENTRY_URL,
+      x: SLOT_SCREEN.x,
+      y: SLOT_SCREEN.y,
+      chrome: { frame: false },
+    });
+    expect(handle(env, 'tool_kanban').hides).toBe(1);
+    expect(handle(env, 'tool_kanban').close).toBe(0);
+    expect(handle(env, 'tool_kanban').evals).toEqual([]);
+    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban', 'tool_kanban_t2']);
+    expect(toolWindows.state().active).toBe('tool_kanban_t2');
+    expect(tool(toolWindows, 'kanban').openWindows).toBe(2);
+  });
+
+  test('activating the other tab raises it without closing or reloading anything (RF-50)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    await toolWindows.newTab('kanban');
+    const before = env.opened.length;
+
+    toolWindows.activate('tool_kanban');
+    expect(toolWindows.state().active).toBe('tool_kanban');
+    expect(handle(env, 'tool_kanban').shows).toEqual([false]); // raised, never activated (S3)
+    expect(handle(env, 'tool_kanban').hides).toBe(1);
+    expect(handle(env, 'tool_kanban_t2').hides).toBe(1);
+    expect(handle(env, 'tool_kanban').close).toBe(0);
+    expect(handle(env, 'tool_kanban').evals).toEqual([]);
+    expect(env.opened.length).toBe(before);
+  });
+
+  test('detach and dock re-chrome the same window and never close or open one (RF-51)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+
+    toolWindows.detach('tool_kanban');
+    expect(handle(env, 'tool_kanban').chrome).toEqual({ frame: true });
+    expect(handle(env, 'tool_kanban').position).toEqual([168, 200]); // a step off the panel
+    expect(handle(env, 'tool_kanban').shows).toEqual([true]); // the person asked for this one
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban']);
+    expect(toolWindows.state().tabs[0].docked).toBe(false);
+    expect(toolWindows.state().active).toBeNull();
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT, detached: true }]);
+
+    toolWindows.dock('tool_kanban');
+    expect(handle(env, 'tool_kanban').chrome).toEqual({ frame: false });
+    expect(handle(env, 'tool_kanban').position).toEqual([140, 172]);
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban']);
+    expect(toolWindows.state().tabs[0].docked).toBe(true);
+    expect(toolWindows.state().active).toBe('tool_kanban');
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT, active: true }]);
+  });
+
+  test('closing the active tab puts its neighbour on the slot (⌘W)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    await toolWindows.newTab('kanban');
+
+    const closed = handle(env, 'tool_kanban_t2'); // the fake drops a handle when it is closed
+    const state = toolWindows.closeTab('tool_kanban_t2');
+    expect(state.active).toBe('tool_kanban');
+    expect(closed.close).toBe(1);
+    expect(handle(env, 'tool_kanban').shows).toEqual([false]); // back on the panel, without focus
+    expect(state.tabs.map((tab) => tab.id)).toEqual(['tool_kanban']);
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT, active: true }]);
+  });
+
+  test('dock works on any detached tab id, not only the selected one (RF-51)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    await toolWindows.newTab('kanban'); // the active tab is now tool_kanban_t2
+    toolWindows.detach('tool_kanban_t2'); // …and the panel falls back to tool_kanban
+    expect(toolWindows.state().active).toBe('tool_kanban');
+    expect(handle(env, 'tool_kanban_t2').chrome).toEqual({ frame: true });
+
+    const state = toolWindows.dock('tool_kanban_t2');
+    expect(state.active).toBe('tool_kanban_t2'); // docking makes it the selected tab
+    expect(state.tabs.map((tab) => tab.id)).toEqual(['tool_kanban', 'tool_kanban_t2']);
+    expect(handle(env, 'tool_kanban_t2').chrome).toEqual({ frame: false });
+    expect(handle(env, 'tool_kanban_t2').position).toEqual([140, 172]);
+    expect(handle(env, 'tool_kanban').hides).toBe(2); // hidden when it opened, hidden again now
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'tool_kanban_t2']);
+  });
+
+  test('a link a tab opens is adopted right after it as an ad-hoc tab (RF-66)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+
+    // S4: the policy event carries the opener, the open event does not.
+    expect(
+      toolWindows.onPopup(
+        popup({ window: 'popup1', opener: 'tool_kanban', url: 'https://docs.example/guide' }),
+      ),
+    ).toBe('window');
+    const popupHandle = env.spawnWindow('popup1');
+    toolWindows.onPopup({
+      kind: 'open',
+      window: 'popup1',
+      action: 'window',
+      url: 'https://docs.example/guide',
+    });
+
+    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban', 'popup1']);
+    expect(toolWindows.state().tabs[1]).toMatchObject({
+      toolId: null,
+      adhoc: true,
+      docked: true,
+      title: 'docs.example',
+      url: 'https://docs.example/guide',
+    });
+    expect(toolWindows.state().active).toBe('popup1');
+    expect(popupHandle.chrome).toEqual({ frame: false });
+    expect(popupHandle.position).toEqual([140, 172]);
+    expect(env.pushed).toContainEqual({ event: 'tab', data: 'popup1' });
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT }]); // never persisted
+  });
+
+  test('an identity popup stays a floating window in docked mode too, and the lock closes it', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+
+    expect(
+      toolWindows.onPopup(
+        popup({ window: 'popup2', opener: 'tool_kanban', url: 'https://idp.example/saml/acs' }),
+      ),
+    ).toBe('window');
+    const popupHandle = env.spawnWindow('popup2');
+    toolWindows.onPopup({
+      kind: 'open',
+      window: 'popup2',
+      action: 'window',
+      url: 'https://idp.example/saml/acs',
+    });
+
+    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban']);
+    expect(popupHandle.chrome).toBeNull(); // never re-chromed: it closes itself (S4)
+    toolWindows.closeAll();
+    expect(popupHandle.close).toBe(1);
+  });
+
+  test('an ad-hoc tab gets no report, no cascade and never an eval (RF-68)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+
+    await toolWindows.openLink('https://docs.example/guide');
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'link_1']);
+    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban', 'link_1']);
+    expect(toolWindows.state().tabs[1]).toMatchObject({ toolId: null, adhoc: true, title: 'docs.example' });
+    expect(toolWindows.state().active).toBe('link_1');
+
+    toolWindows.onNavigate(nav({ window: 'link_1', kind: 'finish', url: 'https://docs.example/guide' }));
+    toolWindows.onReport('link_1', 'filled', 'https://docs.example');
+    await settle();
+    expect(handle(env, 'link_1').evals).toEqual([]);
+    expect(env.calls.credential).toBe(0);
+    expect(env.records.filter((event) => event.type === 'login')).toEqual([]);
+
+    // Its own navigation is still policed — and audited with no tool at all.
+    expect(toolWindows.onNavigate(nav({ window: 'link_1', url: 'javascript:alert(1)' }))).toBe('deny');
+    expect(env.records).toContainEqual({
+      toolId: null,
+      type: 'navigation_blocked',
+      url: null,
+      result: 'denied',
+      detail: 'javascript:',
+    });
+  });
+
+  test('a link the parser refuses opens nothing, and a bare host still opens (RF-66)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+
+    // The same parser the page and the deep link go through: credentials in the address, another
+    // scheme, or an address past 2048 characters never reach a window.
+    await expect(toolWindows.openLink('https://u:p@x.example/')).rejects.toThrow('invalid link');
+    await expect(toolWindows.openLink('ftp://x.example/')).rejects.toThrow('invalid link');
+    await expect(toolWindows.openLink(`https://x.example/${'a'.repeat(2100)}`)).rejects.toThrow(
+      'invalid link',
+    );
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban']);
+    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban']);
+
+    // A pasted bare host is read as https, which is what opens.
+    await toolWindows.openLink('docs.example/guide');
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'link_1']);
+    expect(env.opened[1].options.page).toBe('https://docs.example/guide');
+    expect(toolWindows.state().tabs[1]).toMatchObject({ id: 'link_1', adhoc: true, title: 'docs.example' });
+  });
+
+  test('the page closing the panel hides the docked tab; it comes back with the next slot (RF-49)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+
+    toolWindows.setSlot(null);
+    expect(handle(env, 'tool_kanban').hides).toBe(1);
+    toolWindows.setSlot(SLOT);
+    await settle();
+    expect(handle(env, 'tool_kanban').shows).toEqual([false]);
+  });
+
+  test('main minimized takes the docked tab away; main focused raises it without activating it (S3)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+
+    toolWindows.onWindowState(winState('main', { minimized: true }));
+    expect(handle(env, 'tool_kanban').hides).toBe(1);
+    toolWindows.onWindowState(winState('main'));
+    expect(handle(env, 'tool_kanban').shows).toEqual([false]);
+  });
+
+  test('main hidden with the tray takes the docked tab with it (RF-15)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+
+    env.state.visible = false;
+    toolWindows.onWindowState(winState('main', { focused: false }));
+    await settle();
+    expect(handle(env, 'tool_kanban').hides).toBe(1);
+
+    env.state.visible = true;
+    toolWindows.onWindowState(winState('main'));
+    expect(handle(env, 'tool_kanban').shows).toEqual([false]);
+  });
+
+  test('the docked tab follows main whenever it is shown, focus or not (S2)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows); // no focus event at all: main never took it
+    env.state.main = { x: 300, y: 180, width: 900, height: 600 };
+    vi.advanceTimersByTime(50);
+    await settle();
+    expect(handle(env, 'tool_kanban').position).toEqual([340, 272]); // a WM moved main without focus
+
+    // Minimizing main is what ends the following: nothing docked may show on the slot then.
+    env.state.minimized = true;
+    toolWindows.onWindowState(winState('main', { focused: false, minimized: true }));
+    env.state.main = { x: 500, y: 180, width: 900, height: 600 };
+    vi.advanceTimersByTime(200);
+    await settle();
+    expect(handle(env, 'tool_kanban').position).toEqual([340, 272]);
+  });
+
+  test('restore reopens the tabs in order, docked/detached and active as saved (T6)', async () => {
+    const env = dockedEnvironment();
+    env.store.set('open_tools', [
+      { toolId: 'kanban', active: true },
+      { toolId: 'mail', detached: true },
+    ]);
+    const toolWindows = makeToolWindows(env);
+    expect(toolWindows.setSlot(SLOT)).toBe(true);
+    await settle();
+    await toolWindows.restore();
+
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'tool_mail']);
+    expect(env.opened[0].options).toMatchObject({ x: 140, y: 172, size: '500x340', chrome: { frame: false } });
+    expect(env.opened[1].options).toMatchObject({ x: 168, y: 200, size: '500x340' });
+    expect(env.opened[1].options.chrome).toBeUndefined();
+    const tabs = toolWindows.state().tabs;
+    expect(tabs.map((tab) => tab.id)).toEqual(['tool_kanban', 'tool_mail']);
+    expect(tabs.map((tab) => tab.docked)).toEqual([true, false]);
+    expect(toolWindows.state().active).toBe('tool_kanban');
+    // An old item without `url` restores the tool's own address, and the list is written back whole.
+    expect(openTools(env)).toEqual([
+      { toolId: 'kanban', url: ENTRY_AUDIT, active: true },
+      { toolId: 'mail', url: 'https://mail.example/web', detached: true },
+    ]);
+  });
+
+  test('switching to Windows reframes every docked tab and keeps every page alive (RF-52)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    await toolWindows.newTab('kanban');
+
+    const state = await toolWindows.setMode('windows');
+    expect(state.mode).toBe('windows');
+    expect(state.active).toBeNull();
+    expect(state.tabHotkeys).toBe(false);
+    expect(env.store.get('window_mode')).toBe('windows');
+    expect(handle(env, 'tool_kanban').chrome).toEqual({ frame: true });
+    expect(handle(env, 'tool_kanban_t2').chrome).toEqual({ frame: true });
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'tool_kanban_t2']);
+    expect(handle(env, 'tool_kanban').close).toBe(0);
+    expect(state.tabs.every((tab) => !tab.docked)).toBe(true);
+    expect(openTools(env)).toEqual([
+      { toolId: 'kanban', url: ENTRY_AUDIT },
+      { toolId: 'kanban', url: ENTRY_AUDIT },
+    ]);
+  });
+
+  test('docked is refused where the runtime cannot position windows (RF-49)', async () => {
+    const env = dockedEnvironment();
+    env.state.canPosition = false;
+    const toolWindows = makeToolWindows(env);
+    await toolWindows.open('kanban');
+    expect(toolWindows.state()).toMatchObject({ mode: 'windows', dockable: false, tabHotkeys: false });
+    expect(handle(env, 'tool_kanban').chrome).toBeNull();
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT }]);
+  });
+
+  test('the docked mode registers the tab shortcuts globally, and the strip state says so (E03)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    toolWindows.onWindowState(winState('main'));
+
+    expect(env.registered.map((entry) => entry.id)).toEqual([
+      'digit-1', 'digit-2', 'digit-3', 'digit-4', 'digit-5', 'digit-6', 'digit-7', 'digit-8', 'digit-9',
+      'palette',
+      'tab-new', 'tab-close', 'tab-detach', 'tab-next', 'tab-prev', 'open-link', 'tab-save',
+    ]);
+    const comboOf = (id: string) => env.registered.find((entry) => entry.id === id)?.combo;
+    expect(comboOf('tab-new')).toBe('cmd+t');
+    expect(comboOf('tab-close')).toBe('cmd+w');
+    expect(comboOf('tab-detach')).toBe('cmd+shift+d');
+    expect(comboOf('tab-next')).toBe('ctrl+tab');
+    expect(comboOf('tab-prev')).toBe('ctrl+shift+tab');
+    expect(comboOf('open-link')).toBe('cmd+l');
+    expect(comboOf('tab-save')).toBe('cmd+d');
+    expect(toolWindows.state().tabHotkeys).toBe(true);
+
+    // The day-one set is untouched; leaving docked mode releases the tab ones again.
+    await toolWindows.setMode('windows');
+    expect(env.unregistered).toEqual([
+      'tab-new', 'tab-close', 'tab-detach', 'tab-next', 'tab-prev', 'open-link', 'tab-save',
+    ]);
+    expect(toolWindows.state().tabHotkeys).toBe(false);
+  });
+
+  test('⌘T acts on the active tab tool, ⌘W on the active tab, ⌘L asks the page for a link', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    // The tab hotkeys exist while a Nod window is focused; with main in front the target is the tab
+    // on the slot (E03).
+    toolWindows.onWindowState(winState('main'));
+
+    toolWindows.onHotkey('tab-new');
+    await settle();
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'tool_kanban_t2']);
+    expect(env.pushed).toContainEqual({ event: 'tab', data: 'tool_kanban_t2' });
+
+    toolWindows.onHotkey('tab-close');
+    await settle();
+    expect(env.handles.has('tool_kanban_t2')).toBe(false);
+    expect(env.pushed).toContainEqual({ event: 'tab', data: 'tool_kanban' });
+
+    toolWindows.onHotkey('open-link');
+    expect(env.pushed).toContainEqual({ event: 'openLink', data: null });
+    expect(handle(env, 'main').shows.length).toBe(1);
+  });
+
+  test('⌘D asks the backend side to save the active tab, with the address the page has (RF-67)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    await toolWindows.openLink('https://docs.example/guide?q=1#top');
+    toolWindows.onWindowState(winState('main')); // the ⌘D target is resolved from the focus (E03)
+
+    toolWindows.onHotkey('tab-save');
+    await settle();
+    expect(env.calls.saveTab).toEqual(['link_1']);
+    expect(handle(env, 'main').shows.length).toBe(1);
+    expect(toolWindows.tabForSave('link_1')).toEqual({
+      id: 'link_1',
+      toolId: null,
+      url: 'https://docs.example/guide?q=1#top',
+    });
+    expect(toolWindows.tabForSave('nope')).toBeNull();
+  });
+
+  test('a tab that became a personal tool is a tool tab of it from then on, same window (RF-67)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    await toolWindows.openLink('https://docs.example/guide');
+    env.state.entries = [
+      KANBAN,
+      { ...KANBAN, id: 'p-docs', title: 'Docs', url: 'https://docs.example/guide', scope: 'personal', ownerId: 'p1', views: [] },
+    ];
+
+    const state = toolWindows.adoptSavedTab('link_1', 'p-docs');
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'link_1']); // no reopen
+    expect(state.tabs[1]).toMatchObject({ id: 'link_1', toolId: 'p-docs', adhoc: false, title: 'Docs' });
+    // It is a personal tool's window now, so it carries the warning of a link that is not the org's
+    // (canonico §22) — and nothing else is ever evaluated in it.
+    expect(handle(env, 'link_1').evals).toHaveLength(1);
+    expect(handle(env, 'link_1').evals[0]).toContain('nod-not-from-org');
+    expect(openTools(env)).toEqual([
+      { toolId: 'kanban', url: ENTRY_AUDIT },
+      { toolId: 'p-docs', url: 'https://docs.example/guide', active: true },
+    ]);
+  });
+
+  test('windows mode: a hand-opened link is a framed window of its own (RF-66)', async () => {
+    const env = fakeEnvironment();
+    const toolWindows = makeToolWindows(env);
+    // The stored mode is read once at creation; `state()` is synchronous, so the answer of the
+    // store has to land before the mode is the one this fixture pins.
+    await settle();
+    expect(toolWindows.state()).toMatchObject({ mode: 'windows', active: null, tabHotkeys: false });
+
+    await toolWindows.openLink('https://docs.example/guide');
+    expect(env.opened).toEqual([
+      {
+        id: 'link_1',
+        options: { page: 'https://docs.example/guide', title: 'docs.example', x: 128, y: 108, size: '1280x800' },
+      },
+    ]);
+    expect(toolWindows.state().tabs[0]).toMatchObject({
+      id: 'link_1',
+      toolId: null,
+      adhoc: true,
+      docked: false,
+      title: 'docs.example',
+    });
+    expect(openTools(env)).toEqual([]); // an ad-hoc tab is never persisted
+  });
+
+  test('windows mode never re-chromes a tab and never opens a second window (RF-19, RF-52)', async () => {
+    const env = fakeEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await toolWindows.open('kanban');
+    await toolWindows.open('kanban');
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban']);
+    expect(handle(env, 'tool_kanban').shows.length).toBe(1);
+    expect(handle(env, 'tool_kanban').chrome).toBeNull();
+    expect(toolWindows.state().tabs).toEqual([
+      {
+        id: 'tool_kanban',
+        toolId: 'kanban',
+        title: 'Kanban',
+        url: ENTRY_AUDIT,
+        docked: false,
+        adhoc: false,
+        loading: true,
+        error: null,
+      },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------- the E03 review findings
+
+describe('tabs — hotkey target, relay and the unlock guards (E03 review)', () => {
+  test('⌘W closes the tab window the person is in, not the hidden one on the slot', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    await toolWindows.newTab('kanban'); // tool_kanban_t2, docked and active
+    toolWindows.detach('tool_kanban_t2'); // it leaves the panel: the slot falls back to tool_kanban
+    toolWindows.onWindowState(winState('tool_kanban_t2')); // …and the person is in that window
+    expect(toolWindows.state().active).toBe('tool_kanban');
+
+    toolWindows.onHotkey('tab-close');
+    await settle();
+    expect(env.handles.has('tool_kanban_t2')).toBe(false); // the focused window went away
+    expect(env.handles.has('tool_kanban')).toBe(true); // the hidden one is untouched
+    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban']);
+  });
+
+  test('⌘⇧D follows the focus: it detaches the tab in hand and docks it back (RF-51)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    toolWindows.onWindowState(winState('tool_kanban')); // the docked tab window has the focus
+
+    toolWindows.onHotkey('tab-detach');
+    expect(toolWindows.state().tabs[0].docked).toBe(false);
+    expect(handle(env, 'tool_kanban').chrome).toEqual({ frame: true });
+
+    toolWindows.onHotkey('tab-detach'); // the other half of the palette's toggle
+    expect(toolWindows.state().tabs[0].docked).toBe(true);
+    expect(toolWindows.state().active).toBe('tool_kanban');
+    expect(handle(env, 'tool_kanban').chrome).toEqual({ frame: false });
+    expect(env.opened.length).toBe(1); // the same window, never reopened
+  });
+
+  test('a tab hotkey with no Nod window in front has no target at all', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    toolWindows.onWindowState(winState('tool_kanban')); // focus, then it goes away
+    toolWindows.onWindowState(winState('tool_kanban', { focused: false }));
+
+    toolWindows.onHotkey('tab-close');
+    toolWindows.onHotkey('tab-detach');
+    await settle();
+    expect(env.handles.has('tool_kanban')).toBe(true);
+    expect(toolWindows.state().tabs[0].docked).toBe(true);
+    expect(env.calls.saveTab).toEqual([]);
+  });
+
+  test('⌃Tab steps from the last selected tab, so a detached one is not a trap', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows); // tool_kanban: docked and active
+    await toolWindows.newTab('kanban'); // tool_kanban_t2
+    await toolWindows.newTab('kanban'); // tool_kanban_t3: docked and active
+    toolWindows.detach('tool_kanban_t2'); // it leaves the panel…
+    toolWindows.activate('tool_kanban_t2'); // …and comes forward: now it is the last used tab
+    expect(toolWindows.state().active).toBe('tool_kanban_t3'); // the slot still shows t3
+
+    const showsBefore = handle(env, 'tool_kanban_t2').shows.length;
+    const state = toolWindows.next(1);
+    // The tab after t2 is t3; stepping from the slot would wrap around to tool_kanban instead.
+    expect(state.active).toBe('tool_kanban_t3');
+    expect(handle(env, 'tool_kanban_t2').shows.length).toBe(showsBefore); // never selected again
+  });
+
+  test('saving a tool tab keeps it the tab of its own tool (RF-67)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    env.state.entries = [
+      KANBAN,
+      { ...KANBAN, id: 'p-docs', title: 'Docs', url: 'https://docs.example/guide', scope: 'personal', ownerId: 'p1', views: [] },
+    ];
+
+    const state = toolWindows.adoptSavedTab('tool_kanban', 'p-docs');
+    expect(state.tabs[0]).toMatchObject({ id: 'tool_kanban', toolId: 'kanban', adhoc: false });
+    expect(state.tools.find((status) => status.id === 'kanban')?.openWindows).toBe(1);
+    expect(state.tools.find((status) => status.id === 'p-docs')?.openWindows).toBe(0);
+    expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT, active: true }]);
+  });
+
+  test('the lock clears the slot, so the restored tabs do not cover Home', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    toolWindows.closeAll();
+
+    await toolWindows.restore(); // the tabs come back, the panel does not know where it is
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'tool_kanban']);
+    expect(handle(env, 'tool_kanban').hides).toBe(1); // hidden: Home is not covered
+    expect(handle(env, 'tool_kanban').shows).toEqual([]);
+
+    toolWindows.setSlot(SLOT); // the page mounts the tab view and reports the panel
+    await settle();
+    expect(handle(env, 'tool_kanban').shows).toEqual([false]);
+  });
+
+  test('restore and a click racing for the same tool open its window once', async () => {
+    const env = dockedEnvironment();
+    env.store.set('open_tools', [{ toolId: 'kanban', active: true }]);
+    const toolWindows = makeToolWindows(env);
+
+    // `restore` awaits the store and the geometry; a ⌘1 (or a click on the sidebar) reaches the
+    // same tool while it is in flight. The id is claimed before the first await.
+    const restoring = toolWindows.restore();
+    await toolWindows.open('kanban');
+    await restoring;
+    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban']);
+    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban']);
   });
 });

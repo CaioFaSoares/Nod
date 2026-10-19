@@ -1,0 +1,120 @@
+# Slice E03 — the docked-tabs smoke (`test/smoke/tabs.ts`)
+
+Release 0.6.0, requirement set RF-49…RF-52 and RF-66…RF-68 (`docs/canonico.md` §14), epic
+`docs/epics/E03-docked-tabs.md`, implementation contract `local://e03-design.md`. Proof:
+`bun test/smoke/tabs.ts --force` on this machine (macOS 27.0.0, arm64, tinyjs 0.57.2).
+
+Everything below is `execucao` (`leitura` where said). The run quoted in §2 is the last one: **17
+steps, 4 blocked by the session, verdict `ok`, 10.1 s** (`app id copland.nod.smoke-tabs`, local
+account `tabs@nod.test`).
+
+## 1. What is under test, and how it is measured
+
+| Piece | What it is |
+| --- | --- |
+| `test/smoke/tabs.ts` | runner: refuses while `resources/seed.json` exists (`--force` moves it to `test/smoke/.gerado/seed.json.bak` and restores it), one `tinyjs dev` launch under the throwaway app id, a free dev port, a generated page (`src/app.ts` + the driver), a loopback desk, and the WM/window-server readings. Steps are printed as they land, and each carries `ok`/`FAILED`/`blocked` |
+| `test/smoke/tabs-driver.ts` | the checks, on the real page: a **local** account (`session.createAccount`, no host), sidebar and strip clicks, the Open link dialog, the Account Window-mode card, the lock + Offline-tile unlock |
+| `test/smoke/tools.ts` (`startTabTools`) | three reporting tool pages on three origins: each writes a random draft on load, reports `performance.timeOrigin`, its page box and what the Nod API answered it, and polls its own server for one-shot commands (`report`, `open <url>`, `api <method>`) |
+| `test/smoke/winlist.swift` | compiled on demand into `.gerado/winlist`: `CGWindowListCopyWindowInfo` — every window's real frame and title, the session's lock state, the frontmost app |
+
+Geometry, all of it measured here, decides how a tab is checked:
+
+| Fact | Consequence |
+| --- | --- |
+| `window.screenX/screenY` are `0,1490` and `window.outerWidth/outerHeight` are `0x0` in the window that loads `src/app.ts` | a page cannot report where its own window is (`backend/tiny.d.ts`, `TinyWinState.outer`, says the same of the outer box) |
+| a tool page's `tiny.win.getState()` throws `"win.getState" is disabled by tinyjs.json "api"` (`scripts/gen-config.ts` grants a tool origin only `login.report`/`media.*`) | the tool page brings its **page box**, its `timeOrigin` and its draft — not its frame |
+| the slot's screen rect comes from the main page (`tiny.win.getState()` + the slot's `getBoundingClientRect()`, the `slotToScreen` of `shared/tabs.ts`); the real frame comes from `CGWindowList` | the two halves are the backend's own aim and the screen's own truth, not the same reading twice |
+| the window server's units are not this app's points: main `597,207 1100x752` pt is `652,260 990x678` (`scale 0.9000`, offset `115,74`) | the map is read at every measurement from main itself (its real frame against its own `getState()`) and applied to the tool window: a frameless docked tab comes out with a `0 pt` frame, a detached one with `33 pt` |
+| this machine's screen was **locked** for every run here (`CGWindowList` → `CGSSessionScreenIsLocked: true`, frontmost `loginwindow`), so the page is `visibilityState hidden` | `src/tabs.ts` `currentRect()` reports the empty slot by design; every step whose subject needs the slot is reported **blocked** with its numbers, never as a pass |
+| OmniWM sees **none** of this run's windows (`omniwmctl query windows`, matched by pid: 0 of 24) | the "float the windows the tiler would re-tile" step is a no-op here, and the geometry is not the WM's doing |
+
+## 2. The unlocked run (OmniWM active, 17 steps, 0 blocked, `ok`, 25.2 s)
+
+Run under the owner at the machine, `winlist` reading `screenLocked: false`, frontmost `Notion`:
+OmniWM tiles the app's windows, the smoke floats **its own** (`omniwmctl window focus` +
+`command toggle-focused-window-floating`; the log shows `"Nod" floating` and `"Tool A" floating`), and
+every geometry step passed with real numbers:
+
+| Step | Result | Numbers |
+| --- | --- | --- |
+| RF-52 default mode | ok | `mode=docked dockable=true tabs=0`; main `1160,90 1102x1303` pt = server `1160,90 1102x1303` → scale `1.0000` offset `0,0` (this display's spaces coincide; the earlier display's did not) |
+| RF-49 sidebar click opens one docked tab | ok | `tool_tool-a` docked+active, slot `1034x1181`, page loaded at `1102x1303` in 947 ms |
+| **RF-49 the docked tab lands on the slot** | **ok** | page `1034x1181` on the slot `150,171 1034x1181`; `CGWindowList`: **1** tool window `1034x1181@150,171 = 150,171 1034x1181` pt, settled in **462 ms** |
+| **RF-49 the docked tab follows a resize** | **ok** | main `1102x1271 → 942x1131`: followed in **406 ms** to `150,171 874x1041` (real frame = the slot); back in **534 ms** to `1034x1181` |
+| RF-50 + opens a second tab | ok | `tool_tool-a, tool_tool-a_t2`; own page `…179660`/`draft-9w83g4` ≠ tab 1's `…174256`/`draft-03fg98` |
+| **RF-50 the second tab takes the slot** | **ok** | page `1034x1181` on the slot `150,171 1034x1181`; 1 real tool window, settled in **434 ms** |
+| RF-50 switching tabs keeps the draft | ok | 1→2→1, same `timeOrigin`+draft, **1 load** |
+| RF-51 detach brings the frame back | ok | frame **0 → 122 pt** (the tiler had sized the window to main's tile before the float, so it kept its rect; the frame is what the detach adds), 1 load |
+| **RF-51 the strip docks it back** | **ok** | docked back onto `150,171 1034x1181`: page `1034x1181` on the slot, 1 real tool window (settled 489 ms), same `timeOrigin`+draft, 1 load |
+| RF-66 popup becomes a tab beside its opener | ok | `popup1` right after `tool_tool-a`; **it took the slot in 127 ms** |
+| RF-66 Open link… by hand | ok | `link_1` after the active tab, `link_2` after it (1.1 s, two dialog round trips) |
+| RF-68 ad-hoc tab gets no API | ok (same run) | tool tab → `ok`; `popup1` → `login.report only comes from a tool window`; `link_1` → `"login.report" is disabled by tinyjs.json "api"` |
+| RF-67 save a known origin (view) | ok | view `doc` of `tool-b` (`mode: window`), the tab stays ad-hoc |
+| RF-67 save a new origin (tool) | ok | personal tool (`p-…`) with the probed title `Tool C`, sidebar `2 → 3` rows, the tab became its tool tab without reloading |
+| RF-52 Windows mode | ok | `mode=windows active=null`, the 5 tabs left the panel, toolbox window `1280x800` with a 33 pt frame |
+| RF-19 second open | ok | same window, 1 load, same `timeOrigin` |
+| T6 lock + unlock | ok | `tool_tool-a, tool_p-…, tool_tool-a_t2, tool_tool-b` reopened in order; the 2 ad-hoc tabs did not come back |
+
+## 3. The run tally (unlocked screen, current files, 2026-10-19)
+
+| Run | Verdict | Detail |
+| --- | --- | --- |
+| 1 | **ok**, 17 steps, 0 blocked, 25.2 s | every step above; RF-67 "new origin" passed |
+| 2 | 9 steps ok, then **failed at "RF-51 the strip docks it back"** | after the reseat the real frame read `150,142` against the slot `150,171` — **29 pt**, the height of a title bar — and the window list carried a duplicate `"Tool A"` at `x=-1022` while `main` was missing from it (so the points↔server map fell back to identity). **Cause not established.** Hypotheses: a stale or mid-animation window-list entry read through the identity map; or a dock-back whose window still carried its frame when it was placed (a backend bug in `dock`). Neither was proven; 1 occurrence in 8 unlocked runs |
+| 3 | ok through "RF-49 the docked tab lands on the slot" (settled 789 ms), then failed | the captured tail is truncated, so the failing step and its cause are unknown; the landing itself passed with the real frame on the slot |
+| 4–8 | **ok** ×5, 17 steps each, 0 blocked, 20.5–24.5 s | run by the orchestrator with `bun test/smoke/tabs.ts --force` after the settle poll landed; no step failed, no `tinyjs` process left behind, `resources/seed.json` restored after each |
+
+Total: 6 of 8 unlocked runs passed all 17 steps; run 2's cause was not established and run 3's was
+not captured.
+
+RF-67 "new origin" passed in every run since the driver's syntax error was fixed (run 1 and the two
+earlier locked-screen runs of §4); the one failure before that is not reproducible.
+
+The `CGWindowList` list is the flaky part of the measurement: macOS animates a window out (a hidden
+docked tab shrinks away) and keeps recently ordered-out windows in the list for a moment. Observed by
+execução: before the settle poll, two orchestrator runs failed at "the second tab takes the slot"
+with a second `"Tool A"` at the slot rect inset by 12 pt per side, and only one window left at the
+end of each run. `measure()` therefore polls the list until it is **identical for 300 ms** (budget
+2 s) and prints the settle time in every step (`settled in 462 ms`, `… 434 ms`, `… 489 ms`); a list
+that never settles fails the step with its numbers. Whether this explains run 2's failure is not
+known.
+
+## 3b. For the record: the locked regime (4 steps blocked, never passed)
+
+Every run before the owner unlocked the screen had `winlist` read `screenLocked: true` (frontmost
+`loginwindow`), so the page was `visibilityState hidden` and `src/tabs.ts` reported the empty slot —
+by design ("no docked tab while the page is hidden"). Those runs reported **blocked** with their
+numbers, never a pass:
+
+| Step | Numbers measured then |
+| --- | --- |
+| RF-49 the docked tab lands on the slot | slot box `665,329 1032x630`, page `1280x800`, real frame `625,236 1281x800` (the cascade, `main+28`) |
+| RF-49 the docked tab follows a resize | `1100x720 → 940x580`, nothing followed (slot `872x490`, page `1280x800`) |
+| RF-50 the second tab takes the slot | same reason, same numbers |
+| RF-51 the strip docks it back | docked+active again, same `timeOrigin`/draft/1 load; the snap was not observable |
+
+## 4. Product fix found by this smoke
+
+`src/style.css` (3 lines): an empty `.notice-slot`/`.banner` is `display: none` (`:empty`), and a
+hidden element is no grid item — so in `.main`'s `grid-template-rows: auto auto minmax(0,1fr)` the
+content auto-placed into the **first** row and shrank to its own height. Measured in the running app
+before the fix: `.content 1032x46`, computed rows `46px 0px 674px`, `.tab-slot 1022x0`. The tab view
+is `position: absolute; inset: 0` inside `.content` (RF-49), so the slot was 0 px tall,
+`currentRect()` returned null and the backend never placed a docked tab (the tool window stayed at
+the cascade `1280x800`). After the fix: `.content 1032x720`, rows `0px 0px 720px`, `.tab-slot
+1032x630`, and the smoke's RF-49 steps reach the slot question. Fix: `grid-row` 1/2/3 on
+`.notice-slot`/`.banner`/`.content`.
+
+No other product bug was found: the strip and its order, the tab ids, `tabs.new`, the frame toggle
+(detach and dock), the ad-hoc API gate, `tabs.save` in both branches, the mode switch and the
+restore all behaved as the contract says.
+
+## 5. Not covered
+
+- a run where the `CGWindowList` list never settles: that is the flaky part of the measurement, and
+  §3 records what it looked like (run 2's 29 pt reading and the duplicate window entry);
+- `nod://open?url=` (RF-66's deep link) — the palette path and the Open-link dialog are the ones the
+  smoke drives, and the deep link enters `tabs.openLink` in `backend/main.ts` (`leitura`);
+- a `window` view's own tab, `navigate` views, and the identity-provider popup policy (S4) — outside
+  this smoke's scope;
+- Windows and Linux: not run (no machine), as in the spikes.

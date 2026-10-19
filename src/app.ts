@@ -9,7 +9,9 @@ import { call, errorMessage, on } from './api';
 import { mountEntry, resetEntry, showEntryInvite } from './entry';
 import { openPalette } from './palette';
 import { mountSettings } from './settings';
-import { button, clear, el, field, initials, input, message } from './ui';
+import { activeTab, mountTabs, reportSlot, tabsApi } from './tabs';
+import type { TabsApi, TabsHandle } from './tabs';
+import { button, clear, el, field, glyph, initials, input, message } from './ui';
 import type { SettingsTab } from './settings';
 import type {
   AppInfo,
@@ -19,7 +21,9 @@ import type {
   Id,
   JoinInvite,
   LoginResult,
+  SaveTabResult,
   SessionState,
+  TabState,
   ToolStatus,
   ToolsState,
   UpdateInfo,
@@ -27,8 +31,11 @@ import type {
 import { categoryOf, groupByCategory } from '../shared/catalog';
 import type { PresenceEntry } from '../shared/host-api';
 
-/** What the right side shows: Home or one Settings tab. */
-type View = 'home' | SettingsTab;
+/**
+ * What the right side of the window shows: Home, the tab view of docked mode (RF-49) or one
+ * Settings tab.
+ */
+type View = 'home' | 'tab' | SettingsTab;
 
 /** English text of each cascade result (canonico §8, §11). */
 const LOGIN_TEXT: Record<LoginResult, string> = {
@@ -70,6 +77,12 @@ let session: SessionState | null = null;
 let info: AppInfo | null = null;
 /** Answer of `tools.state` or the push `tools`. */
 let tools: ToolStatus[] = [];
+/**
+ * E03: the whole answer of `tools.state`/`tools`/`tabs.*` — the tabs in strip order, the active
+ * one, the mode and whether the backend owns the tab shortcuts (RF-49…RF-52). `null` before the
+ * first answer and after a lock.
+ */
+let tabsState: ToolsState | null = null;
 /** Answer of `catalog.list` or a refresh triggered by the push `catalog`. */
 let catalog: Entry[] = [];
 /**
@@ -98,15 +111,10 @@ let view: View = 'home';
 let shell: Shell | null = null;
 let settings: SettingsHandle | null = null;
 let settingsTab: SettingsTab | null = null;
+/** E03: the tab view of the center panel, mounted while docked mode shows it (`src/tabs.ts`). */
+let tabView: TabsHandle | null = null;
 
 // ------------------------------------------------------------------ helpers
-
-/** Tool icon: the data URI from the backend, or the first two letters of the title. */
-function glyph(title: string, icon: string | null): HTMLElement {
-  if (icon !== null) return el('img', { class: 'glyph-img', attrs: { src: icon, alt: '' } });
-  const initials = title.trim().slice(0, 2).toUpperCase();
-  return el('span', { class: 'chip' }, initials === '' ? '?' : initials);
-}
 
 /** Entry icon: the tool window state carries a data URI; a seed path is not readable by the page. */
 function entryIcon(entry: Entry, tool: ToolStatus | null): string | null {
@@ -190,8 +198,12 @@ function buildShell(): void {
 
 function teardownShell(): void {
   destroySettings();
-  // B7: the dialog is an overlay of the main window, so it goes with the shell (a lock).
+  // E03: the tab view goes with the panel (a lock), reporting the empty slot on its way out.
+  destroyTabView();
+  // B7: the dialog is an overlay of the main window, so it goes with the shell (a lock). E03: the
+  // "Open link…" dialog is the same kind of overlay and goes with it too.
   document.getElementById(PERSONAL_DIALOG_ID)?.remove();
+  document.getElementById(OPEN_LINK_DIALOG_ID)?.remove();
   shell = null;
 }
 
@@ -309,11 +321,18 @@ function sidebarTool(tool: ToolStatus): HTMLButtonElement {
   const foreign = catalog.find((entry) => entry.id === tool.id)?.scope === 'personal';
   if (foreign) classes.push('personal');
   if (favorites.includes(tool.id)) classes.push('favorite');
+  // E03 (RF-49): the tool whose tab is on the center panel — the strip's active tab, on the rail.
+  const onPanel = tabOnPanel();
+  const current = onPanel !== null && onPanel.toolId === tool.id;
+  if (current) classes.push('current');
 
   const login = tool.login === null ? null : LOGIN_TEXT[tool.login];
   const tip = login === null ? tool.title : `${tool.title} — ${login}`;
-  const base = foreign ? `Not from your org — ${tip}` : tip;
-  const label = tool.error === null ? base : `${tool.title} — failed: ${tool.error}`;
+  // The tool of the tab on the panel says so: the rail's ring is not there for a reader that does
+  // not see it.
+  const panel = current ? ' — on the panel' : '';
+  const base = `${foreign ? `Not from your org — ${tip}` : tip}${panel}`;
+  const label = tool.error === null ? base : `${tool.title} — failed: ${tool.error}${panel}`;
   const node = el(
     'button',
     {
@@ -365,10 +384,20 @@ function destroySettings(): void {
   settingsTab = null;
 }
 
+/**
+ * The center panel draws the face `view` asks for: Home, the tab view of docked mode (E03/RF-49) or
+ * one Settings tab. The Settings screen is mounted once and updated in place afterwards.
+ */
 function renderContent(): void {
   if (shell === null || session === null || info === null) return;
+  if (view === 'tab') {
+    destroySettings();
+    renderTabView();
+    return;
+  }
   if (view === 'home') {
     destroySettings();
+    // E03: `renderHome` takes the tab view with it, whoever asked for Home (RF-49).
     renderHome(shell.content);
     return;
   }
@@ -377,10 +406,42 @@ function renderContent(): void {
     return;
   }
   destroySettings();
+  // E03 (RF-49): Settings takes the panel, so the tab view goes with its slot and its observers.
+  destroyTabView();
   const container = el('div', { class: 'settings-view' });
   shell.content.replaceChildren(container);
   settingsTab = view;
   settings = mountSettings(container, { session, info, tab: view, host, join: joinInvite });
+}
+
+/**
+ * E03 (RF-49/RF-50): the center panel in docked mode — the strip, the toolbar and the slot the
+ * backend lays the active tab on. It is mounted once and updated in place: a `tools` push redraws
+ * the strip without tearing the slot down, so the docked window is not re-placed for every change
+ * of state.
+ */
+function renderTabView(): void {
+  const state = tabsState;
+  if (shell === null || state === null) return;
+  if (tabView !== null) {
+    tabView.update(state);
+    return;
+  }
+  const container = el('div', { class: 'tab-view' });
+  shell.content.replaceChildren(container);
+  tabView = mountTabs(container, {
+    state,
+    actions: tabActions,
+    // RF-66: the dialog of `openLinkDialog`, beside the personal-tool one.
+    openLink: () => openLinkDialog(),
+  });
+}
+
+/** E03: the panel left the tab view — the observers stop and the backend is told there is no slot. */
+function destroyTabView(): void {
+  if (tabView === null) return;
+  tabView.destroy();
+  tabView = null;
 }
 
 /** canonico §22, B7: a tool the org did not add — a personal tool, or an entry marked personal. */
@@ -390,6 +451,12 @@ function isForeign(entry: Entry): boolean {
 
 function renderHome(content: HTMLElement): void {
   if (session === null) return;
+  // E03 (RF-49): Home is not the tab view, and this is where Home is drawn from every path —
+  // `renderContent`, `refreshChrome` (which draws Home directly so a mounted Settings screen is
+  // left alone) and `loadPresence`. A tab view left mounted would keep its observers on a slot no
+  // longer in the document and would go on reporting a rect the backend places a window on, over
+  // Home. `destroyTabView` is idempotent, so the second call of a path costs nothing.
+  destroyTabView();
   const body = el('div', { class: 'home' });
   if (catalog.length === 0) {
     body.append(
@@ -736,28 +803,38 @@ function toolCard(entry: Entry): HTMLElement {
       }),
     );
   }
-  card.append(actions);
-
+  // The views (deep links) are one select in the action row instead of a button each, so a tool
+  // with several views never wraps the card onto more lines. Picking one opens it and the select
+  // goes back to its placeholder, ready for the next pick.
   if (entry.views.length > 0) {
-    const views = el('div', { class: 'row tool-views' });
+    const views = el(
+      'select',
+      { class: 'input tool-views', attrs: { name: `views-${entry.id}`, 'aria-label': `${entry.title} views` } },
+      el('option', { attrs: { value: '' } }, 'Views…'),
+    );
     entry.views.forEach((entryView, index) => {
-      views.append(
-        button(entryView.label, () => runTools(() => call('tools.openView', { toolId: entry.id, index })), {
-          kind: 'ghost',
-          title: `${entry.title} › ${entryView.label}`,
-        }),
-      );
+      views.append(el('option', { attrs: { value: String(index), title: `${entry.title} › ${entryView.label}` } }, entryView.label));
     });
-    card.append(views);
+    views.addEventListener('change', () => {
+      const picked = views.value;
+      views.value = '';
+      if (picked === '') return;
+      runTools(() => call('tools.openView', { toolId: entry.id, index: Number(picked) }));
+    });
+    actions.append(views);
   }
+  card.append(actions);
   return card;
 }
 
-/** Everything around the content that reads the session and the host: sidebar, Home, notices. */
+/** Everything around the content that reads the session and the host: sidebar, the panel, notices. */
 function refreshChrome(): void {
   if (shell === null) return;
   renderSidebar();
+  // E03: the panel follows the view — Home's cards, or the tab view of docked mode, which
+  // `renderContent` mounts once and updates in place from here on.
   if (view === 'home') renderHome(shell.content);
+  else if (view === 'tab') renderContent();
   // The offline-session and O2 banners read `host`, which a fresh unlock has just answered — the
   // boot's own render ran before it (`renderNotices` is idempotent).
   renderNotices();
@@ -954,12 +1031,176 @@ async function runTools(action: () => Promise<ToolsState>): Promise<void> {
     showBanner(e);
     return;
   }
-  tools = state.tools;
-  refreshChrome();
+  applyToolsState(state);
 }
 
 async function openTool(id: Id): Promise<void> {
   await runTools(() => call('tools.open', { id }));
+}
+
+// ------------------------------------------------------------------ tabs (E03)
+
+/** E03: the page's `tabs.*` actions — one definition for the strip, the palette and the keyboard. */
+const tabActions: TabsApi = tabsApi({
+  run: (action) => {
+    void runTools(action);
+  },
+  save: (id) => {
+    void saveTab(id);
+  },
+});
+
+/**
+ * E03 (RF-49): the tab the backend shows on the slot — what the strip's toolbar, the palette rows
+ * and the shortcuts act on. `null` in Windows mode, and while every tab is detached.
+ */
+function tabOnPanel(): TabState | null {
+  return tabsState === null ? null : activeTab(tabsState);
+}
+
+/**
+ * E03 (RF-49/RF-52): one `tools.state`/`tools`/`tabs.*` answer lands here. The center panel has two
+ * faces, Home and the tab view, and Windows mode has only the first: a tab view left behind by a
+ * mode that moved to Windows, or by the last tab closing, would be a strip with nothing under it.
+ */
+function applyTools(state: ToolsState): void {
+  tabsState = state;
+  tools = state.tools;
+  if (view !== 'tab') return;
+  if (state.mode !== 'docked' || state.tabs.length === 0) view = 'home';
+}
+
+/**
+ * E03 (RF-49): the panel follows the answer of a tools or tabs call — it is the tab view while the
+ * mode is docked and there is anything to show there: the tab on the slot, or, with every tab
+ * detached, the strip whose ⤓ (and the palette's "Dock tab") brings one back onto the panel
+ * (RF-51). Only an empty strip would be worse than Home, and Windows mode has no tab view at all
+ * (RF-52).
+ */
+function showActiveTab(state: ToolsState): void {
+  if (state.mode !== 'docked') return;
+  if (state.active === null && state.tabs.length === 0) return;
+  view = 'tab';
+}
+
+/**
+ * E03: the answer of a tools or tabs call lands in the page and the window follows it — the tab view
+ * takes (or keeps) the center panel, which is how a sidebar row, a Home card, a digit and a palette
+ * row all end up on the same tab the backend answered with.
+ */
+function applyToolsState(state: ToolsState): void {
+  applyTools(state);
+  showActiveTab(state);
+  refreshChrome();
+}
+
+/** E03 (RF-52): a view opens through the app too, so a `window` view lands as a tab of its own. */
+async function openToolView(toolId: Id, index: number): Promise<void> {
+  await runTools(() => call('tools.openView', { toolId, index }));
+}
+
+/**
+ * E03 (RF-67): "Save to sidebar" — the tab's address becomes a personal view when its origin is
+ * already a tool, or a personal tool with the probed title and icon otherwise, with no typing. The
+ * catalog is read again so the new entry is on the sidebar and on Home right away.
+ */
+async function saveTab(id: string): Promise<void> {
+  clearBanner();
+  let saved: SaveTabResult;
+  try {
+    saved = await call('tabs.save', { id });
+  } catch (e) {
+    showBanner(e);
+    return;
+  }
+  await loadCatalog();
+  const entry = catalog.find((item) => item.id === saved.entryId) ?? null;
+  if (shell === null) return;
+  message(
+    shell.banner,
+    'ok',
+    saved.kind === 'view'
+      ? `Saved as a view of ${entry === null ? 'the tool' : entry.title}`
+      : `Saved ${entry === null ? 'the link' : entry.title} to the sidebar`,
+  );
+}
+
+/** The dialog of "Open link…" (E03/RF-66): it exists once, and Escape or a click outside closes it. */
+const OPEN_LINK_DIALOG_ID = 'open-link-dialog';
+
+/**
+ * E03 (RF-66): any `http(s)` address opens in the Nod as an ad-hoc tab, next to the one on screen —
+ * by hand from ⌘L, the tab view's toolbar, the palette and the `openLink` push (the same shortcut
+ * registered globally). One field: `tabs.openLink` takes the address (a bare host gets `https://`)
+ * and answers `invalid link` for anything that is not `http(s)`. It is the personal-tool dialog's
+ * sibling: an overlay of the main window, keyboard first, and it talks to the backend only through
+ * `call`.
+ */
+function openLinkDialog(): void {
+  if (session === null || !session.unlocked || shell === null) return;
+  if (document.getElementById(OPEN_LINK_DIALOG_ID) !== null) return;
+
+  const url = input('url', { type: 'url', placeholder: 'https://example.com/docs', required: true });
+  const errorBox = el('div', { class: 'palette-message' });
+  const overlay = el('div', { id: OPEN_LINK_DIALOG_ID, class: 'overlay' });
+
+  const close = (): void => {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+  };
+
+  /** Opens the address; a refusal (`invalid link`) stays in the dialog (RNF-01). */
+  async function submit(): Promise<void> {
+    clear(errorBox);
+    let state: ToolsState;
+    try {
+      state = await call('tabs.openLink', { url: url.value.trim() });
+    } catch (e) {
+      message(errorBox, 'error', errorMessage(e));
+      return;
+    }
+    close();
+    // RF-49: docked, the new tab becomes the active one, so the panel shows it right away.
+    applyToolsState(state);
+  }
+
+  function onKey(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    close();
+  }
+
+  const card = el(
+    'div',
+    { class: 'palette', role: 'dialog', aria: { modal: 'true', label: 'Open link' } },
+    el('h2', { class: 'dialog-title' }, 'Open link'),
+    el(
+      'p',
+      { class: 'muted' },
+      'It opens as an ad-hoc tab: not saved, no autofill, and Nod gives it no access to your account.',
+    ),
+    field('Address', url),
+    errorBox,
+    el(
+      'div',
+      { class: 'row' },
+      button('Open', () => submit(), { kind: 'primary' }),
+      button('Cancel', () => close(), { kind: 'ghost' }),
+    ),
+  );
+  overlay.append(card);
+  overlay.addEventListener('mousedown', (event) => {
+    if (event.target === overlay) close();
+  });
+  // Enter opens the address it is typed in, the way a one-field dialog reads.
+  url.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    void submit();
+  });
+  document.addEventListener('keydown', onKey);
+  document.body.append(overlay);
+  url.focus();
 }
 
 async function lockSession(): Promise<void> {
@@ -974,6 +1215,8 @@ async function lockSession(): Promise<void> {
   session = next;
   teardownShell();
   tools = [];
+  // E03: the tab view went with the shell (`teardownShell`), and a locked window has no tabs.
+  tabsState = null;
   catalog = [];
   favorites = [];
   // Locked windows cannot read `host.state` (SP05 §3): the badge waits for the next unlock.
@@ -989,8 +1232,9 @@ async function lockSession(): Promise<void> {
 }
 
 async function loadUnlocked(): Promise<void> {
+  let state: ToolsState;
   try {
-    const [state, entries, hostState, ids, tiles] = await Promise.all([
+    const [answer, entries, hostState, ids, tiles] = await Promise.all([
       call('tools.state'),
       call('catalog.list'),
       // SP05 §3: locked windows cannot read it, and the sidebar needs it right after the unlock.
@@ -1001,7 +1245,7 @@ async function loadUnlocked(): Promise<void> {
       // mark is the guild's icon, and the next lock re-reads them anyway.
       call('session.profiles'),
     ]);
-    tools = state.tools;
+    state = answer;
     catalog = entries;
     host = hostState;
     favorites = ids;
@@ -1010,7 +1254,12 @@ async function loadUnlocked(): Promise<void> {
     showBanner(e);
     return;
   }
-  refreshChrome();
+  // E03 (RF-52): Windows mode has no slot of the page's own — the backend is told once, here, so a
+  // slot left over from a docked session is not followed by a window of a mode that has none.
+  if (state.mode === 'windows') reportSlot(null);
+  // E03 (RF-49/RF-50): the page's whole answer — the tabs, the active one, the mode — and the panel
+  // shows its active tab at once: the tabs a docked session had open are restored and docked again.
+  applyToolsState(state);
   void loadPresence();
   // K4: how many shares the inbox is holding, for the badge the sidebar draws.
   void loadInboxCount();
@@ -1023,7 +1272,11 @@ async function startUnlocked(): Promise<void> {
 
 // --------------------------------------------------------------- navigation
 
-function go(target: View): void {
+/**
+ * E03: Home and one Settings tab are reached by name; the tab view of docked mode is entered by
+ * `showActiveTab`, from the answer that made a docked tab active (RF-49).
+ */
+function go(target: 'home' | SettingsTab): void {
   view = target;
   if (target !== 'home' && settings !== null) {
     settingsTab = target;
@@ -1065,6 +1318,29 @@ function openPaletteNow(): void {
           document.getElementById('vault-inbox')?.focus();
         }
       : null,
+    // E03: a tool and a view open through the app, so a docked tab lands on the center panel
+    // (RF-49); a failure goes to the window's banner, as it does for the sidebar and Home.
+    openTool: (id) => {
+      void openTool(id);
+    },
+    openView: (toolId, index) => {
+      void openToolView(toolId, index);
+    },
+    // E03 (RF-66): "Open link…" — the dialog waits for the next tick, like the one above, so the
+    // palette has closed and given its focus back before the field takes it.
+    openLink: () => {
+      window.setTimeout(() => openLinkDialog(), 0);
+    },
+    // E03 (RF-50/RF-51/RF-67): the tab rows and actions. Windows mode has no tabs of the page's own
+    // (RF-52), so the palette offers none there.
+    tabs:
+      tabsState !== null && tabsState.mode === 'docked'
+        ? {
+            active: tabOnPanel(),
+            open: tabsState.tabs,
+            ...tabActions,
+          }
+        : null,
   });
 }
 
@@ -1109,6 +1385,8 @@ on('session', (next) => {
   if (!next.unlocked) {
     teardownShell();
     tools = [];
+    // E03: the tab view went with the shell, and a locked window has no tabs.
+    tabsState = null;
     catalog = [];
     favorites = [];
     host = null;
@@ -1134,8 +1412,38 @@ on('session', (next) => {
 });
 
 on('tools', (next) => {
-  tools = next.tools;
+  // E03: the strip draws this answer. A push is not a person asking for a tab, so the window keeps
+  // the view it is on — the `tab` push below is the one that says "show this tab".
+  applyTools(next);
   refreshChrome();
+});
+
+/**
+ * E03: the backend opened or activated a tab — a shortcut, an adopted popup, a `nod://open` link.
+ * The page shows the tab view with it; a detached tab is its own window (the backend focused it
+ * there) and a tab the page has not been told about yet arrives with its own `tools` push.
+ */
+on('tab', (id) => {
+  const state = tabsState;
+  if (state === null || state.mode !== 'docked') return;
+  const tab = state.tabs.find((item) => item.id === id) ?? null;
+  if (tab === null) {
+    void runTools(() => call('tools.state'));
+    return;
+  }
+  if (!tab.docked) return;
+  view = 'tab';
+  // The sidebar's own mark follows the tab the backend put on the panel (`renderContent` alone
+  // would leave the rail saying the previous tool).
+  refreshChrome();
+});
+
+/**
+ * E03 (RF-66): a global shortcut asked for "Open link…" — the dialog ⌘L opens in the page, pushed
+ * while the main window does not have the keyboard (backend/tool-windows.ts).
+ */
+on('openLink', () => {
+  openLinkDialog();
 });
 
 on('catalog', () => {
@@ -1202,6 +1510,24 @@ document.addEventListener('keydown', (event) => {
   if (event.altKey) return;
 
   const key = event.key.toLowerCase();
+  // E03 (§7): the page's keys of docked mode — and never while the backend registers the same ones
+  // globally: `tabHotkeys` says it does, and its shortcuts fire while any Nod window is focused, the
+  // main one included, so handling them here as well would run each action twice (see
+  // `handleTabKey`).
+  if (tabsState !== null && tabsState.mode === 'docked' && !tabsState.tabHotkeys) {
+    // RF-66: "Open link…" is not an action on a window that may be out of sight — it opens a dialog,
+    // so it works while Home or Settings hold the panel too.
+    if (key === 'l') {
+      event.preventDefault();
+      openLinkDialog();
+      return;
+    }
+    // E03 (§7): the rest act on the tab that is on the slot, and stay quiet while the panel is not
+    // the tab view — a window the person cannot see is not the one ⌘W was asked to close. The
+    // backend's own tab hotkeys follow the same rule, so the two agree whichever has the keyboard.
+    if (view === 'tab' && handleTabKey(event, key)) return;
+  }
+
   if (key === 'k') {
     event.preventDefault();
     openPaletteNow();
@@ -1219,5 +1545,52 @@ document.addEventListener('keydown', (event) => {
   event.preventDefault();
   void openTool(tool.id);
 });
+
+/**
+ * E03 (§7): ⌘T new tab, ⌘W close tab, ⌃Tab/⌃⇧Tab next and previous, ⌘⇧D detach or dock, ⌘D save the
+ * tab to the sidebar. True when the event was one of them. ⌘L ("Open link…") is not one of these:
+ * the caller handles it, because the dialog works from Home and Settings as well.
+ *
+ * The caller only reaches it in docked mode and while the tab view is the panel — the tab on the
+ * slot is what these act on. It also keeps out while the backend registers the same keys globally:
+ * `tabHotkeys` says it does, and its shortcuts fire while any Nod window is focused — the main one
+ * included — so handling them here as well would run each action twice (⌘T would open two tabs,
+ * ⌘W would close two). The keydown only reaches this document while the main window has the
+ * keyboard, which is the case the global shortcuts and this handler would otherwise both cover
+ * (canonico §7).
+ */
+function handleTabKey(event: KeyboardEvent, key: string): boolean {
+  const tab = tabOnPanel();
+  // ⌃Tab and ⌃⇧Tab are Control everywhere, not the page's ⌘/Ctrl.
+  if (event.ctrlKey && !event.metaKey && key === 'tab') {
+    event.preventDefault();
+    tabActions.next(event.shiftKey ? -1 : 1);
+    return true;
+  }
+  if (key === 't' && tab !== null && tab.toolId !== null) {
+    event.preventDefault();
+    tabActions.newTab(tab.toolId);
+    return true;
+  }
+  if (key === 'w' && tab !== null) {
+    // Closing the tab must not close the main window with it: the backend closes the tab, and this
+    // side only says which one.
+    event.preventDefault();
+    tabActions.close(tab.id);
+    return true;
+  }
+  if (key === 'd' && event.shiftKey && tab !== null) {
+    event.preventDefault();
+    if (tab.docked) tabActions.detach(tab.id);
+    else tabActions.dock(tab.id);
+    return true;
+  }
+  if (key === 'd' && tab !== null) {
+    event.preventDefault();
+    tabActions.save(tab.id);
+    return true;
+  }
+  return false;
+}
 
 void boot();

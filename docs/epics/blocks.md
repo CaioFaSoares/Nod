@@ -136,5 +136,6 @@ shared" or "Block 3 — Docked tabs and quick links". The epic trackers are #2 (
 #68 (E03), #69 (E04) and #70 (E05); they stay open.
 
 Gate #1 comes first: under `AGENTS.md` no product code starts until the owner moves
-the epics' requirements into `docs/canonico.md` §14. The issues hold the status; this file never
+the epics' requirements into `docs/canonico.md` §14. For E03 that gate (G3, #51) closed on
+2026-10-19 and block 3 shipped in 0.6.0. The issues hold the status; this file never
 does.

@@ -5,7 +5,8 @@
 import { call, errorMessage } from './api';
 import { el, message } from './ui';
 import { categoryOf } from '../shared/catalog';
-import type { Entry, Id, ToolStatus } from '../shared/types';
+import type { TabsApi } from './tabs';
+import type { Entry, Id, TabState, ToolStatus } from '../shared/types';
 import type { SettingsTab } from './settings';
 
 const OVERLAY_ID = 'palette-overlay';
@@ -68,6 +69,17 @@ function filter(items: Item[], query: string): Item[] {
   ];
 }
 
+/**
+ * E03: what the palette may do to the tabs of docked mode — the strip's own actions (`TabsApi`,
+ * which is where each one is documented), plus the list they act on: `active` (the tab on the slot,
+ * or null while the panel has none) and `open` (every tab, in strip order). `null` in Windows mode,
+ * where the page has no tabs of its own (RF-52).
+ */
+export type PaletteTabs = TabsApi & {
+  active: TabState | null;
+  open: TabState[];
+};
+
 export function openPalette(ctx: {
   tools: ToolStatus[];
   entries: Entry[];
@@ -80,6 +92,15 @@ export function openPalette(ctx: {
   showOnline: (() => void) | null;
   /** K4: "Vault inbox" — Settings → Vault, scrolled to the shares waiting; null without a guild. */
   openInbox: (() => void) | null;
+  /** E03: a tool opens through the app, so a docked tab lands on the center panel (RF-49). A
+   * failure is the window's banner, the same one the sidebar and Home use. */
+  openTool: (id: Id) => void;
+  /** E03: a view opens through the app for the same reason. */
+  openView: (toolId: Id, index: number) => void;
+  /** E03 (RF-66): "Open link…" — the dialog of `src/app.ts`; it works in both modes. */
+  openLink: () => void;
+  /** E03: the tab rows and actions of docked mode. */
+  tabs: PaletteTabs | null;
 }): void {
   // One palette at a time: the global shortcut and the push `palette` can both ask for it.
   if (document.getElementById(OVERLAY_ID) !== null) return;
@@ -97,7 +118,8 @@ export function openPalette(ctx: {
       label: tool.title,
       key: matchKey(tool.title),
       ...(category === null ? {} : { hint: category }),
-      run: () => call('tools.open', { id: tool.id }),
+      // E03: through the app, so a docked tab takes the center panel (RF-49).
+      run: () => ctx.openTool(tool.id),
     });
   }
   for (const entry of ctx.entries) {
@@ -106,10 +128,52 @@ export function openPalette(ctx: {
       items.push({
         label,
         key: matchKey(label),
-        run: () => call('tools.openView', { toolId: entry.id, index }),
+        run: () => ctx.openView(entry.id, index),
       });
     });
   }
+  // E03 (RF-50/RF-51/RF-67): the tabs of docked mode. Every open tab is one row away — the
+  // keyboard's own way of switching between them — the four actions act on the active tab, and a
+  // detached tab carries its own way back (the backend's active tab is a docked one, so it is null
+  // while every tab is detached).
+  const tabs = ctx.tabs;
+  if (tabs !== null) {
+    for (const tab of tabs.open) {
+      const label = `Tab: ${tab.title}`;
+      items.push({ label, key: matchKey(label), run: () => tabs.activate(tab.id) });
+      // RF-51: a detached tab is docked back from here too — the strip may not be on screen (Home,
+      // Settings), and with every tab detached the backend has no active tab for the row below.
+      if (!tab.docked) {
+        const dock = `Dock tab: ${tab.title}`;
+        items.push({ label: dock, key: matchKey(dock), run: () => tabs.dock(tab.id) });
+      }
+    }
+    const active = tabs.active;
+    if (active !== null) {
+      const toolId = active.toolId;
+      // An ad-hoc tab has no tool of its own to open another tab of (RF-66).
+      if (toolId !== null) {
+        const newTab = 'New tab';
+        items.push({ label: newTab, key: matchKey(newTab), run: () => tabs.newTab(toolId) });
+      }
+      const close = 'Close tab';
+      items.push({ label: close, key: matchKey(close), run: () => tabs.close(active.id) });
+      const toggle = active.docked ? 'Detach tab' : 'Dock tab';
+      items.push({
+        label: toggle,
+        key: matchKey(toggle),
+        run: () => {
+          if (active.docked) tabs.detach(active.id);
+          else tabs.dock(active.id);
+        },
+      });
+      const save = 'Save tab to sidebar';
+      items.push({ label: save, key: matchKey(save), run: () => tabs.save(active.id) });
+    }
+  }
+  // E03 (RF-66): an address by hand — the same dialog the toolbar and ⌘L open, in either mode.
+  const openLink = 'Open link…';
+  items.push({ label: openLink, key: matchKey(openLink), run: () => ctx.openLink() });
   const home = 'Home';
   items.push({ label: home, key: matchKey(home), run: () => ctx.go('home') });
   // B7/SP05 §4: the dialog of a personal tool, reachable from the keyboard like every action.

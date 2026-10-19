@@ -554,6 +554,8 @@ describe('the O2 gate on the personal writes (B8b)', () => {
       'personal.saveView',
       'personal.removeView',
       'favorites.set',
+      // E03/RF-67: `tabs.save` writes the same host-side half (a personal view or a personal tool).
+      'tabs.save',
     ] as const;
     for (const method of writes) {
       expect(hostWriteRefused(method, true)).toBe(true);

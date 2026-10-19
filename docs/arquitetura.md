@@ -252,6 +252,30 @@ export function digits(ids: Id[]): Map<number, Id>;                             
 export function combo(key: string, os: 'macos' | 'windows' | 'linux'): string; // 'cmd+<k>' on macOS, 'ctrl+<k>' elsewhere
 ```
 
+### `shared/tabs.ts` — abas, links e o slot (E03, canonico §14)
+```ts
+export const LINK_WINDOW_PREFIX = 'link_';
+export function tabWindowId(toolId: Id, n: number): string;        // tool_<entry>_t<n>, n >= 2
+export function nextTabNumber(toolId: Id, liveIds: Iterable<string>): number;
+export function linkWindowId(n: number): string;                   // link_<n>
+export function nextLinkNumber(liveIds: Iterable<string>): number;
+export function insertAfter(order: string[], afterId: string | null, id: string): string[];
+export function neighbourAfterClose(order: string[], closedId: string): string | null;
+export function stepTab(order: string[], current: string | null, step: 1 | -1): string | null;
+export function parseLinkUrl(raw: string): string | null;          // http(s) only, trimmed, no userinfo, ≤ 2048 chars
+export function parseOpenLink(url: string): string | null;         // nod://open?url=<encoded>
+export function slotToScreen(main: { x; y; width; height; outer: { width; height } }, rect: SlotRect): SlotRect;
+export function rectEquals(a: SlotRect | null, b: SlotRect | null): boolean;
+export interface PersistedTab { toolId: Id; view?: number; url?: string; detached?: true; active?: true }
+export function parsePersistedTabs(raw: unknown): PersistedTab[];
+export function saveTarget(url: string, entries: Array<{ id: Id; url: string }>): { kind: 'view'; entryId: Id } | { kind: 'tool' } | null;
+export function defaultMode(os: 'macos' | 'windows' | 'linux'): WindowMode;  // docked on macOS
+```
+Puro: decide ids de janela, a ordem da faixa, que links são aceitos, o retângulo de tela do slot e o
+alvo do "salvar". A lista viva de abas e as chamadas de geometria são do backend
+(`docs/arquitetura.md` §4); assim a página, o backend e os testes não discordam de nenhum deles
+(requisitos e epic: `docs/epics/E03-docked-tabs.md`).
+
 ### `shared/probe.ts` — cadastro assistido
 ```ts
 export function analyzeHtml(html: string, finalUrl: string): { title: string | null; icons: string[]; hasLoginForm: boolean };
@@ -435,7 +459,7 @@ export function createPersonal(deps): Personal;
 While a `host` row exists a write appends one `host_outbox` row (SP04 §4) and re-derives the
 catalog; without one it writes the local `tool`/`meta` tables.
 
-### `backend/tool-windows.ts` — janelas de ferramenta, cascata, atalhos (canonico §7)
+### `backend/tool-windows.ts` — abas, janelas de ferramenta, cascata, atalhos (canonico §7, §14; E03)
 ```ts
 export function createToolWindows(app: TinyApp, deps: {
   entries(): Entry[];                         // visible to the current person (empty when locked)
@@ -447,33 +471,83 @@ export function createToolWindows(app: TinyApp, deps: {
   store: { get(k: string): Promise<unknown>; set(k: string, v: unknown): Promise<boolean> };
   os: 'macos' | 'windows' | 'linux';
   hotkeys: boolean;
+  saveTab(id: string): Promise<SaveTabResult>;  // E03: what ⌘D does — `backend/main.ts` `tabs.save`
 }): ToolWindows
 state(): ToolsState
 open(id): Promise<ToolsState>                 // open window → show() (focus, no reload); otherwise opens it
-openView(toolId, index): Promise<ToolsState>  // 'window' → its own window at the view URL; 'navigate' → if the tool window
-                                              // is open, eval location.href; if cold, open it directly at the view URL (A8)
-close(id): ToolsState                         // closes every window of the tool
+openView(toolId, index): Promise<ToolsState>  // 'window' → its own tab at the view URL; 'navigate' → the tool's tab (A8)
+close(id): ToolsState                         // closes every tab of the tool
 reload(id): Promise<ToolsState>
-closeAll(): void                              // tool windows + tracked popups (on lock — D1)
-restore(): Promise<void>                      // reopens the persisted list ('open_tools' in store), only visible tools (RF-06)
+closeAll(): void                              // tool tabs + tracked popups (on lock — D1)
+restore(): Promise<void>                      // reopens `open_tools` in order, docked/detached as saved (RF-49/T6)
 reconcile(): void                             // closes windows of tools no longer visible (canonico §10)
 onNavigate(ev: TinyNavEvent): 'deny' | 'external' | undefined
 onReport(windowId: string, state: ReportState, origin: string | undefined): void
 onPopup(info: TinyPopupEvent): 'window' | 'external' | 'deny' | undefined
 onWindowClosed(id: string): void
-onFocus(windowId: string, focused: boolean): void
+onWindowState(ev: TinyWindowStateEvent): void // focus, minimize and visibility of the main window and ours
 onHotkey(id: string): void                    // 'digit-1'..'digit-9' → open; 'palette' → show main + push 'palette'
+newTab(toolId): Promise<ToolsState>           // 'tabs.new' (⌘T): one more tab of the tool
+activate(id): ToolsState                      // 'tabs.activate': a docked tab takes the slot, a detached one comes forward
+closeTab(id): ToolsState                      // 'tabs.close' (⌘W)
+next(step: 1 | -1): ToolsState                // 'tabs.next' (⌃Tab/⌃⇧Tab), wrapping
+detach(id) / dock(id): ToolsState             // 'tabs.detach'/'tabs.dock' (⌘⇧D) — same window, no reload (RF-51)
+setSlot(rect: SlotRect | null): true          // 'tabs.slot' (RF-49): the center panel as the page sees it
+openLink(url): Promise<ToolsState>            // 'tabs.openLink' (RF-66)
+setMode(mode: WindowMode): Promise<ToolsState>  // 'tabs.setMode' (RF-52): Docked or Windows
+tabForSave(id) / adoptSavedTab(id, toolId)    // 'tabs.save' (RF-67)
 ```
-- Fill gate (B9, RF-38): the cascade context reads
+- **Toda janela de ferramenta é uma aba (E03).** O id da primeira aba de uma ferramenta continua o do
+  dia um — `tool_<entry>`, ou `tool_<entry>_<viewIndex>` numa vista `window` —, cada aba seguinte é
+  `tool_<entry>_t<n>`, e uma aba ad-hoc é `link_<n>` ou o id do popup adotado (`popup<N>`).
+  `toolOfWindow` divide no `_`, então responde a mesma ferramenta para toda aba. Uma aba ad-hoc
+  (`toolId: null`) nunca é persistida, nunca conta para uma ferramenta, nunca entra na cascata, nunca
+  recebe `eval` e não tem método de backend nenhum (o gate de `api.origins` recusa a origin não
+  listada — RF-66, RF-68).
+- **Dois modos (RF-52; `window_mode` no `store`).** **windows** é o comportamento do dia um — uma
+  janela com moldura por ferramenta, abrir uma aberta só foca, nada recarrega (RF-19). **docked** (o
+  padrão no macOS, `shared/tabs.ts` `defaultMode`) deixa a aba ativa **sem moldura** sobre o slot que
+  a página reporta, seguindo a `main` e escondendo com ela; só a aba ativa aparece e as outras mantêm
+  a página viva, escondidas (RF-50).
+- **Slot (RF-49).** A página manda `tabs.slot` com o retângulo do painel central em CSS px;
+  `shared/tabs.ts` `slotToScreen` converte para coordenadas de tela e o backend põe ali a aba ativa,
+  pulando a reposição quando nada mudou (`rectEquals`). O runtime não reporta movimento da `main`
+  (`onState` cobre só fullscreen/maximize/minimize/foco — `backend/tiny.d.ts`), então, enquanto há
+  uma aba docked mostrada e a `main` está visível e não minimizada (com foco ou sem: um tiling WM, uma
+  troca de Space ou monitor a movem sem foco), um poll de 50 ms (`MOVE_POLL_MS`) lê `getState()` e
+  reposiciona (lag ≈ um intervalo, medido em `docs/handovers/e03-spikes.md` §4). Ao ganhar foco, a aba docked sobe de
+  novo com `show({ activate: false })` para não ficar atrás da `main`. Wayland (`canPosition: false`)
+  não oferece o modo.
+- **Troca e desencaixe (RF-50, RF-51).** Trocar de aba é `hide({ app: false })` na atual e `show` na
+  próxima — a página escondida fica viva, nada recarrega (mesmo mecanismo de RNF-09). `detach`/`dock`
+  são `setChrome({ frame: true|false })` na **mesma** janela: rascunho, scroll e estado da página
+  sobrevivem (`docs/handovers/e03-spikes.md` §3).
+- **Popups (E03 §5).** Em docked, um popup `http(s)` que uma aba abriu é adotado como aba ad-hoc logo
+  depois dela (o evento `open` não traz o `opener`, então a resposta `policy` o memoriza) e perde a
+  moldura; um caminho de identidade conhecido (`isIdentityPath`) continua popup flutuante nos dois
+  modos. Em windows a resposta `policy` vale `'window'` se a origin é a da entrada, uma origin de
+  provedor já vista naquela janela, ou `isIdentityPath(url)`; senão `'external'` + evento
+  `external_opened`; outros esquemas `'deny'`. `kind 'open'` com `action 'window'` também guarda a
+  janela para fechar no bloqueio (D1).
+- **Atalhos.** `digit-1`..`digit-9` abrem e `palette` sobe a `main` (`push 'palette'`). Em docked o
+  backend registra também, globalmente e só com alguma janela do Nod focada: `tab-new` (⌘T),
+  `tab-close` (⌘W), `tab-next`/`tab-prev` (⌃Tab/⌃⇧Tab), `tab-detach`/`tab-dock` (⌘⇧D), `open-link`
+  (⌘L, `push 'openLink'` — a página abre o diálogo) e `tab-save` (⌘D); `unregister` quando nenhuma
+  está.
+- **Persistência.** `open_tools` guarda cada aba com `{ toolId, view, url, detached, active }` (abas
+  ad-hoc fora); `restore()` reabre na ordem e no estado salvos. `window_mode` guarda a preferência.
+- Fill gate (B9, RF-38): a cascata context reads
   `hasCredential = vaultOrigin(toolId) !== null && vaultOrigin(toolId) === window.origin`, where
   `window.origin` is the canonical origin of the entry address the window opened at. A tool whose
   address moved — a local edit or a host snapshot rewriting the entry — reads as one with no
   credential: `fill: false`, no attempt counted, no keychain read. The credential belongs to the
   origin, not to the page: another path on the same origin still fills.
-- Abrir: `app.win.open(toolWindowId(id), { page: url, title, size: 'WxH', x, y })` e logo depois
-  `setPosition`/`setSize` no handle (o launcher não respeitou `x`/`size` do `win.open` — observado por
-  execução na v1). Geometria padrão: 1280×800 limitada a 90% da área útil da tela da janela `main`,
-  em cascata (+28 px) a partir do canto da `main`. Moldura nativa, janela independente.
+- Abrir: em **windows** a janela nasce com moldura e a geometria padrão — 1280×800 limitada a 90% da
+  área útil da tela da `main`, em cascata (+28 px) a partir do canto dela —, aplicada por
+  `app.win.open(id, { page, title, size, x, y })` e, no mesmo tick, `setPosition`/`setSize` no handle.
+  O retângulo pedido é entregue; o que embaralhava os frames dos tools era o gerenciador de janelas
+  em mosaico do macOS (B05, `docs/handovers/e03-spikes.md` §1, §8.9). Em **docked** a aba nasce sem
+  moldura, já no slot reportado (`chrome: { frame: false }` + `setPosition`/`setSize` no mesmo tick).
 - `loading` até o primeiro `finish`; `fail`/`crash` → `error`, evento `load_failed` com `auditUrl`.
 - Cascata (`stepCascade`): `navigated` em `policy`/`start` de main frame (`isMainFrame !== false`);
   `finished` em `finish` de main frame (ignore `isMainFrame === false`); `report` em `onReport`.
@@ -483,18 +557,10 @@ onHotkey(id: string): void                    // 'digit-1'..'digit-9' → open; 
   `{ type: 'finished', url: lastUrl }` (relogin por XHR, A7). Falha do `eval` → evento `login` com
   resultado `failed` (A10). Ação `result` → `login` no `ToolStatus` + evento `login`.
 - Origins vistas fora da entrada durante a cascata (provedor) ficam guardadas por janela.
-- Navegação (`onNavigate`, só janelas de ferramenta): `policy` com `http:` fora de loopback →
+- Navegação (`onNavigate`, só abas de ferramenta): `policy` com `http:` fora de loopback →
   `'deny'` + evento `navigation_blocked` (A20); `https:`/loopback → permitir; `mailto:`/`tel:` com
   `isMainFrame !== false` → `'external'` + evento `external_opened`; qualquer outro esquema → `'deny'`
   + evento `navigation_blocked` (D2).
-- Popups (`onPopup`, `kind 'policy'`, opener = janela de ferramenta): só `http(s)`; `'window'` se a
-  origin é a da entrada, uma origin de provedor já vista naquela janela, ou `isIdentityPath(url)`;
-  senão `'external'` + evento `external_opened`; outros esquemas `'deny'`. `kind 'open'` com
-  `action 'window'` → guarda `info.window` para fechar no bloqueio (D1).
-- Persistência: a lista `{ toolId, view? }` das janelas abertas vai para `store` (`open_tools`) a
-  cada abrir/fechar.
-- Atalhos: `app.hotkey.register('digit-N', combo(String(N), os))` e `('palette', combo('k', os))` só
-  com alguma janela do Nod focada e `deps.hotkeys`; `unregister` quando nenhuma está.
 
 ### `backend/login-adapter.ts`
 `export function adapterScript(o: { fill: boolean; origin: string; username?: string; secret?: string }): string`
@@ -665,6 +731,7 @@ export function createHostAdmin(connection: HostConnection): HostAdmin;
 | `index.html` | `lang="en"`, título `Nod`, `<div id="app">`, `src/app.ts`, `src/style.css`. |
 | `src/app.ts` | Boot e roteamento. Bloqueado: tela de entrada (criar a conta de admin / entrar / entrar com convite / Touch ID / espera). Desbloqueado: **sidebar** à esquerda (logo; um ícone por ferramenta com dígito e estado — aberta, carregando, falhou; no rodapé Settings e Lock) e **conteúdo**: Home (cartões das ferramentas: abrir/focar, vistas, fechar, estado e resultado de login) ou Settings (`src/settings.ts`). Teclado: ⌘/Ctrl+1..9 abre, ⌘/Ctrl+K paleta, ⌘/Ctrl+, Settings. Ouve `session`, `tools`, `catalog`, `palette`, and the connected events `host`, `join` (a `nod://join` invite) and `update` (the new-version notice). A `host` push drives the "offline" badge and the signed-out notice; a "Join a guild" path lives on the blocked screen beside create-account and invite. |
 | `src/palette.ts` | `export function openPalette(ctx): void` — overlay dentro da janela com busca (subsequência, sem acento) sobre ferramentas, vistas e ações (Home, cada aba de Settings, Lock, Quit); ↑/↓/Enter/Esc; foco preso enquanto aberta. |
+| `src/tabs.ts` | E03: a visão de abas do painel central — a faixa das abas abertas, a barra que age na ativa e o slot onde o backend deita a aba docked. `tabsApi(deps)` é a metade da página dos métodos `tabs.*` (uma definição por ação, compartilhada pela faixa, pela paleta e pelo teclado); `mountTabs(root, ctx)` monta a visão e devolve `{ update, destroy }`; `reportSlot(rect)` manda o retângulo do slot ao backend; `activeTab(state)` é a aba docked que a faixa, a barra e a paleta miram. `src/app.ts` a monta só em docked (RF-52). |
 | `src/settings.ts` | `export function mountSettings(root: HTMLElement, ctx: { session: SessionState; info: AppInfo; tab?: SettingsTab }): { setTab(tab: SettingsTab): void; update(session: SessionState): void; destroy(): void }`, com `export type SettingsTab = 'account' \| 'hosts' \| 'vault' \| 'tools' \| 'roles' \| 'people' \| 'activity' \| 'catalog'`. Todas as pessoas: Account (trocar senha, habilitar/desabilitar biometria, versão, atualização; e, com host, os dispositivos com Revoke de O1, a impressão digital da chave própria de K1 e os colegas com o aviso `key changed` de K2) e Vault (salvar/revelar 10 s/remover; export/import com `tiny.dialog`; e o compartilhamento de K4–K9: inbox, escopo, Send, holders com Remove e o chip `rotation pending`). **Hosts** (todos, SP05 §4): without a host, address → `host.discover` → guild + fingerprint → email + code (or password) → set password; with a host, guild, address, fingerprint, last sync, pending writes, "Sync now", "Remove host" (keep-personal), and a "Keep your local tools" step after a join (B8b). Só admin: Tools (colar endereço → `catalog.probe` → formulário pré-preenchido; vistas, papéis, `noFill`; aviso quando a origin não está em `info.gateOrigins`; "usually signs in via …" de `catalog.get`), Roles (CRUD + concessões), People (papéis, revogar, emitir convite mostrando o código uma vez), Activity (lista + exportar JSONL; sent vs pending from `events.syncStatus` while a host exists), Catalog (exportar/importar seed com modo merge/overwrite). Só admin, conectado: the four admin tabs read/write the host through the same RPC and a "publish local tools" card calls `host.bootstrap` once. |
 | `src/style.css` | Tema escuro sóbrio, monospace, contraste alto, `:focus-visible`. Classes usadas por `src/ui.ts`: `.button .button-primary .button-danger .button-ghost .field .field-label .field-hint .input .message .message-error .message-ok .message-info`. |
 | `src/ui.ts` | Helpers de DOM (já escrito pelo coordenador; não editar). |

@@ -35,9 +35,11 @@ import type {
   Role,
   SessionState,
   ShareRecipient,
+  ToolsState,
   UpdateInfo,
   View,
   VaultItem,
+  WindowMode,
 } from '../shared/types';
 
 export type SettingsTab =
@@ -418,6 +420,12 @@ export function mountSettings(
     /** SP05 §6: the app-icon choice and whether a guild icon is available, as `nod.appIcon` answers. */
     appIcon: null as AppIconState | null,
     /**
+     * E03 (RF-52): the tools answer this screen reads (`tools.state`, replaced by the answer of
+     * `tabs.setMode`) — where the tools of this machine open, and whether the runtime can position
+     * windows at all (`dockable`: Wayland cannot, so Docked is not offered there).
+     */
+    tools: null as ToolsState | null,
+    /**
      * SP05 §6: the PNG an admin picked in this session — the base64url the upload takes, and the
      * data URI of the preview. Only the host holds the stored icon's bytes: the page is handed the
      * digest, never an image (SP03 §2), so an icon uploaded in an earlier session gets no preview.
@@ -536,12 +544,15 @@ export function mountSettings(
     value: string,
     checked: boolean,
     onChange: () => void,
+    /** offered but not choosable here — the card's hint carries the reason (E03, RF-52) */
+    disabled = false,
   ): HTMLInputElement {
     const node = el('input', {
       attrs: { type: 'radio', name, value },
       on: { change: onChange },
     });
     node.checked = checked;
+    node.disabled = disabled;
     return node;
   }
 
@@ -686,6 +697,9 @@ export function mountSettings(
           state.roles = await call('roles.list');
           // SP05 §6: every person chooses the icon of this machine, admin or not.
           state.appIcon = await call('nod.appIcon');
+          // E03 (RF-52): the mode the tools of this machine open in, and whether docking is offered
+          // here at all — the card reads both from the answer every view of the page shares.
+          state.tools = await call('tools.state');
           // O1: the devices card needs the host state (the card is hidden without a guild) and the
           // list itself. A local-account Nod reads neither.
           state.host = await call('host.state');
@@ -1214,6 +1228,65 @@ export function mountSettings(
   // ---------------------------------------------------------------- tab: account
 
   /**
+   * E03 (RF-52): Docked or Windows — where the tools this Nod opens land. It is this machine's
+   * choice (`store.json`'s `window_mode`), not the account's, so the card sits beside the app icon,
+   * which is also a thing of the machine. Docked is offered only where the runtime can position
+   * windows (`dockable`; Wayland says no): where it cannot, the option is disabled and the hint
+   * carries the reason instead of pretending the mode exists.
+   */
+  function windowModeCard(): HTMLElement | null {
+    // The tab reads `tools.state` when it opens; until that answer lands there is nothing honest to
+    // show — not even a default mode of this machine.
+    if (state.tools === null) return null;
+    const mode = state.tools.mode;
+    const dockable = state.tools.dockable;
+    return el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'Window mode'),
+      el('p', { class: 'muted' }, 'Where the tools open on this machine.'),
+      el(
+        'div',
+        { class: 'row' },
+        checkboxField(
+          'Docked',
+          radio('window-mode', 'docked', mode === 'docked', () => void setWindowMode('docked'), !dockable),
+        ),
+        checkboxField(
+          'Windows',
+          radio('window-mode', 'windows', mode === 'windows', () => void setWindowMode('windows')),
+        ),
+      ),
+      el(
+        'p',
+        { class: 'field-hint' },
+        dockable
+          ? 'Docked puts the open tool on the center panel, with a tab for each window; Windows opens every tool in its own window.'
+          : 'This system cannot place windows, so Docked is not offered here — every tool opens in its own window.',
+      ),
+    );
+  }
+
+  /**
+   * E03 (RF-52): switching the mode changes how the next tool opens, and nothing reloads: the
+   * backend moves the docked tabs into windows of their own and back. The whole answer comes back,
+   * so the card reads the effective mode and `dockable` from it.
+   */
+  async function setWindowMode(mode: WindowMode): Promise<void> {
+    state.status = null;
+    try {
+      state.tools = await call('tabs.setMode', { mode });
+      state.status = {
+        kind: 'ok',
+        text: mode === 'docked' ? 'Tools open docked on the panel' : 'Tools open in their own windows',
+      };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  /**
    * SP05 §6: the app icon of this machine — the bundle's, or the guild's PNG. One choice per
    * machine (`app.icon` is the icon of the running app, not of a window), so it is on Account, which
    * every person sees, and not on the admin screens. The Guild option is disabled while the guild
@@ -1589,7 +1662,11 @@ export function mountSettings(
     if (hasHost()) box.append(keyFingerprintCard(), colleaguesCard());
     // O1: the devices of this account, above the machine's own settings. Only a guild has them.
     if (hasHost()) box.append(devicesCard());
-    // SP05 §6: the icon of this machine, before the account's own cards.
+    // SP05 §6: the icon of this machine, before the account's own cards. E03 (RF-52): the mode the
+    // tools of this machine open in sits beside it — both are choices of the machine, and the mode
+    // card appears with the answer the tab read from `tools.state`.
+    const modeCard = windowModeCard();
+    if (modeCard !== null) box.append(modeCard);
     box.append(appIconCard());
     box.append(changePasswordCard());
     // SP02 §9/canonico §9: the shortcut is offered only where the machine reports `authenticate`

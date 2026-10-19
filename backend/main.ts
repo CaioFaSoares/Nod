@@ -17,6 +17,7 @@ import { fromBase64url, toBase64url } from '../shared/encoding';
 import { HOST_ROUTES, codeKindOf, isPng } from '../shared/host-api';
 import { leftoverLocalTools, parseSnapshot } from '../shared/host-merge';
 import { joinLink, parseJoinLink } from '../shared/join-link';
+import { parseLinkUrl, parseOpenLink, saveTarget } from '../shared/tabs';
 import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED, MAIN_WINDOW, toolOfWindow } from '../shared/types';
 import { compareVersions, tooOldFor } from '../shared/version';
 import { encryptVaultBytes, encryptVaultValue, plainVaultCredential } from '../shared/vault-crypto';
@@ -48,8 +49,10 @@ import type {
   ReportState,
   Result,
   Role,
+  SaveTabResult,
   Seed,
   SessionState,
+  SlotRect,
   ToolsState,
   UpdateInfo,
   VaultItem,
@@ -433,6 +436,10 @@ export async function init(app: TinyApp): Promise<void> {
     store: app.store,
     os: system,
     hotkeys: supported(capabilities, 'hotkey'),
+    // E03/RF-67: ⌘D saves the active tab with `tabs.save`'s own body — one implementation, so the
+    // hotkey and the method can never disagree. It resolves after `windows` is assigned (only ever
+    // called from a live window), which is why the closure may read it.
+    saveTab: (id) => saveTabToSidebar(id),
   });
 
   app.window(MAIN_WINDOW).setMinSize(760, 500);
@@ -618,8 +625,14 @@ function credentialHolders(): CredentialHolders[] {
   });
 }
 
+/**
+ * The state the page reads (`tools.*`, `PushEvents.tools`). Before the window module exists — a boot
+ * that has not reached `init` — there are no tools and no tabs: what the answer says is that the
+ * machine is not ready, not that the person runs Windows mode.
+ */
 function toolsState(): ToolsState {
-  return windows === null ? { tools: [] } : windows.state();
+  if (windows !== null) return windows.state();
+  return { tools: [], tabs: [], active: null, mode: 'windows', dockable: false, tabHotkeys: false };
 }
 
 /**
@@ -942,6 +955,9 @@ const HOST_WRITES: Partial<Record<Method, true>> = {
   'personal.saveView': true,
   'personal.removeView': true,
   'favorites.set': true,
+  // E03/RF-67: `tabs.save` is `personal.saveView`/`personal.saveTool` under another name — it writes
+  // the same host-side half, so a disconnected Nod refuses it with the same sentence.
+  'tabs.save': true,
   // K4: the sealed copies and the recipient's answer are writes to the host's share rows. A Nod
   // this old must not send, accept or decline against a host that asked for a newer one.
   'shares.send': true,
@@ -1958,6 +1974,115 @@ function usualLogin(results: LoginResult[]): LoginResult | null {
     }
   }
   return best;
+}
+
+// ---------------------------------------------------------------- tabs (E03)
+
+/**
+ * E03/RF-49: `tabs.slot`'s `rect` — the center panel in CSS px, or `undefined` for the explicit
+ * `null` the page sends when no tab may show. A rect has to be four finite numbers with a positive
+ * width and height: the backend places windows with it, so a broken one is refused here.
+ */
+function slotRect(params: unknown): SlotRect | null {
+  const raw = parameters(params, 'invalid slot');
+  if (raw.rect === undefined || raw.rect === null) return null;
+  const rect = object(raw.rect, 'invalid slot');
+  const numbers = (['x', 'y', 'width', 'height'] as const).map((key) => {
+    const value = rect[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error('invalid slot');
+    return value;
+  });
+  const [x, y, width, height] = numbers;
+  if (width <= 0 || height <= 0) throw new Error('invalid slot');
+  return { x, y, width, height };
+}
+
+/**
+ * E03/RF-49: `tabs.next`'s `step` — exactly next (1) or previous (-1), the two arrows of ⌃Tab and
+ * ⌃⇧Tab. Anything else is the page sending a value the contract does not have.
+ */
+function tabStep(value: unknown): 1 | -1 {
+  if (value !== 1 && value !== -1) throw new Error('invalid step');
+  return value;
+}
+
+/**
+ * E03/RF-67 (`tabs.save`, ⌘D): the tab's address to the sidebar in one step, no typing. The origin
+ * decides: one the person already sees becomes a personal view of that entry, anything else a
+ * personal tool whose title and icon come from the probe the assisted registration uses (RF-29).
+ * The tab that became a tool is re-labelled by the window module — the same window, no reload.
+ *
+ * An address that is not `http(s)`, and a tab the module does not have, are refused the way the
+ * contract says (`invalid link`, `unknown tab`).
+ */
+async function saveTabToSidebar(id: string): Promise<SaveTabResult> {
+  // The RPC path reads this through `guarded`; the ⌘D hotkey comes straight from the window module,
+  // so the check lives here once and both paths share it (O2, SP04 §1): a disconnected Nod must not
+  // queue a personal write, and its local catalog could not show the saved entry anyway.
+  const offline = offlineSession();
+  if (hostWriteRefused('tabs.save', disconnected())) {
+    throw new Error(offline ? OFFLINE_SESSION_ERROR : UPDATE_REQUIRED_ERROR);
+  }
+  const layer = required(personal, 'tabs.save');
+  const open = required(windows, 'tabs.save');
+  const tab = open.tabForSave(id);
+  if (tab === null) throw new Error('unknown tab');
+  const entries = visibleEntriesOf().map((entry) => ({ id: entry.id, url: entry.url }));
+  const target = saveTarget(tab.url, entries);
+  if (target === null) throw new Error('invalid link');
+
+  if (target.kind === 'view') {
+    // A view of the entry the address belongs to; its label is what the address says, since neither
+    // the window nor the page hands a title over (RF-67's "no typing" is about the person's hands).
+    layer.saveView({
+      entryId: target.entryId,
+      label: viewLabelOf(tab.url),
+      url: tab.url,
+      mode: 'window',
+    });
+    return { kind: 'view', entryId: target.entryId };
+  }
+
+  // A new origin: the probe names it (title and icon), so the person only confirms (RF-29, RF-67).
+  const probed = await probe(auditUrl(tab.url) ?? tab.url);
+  const title = probed.title === null || probed.title.trim() === '' ? hostOfUrl(tab.url) : probed.title;
+  const saved = layer.saveTool({
+    title,
+    url: auditUrl(tab.url) ?? tab.url,
+    icon: probed.icon === null ? null : iconDataUri(probed.icon),
+  });
+  // Locally the entry's icon is what the icon store answers for it (`refreshIcons`): the probed
+  // bytes go there, exactly as `catalog.save` does. While connected the snapshot carries the URI.
+  if (!connectedMode && probed.icon !== null) {
+    const store = required(icons, 'tabs.save');
+    const database = required(repo, 'tabs.save');
+    database.saveEntry(saved, { iconHash: await store.save(probed.icon), probe: probed });
+    await afterChange();
+  }
+  // Finding 4: only an ad-hoc tab becomes a tab of the new entry. A tool tab keeps its tool — the
+  // save is a new sidebar item beside it (`adoptSavedTab` refuses anything but an ad-hoc tab too).
+  if (tab.toolId === null) open.adoptSavedTab(id, saved.id);
+  return { kind: 'tool', entryId: saved.id };
+}
+
+/** E03/RF-67: what a saved tab is called — its path, or the host when it is the root. */
+function viewLabelOf(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/^\/+|\/+$/g, '');
+    return path === '' ? parsed.hostname : path;
+  } catch {
+    return url;
+  }
+}
+
+/** The host of an address, for the fallback title of a probed tool; '' when it is unreadable. */
+function hostOfUrl(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
 }
 
 // ---------------------------------------------------------------- api
@@ -3592,6 +3717,59 @@ const methods: { [M in Method]: Handler<M> } = {
   'tools.reload': (params) =>
     required(windows, 'tools.reload').reload(text(parameters(params, 'invalid tool').id, 'invalid id')),
 
+  // -------------------------------------------------------------- tabs (E03)
+  /**
+   * E03/RF-50: another tab of the tool (⌘T). Every method below is main-window only and needs an
+   * unlocked session, which is what the §2 guard already says for anything outside
+   * `WITHOUT_SESSION`; the `rect`/`step`/`mode` values are the page's, so each one is checked here.
+   */
+  'tabs.new': (params) => {
+    const p = parameters(params, 'invalid tool');
+    return required(windows, 'tabs.new').newTab(text(p.toolId, 'invalid tool'));
+  },
+
+  'tabs.activate': (params) => {
+    const p = parameters(params, 'invalid tab');
+    return required(windows, 'tabs.activate').activate(text(p.id, 'invalid tab'));
+  },
+
+  'tabs.close': (params) => {
+    const p = parameters(params, 'invalid tab');
+    return required(windows, 'tabs.close').closeTab(text(p.id, 'invalid tab'));
+  },
+
+  'tabs.next': (params) =>
+    required(windows, 'tabs.next').next(tabStep(parameters(params, 'invalid step').step)),
+
+  'tabs.detach': (params) => {
+    const p = parameters(params, 'invalid tab');
+    return required(windows, 'tabs.detach').detach(text(p.id, 'invalid tab'));
+  },
+
+  'tabs.dock': (params) => {
+    const p = parameters(params, 'invalid tab');
+    return required(windows, 'tabs.dock').dock(text(p.id, 'invalid tab'));
+  },
+
+  /** E03/RF-49: the slot of the center panel, or an explicit `null` for "nothing may show". */
+  'tabs.slot': (params): true => required(windows, 'tabs.slot').setSlot(slotRect(params)),
+
+  'tabs.openLink': async (params) => {
+    const raw = text(parameters(params, 'invalid link').url, 'invalid link');
+    const url = parseLinkUrl(raw);
+    if (url === null) throw new Error('invalid link');
+    return await required(windows, 'tabs.openLink').openLink(url);
+  },
+
+  'tabs.save': async (params): Promise<SaveTabResult> =>
+    await saveTabToSidebar(text(parameters(params, 'invalid tab').id, 'invalid tab')),
+
+  'tabs.setMode': async (params) => {
+    const mode = parameters(params, 'invalid mode').mode;
+    if (mode !== 'docked' && mode !== 'windows') throw new Error('invalid mode');
+    return await required(windows, 'tabs.setMode').setMode(mode);
+  },
+
   // -------------------------------------------------------------- audit
   'events.list': async (params) => {
     const r = required(repo, 'events.list');
@@ -3718,7 +3896,18 @@ export const api: Record<string, TinyApiHandler> = Object.fromEntries(
  */
 export function onOpenUrl(url: string, app: TinyApp): void {
   const join = parseJoinLink(url);
-  if (join === null) return;
+  if (join === null) {
+    // E03/RF-66: `nod://open?url=…` opens the link as a tab — another app or a script handing a URL
+    // to the Nod. A locked Nod ignores it: nothing opens before the person has unlocked.
+    const link = parseOpenLink(url);
+    if (link === null) return;
+    const open = windows;
+    if (open === null) return;
+    if (session === null || session.current() === null) return;
+    app.window(MAIN_WINDOW).show();
+    void open.openLink(link).catch(() => undefined);
+    return;
+  }
   pendingJoin = join;
   app.window(MAIN_WINDOW).show();
   push('join', join);
@@ -3757,7 +3946,9 @@ export function onWindowClosed(id: string): void {
 
 export function onWindowState(info: TinyWindowStateEvent): void {
   const open = windows;
-  if (open !== null) open.onFocus(info.win, info.focused);
+  // E03/RF-49: the whole event goes down — the tab manager needs main's `minimized` and `focused`
+  // to take the docked tabs away with the window and raise the active one when it comes back.
+  if (open !== null) open.onWindowState(info);
 }
 
 export function onHotkey(id: string): void {

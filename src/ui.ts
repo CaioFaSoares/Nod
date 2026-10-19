@@ -1,5 +1,5 @@
 // DOM helpers shared by every view of the single page (src/app.ts, src/palette.ts,
-// src/settings.ts). Text always goes in through `textContent`, never `innerHTML`.
+// src/settings.ts, src/tabs.ts). Text always goes in through `textContent`, never `innerHTML`.
 
 type Child = Node | string | null | undefined | false;
 
@@ -47,6 +47,16 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 export function initials(name: string): string {
   const mark = name.trim().slice(0, 2).toUpperCase();
   return mark === '' ? '?' : mark;
+}
+
+/**
+ * Tool icon: the data URI the backend answered for it, or the two letters of its title. The
+ * sidebar, Home's cards and the tabs of the strip (`src/tabs.ts`) all draw a tool this way, so it
+ * looks the same wherever it is named.
+ */
+export function glyph(title: string, icon: string | null): HTMLElement {
+  if (icon !== null) return el('img', { class: 'glyph-img', attrs: { src: icon, alt: '' } });
+  return el('span', { class: 'chip' }, initials(title));
 }
 
 /** A button that disables itself while its async handler runs. */

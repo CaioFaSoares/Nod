@@ -149,3 +149,31 @@ and a release without one ships no `seed.json` at all. `POST /v1/admin/people` i
 (its client, `backend/host-admin.ts`'s `createPerson`, with it): a person who does not exist yet
 joins through a guild invite, and `invites.issue`'s connected path is only the reissue for an
 existing person.
+
+**0.6.0 (E03) — the tab manager (`tool-windows.ts`, RF-49…RF-52, RF-66…RF-68).** Every tool window is
+a **tab**, and the module is its manager: a tool tab is `tool_<entry>` (a `window` view
+`tool_<entry>_<viewIndex>`) for its first tab and `tool_<entry>_t<n>` from the second on, and a tab
+may belong to no entry at all — an **ad-hoc tab** (`link_<n>` from `tabs.openLink`/`nod://open?url=`,
+or a popup the site opened that the backend adopted, keeping the runtime's `popup<N>` id). Ad-hoc
+tabs are never persisted, never counted for a tool, never cascaded and never see `eval`; their
+navigation is still policed and audited with `toolId: null` (RF-68). Two modes, the setting in
+`store.json`'s `window_mode` and `docked` the default on macOS (`windows` on Windows/Linux): in
+**docked** mode the active tab lies frameless on the slot the main page reports (`tabs.slot`,
+`slotToScreen`), follows main by polling `getState()` every 50 ms whenever a docked tab is shown and
+main is on screen — not only while main is focused, because a tiling WM, a Space or monitor change
+and a WM shortcut all move main without giving it the focus — hides with a
+minimized/hidden main window and is raised with `show({ activate: false })` when main takes focus
+(S3); only the active tab is visible, the others stay alive hidden (RF-50). Detaching and docking are
+`setChrome({ frame })` on the same window — never a close/reopen, so the page keeps its state
+(RF-51). `windows` mode is the day-one behavior untouched: one framed window per tool, `tools.open`
+focusing it (RF-19), popups as before. Tab shortcuts (⌘T, ⌘W, ⌘⇧D, ⌃Tab, ⌃⇧Tab, ⌘L, ⌘D) are global
+hotkeys registered only in docked mode while a Nod window is focused, and they act on the tab the
+person is in — falling back to the one on the slot while main is focused with the panel showing, and
+doing nothing otherwise (`⌘⇧D` is the palette's Detach/Dock toggle); `ToolsState.tabHotkeys` tells the
+page not to handle them twice. `tabs.save` (RF-67) writes one step to the sidebar through
+`backend/personal.ts`: a personal view when the address's origin is an entry the person sees,
+otherwise a personal tool named by `backend/probe-net.ts`'s probe — and the ad-hoc tab that became a
+tool is re-labelled in place (a tool tab keeps its own tool). Both `tabs.save` and the ⌘D hotkey read
+`HOST_WRITES` through `main.ts`'s `saveTabToSidebar`, so a disconnected guild refuses the write on
+either path; the rest of the `tabs.*` methods are this machine's own. `shared/tabs.ts` holds the
+pure half (ids, strip order, link parsing, the slot formula, the persisted list, `saveTarget`).

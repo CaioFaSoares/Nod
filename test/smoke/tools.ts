@@ -441,3 +441,234 @@ export function issueSetupCode(
   if (code.length === 0) throw new Error('setup-code printed nothing');
   return code;
 }
+
+// ---------------------------------------------------------------- E03 tab smoke (test/smoke/tabs.ts)
+
+/**
+ * One report a reporting tool page posted to its own server (the E03 tab smoke). The page measures
+ * **itself** — `window.screenX/screenY`, its outer and inner box, `performance.timeOrigin`, the value
+ * of its `<input id=draft>` and what the Nod API answered it — so the smoke reads the real geometry
+ * of a real tool window instead of guessing it from the backend.
+ */
+export interface TabReport {
+  /** 'A', 'B' or 'C': which reporting server served the page. */
+  tool: string;
+  /** this load's id — two tabs of the same tool answer their own commands. */
+  pid: string;
+  tag: string | null;
+  note: string | null;
+  /** `tiny.win.id`, the window the page lives in; null when the window has no bridge. */
+  win: string | null;
+  href: string;
+  timeOrigin: number;
+  /** The raw webview numbers, reported on purpose: in a WKWebView they are useless (see above). */
+  screenX: number;
+  screenY: number;
+  outerWidth: number;
+  outerHeight: number;
+  innerWidth: number;
+  innerHeight: number;
+  /**
+   * `tiny.win.getState()` of that window — the runtime's own view of where it is and how big, which
+   * is what the geometry of a tab can be measured with (`window.screenX/screenY` are 0 and the
+   * screen height in this webview, and `outerWidth/outerHeight` are 0).
+   */
+  state: {
+    /** frame top-left in screen coordinates — the units `setPosition` takes */
+    x: number;
+    y: number;
+    /** the page's box (decorations excluded) */
+    width: number;
+    height: number;
+    /** the footprint on screen, decorations included */
+    outerWidth: number;
+    outerHeight: number;
+    frame: boolean | null;
+    visible: boolean;
+    focused: boolean;
+    minimized: boolean;
+  } | null;
+  draft: string;
+  /** what `tiny.api.call` answered: 'ok', the refusal, or why there is no bridge at all. */
+  apiError: string | null;
+  /** why the page has no `state`: no `tiny.win`, no `getState` in it, or an error from the call. */
+  stateError: string | null;
+  at: number;
+}
+
+export interface TabTools {
+  originA: string;
+  originB: string;
+  originC: string;
+  /** Every report every page posted so far, oldest first. */
+  reports(): TabReport[];
+  /** Queues one command for the page of one load; that page's next poll answers it. */
+  command(pid: string, cmd: string, arg?: string, tag?: string): void;
+  /** Forgets every report and every queued command. */
+  reset(): void;
+  stop(): void;
+}
+
+function smokeJson(value: unknown): Response {
+  return new Response(JSON.stringify(value) + '\n', {
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'access-control-allow-origin': '*',
+    },
+  });
+}
+
+/**
+ * The page of a reporting tool: no login, one icon, one input. It writes a random draft into
+ * `<input id=draft>` on load, posts a report on load and on every resize, and polls its own server
+ * (`/poll?pid=…`) for the one-shot commands the smoke queues — `report`, `open <url>`, `api <method>`.
+ * The draft and `performance.timeOrigin` are what proves a switch, a detach or a dock never reloaded
+ * the page; `window.open` is what RF-66 needs; the api answer is RF-68's.
+ */
+function reportPage(label: string): string {
+  const script = [
+    'const LABEL = ' + JSON.stringify(label) + ';',
+    "const PID = Math.random().toString(36).slice(2) + Date.now().toString(36);",
+    "const DRAFT = 'draft-' + Math.random().toString(36).slice(2, 8);",
+    "const input = document.getElementById('draft');",
+    'input.value = DRAFT;',
+    'let apiError = null;',
+    'async function snapshot(tag, note) {',
+    '  const bridge = window.tiny && window.tiny.win ? window.tiny.win : null;',
+    '  let state = null;',
+    '  let stateError = null;',
+    '  try {',
+    '    if (bridge === null) stateError = "no tiny.win in this window";',
+    '    else if (typeof bridge.getState !== "function") stateError = "no tiny.win.getState in this window";',
+    '    else { state = await bridge.getState(); if (state === null) stateError = "getState() answered null"; }',
+    '  } catch (error) { stateError = String(error && error.message ? error.message : error); }',
+    '  return { tool: LABEL, pid: PID, tag: tag === undefined ? null : tag,',
+    '    note: note === undefined ? null : note, win: bridge === null ? null : bridge.id,',
+    '    stateError: stateError,',
+    '    href: location.href, timeOrigin: performance.timeOrigin,',
+    '    screenX: window.screenX, screenY: window.screenY,',
+    '    outerWidth: window.outerWidth, outerHeight: window.outerHeight,',
+    '    innerWidth: window.innerWidth, innerHeight: window.innerHeight,',
+    '    state: state === null ? null : { x: state.x, y: state.y, width: state.width,',
+    '      height: state.height, outerWidth: state.outer.width, outerHeight: state.outer.height,',
+    '      frame: state.chrome ? state.chrome.frame : null, visible: state.visible,',
+    '      focused: state.focused, minimized: state.minimized },',
+    '    draft: input.value, apiError: apiError, at: Date.now() };',
+    '}',
+    'function send(tag, note) {',
+    '  snapshot(tag, note).then(function (body) {',
+    "    fetch('/report', { method: 'POST', headers: { 'content-type': 'application/json' },",
+    '      body: JSON.stringify(body) }).catch(function () { return undefined; });',
+    '  }).catch(function () { return undefined; });',
+    '}',
+    "window.addEventListener('resize', function () { send(undefined, 'resize'); });",
+    'async function run(command) {',
+    "  if (command.cmd === 'report') { send(command.tag, 'ask'); return; }",
+    "  if (command.cmd === 'open') { window.open(command.arg, '_blank'); send(command.tag, 'open'); return; }",
+    "  if (command.cmd === 'api') {",
+    '    apiError = null;',
+    '    try {',
+    "      if (!window.tiny || !window.tiny.api) { apiError = 'no tiny bridge in this window'; }",
+    "      else { await window.tiny.api.call(command.arg || 'login.report', { state: 'no-form' }); apiError = 'ok'; }",
+    '    } catch (error) { apiError = String(error && error.message ? error.message : error); }',
+    "    send(command.tag, 'api');",
+    '    return;',
+    '  }',
+    "  send(command.tag, 'unknown:' + command.cmd);",
+    '}',
+    'async function poll() {',
+    '  try {',
+    "    const response = await fetch('/poll?pid=' + encodeURIComponent(PID), { cache: 'no-store' });",
+    '    if (response.ok) { const list = await response.json(); for (const command of list) await run(command); }',
+    '  } catch (error) { /* the server may be gone: keep polling */ }',
+    '  setTimeout(poll, 120);',
+    '}',
+    "send(undefined, 'load');",
+    'poll();',
+  ].join('\n');
+  return (
+    '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">' +
+    `<title>Tool ${label} · smoke</title>` +
+    '<link rel="icon" href="/icon.png"></head><body>' +
+    `<h1>Tool ${label}</h1>` +
+    '<input id="draft" type="text" autocomplete="off">' +
+    '<script>\n' +
+    script +
+    '\n</script></body></html>\n'
+  );
+}
+
+/**
+ * The three reporting tools of the E03 tab smoke, each on its own loopback origin: **A** and **B**
+ * are the two the smoke's seed names (a tool tab each), **C** is an origin no catalog names — what
+ * RF-67's "new tool" branch needs and what `api.origins` gives no method to. Every port is
+ * ephemeral and everything binds 127.0.0.1: no fixed port, no external network.
+ */
+export function startTabTools(): TabTools {
+  const reports: TabReport[] = [];
+  const queues = new Map<string, Array<{ cmd: string; arg?: string; tag?: string }>>();
+  const origins: Record<string, string> = {};
+  const servers: Array<{ stop: (closeActiveConnections?: boolean) => void }> = [];
+
+  function start(label: string): string {
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/icon.png') {
+          return new Response(PNG_1X1, {
+            headers: {
+              'content-type': 'image/png',
+              'content-length': String(PNG_1X1.byteLength),
+              'cache-control': 'no-store',
+            },
+          });
+        }
+        if (url.pathname === '/report' && req.method === 'POST') {
+          const body: unknown = await req.json().catch(() => null);
+          if (typeof body === 'object' && body !== null) reports.push(body as TabReport);
+          return smokeJson({ ok: true });
+        }
+        if (url.pathname === '/poll') {
+          const pid = url.searchParams.get('pid') ?? '';
+          const queued = queues.get(pid) ?? [];
+          queues.delete(pid);
+          return smokeJson(queued);
+        }
+        if (req.method === 'GET') {
+          return new Response(reportPage(label), {
+            headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+          });
+        }
+        return notFound();
+      },
+    });
+    servers.push(server);
+    return `http://127.0.0.1:${server.port}`;
+  }
+
+  origins.A = start('A');
+  origins.B = start('B');
+  origins.C = start('C');
+
+  return {
+    originA: origins.A,
+    originB: origins.B,
+    originC: origins.C,
+    reports: () => [...reports],
+    command(pid, cmd, arg, tag): void {
+      const queued = queues.get(pid) ?? [];
+      queued.push({ cmd, ...(arg === undefined ? {} : { arg }), ...(tag === undefined ? {} : { tag }) });
+      queues.set(pid, queued);
+    },
+    reset(): void {
+      reports.length = 0;
+      queues.clear();
+    },
+    stop(): void {
+      for (const server of servers) server.stop(true);
+    },
+  };
+}
