@@ -3,6 +3,7 @@
 How the epics (`docs/epics/E01-connected-mode.md`, `docs/epics/E02-credential-sharing.md`,
 `docs/epics/E03-docked-tabs.md`) split into stories, how big each one is, and in which effort block
 it lands. E04 and E05 (later phases, `Proposto`) have trackers (#69, #70) but no stories yet.
+E06 (research, embedded webview) has no tracker or stories yet.
 
 Evidence: sizes are judgement from `leitura` of the epics, the code and the past handovers. Nothing
 was executed, and no velocity exists yet.

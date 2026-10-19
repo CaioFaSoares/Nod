@@ -24,6 +24,14 @@
 //   `getState()`), and applied to the tool window's frame.
 import { call } from '../../src/api';
 import type { TabReport } from './tools';
+
+/**
+ * The fake pair `test/smoke/tools.ts` accepts (`USERNAME`/`SECRET_A` there). Literals on purpose:
+ * that module imports `node:child_process` for its servers, and a page importing it fails to bundle
+ * — this file is the page half and may only take *types* from it.
+ */
+const USERNAME = 'person@test';
+const SECRET_A = 'secret-a';
 import type { Entry, TabState, ToolsState } from '../../shared/types';
 
 /** The generated page hands this in before the modules load. */
@@ -1767,9 +1775,18 @@ async function checkOpenAsWindow(): Promise<Outcome> {
   expect(!state.embedded.includes('tool-a'), `the preference stayed: ${JSON.stringify(state.embedded)}`);
   const tab = tabOf(state, 'tool_tool-a');
   expect(tab.toolId === 'tool-a', `the docked tab is ${tab.id}`);
-  if ((await wmTiled()).length > 0) return await blockedByTiler(a1 as Tracked, 'the window cannot be measured on the slot');
   await reseat();
-  const measured = await measure(a1 as Tracked, 'after Open as window', false);
+  // The WM takes a new window as soon as it exists: the rule is judged at check time, after the
+  // conversion and the float, not at the moment the step started.
+  if ((await wmTiled()).length > 0) {
+    return await blockedByTiler(a1 as Tracked, 'the window cannot be measured on the slot');
+  }
+  // The window that the conversion opened loads a page of its own: measure that one, freshly.
+  const load = await waitForReport(
+    'the Tool A window page after Open as window',
+    (report) => report.tool === 'A' && report.note === 'load' && (report.href ?? '') === `${CONFIG.originA}/tab`,
+  );
+  const measured = await measure(track(load), 'after Open as window');
   expectPageBox(measured, 'after Open as window');
   expectOnSlot(measured, 'after Open as window');
   expect(
@@ -1788,10 +1805,14 @@ async function checkEmbedRestored(): Promise<string> {
   const open = before.tabs.find((tab) => tab.toolId === 'tool-a');
   expect(open !== undefined, 'no Tool A tab is open to embed');
   await activateRow((open as TabState).id);
-  await clickToolbar('Show inside Nod');
-  await waitForState('the tab embedded again', (next) =>
-    next.tabs.some((tab) => tab.embedded && tab.id === 'embed_tool-a') ? next : null,
-  );
+  // The tab may already be embedded (the earlier RF-69 steps leave it so): then the toolbar offers
+  // "Open as window" and there is nothing to convert.
+  if (!(open as TabState).embedded) {
+    await clickToolbar('Show inside Nod');
+    await waitForState('the tab embedded again', (next) =>
+      next.tabs.some((tab) => tab.embedded && tab.id === 'embed_tool-a') ? next : null,
+    );
+  }
   const geometry = await embeddedGeometry('before the lock');
   const page = framed;
   expect(page !== null, 'the embedded page was never tracked');
@@ -1847,6 +1868,134 @@ async function checkEmbedRestored(): Promise<string> {
   );
 }
 
+// ------------------------------------------------------------- 0.6.0b
+
+/** The native clipboard's text as the page can read it (`tiny.clipboard.read`). */
+async function clipboardText(): Promise<string> {
+  const data = await tiny.clipboard.read();
+  const raw: unknown = data;
+  if (typeof raw !== 'object' || raw === null) return '';
+  if ('text' in raw && typeof raw.text === 'string') return raw.text;
+  return '';
+}
+
+/** Puts something harmless on the clipboard before a copy and empties it after (try both shapes). */
+async function setClipboard(value: string): Promise<void> {
+  try {
+    await tiny.clipboard.write({ text: value });
+  } catch {
+    try {
+      await tiny.clipboard.write(value as never);
+    } catch {
+      /* the runtime may only read; the step says so through the value it found */
+    }
+  }
+}
+
+/** The dev run's gate: type the account password in the inline prompt and press Confirm. */
+async function passGate(): Promise<void> {
+  const field = await waitForValue('the password prompt', () =>
+    document.querySelector<HTMLInputElement>('input.gate-password'),
+  );
+  setValue(field, PASSWORD);
+  const gate = field.closest('.gate');
+  const confirm = controlByText('Confirm', gate ?? document);
+  expect(confirm !== null, 'the password prompt has no Confirm button');
+  confirm.click();
+  await waitForValue('the password prompt to close', () =>
+    document.querySelector('input.gate-password') === null ? true : null,
+  );
+}
+
+async function checkOpenTabsButton(): Promise<Outcome> {
+  await activateRow((await stateOf()).tabs[0]?.id ?? 'tool_tool-a').catch(() => undefined);
+  await openHome();
+  const button = await waitForValue('the Open tabs button', () =>
+    document.querySelector<HTMLButtonElement>('.mark-tabs'),
+  );
+  const state = await stateOf();
+  const badge = text(button.querySelector('.tabs-badge'));
+  expect(
+    Number(badge) === state.tabs.length,
+    `the Open tabs badge reads ${JSON.stringify(badge)} for ${state.tabs.length} tab(s)`,
+  );
+  expect(!button.disabled, 'the Open tabs button is disabled with tabs open');
+  button.click();
+  await waitForValue('the strip from the Open tabs button', () => document.querySelector('.tab-strip'));
+  const shown = await stripRows();
+  expect(
+    shown.length === state.tabs.length,
+    `the strip shows ${shown.length} row(s) for ${state.tabs.length} tab(s)`,
+  );
+
+  // With no tabs the button is there and disabled; Windows mode has none at all.
+  const closed = await closeAllTabs();
+  const empty = await waitForValue('the disabled Open tabs button', () => {
+    const found = document.querySelector<HTMLButtonElement>('.mark-tabs');
+    return found !== null && found.disabled ? found : null;
+  });
+  await openSettingsTab('Account');
+  const card = await waitForValue('the Window mode card', () => sectionCard('Window mode'));
+  const windows = card.querySelector<HTMLInputElement>('input[name=window-mode][value=windows]');
+  expect(windows !== null, 'the Window mode card has no Windows option');
+  windows.click();
+  await waitForState('windows mode', (next) => next.mode === 'windows');
+  expect(document.querySelector('.mark-tabs') === null, 'the Open tabs button is drawn in Windows mode');
+  // Back to docked for the credential steps, and one tab of Tool A to embed. The card is redrawn
+  // after the switch, so the radios must be read again — the earlier nodes are out of the document.
+  const redrawn = await waitForValue('the Window mode card again', () => sectionCard('Window mode'));
+  const docked = redrawn.querySelector<HTMLInputElement>('input[name=window-mode][value=docked]');
+  expect(docked !== null && !docked.disabled, 'the Docked option is not offered');
+  docked.click();
+  await waitForState('docked mode again', (next) => next.mode === 'docked');
+  return (
+    `Home → the Open tabs button (badge ${badge} for ${state.tabs.length} tab(s)) showed a strip of ` +
+    `${shown.length} row(s); with ${closed} closed it is disabled (${empty.disabled}); Windows mode ` +
+    `draws no .mark-tabs`
+  );
+}
+
+async function checkEmbeddedSignIn(): Promise<string> {
+  await call('vault.save', { toolId: 'tool-a', username: USERNAME, secret: SECRET_A });
+  await clickSidebarTool('Tool A');
+  const opened = await waitForState('a Tool A tab', (next) =>
+    next.tabs.some((tab) => tab.toolId === 'tool-a') ? next : null,
+  );
+  const tab = opened.tabs.find((item) => item.toolId === 'tool-a') as TabState;
+  await activateRow(tab.id);
+  await clickToolbar('Show inside Nod');
+  const state = await waitForState('the embedded Tool A tab', (next) =>
+    next.tabs.some((item) => item.embedded && item.toolId === 'tool-a') ? next : null,
+  );
+  const embedded = state.tabs.find((item) => item.embedded && item.toolId === 'tool-a') as TabState;
+  const warning = await waitForValue('the sign-in warning after Show inside Nod', () => {
+    const nodes = [document.querySelector('.banner'), document.querySelector('.notice-slot')];
+    const found = nodes
+      .map((node) => (node === null ? '' : text(node)))
+      .find((said) => /sign in/i.test(said) && /copy/i.test(said));
+    return found === undefined || found === '' ? null : found;
+  });
+  await setClipboard('smoke-before-copy');
+  await clickToolbar('Copy username');
+  const copiedUser = await waitForValue('the username on the clipboard', async () => {
+    const value = await clipboardText();
+    return value === USERNAME ? value : null;
+  });
+  await clickToolbar('Copy password');
+  await passGate();
+  const copiedSecret = await waitForValue('the secret on the clipboard', async () => {
+    const value = await clipboardText();
+    return value === SECRET_A ? value : null;
+  });
+  await setClipboard('');
+  const cleared = await clipboardText();
+  return (
+    `${embedded.id} embedded with its credential: warning ${JSON.stringify(warning.slice(0, 110))}; ` +
+    `Copy username → clipboard ${JSON.stringify(copiedUser)}; Copy password (gate with the account ` +
+    `password) → ${JSON.stringify(copiedSecret)}; clipboard cleared (${JSON.stringify(cleared)})`
+  );
+}
+
 // ------------------------------------------------------------- harness
 
 /** A check's answer: the step's detail, or the reason the session made its subject unobservable. */
@@ -1885,6 +2034,8 @@ const CHECKS: Checks = [
   ['RF-69 an X-Frame-Options tool is refused', checkEmbedRefused],
   ['RF-69 lock and unlock restore it embedded', checkEmbedRestored],
   ['RF-69 Open as window brings the tab back', checkOpenAsWindow],
+  ['0.6.0b Open tabs from Home, and not in Windows mode', checkOpenTabsButton],
+  ['0.6.0b embedded Sign in copies username and password', checkEmbeddedSignIn],
 ];
 
 async function run(): Promise<void> {

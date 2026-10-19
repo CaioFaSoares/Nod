@@ -6,7 +6,7 @@ import { call, errorMessage } from './api';
 import { el, message } from './ui';
 import { categoryOf } from '../shared/catalog';
 import type { TabsApi } from './tabs';
-import type { Entry, Id, TabState, ToolStatus } from '../shared/types';
+import type { Entry, Id, TabState, ToolStatus, VaultItem } from '../shared/types';
 import type { SettingsTab } from './settings';
 
 const OVERLAY_ID = 'palette-overlay';
@@ -78,6 +78,11 @@ function filter(items: Item[], query: string): Item[] {
 export type PaletteTabs = TabsApi & {
   active: TabState | null;
   open: TabState[];
+  /**
+   * 0.6.0b: the default credential of the active embedded tab, when the page knows the vault —
+   * null while the metadata has not been read or the tool has none.
+   */
+  credential: VaultItem | null;
 };
 
 export function openPalette(ctx: {
@@ -92,6 +97,9 @@ export function openPalette(ctx: {
   showOnline: (() => void) | null;
   /** K4: "Vault inbox" — Settings → Vault, scrolled to the shares waiting; null without a guild. */
   openInbox: (() => void) | null;
+  /** E03: "Open tabs" — the tab view of docked mode, from the page's own state; null in Windows
+   * mode and while the strip is empty. */
+  openTabs: (() => void) | null;
   /** E03: a tool opens through the app, so a docked tab lands on the center panel (RF-49). A
    * failure is the window's banner, the same one the sidebar and Home use. */
   openTool: (id: Id) => void;
@@ -165,6 +173,23 @@ export function openPalette(ctx: {
       }
       const close = 'Close tab';
       items.push({ label: close, key: matchKey(close), run: () => tabs.close(active.id) });
+      // 0.6.0b (RF-69): the Sign in control of an embedded tab — no script reaches the iframe, so
+      // the login is copied to the person. Same two actions the toolbar offers.
+      if (active.embedded && tabs.credential !== null) {
+        const credential = tabs.credential;
+        const username = 'Copy username';
+        items.push({
+          label: username,
+          key: matchKey(username),
+          run: () => tabs.copyUsername(credential),
+        });
+        const password = 'Copy password';
+        items.push({
+          label: password,
+          key: matchKey(password),
+          run: () => tabs.copyPassword(credential),
+        });
+      }
       // RF-69: an embedded tab has no window to detach and no dock to come back from.
       if (!active.embedded) {
         const toggle = active.docked ? 'Detach tab' : 'Dock tab';
@@ -180,6 +205,12 @@ export function openPalette(ctx: {
       const save = 'Save tab to sidebar';
       items.push({ label: save, key: matchKey(save), run: () => tabs.save(active.id) });
     }
+  }
+  // E03: the strip of docked mode, one row away (the same action as the sidebar's button).
+  const openTabs = ctx.openTabs;
+  if (openTabs !== null) {
+    const label = 'Open tabs';
+    items.push({ label, key: matchKey(label), run: () => openTabs() });
   }
   // E03 (RF-66): an address by hand — the same dialog the toolbar and ⌘L open, in either mode.
   const openLink = 'Open link…';

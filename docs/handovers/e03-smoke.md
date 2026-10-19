@@ -202,3 +202,42 @@ Every run: the owner's `resources/seed.json` came back (299 B) and `pgrep -fl ti
 release-only** (a release's `file://` top keeps them, except `SameSite=Lax`/`Strict`). Everything
 asserted here is framing, geometry, state and no-reload; the framed reporting page needs no cookies,
 which is why it works in dev.
+
+## 7. 0.6.0b — Open tabs button and the embedded Sign in group
+
+Two steps were added after the RF-69 block, on the same page:
+
+| Step | Result (two green runs) | Numbers |
+| --- | --- | --- |
+| 0.6.0b Open tabs from Home, and not in Windows mode | **ok** (157 ms / 356 ms) | from Home the sidebar's `.mark-tabs` carries badge `3` for 3 open tabs (badge = `state.tabs.length`), clicking it brings the strip back with 3 rows; with the tabs closed the button is **disabled** (`true`); after switching to Windows mode the card redraws and `.mark-tabs` is **absent**; switched back to Docked for the next step |
+| 0.6.0b embedded Sign in copies username and password | **ok** (910 ms / 623 ms) | `vault.save({ toolId: 'tool-a', username: 'person@test', secret: 'secret-a' })` (the fake pair `tools.ts` accepts, never a real credential), then "Show inside Nod" on Tool A → the banner reads `Tool A will not be signed in automatically inside Nod — use Sign in on the tab to copy your login.`; **Copy username** put `"person@test"` on the clipboard; **Copy password** passed the dev gate with the account password and put `"secret-a"` there; the clipboard was cleared afterwards (`""`) through `tiny.clipboard.write` |
+
+Clipboard: read with `tiny.clipboard.read()` (the native pasteboard through the runtime, no polling);
+`setClipboard`/the final clear try `write({ text })` and fall back to `write(text)`.
+
+### Runs after the two steps (unlocked screen)
+
+| Run | Verdict | Detail |
+| --- | --- | --- |
+| A | **`ok`, 25 steps, 3 blocked, 22.3 s** | both 0.6.0b steps green; RF-69 "Open as window" green that time (real frame on the slot) |
+| B | **`ok`, 25 steps, 4 blocked, 21.8 s** | both 0.6.0b steps green; "Open as window" `blocked by the tiling WM` |
+| C | failed at "RF-69 Open as window" | the WM tiled the freshly converted window between the guard and the measurement: the real frame is the tile (`3619,-1400 1235x1312`) while the slot is `3687,-1278 1167x1190`. **WM timing, not the product**: the guard is read a moment before `measure`, so a re-tile in between still reaches the assertion |
+
+Every run restored `resources/seed.json` (299 B, the owner's) and left no `tinyjs` process
+(`pgrep -fl tinyjs` empty).
+
+### Fixes made to the smoke in this round (no product code touched)
+
+1. **A page module may only take *types* from `test/smoke/tools.ts`.** Importing its values pulled
+   `node:child_process` into the page bundle: vite failed the module and the page never booted (two
+   240 s runs, windows left on screen). The fake pair is now two literals in the driver, and the
+   pre-launch gate also refuses a page module whose own imports name a runtime builtin.
+2. **The boot guard** no longer waits for "no window": a launch that writes nothing to the store for
+   25 s is killed and reported (a booted page that cannot write is just as broken).
+3. **`checkEmbedRestored` tolerates an already-embedded tab** (the toolbar then offers "Open as
+   window"), and **"Open as window" measures the page the new window loads**, not the dead iframe's
+   page box (which is what made its page-box assertion fail).
+4. **The Account card's radios are read again after the card redraws** — the nodes a mode switch
+   leaves behind are out of the document, and a click on them did nothing.
+5. The tiling-WM rule is judged **at check time**, after the reseat, in "Open as window" — run C above
+   shows the remaining window of a few hundred milliseconds in which the WM can still take the window.
