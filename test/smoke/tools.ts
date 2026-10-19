@@ -502,6 +502,8 @@ export interface TabTools {
   originC: string;
   /** RF-69: a reporting tool whose pages carry `X-Frame-Options: SAMEORIGIN` (never frameable). */
   originD: string;
+  /** RF-70: a reporting tool whose page loads a same-origin script writing a strict SameSite cookie. */
+  originE: string;
   /** Every report every page posted so far, oldest first. */
   reports(): TabReport[];
   /** Queues one command for the page of one load; that page's next poll answers it. */
@@ -613,7 +615,7 @@ export function startTabTools(): TabTools {
   const origins: Record<string, string> = {};
   const servers: Array<{ stop: (closeActiveConnections?: boolean) => void }> = [];
 
-  function start(label: string, noFraming = false): string {
+  function start(label: string, noFraming = false, cookieScript = false): string {
     const server = Bun.serve({
       hostname: '127.0.0.1',
       port: 0,
@@ -648,7 +650,26 @@ export function startTabTools(): TabTools {
           queues.delete(pid);
           return smokeJson(queued);
         }
-        if (req.method === 'GET') return html(reportPage(label));
+        if (url.pathname === '/cookies.js' && cookieScript) {
+          // RF-70: the js-cookie shape a real login write has — a flat literal with `expires:` and
+          // `sameSite: "strict"`, which is what `loginCookieRisk` (shared/tabs.ts) must find.
+          return new Response(
+            'function Cookies() {}\nCookies.set = function (name, value, options) {\n' +
+              '  document.cookie = name + "=" + value;\n' +
+              '  return [name, value, options];\n' +
+              '};\n' +
+              'Cookies.set("t", "v", {expires: 365, path: "/", secure: true, sameSite: "strict"});\n',
+            { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' } },
+          );
+        }
+        if (req.method === 'GET') {
+          const page = reportPage(label);
+          return html(
+            cookieScript
+              ? page.replace('</head>', '<script src="/cookies.js"></script></head>')
+              : page,
+          );
+        }
         return notFound();
       },
     });
@@ -661,12 +682,15 @@ export function startTabTools(): TabTools {
   origins.C = start('C');
   // RF-69: the same page behind `X-Frame-Options: SAMEORIGIN` — what `tabs.checkEmbed` must refuse.
   origins.D = start('D', true);
+  // RF-70: same page, but a same-origin script writes a SameSite=strict login cookie.
+  origins.E = start('E', false, true);
 
   return {
     originA: origins.A,
     originB: origins.B,
     originC: origins.C,
     originD: origins.D,
+    originE: origins.E,
     reports: () => [...reports],
     command(pid, cmd, arg, tag): void {
       const queued = queues.get(pid) ?? [];

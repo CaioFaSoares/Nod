@@ -464,6 +464,12 @@ export interface ToolsState {
   tabHotkeys: boolean;
   /** RF-69: the tools this machine opens as embedded tabs (docked mode only) */
   embedded: Id[];
+  /**
+   * RF-70: tools this machine never embeds because their login cannot survive an iframe, with the
+   * reason shown when "Show inside Nod" is refused (found by `tabs.checkEmbed` or reported by the
+   * person with `tabs.reportLoginFails`).
+   */
+  embedBlocked: Record<Id, string>;
 }
 
 /** E03 (RF-67): where `tabs.save` put the tab — a personal view under an entry, or a personal tool. */
@@ -1074,6 +1080,11 @@ export interface ApiContract {
    * with the `EmbedCheck` reason when the address may not be framed.
    */
   'tabs.setEmbedded': [{ toolId: Id; embedded: boolean }, ToolsState];
+  /**
+   * RF-70: the person saw the embedded tab fall back to its login screen. The tool's embedded tabs
+   * become window tabs (the login is filled there) and "Show inside Nod" is refused from now on.
+   */
+  'tabs.reportLoginFails': [{ toolId: Id }, ToolsState];
 
   'events.list': [EventFilter, AuditEvent[]];
   /** SP04 §5: the sent/pending counters of Settings → Activity (`{ sent: 0, pending: 0 }` with no host). */

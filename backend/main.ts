@@ -632,7 +632,16 @@ function credentialHolders(): CredentialHolders[] {
  */
 function toolsState(): ToolsState {
   if (windows !== null) return windows.state();
-  return { tools: [], tabs: [], active: null, mode: 'windows', dockable: false, tabHotkeys: false, embedded: [] };
+  return {
+    tools: [],
+    tabs: [],
+    active: null,
+    mode: 'windows',
+    dockable: false,
+    tabHotkeys: false,
+    embedded: [],
+    embedBlocked: {},
+  };
 }
 
 /**
@@ -3783,6 +3792,17 @@ const methods: { [M in Method]: Handler<M> } = {
     return await required(windows, 'tabs.setEmbedded').setEmbedded(
       text(p.toolId, 'invalid tool'),
       p.embedded,
+    );
+  },
+
+  /**
+   * RF-70: the person saw the embedded tab fall back to its login screen. The tool stops being
+   * embedded and its tabs become windows, where the login cascade fills them.
+   */
+  'tabs.reportLoginFails': async (params) => {
+    const p = parameters(params, 'invalid tool');
+    return await required(windows, 'tabs.reportLoginFails').reportLoginFails(
+      text(p.toolId, 'invalid tool'),
     );
   },
 

@@ -232,6 +232,20 @@ reason when it may not be framed. The backend shows no window while an embedded 
 | Planka (`kanban.copland.studio`) | renders, no `X-Frame-Options`/CSP | will **not** keep a login even with the proxy: its client writes `accessToken` from JavaScript with `sameSite: 'strict'` (leitura: `client/src/utils/access-token-storage.js` of plankanban/planka), and no response-header rewrite can change a cookie the page creates itself | none known — leave it as a window |
 | Claude (`claude.ai`) | **refused**, measured: `X-Frame-Options: SAMEORIGIN` (and a CSP on its challenge page) | n/a | none — stays a window, as the RF-69 acceptance says |
 
+**Login-blocked tools (RF-70, 0.6.0c).** A tool can pass the framing check and still never keep a
+login in the frame: Planka sets both of its login cookies `SameSite=Strict` — the server's
+`httpOnlyToken` (`server/api/helpers/utils/set-http-only-token-cookie.js`) and the client's
+`accessToken`, saved with js-cookie (`client/src/utils/access-token-storage.js`; in the owner's bundle
+as `sameSite:"strict"`), both by leitura, the second from the page's own script where a proxy rewrite
+cannot reach. Since 0.6.0c the Nod treats that as a property of the machine: after the header check,
+`tabs.checkEmbed` runs `loginCookieRisk` (`shared/tabs.ts`), which flags a `SameSite=Strict`/`Lax`
+cookie on the entry response or written by a same-origin script the entry HTML loads, and records the
+reason in `embed_blocked` (`ToolsState.embedBlocked`, no secret). "Show inside Nod" is then refused
+with that reason, the embedded tab offers "Login won't stay? Open as window" (`tabs.reportLoginFails`),
+and a flagged tool's embedded tabs become window tabs in place, where the login cascade fills them;
+an already-embedded tool that the check flags on its next open converts the same way, and the store
+keeps the entry so a later "Allow again" can delete it.
+
 Dev runs (`bun run app:dev`) never keep a framed login: the page is `http://127.0.0.1:5173`, so the
 frame is third-party and WebKit neither stores nor sends its cookies — only release builds (the
 `file://` page) keep a login. Windows and Linux were not measured; the runtime's own notes say Linux

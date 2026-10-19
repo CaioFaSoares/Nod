@@ -170,6 +170,16 @@ export function openPalette(ctx: {
           key: matchKey(mode),
           run: () => tabs.setEmbedded(toolId, !active.embedded),
         });
+        // RF-70: the same report the embedded toolbar offers — the login did not survive the
+        // iframe, so the tool stops embedding and its tabs go back to windows.
+        if (active.embedded) {
+          const login = "Login won't stay? Open as window";
+          items.push({
+            label: login,
+            key: matchKey(login),
+            run: () => tabs.reportLoginFails(toolId),
+          });
+        }
       }
       const close = 'Close tab';
       items.push({ label: close, key: matchKey(close), run: () => tabs.close(active.id) });

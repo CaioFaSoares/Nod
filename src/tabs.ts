@@ -44,6 +44,12 @@ export interface TabsApi {
    */
   setEmbedded: (toolId: Id, embedded: boolean) => void;
   /**
+   * RF-70: the person reports that the tool lost its login inside Nod. The backend blocks the tool
+   * from embedding — its open tabs become window tabs in place — and the answer's `embedBlocked`
+   * carries the reason the app shows.
+   */
+  reportLoginFails: (toolId: Id) => void;
+  /**
    * 0.6.0b (RF-69): the credential's username goes to the clipboard — it is already on screen in
    * Settings → Vault, never a secret.
    */
@@ -63,6 +69,8 @@ export interface TabsDeps {
   save: (id: string) => void;
   /** RF-69: the app's half of the embedding toggle — the frameability check and its message. */
   setEmbedded: (toolId: Id, embedded: boolean) => void;
+  /** RF-70: the app's half of a report — the call, its answer and the notice of the block. */
+  reportLoginFails: (toolId: Id) => void;
   /** 0.6.0b: the app's clipboard copy of a credential's username. */
   copyUsername: (item: VaultItem) => void;
   /** 0.6.0b: the app's gated copy of a credential's password. */
@@ -86,6 +94,7 @@ export function tabsApi(deps: TabsDeps): TabsApi {
     next: (step) => deps.run(() => call('tabs.next', { step })),
     save: deps.save,
     setEmbedded: deps.setEmbedded,
+    reportLoginFails: deps.reportLoginFails,
     copyUsername: deps.copyUsername,
     copyPassword: deps.copyPassword,
   };
@@ -506,6 +515,21 @@ function toolbarButtons(active: TabState | null, ctx: TabsViewCtx): HTMLElement[
               title: `Show ${active.title} inside Nod instead of a window`,
             }),
       );
+      // RF-70: a framed site never stores a SameSite login, so the person may find the tool signed
+      // out inside Nod. Reporting it blocks the tool from embedding; the backend turns its tabs back
+      // into windows in place, and the app shows the notice once from the answer's `embedBlocked`.
+      if (active.embedded) {
+        buttons.push(
+          button(
+            "Login won't stay? Open as window",
+            () => ctx.actions.reportLoginFails(toolId),
+            {
+              kind: 'ghost',
+              title: `If ${active.title} forgets its login inside Nod, report it and open it as a window`,
+            },
+          ),
+        );
+      }
     }
     // 0.6.0b (RF-69): no script reaches a subframe, so an embedded tool cannot be autofilled. When
     // the person holds a credential for it, the tab offers the login as two copy actions: the

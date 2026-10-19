@@ -15,6 +15,7 @@ import {
   frameability,
   insertAfter,
   linkWindowId,
+  loginCookieRisk,
   neighbourAfterClose,
   nextEmbedNumber,
   nextLinkNumber,
@@ -24,6 +25,7 @@ import {
   parsePersistedTabs,
   rectEquals,
   saveTarget,
+  scriptSources,
   slotToScreen,
   stepTab,
   tabWindowId,
@@ -132,6 +134,105 @@ describe('frameability', () => {
         'content-security-policy': 'frame-ancestors *, default-src \'self\', frame-ancestors https://a.example',
       }),
     ).toEqual({ frameable: false, reason: 'frame-ancestors https://a.example' });
+  });
+});
+
+describe('loginCookieRisk (RF-70)', () => {
+  const COOKIE_REASON = (value: string) =>
+    `the tool keeps cookies with SameSite=${value}, which a tab inside Nod cannot store`;
+  const SCRIPT_REASON = (value: string) =>
+    `the tool's page saves its login in a SameSite=${value} cookie, which a tab inside Nod cannot store`;
+
+  test('a Set-Cookie with SameSite=Strict or Lax refuses the iframe', () => {
+    expect(
+      loginCookieRisk({ setCookies: ['token=1; Path=/; HttpOnly; SameSite=Strict'], scripts: [] }),
+    ).toBe(COOKIE_REASON('Strict'));
+    expect(loginCookieRisk({ setCookies: ['token=1; SameSite=Lax'], scripts: [] })).toBe(
+      COOKIE_REASON('Lax'),
+    );
+    // The attribute name is case-insensitive; the reason quotes the value as written.
+    expect(loginCookieRisk({ setCookies: ['token=1; samesite=strict'], scripts: [] })).toBe(
+      COOKIE_REASON('strict'),
+    );
+  });
+
+  test('SameSite=None and a cookie with no SameSite are fine', () => {
+    expect(
+      loginCookieRisk({ setCookies: ['token=1; SameSite=None; Secure', 'theme=dark; Path=/'], scripts: [] }),
+    ).toBeNull();
+  });
+
+  test('a login cookie write with expires and a strict/lax sameSite refuses the iframe', () => {
+    // The shape a login write has: a flat options literal with `expires` beside `sameSite`.
+    const write =
+      'Cookie.set("accessToken", T, {expires:T,path:PATH,secure:window.location.protocol==="https:",sameSite:"strict"});';
+    expect(loginCookieRisk({ setCookies: [], scripts: [write] })).toBe(SCRIPT_REASON('strict'));
+    const lax = 'Cookies.set("session", id, { path: "/", expires: days(1), sameSite: \'lax\' });';
+    expect(loginCookieRisk({ setCookies: [], scripts: [lax] })).toBe(SCRIPT_REASON('lax'));
+  });
+
+  test('library defaults, consent banners and serializers do not match', () => {
+    // The three Jitsi shapes: js-cookie's default argument, a serializer `switch` and a consent
+    // banner's defaults. None is a login write of the page itself.
+    const snippets = [
+      'o=arguments[4]||{path:"/",sameSite:"strict"};',
+      'switch(e){case"lax":a+="; SameSite=Lax";break;case"strict":a+="; SameSite=Strict";}',
+      '{domain:"",expiration:365,sameSite:"Lax",secure:!1,upgrade:!0}',
+    ];
+    for (const snippet of snippets) {
+      expect(loginCookieRisk({ setCookies: [], scripts: [snippet] })).toBeNull();
+    }
+    // A login write whose options are not a flat literal is not read as one either.
+    expect(
+      loginCookieRisk({
+        setCookies: [],
+        scripts: ['set("t", v, { expires: T, nested: { sameSite: "strict" } });'],
+      }),
+    ).toBeNull();
+    // `expiration` is not `expires:`.
+    expect(
+      loginCookieRisk({ setCookies: [], scripts: ['set("t", v, { expiration: 365, sameSite: "strict" });'] }),
+    ).toBeNull();
+  });
+});
+
+describe('scriptSources (RF-70)', () => {
+  test('same-origin script and modulepreload addresses, in document order', () => {
+    const html = [
+      '<script src="/app.js"></script>',
+      "<script src='https://kanban.example/next.js'></script>",
+      '<script src="https://cdn.example/lib.js"></script>',
+      '<link href="/preload.js" rel="modulepreload">',
+      '<link rel="stylesheet" href="/style.css">',
+      '<script>inline()</script>',
+    ].join('');
+    expect(scriptSources(html, 'https://kanban.example/app')).toEqual([
+      'https://kanban.example/app.js',
+      'https://kanban.example/next.js',
+      'https://kanban.example/preload.js',
+    ]);
+  });
+
+  test('relative addresses resolve against the entry URL and duplicates count once', () => {
+    const html = '<script src="chunk.js"></script><script src="/app/chunk.js"></script>';
+    expect(scriptSources(html, 'https://kanban.example/app/page')).toEqual([
+      'https://kanban.example/app/chunk.js',
+    ]);
+  });
+
+  test('at most 8 scripts are read', () => {
+    const html = Array.from({ length: 12 }, (_, index) => `<script src="/s${index}.js"></script>`).join('');
+    expect(scriptSources(html, 'https://kanban.example/')).toHaveLength(8);
+  });
+
+  test('a cross-origin script or preload is ignored, and so is a malformed entry URL', () => {
+    expect(
+      scriptSources(
+        '<script src="https://other.example/a.js"></script><link rel="modulepreload" href="https://other.example/b.js">',
+        'https://kanban.example/',
+      ),
+    ).toEqual([]);
+    expect(scriptSources('<script src="/a.js"></script>', 'not a url')).toEqual([]);
   });
 });
 

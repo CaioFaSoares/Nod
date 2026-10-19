@@ -241,3 +241,43 @@ Every run restored `resources/seed.json` (299 B, the owner's) and left no `tinyj
    leaves behind are out of the document, and a click on them did nothing.
 5. The tiling-WM rule is judged **at check time**, after the reseat, in "Open as window" — run C above
    shows the remaining window of a few hundred milliseconds in which the WM can still take the window.
+
+## 8. 0.6.0c — RF-70 login-block (`loginCookieRisk`, `embedBlocked`)
+
+A fifth reporting tool and two steps were added. They first failed or hung (table below), then passed
+in two orchestrator runs on current files.
+
+### Added
+
+- **origin E** (`startTabTools`) — the same reporting page with a same-origin `/cookies.js` that
+  carries the js-cookie shape `shared/tabs.ts` `loginCookieRisk` looks for:
+  `Cookies.set("t", "v", {expires: 365, path: "/", secure: true, sameSite: "strict"});` (flat literal,
+  `expires:` beside `sameSite: "strict"`). The seed names it `tool-e`.
+- **0.6.0c a strict-cookie login write refuses the iframe** — opens Tool E as a window, "Show inside
+  Nod": the banner must carry the reason (the matcher is the tolerant `shown inside Nod` plus
+  `/samesite/i`), the tab must stay a window, the preference must stay without `tool-e`, and
+  `embedBlocked['tool-e']` must carry the string.
+- **0.6.0c Login won't stay? Open as window blocks the tool** — on the embedded Tool A of the Sign in
+  step: the toolbar button converts the tab to a window **at the same strip index**, `embedBlocked`
+  gets `tool-a`, the preference drops `tool-a`, and a second "Show inside Nod" is refused with
+  `the tool did not keep its login inside Nod`.
+
+### What execution showed
+
+| Attempt | Result | Detail |
+| --- | --- | --- |
+| runs A/B (before the wording fix) | failed at the **existing** "RF-69 an X-Frame-Options tool is refused" step | the 0.6.0c product changed that banner to `… can't be shown inside Nod: …` while the check still waited for `cannot be shown inside Nod`; 20 s timeout, everything after it did not run. The check was fixed to match `shown inside Nod` (both wordings) |
+| runs C/D (after the fix) | **no verdict** — both were killed past 5 minutes with no step lines | the page wrote nothing this time and the launch had to be killed by hand: the app (pids seen by `pgrep -fl tinyjs`) and the temporary seed were left behind and were restored afterwards (`resources/seed.json` 299 B, `tinyjs.json` `devUrl` 5173, no process left). The cause is not diagnosed; the pre-launch parse gate passed, so the module is syntactically valid — the next step is to read the app's own output for those launches (the runner prints it on failure) and to check whether the new Tool E page's script breaks the report page's module |
+| runs E/F (orchestrator, `bun test/smoke/tabs.ts --force`) | **`ok`**, 27 steps; run E 3 blocked (page hidden), run F 4 blocked (tiling WM) | both 0.6.0c steps green in both runs: Tool E refused with `the tool's page saves its login in a SameSite=strict cookie, which a tab inside Nod cannot store`; "Login won't stay? Open as window" put `tool_tool-a` at strip index 0, `embedBlocked[tool-a]` = `the tool did not keep its login inside Nod`, preference `[]`, and the next "Show inside Nod" was refused. No `tinyjs` process left, seed restored. The C/D hang did not recur and stays undiagnosed |
+
+The rule was also checked against the live tools (execução, orchestrator, `shared/tabs.ts`
+`scriptSources` + `loginCookieRisk` under Bun): `kanban.copland.studio` (Planka) → flagged;
+`affine.copland.studio`, `jitsi.copland.studio`, `copland.studio` → not flagged. A first, broader
+rule flagged Jitsi (library cookie defaults in its bundle); the rule was narrowed to a flat object
+literal carrying `expires:` beside `sameSite:"strict"|"lax"`.
+
+### Note on the contract
+
+`local://e03-loginblock.md`'s two signals are both covered by the fake tool chosen here (the script
+shape); the `Set-Cookie: SameSite=…` half is not exercised by the smoke — a deliberate omission, it
+would need a second tool and the same page.

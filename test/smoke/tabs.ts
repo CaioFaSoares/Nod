@@ -117,6 +117,8 @@ function temporarySeed(tools: TabTools): string {
       { ...base, id: 'tool-b', title: 'Tool B', url: `${tools.originB}/tab`, order: 20 },
       // RF-69: a tool whose pages answer `X-Frame-Options: SAMEORIGIN` — never embeddable.
       { ...base, id: 'tool-d', title: 'Tool D', url: `${tools.originD}/tab`, order: 30 },
+      // RF-70: a tool whose page writes a SameSite=strict login cookie — the iframe would lose it.
+      { ...base, id: 'tool-e', title: 'Tool E', url: `${tools.originE}/tab`, order: 40 },
     ],
     invites: [],
     update: null,
@@ -429,6 +431,7 @@ function generatePage(
     originB: tools.originB,
     originC: tools.originC,
     originD: tools.originD,
+    originE: tools.originE,
   });
   const html =
     '<!doctype html>\n' +
@@ -764,7 +767,7 @@ async function main(): Promise<number> {
     tools = startTabTools();
     console.log(
       `reporting tools: A=${tools.originA} B=${tools.originB} C=${tools.originC} ` +
-        `D=${tools.originD} (XFO SAMEORIGIN, loopback only)`,
+        `D=${tools.originD} (XFO SAMEORIGIN) E=${tools.originE} (SameSite=strict write), loopback only`,
     );
     const wm = await runTool(['omniwmctl', 'ping']);
     console.log(
