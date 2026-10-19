@@ -188,6 +188,10 @@ notice. Write it as patch notes for the people using Nod.
   (`backend/main.ts` `withHotfixes`), and the install itself does not compare versions. The same
   form is a valid `NOD_MIN_APP_VERSION` on the host (SP07 §2). macOS shows the letters in the
   bundle's version string as written.
+  - **A build older than 0.5.5a never sees a letter.** `withHotfixes` ships inside the app, so a
+    Nod on `0.5.5` or older only has the runtime's three-number check (`update.js` `parseVer`)
+    and reads `0.5.5a`, `0.5.5b`… as `0.5.5`. A fix those installs must receive automatically
+    goes out as a patch bump instead — that is why 0.5.6 exists (`docs/canonico.md` §22).
 - **Public repository: auto-update works.** The repository is public, so release files download
   without authentication and an installed Nod fetches its manifest and its archives straight from
   GitHub Releases. The release repository is this one — `RELEASE_REPO` already defaults to

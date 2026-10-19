@@ -40,8 +40,9 @@ Taken from the two references the owner chose:
 | --- | --- | --- | --- |
 | **1 — One guild, synced** | Host on Coolify; people activated with access codes; org tools, roles and grants managed on the host and synced to every Nod; offline cache; events; vault bound to origin; the crypto risk of both epics retired | 67 | 19 |
 | **2 — Mine and shared** | Personal tools, views and favorites; vault encrypted with `vaultKey`; device sessions and update manifest; credential send, assign and share with scope, holders and gate | 56 | 16 |
+| **3 — Docked tabs and quick links** | Tabs over the center panel, several per tool, detach without reload, Docked/Windows setting, links opened and saved as tabs; B05 fixed first | 56 | 16 (5 spikes, 11 stories) + gate G3 |
 
-E01 totals 85 points; E02 totals 38.
+E01 totals 85 points; E02 totals 38; E03 totals 56.
 
 Why this cut:
 
