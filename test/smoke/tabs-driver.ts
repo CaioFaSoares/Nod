@@ -43,6 +43,8 @@ interface DriverConfig {
   originC: string;
   /** RF-69: the tool that answers `X-Frame-Options: SAMEORIGIN`. */
   originD: string;
+  /** RF-70: the tool whose page writes a strict SameSite cookie. */
+  originE: string;
 }
 
 const smokeWindow = window as unknown as { __NOD_TABS_SMOKE__?: DriverConfig };
@@ -1748,7 +1750,7 @@ async function checkEmbedRefused(): Promise<string> {
   const before = opened.tabs.find((tab) => tab.id === 'tool_tool-d') as TabState;
   expect(before.embedded === false, 'Tool D opened embedded');
   await clickToolbar('Show inside Nod');
-  const banner = await waitForStatus('cannot be shown inside Nod');
+  const banner = await waitForStatus('shown inside Nod');
   const said = text(banner);
   expect(/x-frame-options/i.test(said), `the banner says ${JSON.stringify(said)}`);
   const state = await stateOf();
@@ -1996,6 +1998,73 @@ async function checkEmbeddedSignIn(): Promise<string> {
   );
 }
 
+// ------------------------------------------------------------- 0.6.0c (RF-70)
+
+async function checkLoginCookieRefused(): Promise<string> {
+  await clickSidebarTool('Tool E');
+  const opened = await waitForState('the Tool E window', (next) =>
+    next.tabs.some((tab) => tab.id === 'tool_tool-e') && next.active === 'tool_tool-e' ? next : null,
+  );
+  const tab = opened.tabs.find((item) => item.id === 'tool_tool-e') as TabState;
+  expect(tab.embedded === false, 'Tool E opened embedded');
+  await clickToolbar('Show inside Nod');
+  const banner = await waitForStatus('shown inside Nod');
+  const said = text(banner);
+  expect(/samesite/i.test(said), `the banner says ${JSON.stringify(said)}`);
+  const state = await stateOf();
+  const after = state.tabs.find((item) => item.id === 'tool_tool-e') as TabState;
+  expect(after.embedded === false, 'Tool E became embedded anyway');
+  expect(!state.embedded.includes('tool-e'), `the preference was stored: ${JSON.stringify(state.embedded)}`);
+  const blocked = state.embedBlocked['tool-e'];
+  expect(typeof blocked === 'string' && blocked !== '', `embedBlocked = ${JSON.stringify(state.embedBlocked)}`);
+  return (
+    `Tool E (${CONFIG.originE}/tab, a same-origin script writing Cookies.set(…, {expires, sameSite: ` +
+    `"strict"})) → "Show inside Nod" refused: ${JSON.stringify(said.slice(0, 150))}; the tab stays a ` +
+    `window; the preference stays ${JSON.stringify(state.embedded)}; embedBlocked[tool-e] = ` +
+    `${JSON.stringify(blocked)}`
+  );
+}
+
+async function checkLoginDoesNotStay(): Promise<string> {
+  // Tool A is embedded, with its credential, from the Sign in step before this one.
+  const before = await stateOf();
+  const at = before.tabs.findIndex((tab) => tab.embedded && tab.toolId === 'tool-a');
+  expect(at >= 0, `Tool A is not embedded: ${before.tabs.map((tab) => tab.id).join(', ')}`);
+  await activateRow('embed_tool-a');
+  const button = await waitForControl("Login won't stay? Open as window");
+  button.click();
+  const state = await waitForState('the tab to become a window tab', (next) =>
+    next.tabs.some((tab) => tab.id === 'tool_tool-a' && !tab.embedded) ? next : null,
+  );
+  const ids = state.tabs.map((tab) => tab.id);
+  expect(
+    ids[at] === 'tool_tool-a',
+    `the window tab is at ${ids.indexOf('tool_tool-a')} of ${ids.join(', ')}; it was at ${at}`,
+  );
+  const blocked = state.embedBlocked['tool-a'];
+  expect(typeof blocked === 'string' && blocked !== '', `embedBlocked = ${JSON.stringify(state.embedBlocked)}`);
+  expect(!state.embedded.includes('tool-a'), `the preference was kept: ${JSON.stringify(state.embedded)}`);
+  const tab = tabOf(state, 'tool_tool-a');
+  expect(tab.docked === true, 'the converted tab is not docked');
+
+  await activateRow('tool_tool-a');
+  await clickToolbar('Show inside Nod');
+  const banner = await waitForStatus('shown inside Nod');
+  const said = text(banner);
+  expect(/did not keep its login/i.test(said), `the banner says ${JSON.stringify(said)}`);
+  const refused = await stateOf();
+  expect(
+    (refused.tabs.find((item) => item.id === 'tool_tool-a') as TabState).embedded === false,
+    'Tool A became embedded again',
+  );
+  return (
+    `"Login won't stay? Open as window" → tool_tool-a at index ${at} (it was embed_tool-a; the strip ` +
+    `order is ${ids.join(', ')}), embedBlocked[tool-a] = ${JSON.stringify(blocked)}, the preference is ` +
+    `${JSON.stringify(refused.embedded)}; the next "Show inside Nod" refused: ` +
+    `${JSON.stringify(said.slice(0, 150))}`
+  );
+}
+
 // ------------------------------------------------------------- harness
 
 /** A check's answer: the step's detail, or the reason the session made its subject unobservable. */
@@ -2036,6 +2105,8 @@ const CHECKS: Checks = [
   ['RF-69 Open as window brings the tab back', checkOpenAsWindow],
   ['0.6.0b Open tabs from Home, and not in Windows mode', checkOpenTabsButton],
   ['0.6.0b embedded Sign in copies username and password', checkEmbeddedSignIn],
+  ['0.6.0c a strict-cookie login write refuses the iframe', checkLoginCookieRefused],
+  ["0.6.0c Login won't stay? Open as window blocks the tool", checkLoginDoesNotStay],
 ];
 
 async function run(): Promise<void> {

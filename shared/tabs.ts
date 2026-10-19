@@ -112,6 +112,104 @@ export function frameability(headers: Record<string, string>): EmbedCheck {
   return { frameable: true, reason: null };
 }
 
+// ---------------------------------------------------------------- login risk (RF-70)
+
+/**
+ * RF-70: why a tool cannot keep its login inside an `<iframe>` of the Nod's main page, or `null`
+ * when nothing in the response suggests a problem. A framed site never stores a `Lax`/`Strict`
+ * cookie (`docs/handovers/e03-iframe-spike.md`), so a login that depends on one falls back to its
+ * login screen as soon as the person presses anything.
+ *
+ * Two signals, both generic (no product names, AGENTS.md):
+ *
+ * - a `Set-Cookie` of the entry response carrying `SameSite=Strict` or `SameSite=Lax`
+ *   (case-insensitive). The reason quotes the value as the header wrote it.
+ * - a same-origin script that writes a login cookie with a strict/lax SameSite: a
+ *   `sameSite: "strict"` / `sameSite: 'lax'` option inside a **flat** object literal (no nested
+ *   braces, at most 300 characters) that also carries an `expires` key — exactly `expires:`, not
+ *   `expiration:`. Library defaults (`{path:"/",sameSite:"strict"}`, consent banners with
+ *   `expiration`, cookie serializers) are shaped nothing like that, so they do not count; the
+ *   shape is what a real login write looks like. The reason quotes the value as the script wrote
+ *   it. A false positive only costs the iframe, which the contract accepts.
+ *
+ * `setCookies` holds one entry per header (the caller keeps them apart; a joined header would make
+ * the comma ambiguous), `scripts` the bodies of the page's own scripts. Pure: no DOM, no fetch.
+ */
+export function loginCookieRisk(input: { setCookies: string[]; scripts: string[] }): string | null {
+  for (const header of input.setCookies) {
+    const match = /(?:^|;)\s*samesite\s*=\s*(strict|lax)\b/i.exec(header);
+    if (match !== null) {
+      return `the tool keeps cookies with SameSite=${match[1]}, which a tab inside Nod cannot store`;
+    }
+  }
+  // The js-cookie shape a login write uses; the flat literal with `expires:` beside it is what
+  // tells a real write from a library default. Serializer strings (`SameSite=Strict`) are
+  // deliberately not matched: every cookie library ships them.
+  const sameSite = /sameSite\s*:\s*["'](strict|lax)["']/gi;
+  for (const script of input.scripts) {
+    for (const match of script.matchAll(sameSite)) {
+      const at = match.index;
+      if (at === undefined) continue;
+      const open = script.lastIndexOf('{', at);
+      const close = script.indexOf('}', at);
+      if (open === -1 || close === -1 || close - open + 1 > 300) continue;
+      const literal = script.slice(open + 1, close);
+      if (literal.includes('{') || literal.includes('}')) continue; // nested: not the write's own options
+      if (!/\bexpires\s*:/.test(literal)) continue; // `expiration:` is a consent default, not this
+      return `the tool's page saves its login in a SameSite=${match[1]} cookie, which a tab inside Nod cannot store`;
+    }
+  }
+  return null;
+}
+
+/**
+ * RF-70: the same-origin scripts the entry HTML loads — `<script src>` and
+ * `<link rel=modulepreload href>`, resolved against the entry URL, in document order, each address
+ * once, at most 8. A cross-origin script is ignored: the backend may not read it, and a cookie it
+ * writes for another site is not the tool's login. Everything else (inline scripts, `data:`
+ * addresses) is skipped. Pure: the backend fetches the addresses, the page never runs this.
+ */
+export function scriptSources(html: string, entryUrl: string): string[] {
+  let base: URL;
+  try {
+    base = new URL(entryUrl);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const tag of html.matchAll(/<(script|link)\b([^>]*)>/gi)) {
+    const attrs = tag[2] ?? '';
+    const isScript = (tag[1] ?? '').toLowerCase() === 'script';
+    const address = isScript ? attribute(attrs, 'src') : attribute(attrs, 'href');
+    if (address === null || address.trim() === '') continue;
+    const rel = attribute(attrs, 'rel');
+    if (!isScript && (rel === null || !rel.toLowerCase().split(/\s+/).includes('modulepreload'))) {
+      continue;
+    }
+    let resolved: URL;
+    try {
+      resolved = new URL(address.trim(), base);
+    } catch {
+      continue;
+    }
+    if (resolved.origin !== base.origin) continue;
+    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') continue;
+    if (seen.has(resolved.href)) continue;
+    seen.add(resolved.href);
+    out.push(resolved.href);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+/** Reads one attribute of an HTML tag, quoting either way or not at all; `null` when absent. */
+function attribute(attrs: string, name: string): string | null {
+  const match = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i').exec(attrs);
+  if (match === null) return null;
+  return match[1] ?? match[2] ?? match[3] ?? null;
+}
+
 // ---------------------------------------------------------------- strip order
 
 /**

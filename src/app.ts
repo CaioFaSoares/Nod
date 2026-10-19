@@ -1164,6 +1164,9 @@ const tabActions: TabsApi = tabsApi({
   setEmbedded: (toolId, embedded) => {
     void applyEmbedded(toolId, embedded);
   },
+  reportLoginFails: (toolId) => {
+    void reportLoginFails(toolId);
+  },
   copyUsername: (item) => {
     void copyUsername(item);
   },
@@ -1330,6 +1333,35 @@ function copyPassword(item: VaultItem): void {
 }
 
 /**
+ * RF-70: the one sentence for a tool that must stay a window — its login cannot survive an iframe.
+ * The reason comes from the backend (`embed_blocked`), so the page never guesses why.
+ */
+function embedRefusalNotice(title: string, reason: string): void {
+  if (shell === null) return;
+  message(
+    shell.banner,
+    'info',
+    `${title} can't be shown inside Nod: ${reason}. It opens as a window tab, where Nod fills your login.`,
+  );
+}
+
+/**
+ * RF-70: a tool whose login cannot survive an iframe is announced once — when a `tools` answer first
+ * carries it in `embedBlocked` after it had embedded tabs (the backend converted them in place, or
+ * the person reported the lost login). Later pushes carry it as already blocked and stay silent.
+ */
+function announceEmbedBlocked(previous: ToolsState | null, next: ToolsState): void {
+  if (previous === null) return;
+  for (const [toolId, reason] of Object.entries(next.embedBlocked)) {
+    if (toolId in previous.embedBlocked) continue;
+    if (!previous.tabs.some((tab) => tab.toolId === toolId && tab.embedded)) continue;
+    const title = next.tools.find((tool) => tool.id === toolId)?.title ?? 'This tool';
+    embedRefusalNotice(title, reason);
+    return;
+  }
+}
+
+/**
  * RF-69: "Show inside Nod"/"Open as window" of the toolbar and the palette. Becoming embedded asks
  * the backend first (`tabs.checkEmbed`, the same check `tabs.setEmbedded` runs): a tool whose
  * address may not be framed keeps its window and the panel says why; nothing else changes. The
@@ -1347,13 +1379,7 @@ async function applyEmbedded(toolId: Id, embedded: boolean): Promise<void> {
     }
     if (!check.frameable) {
       const title = tools.find((tool) => tool.id === toolId)?.title ?? 'This tool';
-      if (shell !== null) {
-        message(
-          shell.banner,
-          'info',
-          `${title} cannot be shown inside Nod — ${check.reason ?? 'the address refuses framing'}`,
-        );
-      }
+      embedRefusalNotice(title, check.reason ?? 'the address refuses framing');
       return;
     }
   }
@@ -1374,13 +1400,27 @@ async function applyEmbedded(toolId: Id, embedded: boolean): Promise<void> {
 }
 
 /**
+ * RF-70: the person says the login did not survive the iframe ("Login won't stay? Open as window").
+ * The backend blocks the tool, removes it from `embedded_tools` and converts its embedded tabs to
+ * window tabs in place; the answer's `embedBlocked` carries the reason and `applyTools` announces
+ * the block once, without a second read of the state here.
+ */
+async function reportLoginFails(toolId: Id): Promise<void> {
+  await runTools(() => call('tabs.reportLoginFails', { toolId }));
+}
+
+/**
  * E03 (RF-49/RF-52): one `tools.state`/`tools`/`tabs.*` answer lands here. The center panel has two
  * faces, Home and the tab view, and Windows mode has only the first: a tab view left behind by a
  * mode that moved to Windows, or by the last tab closing, would be a strip with nothing under it.
  */
 function applyTools(state: ToolsState): void {
+  const previous = tabsState;
   tabsState = state;
   tools = state.tools;
+  // RF-70: the notice follows the answer that blocked a tool, whether the backend found the risk
+  // (item 4 of the contract) or the person reported the lost login.
+  announceEmbedBlocked(previous, state);
   // RF-69: the iframe layer follows every answer even while Home or Settings hide it — a closed
   // tab's iframe goes, a new embedded tab's frame is created (hidden) at once.
   embeds?.update(state);

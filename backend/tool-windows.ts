@@ -29,6 +29,7 @@ import {
   frameability,
   insertAfter,
   linkWindowId,
+  loginCookieRisk,
   neighbourAfterClose,
   nextEmbedNumber,
   nextLinkNumber,
@@ -36,6 +37,7 @@ import {
   parseLinkUrl,
   parsePersistedTabs,
   rectEquals,
+  scriptSources,
   slotToScreen,
   stepTab,
   tabWindowId,
@@ -78,8 +80,21 @@ const STORE_KEY = 'open_tools';
 const MODE_KEY = 'window_mode';
 /** RF-69: the tools this machine opens as embedded tabs; a preference, never a secret. */
 const EMBEDDED_KEY = 'embedded_tools';
-/** RF-69: `tabs.checkEmbed` waits this long for the tool's headers before saying it failed. */
+/**
+ * RF-70: the tools whose login cannot survive an iframe, with the reason the page shows. Loaded
+ * with the mode and kept so a later "Allow again" can simply delete a key.
+ */
+const BLOCKED_KEY = 'embed_blocked';
+/** RF-70: the reason `tabs.reportLoginFails` stores — the person saw the embedded login fail. */
+const LOGIN_FAILED = 'the tool did not keep its login inside Nod';
+/** RF-69/RF-70: the entry fetch and its HTML body get this long before the check gives up. */
 const EMBED_TIMEOUT_MS = 10_000;
+/** RF-70: the entry HTML read for the script list, past which the scan is not worth it. */
+const EMBED_HTML_LIMIT = 2 * 1024 * 1024;
+/** RF-70: one script, read up to this many bytes (`scriptSources` caps the list at 8). */
+const EMBED_SCRIPT_LIMIT = 12 * 1024 * 1024;
+/** RF-70: the whole same-origin script scan, all fetches included. */
+const EMBED_SCAN_MS = 10_000;
 /** The docked tab follows the main window by polling it: 50 ms lag, ~0.04 ms a read (S2). */
 const MOVE_POLL_MS = 50;
 
@@ -188,7 +203,7 @@ export interface ToolWindows {
   /** `tabs.new` (⌘T): one more tab of the tool, on the tool's own address */
   newTab(toolId: Id): Promise<ToolsState>;
   /** `tabs.activate`: a docked tab goes on the slot, a detached one comes forward */
-  activate(id: string): ToolsState;
+  activate(id: string): Promise<ToolsState>;
   /** `tabs.close` (⌘W): closes one tab; an ad-hoc one is forgotten (RF-66) */
   closeTab(id: string): ToolsState;
   /** `tabs.next` (⌃Tab / ⌃⇧Tab): the next or previous tab of the strip, wrapping */
@@ -210,10 +225,12 @@ export interface ToolWindows {
 
   // ---------------------------------------------------------------- RF-69 embedded tabs
 
-  /** `tabs.checkEmbed`: reads the tool's response headers and says whether it may be framed */
+  /** `tabs.checkEmbed`: reads the tool's response and says whether it may be framed */
   checkEmbed(toolId: Id): Promise<EmbedCheck>;
   /** `tabs.setEmbedded`: stores the preference and converts the tool's open tabs in place */
   setEmbedded(toolId: Id, embedded: boolean): Promise<ToolsState>;
+  /** `tabs.reportLoginFails` (RF-70): the embedded login failed — block the tool and unembed it */
+  reportLoginFails(toolId: Id): Promise<ToolsState>;
 }
 
 /**
@@ -287,6 +304,82 @@ function isForeign(entry: Entry, view: number | null): boolean {
   return entry.scope === 'personal' || (view !== null && entry.views[view]?.scope === 'personal');
 }
 
+/**
+ * RF-70: `embed_blocked` as the store keeps it — tool id → reason. Anything but a plain object
+ * answers `{}`; an entry without a non-empty string reason says nothing and is dropped, so a
+ * hand-edited store can never make a tool unembeddable without a sentence to show.
+ */
+function readEmbedBlocked(raw: unknown): Record<Id, string> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {};
+  const out: Record<Id, string> = {};
+  for (const [toolId, reason] of Object.entries(raw)) {
+    if (toolId === '' || typeof reason !== 'string' || reason === '') continue;
+    out[toolId] = reason;
+  }
+  return out;
+}
+
+/**
+ * RF-70: at most `limit` bytes of a response body as text, stopping at `deadline` too. A body that
+ * breaks off keeps what had arrived — the login scan is best effort and may not refuse an iframe
+ * it could not read.
+ */
+async function readCapped(response: Response, limit: number, deadline: number): Promise<string> {
+  const body = response.body;
+  if (body === null) return '';
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let size = 0;
+  try {
+    while (size < limit) {
+      if (Date.now() > deadline) break;
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      const room = limit - size;
+      const chunk = value.byteLength > room ? value.subarray(0, room) : value;
+      text += decoder.decode(chunk, { stream: true });
+      size += chunk.byteLength;
+      if (chunk.byteLength < value.byteLength) break;
+    }
+  } catch {
+    // keep what arrived: a broken body ends the read, not the check
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // the stream may already be closed
+    }
+  }
+  return text + decoder.decode();
+}
+
+/**
+ * The runtime's `fetch` takes no `AbortSignal` (`TinyFetchInit` in `backend/tiny.d.ts`), so a
+ * deadline races the promise instead — the same recipe as `backend/probe-net.ts`.
+ */
+async function fetchWithin(url: string, ms: number): Promise<Response> {
+  let timer: number | undefined;
+  try {
+    return await Promise.race([
+      fetch(url, { redirect: 'follow' }),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('timed out')), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** RF-70: one embed check's answer, and whether its reason is a login block worth storing. */
+interface EmbedProbe {
+  check: EmbedCheck;
+  /** true when `check.reason` came from `loginCookieRisk` (not from the frame headers) */
+  blocks: boolean;
+}
+
 export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWindows {
   /** The live tabs, by window id. */
   const tabs = new Map<string, TabWindow>();
@@ -300,6 +393,10 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   let mode: WindowMode | null = null;
   /** RF-69: the tools this machine opens as embedded tabs, loaded with the mode. */
   let embeddedTools: Id[] = [];
+  /** RF-70: the tools that may not be embedded, with the reason, loaded with the mode. */
+  let embedBlocked: Record<Id, string> = {};
+  /** RF-70: the per-session answer of the embedded-tab check, one promise per tool. */
+  const embedProbes = new Map<Id, Promise<EmbedProbe>>();
   /** Whether the runtime can position windows here (`canPosition !== false`, i.e. not Wayland). */
   let dockable = true;
   let modeLoaded: Promise<void> | null = null;
@@ -520,6 +617,14 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       } catch {
         embeddedTools = []; // ditto: an unreadable list means nothing is embedded
       }
+      try {
+        embedBlocked = readEmbedBlocked(await deps.store.get(BLOCKED_KEY));
+      } catch {
+        embedBlocked = {}; // an unreadable store blocks nothing
+      }
+      // A tool may have been blocked after it was embedded (another Nod, a hand-edited store):
+      // its tabs restore as windows, never as an iframe.
+      embeddedTools = embeddedTools.filter((id) => embedBlocked[id] === undefined);
       const state = await mainState();
       if (state !== null) dockable = state.canPosition !== false;
     })();
@@ -1035,6 +1140,12 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
    * comes forward, and only a tool with no tab at all opens another.
    */
   async function openToolDocked(entry: Entry): Promise<string | null> {
+    // RF-70 item 4: a tool that is embedded here is checked once per session before its tab is
+    // opened. A block found now converts its embedded tabs to windows, and the path below then
+    // opens (or reaches) a window tab instead of an iframe.
+    if (embedsTool(entry.id) || tabsOf(entry.id).some((tab) => tab.embedded)) {
+      await enforceEmbed(entry);
+    }
     // RF-69: the tool is embedded on this machine — an open embedded tab is what the person wants,
     // a new one only when it has none. A window tab left from another mode is still reached.
     if (embedsTool(entry.id)) {
@@ -1075,8 +1186,9 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     await loadMode();
     const mode = effectiveMode();
     const docked = mode === 'docked';
-    // RF-69: ⌘T of an embedded tool opens another iframe tab of the tool, never a window.
-    if (docked && embedsTool(entry.id)) {
+    // RF-69: ⌘T of an embedded tool opens another iframe tab of the tool, never a window; RF-70
+    // runs the session check first, so a tool that just became blocked opens a window instead.
+    if (docked && embedsTool(entry.id) && !(await enforceEmbed(entry))) {
       const embeddedId = addEmbeddedTab(entry, null, entry.url, null, true);
       if (embeddedId === null) return null;
       record(entry.id, 'tool_opened', auditUrl(entry.url), null, null);
@@ -1118,8 +1230,9 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     title: string,
     docked: boolean,
   ): Promise<string | null> {
-    // RF-69: a window view of an embedded tool is another iframe tab at the view's address.
-    if (docked && embedsTool(entry.id)) {
+    // RF-69: a window view of an embedded tool is another iframe tab at the view's address; the
+    // RF-70 session check runs first, as on every other path that would create an iframe tab.
+    if (docked && embedsTool(entry.id) && !(await enforceEmbed(entry))) {
       const embeddedId = addEmbeddedTab(entry, index, address, null, true);
       if (embeddedId === null) return null;
       record(entry.id, 'view_opened', auditUrl(address), null, viewLabel(entry, index));
@@ -1349,6 +1462,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       dockable,
       tabHotkeys: deps.hotkeys && current === 'docked',
       embedded: [...embeddedTools],
+      embedBlocked: { ...embedBlocked },
     };
   }
 
@@ -2047,53 +2161,148 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     publish();
   }
 
-  // ------------------------------------------------------------ embedded tabs (RF-69)
+  // ------------------------------------------------------------ embedded tabs (RF-69, RF-70)
 
   /**
-   * `tabs.checkEmbed`: the tool's address fetched as the browser would (`redirect: 'follow'`), and
-   * the pure rule of `shared/tabs.ts` reads its headers. A network failure is the page's own
-   * sentence, `could not reach the tool`; nothing of the response body is kept.
+   * RF-69/RF-70: the tool's address fetched as the browser would (`redirect: 'follow'`), read by
+   * the pure rules of `shared/tabs.ts`: first the frame headers, then the login-cookie risk — the
+   * entry's `Set-Cookie`, and the same-origin scripts its HTML loads. A network failure is the
+   * page's own sentence, `could not reach the tool`; a failure inside the script scan only ends
+   * the scan, because the header verdict still stands. The HTML body is dropped after the scan.
    */
-  async function checkEmbedAddress(address: string): Promise<EmbedCheck> {
+  async function probeEmbed(address: string): Promise<EmbedProbe> {
     // The `api` gate stamps a subframe's own origin on macOS (`docs/handovers/e03-iframe-spike.md`
     // §4); canonico §7 records the Linux stamp as frame-blind, and nothing was measured on Windows.
     // A framed site must never inherit the main page's `"all"`, so the iframe is macOS-only.
     if (deps.os !== 'macos') {
-      return { frameable: false, reason: 'embedded tabs are only available on macOS' };
+      return {
+        check: { frameable: false, reason: 'embedded tabs are only available on macOS' },
+        blocks: false,
+      };
     }
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const headers = await Promise.race([
-        (async (): Promise<Record<string, string>> => {
-          const response = await fetch(address, { redirect: 'follow' });
-          const out: Record<string, string> = {};
-          response.headers.forEach((value, name) => {
-            const key = name.toLowerCase();
-            out[key] = out[key] === undefined ? value : `${out[key]}, ${value}`;
-          });
-          try {
-            await response.body?.cancel();
-          } catch {
-            // the body is not needed: a refused cancel leaves the connection to the runtime
+      const entryDeadline = Date.now() + EMBED_TIMEOUT_MS;
+      const response = await fetchWithin(address, EMBED_TIMEOUT_MS);
+      const headers: Record<string, string> = {};
+      response.headers.forEach((value, name) => {
+        const key = name.toLowerCase();
+        headers[key] = headers[key] === undefined ? value : `${headers[key]}, ${value}`;
+      });
+      const verdict = frameability(headers);
+      if (!verdict.frameable) {
+        try {
+          await response.body?.cancel();
+        } catch {
+          // the body is not needed: a refused cancel leaves the connection to the runtime
+        }
+        return { check: verdict, blocks: false };
+      }
+      // One entry per header: `getSetCookie` keeps them apart, and a joined one would make the
+      // commas ambiguous. A runtime without it hands over the single joined value it has.
+      const setCookies =
+        typeof response.headers.getSetCookie === 'function'
+          ? response.headers.getSetCookie()
+          : [response.headers.get('set-cookie') ?? ''].filter((value) => value !== '');
+      const cookieRisk = loginCookieRisk({ setCookies, scripts: [] });
+      if (cookieRisk !== null) {
+        try {
+          await response.body?.cancel();
+        } catch {
+          // ditto: nothing of the body is needed once the cookie already refuses the frame
+        }
+        return { check: { frameable: false, reason: cookieRisk }, blocks: true };
+      }
+      const html = await readCapped(response, EMBED_HTML_LIMIT, entryDeadline);
+      const scripts: string[] = [];
+      const deadline = Date.now() + EMBED_SCAN_MS;
+      for (const source of scriptSources(html, address)) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break; // the scan is best effort; what arrived is what is read
+        try {
+          const script = await fetchWithin(source, remaining);
+          if (!script.ok) {
+            try {
+              await script.body?.cancel();
+            } catch {
+              // a refused cancel leaves the connection to the runtime
+            }
+            continue;
           }
-          return out;
-        })(),
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error('timed out')), EMBED_TIMEOUT_MS);
-        }),
-      ]);
-      return frameability(headers);
+          scripts.push(await readCapped(script, EMBED_SCRIPT_LIMIT, deadline));
+        } catch {
+          // RF-70: a network failure during the scan does NOT block; the header check stands.
+        }
+      }
+      const scriptRisk = loginCookieRisk({ setCookies: [], scripts });
+      if (scriptRisk !== null) {
+        return { check: { frameable: false, reason: scriptRisk }, blocks: true };
+      }
+      return { check: { frameable: true, reason: null }, blocks: false };
     } catch {
-      return { frameable: false, reason: 'could not reach the tool' };
-    } finally {
-      clearTimeout(timer);
+      return { check: { frameable: false, reason: 'could not reach the tool' }, blocks: false };
     }
+  }
+
+  /** RF-70: the embed check once per session per tool; the promise itself is the cache. */
+  function probeOnce(entry: Entry): Promise<EmbedProbe> {
+    const cached = embedProbes.get(entry.id);
+    if (cached !== undefined) return cached;
+    const probe = probeEmbed(entry.url);
+    embedProbes.set(entry.id, probe);
+    return probe;
+  }
+
+  /** RF-70: stores a block (id → reason) so the refusal survives the next boot. */
+  function blockTool(toolId: Id, reason: string): void {
+    if (embedBlocked[toolId] === reason) return;
+    embedBlocked = { ...embedBlocked, [toolId]: reason };
+    try {
+      void deps.store.set(BLOCKED_KEY, { ...embedBlocked }).catch(() => undefined);
+    } catch {
+      // the block of this run stands even when the store refuses it
+    }
+  }
+
+  /**
+   * RF-70 item 4: when an embedded tab of a tool is opened, activated or restored, the check runs
+   * once per session. A found block converts the tool's embedded tabs to window tabs in place,
+   * drops it from `embedded_tools` and pushes `tools`; an unreachable tool changes nothing (the
+   * header check already passed when the tab was embedded). Returns true when the tool is blocked.
+   */
+  async function enforceEmbed(entry: Entry): Promise<boolean> {
+    let reason = embedBlocked[entry.id];
+    if (reason === undefined) {
+      const probe = await probeOnce(entry);
+      if (!probe.blocks || probe.check.reason === null) return false;
+      reason = probe.check.reason;
+    }
+    blockTool(entry.id, reason);
+    const listed = embeddedTools.includes(entry.id);
+    const live = [...tabs.values()].some((tab) => tab.toolId === entry.id && tab.embedded);
+    if (!listed && !live) return true; // already blocked and nothing to convert
+    if (listed) {
+      embeddedTools = embeddedTools.filter((id) => id !== entry.id);
+      saveEmbeddedTools();
+    }
+    await unembedTabs(entry);
+    syncDocked();
+    updatePoll();
+    persist();
+    publish();
+    return true;
   }
 
   async function checkEmbed(toolId: Id): Promise<EmbedCheck> {
     const entry = entryOf(toolId);
     if (entry === null) throw new Error('unknown tool');
-    return await checkEmbedAddress(entry.url);
+    await loadMode();
+    // A block already on record (from the store, the check or the person) is the answer; there is
+    // nothing new a fetch could say about it.
+    const known = embedBlocked[toolId];
+    if (known !== undefined) return { frameable: false, reason: known };
+    const probe = await probeEmbed(entry.url);
+    if (probe.blocks && probe.check.reason !== null) blockTool(toolId, probe.check.reason);
+    return probe.check;
   }
 
   /**
@@ -2193,6 +2402,15 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     }
   }
 
+  /** Writes the machine's embedded-tool preference; a store failure keeps it for this run. */
+  function saveEmbeddedTools(): void {
+    try {
+      void deps.store.set(EMBEDDED_KEY, [...embeddedTools]).catch(() => undefined);
+    } catch {
+      // a store failure leaves the preference of this run only
+    }
+  }
+
   async function setEmbedded(toolId: Id, embedded: boolean): Promise<ToolsState> {
     const entry = entryOf(toolId);
     if (entry === null) throw new Error('unknown tool');
@@ -2200,21 +2418,48 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     // The page asks for `tabs.checkEmbed` before this call and shows its reason early; the same
     // check runs here so no caller can embed an address that would be refused by the browser.
     if (embedded) {
-      const check = await checkEmbedAddress(entry.url);
-      if (!check.frameable) throw new Error(check.reason ?? 'this tool cannot be embedded');
+      // RF-70: a block found before — by the check or by the person — refuses before any network
+      // call, with the sentence the page shows.
+      const blocked = embedBlocked[toolId];
+      if (blocked !== undefined) throw new Error(blocked);
+      const probe = await probeEmbed(entry.url);
+      if (probe.blocks && probe.check.reason !== null) blockTool(toolId, probe.check.reason);
+      if (!probe.check.frameable) {
+        throw new Error(probe.check.reason ?? 'this tool cannot be embedded');
+      }
+      embedProbes.set(toolId, Promise.resolve(probe));
       if (!embeddedTools.includes(toolId)) embeddedTools = [...embeddedTools, toolId];
       // RF-69: embedded is a docked-mode shape; in windows mode the preference is only remembered
       // and the tool keeps opening as a framed window.
       if (effectiveMode() === 'docked') embedTabs(entry);
     } else {
+      // RF-70 item 6: leaving the iframe is always allowed, even for a blocked tool; the block
+      // stays so a later "Allow again" only has to delete the key.
       embeddedTools = embeddedTools.filter((id) => id !== toolId);
       await unembedTabs(entry);
     }
-    try {
-      void deps.store.set(EMBEDDED_KEY, [...embeddedTools]).catch(() => undefined);
-    } catch {
-      // a store failure leaves the preference of this run only
-    }
+    saveEmbeddedTools();
+    syncDocked();
+    updatePoll();
+    persist();
+    publish();
+    return state();
+  }
+
+  /**
+   * RF-70 item 5: the person saw the embedded tab fall back to its login screen. The tool is
+   * blocked from now on, leaves `embedded_tools`, and its embedded tabs become window tabs in
+   * place — the active one included, so the login cascade fills them as usual. No other tool's
+   * tab is reloaded.
+   */
+  async function reportLoginFails(toolId: Id): Promise<ToolsState> {
+    const entry = entryOf(toolId);
+    if (entry === null) throw new Error('unknown tool');
+    await loadMode();
+    blockTool(toolId, LOGIN_FAILED);
+    embeddedTools = embeddedTools.filter((id) => id !== toolId);
+    saveEmbeddedTools();
+    await unembedTabs(entry);
     syncDocked();
     updatePoll();
     persist();
@@ -2244,6 +2489,12 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     const view = entry.views[index];
     await loadMode();
     const docked = effectiveMode() === 'docked';
+    // RF-70: this path can create an iframe tab cold (`openViewNavigate`) or a window view tab;
+    // one session check covers both, and a block found here turns the tool's iframe tabs into
+    // windows before the decision below.
+    if (docked && (embedsTool(entry.id) || tabsOf(entry.id).some((tab) => tab.embedded))) {
+      await enforceEmbed(entry);
+    }
     const acted =
       view.mode === 'window'
         ? // A view window is its own tab: `tool_<entry>_<index>`.
@@ -2302,9 +2553,15 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   }
 
   /** E03: a docked tab goes on the slot, a detached one comes forward with focus. */
-  function activate(id: string): ToolsState {
+  async function activate(id: string): Promise<ToolsState> {
     const tab = selectTab(id);
     if (tab === null) throw new Error('unknown tab');
+    // RF-70 item 4: activating an embedded tab runs the session check; when it finds a block the
+    // iframe tab is converted to a window tab in place, active preserved.
+    if (tab.embedded && tab.toolId !== null) {
+      const entry = entryOf(tab.toolId);
+      if (entry !== null) await enforceEmbed(entry);
+    }
     persist();
     publish();
     return state();
@@ -2367,7 +2624,14 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       if (item.url !== undefined) address = item.url; // where the tab was, when it is its own
       // RF-69: the preference is what restore follows in docked mode; the `detached` flag of the
       // item says nothing for a tool that now lives in the main page.
-      if (effectiveMode() === 'docked' && embeddedTools.includes(entry.id)) {
+      // RF-70 item 4: the check runs once per tool before its iframe tabs are restored. A block
+      // found now leaves the tool out of `embedded_tools`, so this and its other items restore as
+      // window tabs — converted once, never as an iframe.
+      if (
+        effectiveMode() === 'docked' &&
+        embeddedTools.includes(entry.id) &&
+        !(await enforceEmbed(entry))
+      ) {
         const embeddedId = addEmbeddedTab(entry, view, address, null, item.active === true);
         if (embeddedId === null) continue;
         record(
@@ -2485,5 +2749,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     adoptSavedTab,
     checkEmbed,
     setEmbedded,
+    reportLoginFails,
   };
 }

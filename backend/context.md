@@ -191,10 +191,32 @@ the page draws the iframe; `ToolsState.active` still names it and the page keeps
 tool; a `navigate` view updates that tab's `url` (the page re-renders the iframe `src`) instead of
 `eval`ling. A popup policy with `opener: 'main'` while an embedded tab is active belongs to that
 tab: identity paths stay floating, other `http(s)` addresses are adopted as ad-hoc tabs right after
-it. `tabs.checkEmbed` fetches `entry.url` (`redirect: 'follow'`, 10 s deadline) and runs the pure
-`frameability(headers)` of `shared/tabs.ts` — any `X-Frame-Options`, or a CSP `frame-ancestors`
-other than exactly `*`, refuses the frame; a failed fetch answers `could not reach the tool`.
+it. `tabs.checkEmbed` answers a stored block without a fetch; otherwise it fetches `entry.url`
+(`redirect: 'follow'`, 10 s deadline) and runs the pure
+`frameability(headers)` of `shared/tabs.ts` (and, since RF-70, the login-cookie rule below) — any
+`X-Frame-Options`, or a CSP `frame-ancestors` other than exactly `*`, refuses the frame; a failed
+fetch answers `could not reach the tool`.
 `tabs.setEmbedded` runs the same check before storing the preference and converts every open tab of
 the tool in place — windows closed for embedded tabs, windows opened for the reverse — keeping the
 strip position and the active tab. In windows mode the preference stays in `store.json` but every
 tool opens as a window, and switching to windows converts embedded tabs into framed windows.
+
+**0.6.0c (RF-70) — logins that cannot survive an iframe (`tool-windows.ts`).** A framed site never
+stores a `Lax`/`Strict` cookie, so the embed check now also reads the login's shape, with the pure
+`loginCookieRisk` and `scriptSources` of `shared/tabs.ts`. `embed_blocked` in `store.json` keeps
+`tool id → reason`, loaded with the mode and exposed as `ToolsState.embedBlocked` (no secret).
+`probeEmbed` fetches `entry.url` once (`redirect: 'follow'`, 10 s), checks `frameability` first,
+then any `Set-Cookie` carrying `SameSite=Strict|Lax`, then the same-origin `<script src>` and
+`<link rel=modulepreload>` addresses of the entry HTML — HTML read up to 2 MB, at most 8 scripts of
+up to 12 MB each inside one 10 s scan budget. Scripts count only on the shape of a real login
+write: a `sameSite: "strict"|"lax"` inside a flat object literal (no nested braces, ≤ 300 chars)
+that also carries an `expires:` key — never `expiration:`; library defaults, consent banners and
+cookie serializers (`SameSite=Strict` strings) therefore do not refuse an iframe. A network
+failure during the scan never blocks, because the header verdict stands. A found risk is stored and
+`tabs.checkEmbed` answers `{ frameable: false, reason }`; `tabs.setEmbedded(true)` refuses from the
+store or from the check, while `tabs.setEmbedded(false)` is always allowed (clearing a block is out
+of scope; the shape lets a later "Allow again" delete the key). Before an embedded tab is opened,
+activated or restored, the check runs once per session per tool (promise cache); a block converts
+that tool's embedded tabs to window tabs in place, drops it from `embedded_tools` and pushes
+`tools`. `tabs.reportLoginFails` does the same on the person's word, storing the reason `the tool
+did not keep its login inside Nod`.
