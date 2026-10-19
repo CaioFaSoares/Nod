@@ -1,6 +1,6 @@
 /* Nod — the single stylesheet of the main window (docs/arquitetura.md §5).
    Sober dark theme, monospace, high contrast, visible focus, no UI dependency.
-   Consumed by index.html, src/app.ts, src/palette.ts and src/settings.ts.
+   Consumed by index.html, src/app.ts, src/palette.ts, src/settings.ts and src/tabs.ts.
    Classes required by src/ui.ts: .button .button-primary .button-danger .button-ghost .field
    .field-label .field-hint .input .message .message-error .message-ok .message-info.
    Generic classes any view may use: .tabs .tab .tab-active .table .muted .chip .row .stack
@@ -398,8 +398,13 @@ button {
   overflow: hidden;
 }
 
-/* RF-55: the update notice, above the banner so nothing pushes it out of sight. */
+/* E03: an empty notice slot or banner is `display: none` (`:empty` below), and a hidden element
+   generates no grid item — so the content would auto-place into the FIRST row and shrink to its own
+   height instead of taking the panel. The tab view is an absolute child of the content (RF-49), so
+   that collapse left the slot at 0 px tall and the docked tab never landed on it. Each child is
+   placed on its own row, which the hidden ones leave alone. */
 .notice-slot {
+  grid-row: 1;
   padding: 0 22px;
 }
 
@@ -448,6 +453,7 @@ button {
 }
 
 .banner {
+  grid-row: 2;
   padding: 0 22px;
 }
 
@@ -466,6 +472,9 @@ button {
   min-width: 0;
   padding: 18px 22px 28px;
   overflow: auto;
+  /* E03: the containing block of the tab view, which is placed on the panel's own box (RF-49). */
+  position: relative;
+  grid-row: 3;
 }
 
 .content-header {
@@ -483,6 +492,180 @@ button {
 
 .settings-view {
   min-width: 0;
+}
+
+/* --------------------------------------------------------- tab view (E03) */
+
+/* RF-49: in docked mode the center panel is the tab view — the strip and the toolbar on top, and
+   the slot, the element the backend lays the active docked tab on, filling the rest. It is placed
+   on the panel's own box (`.content` is its containing block), so the docked window meets the
+   panel's edges. */
+.tab-view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.tab-strip {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 10px 22px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+/* One tab: its mark, its title, what it is (not saved, detached, failed) and the ×. */
+.tab-item {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 5px 4px 5px 8px;
+  color: var(--muted);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius) var(--radius) 0 0;
+  cursor: pointer;
+}
+
+.tab-item:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+  border-color: var(--line-strong);
+}
+
+/* The tab on the slot: the one the panel is showing. */
+.tab-item-active {
+  color: var(--fg);
+  border-color: var(--line-strong);
+  border-top-color: var(--accent);
+}
+
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-mark {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.tab-mark .glyph-img {
+  width: 16px;
+  height: 16px;
+}
+
+.tab-mark .chip {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  font-size: 9px;
+}
+
+.tab-mark-link {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tab-flag {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tab-unsaved {
+  color: var(--info);
+}
+
+.tab-detached {
+  color: var(--accent);
+}
+
+.tab-failed {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.tab-loading {
+  color: var(--muted);
+}
+
+/* The per-row buttons: the × that closes the tab, and the ⤓ that docks a detached one back. */
+.tab-close,
+.tab-dock {
+  flex: none;
+  padding: 0 2px;
+  color: inherit;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.tab-close:hover,
+.tab-dock:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.tab-dock {
+  color: var(--accent);
+}
+
+/* ⌘T: another tab of the tool the active tab shows. */
+.tab-new {
+  flex: none;
+  align-self: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 2px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.tab-new:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--bg-hover);
+  border-color: var(--line-strong);
+}
+
+.tab-new:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.tab-toolbar {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  padding: 8px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* RF-49: the slot the backend lays the active docked tab on. It carries nothing of the page's own:
+   while the window is away — being placed, hidden with the main window — only this neutral
+   background shows, so nothing reads as a gap. */
+.tab-slot {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
 }
 
 /* ------------------------------------------------------------------- rails */
@@ -1304,17 +1487,31 @@ button {
   border-color: var(--info);
 }
 
-/* The dialog of `personal.saveTool`: the palette's box, a form's width. */
+/* E03 (RF-49): the tool whose tab is on the center panel. `.open` says the tool has a window
+   somewhere; this says it is the one the panel is showing. */
+.tool-icon.current {
+  border-color: var(--accent);
+  border-radius: var(--rail-square);
+}
+
+.tool-icon.current::before {
+  height: 20px;
+  background: var(--accent);
+}
+
+/* The dialog of `personal.saveTool`, and E03's "Open link…": the palette's box, a form's width. */
 .dialog-title {
   margin: 0;
   font-size: 14px;
 }
 
-#personal-tool-dialog .palette {
+#personal-tool-dialog .palette,
+#open-link-dialog .palette {
   width: min(440px, 100%);
 }
 
-#personal-tool-dialog .field {
+#personal-tool-dialog .field,
+#open-link-dialog .field {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -1329,6 +1526,18 @@ button {
 
   .content {
     padding: 14px 16px 22px;
+  }
+
+  /* E03: the tab view sits on the panel's box, so its own chrome follows the padding the content
+     just took (`.tab-view` is absolutely placed and ignores it). */
+  .tab-strip,
+  .tab-toolbar {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .tab-item {
+    max-width: 160px;
   }
 
   .banner {

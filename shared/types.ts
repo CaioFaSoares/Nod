@@ -406,8 +406,56 @@ export interface ToolStatus {
   login: LoginResult | null;
 }
 
+/**
+ * E03 (RF-52): how tools open. `docked` — tabs over the main window's center panel; `windows` —
+ * every tool in its own framed window, the behavior before 0.6.0.
+ */
+export type WindowMode = 'docked' | 'windows';
+
+/** E03 (RF-49): a rectangle in CSS px — the slot relative to the main page, or a screen rect. */
+export interface SlotRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** E03: one tab — a tool window, docked over the center panel or detached into its own frame. */
+export interface TabState {
+  /** the window id */
+  id: string;
+  /** null for an ad-hoc tab (RF-66): an address outside the catalog or a link a tool opened */
+  toolId: Id | null;
+  /** the entry title (with the view label), or the page host for an ad-hoc tab */
+  title: string;
+  /** last main-frame URL as `auditUrl` (origin + path, no query or fragment); '' when unknown */
+  url: string;
+  /** false: detached into its own framed window (RF-51) */
+  docked: boolean;
+  /** RF-66/RF-68: not saved, not restored, no backend methods, no autofill */
+  adhoc: boolean;
+  loading: boolean;
+  error: string | null;
+}
+
 export interface ToolsState {
   tools: ToolStatus[];
+  /** E03: the open tabs in strip order */
+  tabs: TabState[];
+  /** the docked tab shown on the slot; null when none */
+  active: string | null;
+  /** the effective mode: `windows` wherever docking is not offered */
+  mode: WindowMode;
+  /** the runtime can position windows here (not Wayland), so the setting offers Docked */
+  dockable: boolean;
+  /** the backend registers the tab shortcuts globally; the page must not handle them a second time */
+  tabHotkeys: boolean;
+}
+
+/** E03 (RF-67): where `tabs.save` put the tab — a personal view under an entry, or a personal tool. */
+export interface SaveTabResult {
+  kind: 'view' | 'tool';
+  entryId: Id;
 }
 
 export interface SessionState {
@@ -981,6 +1029,30 @@ export interface ApiContract {
   'tools.close': [{ id: Id }, ToolsState];
   'tools.reload': [{ id: Id }, ToolsState];
 
+  /** E03 (RF-50): another tab of the tool (⌘T). */
+  'tabs.new': [{ toolId: Id }, ToolsState];
+  /** E03: a docked tab becomes the one on the slot; a detached tab comes forward with focus. */
+  'tabs.activate': [{ id: string }, ToolsState];
+  /** E03: closes one tab (⌘W); an ad-hoc tab is forgotten. */
+  'tabs.close': [{ id: string }, ToolsState];
+  /** E03: the next (1) or previous (-1) tab of the strip, wrapping (⌃Tab / ⌃⇧Tab). */
+  'tabs.next': [{ step: 1 | -1 }, ToolsState];
+  /** E03 (RF-51): the tab leaves the panel into its own framed window — the same page, no reload. */
+  'tabs.detach': [{ id: string }, ToolsState];
+  /** E03 (RF-51): a detached tab docks back onto the slot — the same page, no reload. */
+  'tabs.dock': [{ id: string }, ToolsState];
+  /**
+   * E03 (RF-49): the slot of the center panel in CSS px relative to the main page, or `null` when no
+   * docked tab may show (Home, Settings, an overlay, a dialog).
+   */
+  'tabs.slot': [{ rect: SlotRect | null }, true];
+  /** E03 (RF-66): any http(s) link as an ad-hoc tab after the current one; anything else `invalid link`. */
+  'tabs.openLink': [{ url: string }, ToolsState];
+  /** E03 (RF-67): the tab's address saved to the sidebar in one step (⌘D). */
+  'tabs.save': [{ id: string }, SaveTabResult];
+  /** E03 (RF-52): Docked or Windows, stored on this machine; the next tool opened follows it. */
+  'tabs.setMode': [{ mode: WindowMode }, ToolsState];
+
   'events.list': [EventFilter, AuditEvent[]];
   /** SP04 §5: the sent/pending counters of Settings → Activity (`{ sent: 0, pending: 0 }` with no host). */
   'events.syncStatus': [void, EventSyncStatus];
@@ -1040,6 +1112,13 @@ export interface PushEvents {
   join: JoinInvite | null;
   /** a global shortcut asked the main window to open the command palette */
   palette: null;
+  /**
+   * E03: the backend opened or activated this tab (a hotkey, an adopted popup, a `nod://open` link):
+   * the page shows the tab view with it.
+   */
+  tab: string;
+  /** E03: a global shortcut asked the main window for "Open link…" (⌘L). */
+  openLink: null;
   /**
    * RF-55: the automatic check of the release channel (backend/main.ts). The notice to show, or
    * `null` when there is nothing to announce — no channel, no newer release, or that version was

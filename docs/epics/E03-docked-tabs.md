@@ -2,11 +2,11 @@
 id: E03
 frente: nod
 titulo: Docked view, tabs and quick links — tools in the main window's center panel, several tabs per tool, detachable without reload, open and save any link
-status: proposto
+status: construido
 tipo: epico
 origem: dono
 aberta_em: 2026-10-16
-bloqueada_por: B05
+bloqueada_por: —
 ---
 
 # E03 — Docked view, tabs and quick links
@@ -17,9 +17,15 @@ Owner, 2026-10-16:
 > aberta como opcao, e podendo desacoplar do resto do bond a aba aberta, alem de poder abrir mais de
 > uma aba para navegar entre eles (digamos, ver uma tabela em um projeto ou dois chats da claude)
 
-Proposal waiting for the owner's reading (`AGENTS.md`). Evidence: `leitura` of
-`backend/tiny.d.ts`, `backend/tool-windows.ts`, the handovers and `docs/tinyjs.md`. Nothing here was
-executed.
+Status: the requirements were approved on 2026-10-19 (RF-49…RF-52, RF-66…RF-68 enter
+`docs/canonico.md` §14, §22 "E03 requirements approved (0.6.0)"), and the epic was built in **0.6.0**
+the same day. Evidence by `execução`, macOS only: the spikes S0–S4 (`docs/handovers/e03-spikes.md`)
+and the real-surface smoke `bun test/smoke/tabs.ts` on an unlocked screen with OmniWM active, the
+smoke floating its own windows — 6 of 8 runs passed all 17 steps (`docs/handovers/e03-smoke.md` §3).
+Windows and Linux were not run: there the default stays Windows, which departs from the owner's
+"padrão é docked view" until the owner reads §22 "Docked mode per OS" (`Proposto`). On a tiling
+window manager the Nod's windows must be floated by a WM rule, or docked tabs are re-tiled (B05). The
+`mode: navigate` question of §7 q3 stays `Proposto` in `docs/canonico.md` §22 ("Views in docked mode").
 
 ## 1. What the owner gets
 

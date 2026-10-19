@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { combo, digits } from '../shared/shortcuts';
+import { combo, ctrlCombo, digits, shiftCombo } from '../shared/shortcuts';
 
 describe('digits', () => {
   test('maps 1..9 onto the ids in the given order', () => {
@@ -45,5 +45,21 @@ describe('combo', () => {
   test('lowercases the key, digits and letters alike', () => {
     expect(combo('9', 'macos')).toBe('cmd+9');
     expect(combo('PALETTE', 'linux')).toBe('ctrl+palette');
+  });
+});
+
+describe('shiftCombo', () => {
+  test('adds Shift to the platform modifier (E03, RF-51)', () => {
+    expect(shiftCombo('d', 'macos')).toBe('cmd+shift+d');
+    expect(shiftCombo('D', 'windows')).toBe('ctrl+shift+d');
+    expect(shiftCombo('D', 'linux')).toBe('ctrl+shift+d');
+  });
+});
+
+describe('ctrlCombo', () => {
+  test('is Control on every OS — what ⌃Tab and ⌃⇧Tab are registered with (E03, RF-49)', () => {
+    expect(ctrlCombo('tab')).toBe('ctrl+tab');
+    expect(ctrlCombo('tab', true)).toBe('ctrl+shift+tab');
+    expect(ctrlCombo('Tab', true)).toBe('ctrl+shift+tab');
   });
 });

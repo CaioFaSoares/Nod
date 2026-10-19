@@ -1,7 +1,8 @@
 # src/ — Nod's page
 
-The single page of the main window: the entry screen, sidebar, Home, palette and Settings. Module by
-module: `docs/arquitetura.md` §5; window model: `docs/canonico.md` §7.
+The single page of the main window: the entry screen, sidebar, Home, the tab view of docked mode
+(0.6.0), palette and Settings. Module by module: `docs/arquitetura.md` §5; window model:
+`docs/canonico.md` §7.
 
 ## Rules
 
@@ -42,8 +43,9 @@ module: `docs/arquitetura.md` §5; window model: `docs/canonico.md` §7.
 | Settings → Vault | Inbox (`shares.inbox`) with Accept/Decline, read again on the `host` push; the list groups the credentials by tool under the tool's heading, and every credential of a tool is its own card (its `id`, label, username, a `Default` chip on the one autofill uses and a "Use for autofill" button on the others → `vault.setDefault`), so all of the following acts on one credential named by `itemId`: the scope select (Role/Org/Blocked, owner only), Reveal behind the gate with a 10 s countdown, Copy behind the gate (the secret never reaches the page), Send (hidden when `blocked`) with the recipients dialog and its `key changed — confirm in Account` warning, holders with date and scope and a `Remove` for a live holder (owner or admin, K9), the `rotation pending` chip (title "save a new secret to rotate") and `Edit` (replaces that credential through `vault.save` with its `itemId`); the save form adds a new credential to the chosen tool (label placeholder "e.g. admin account"); the send and assign dialogs title the credential by label + tool; saving a shared credential shows the update warning and the save itself fans the update out; for an admin, an `Assign` dialog per credential (to a role or to one person, with `Remove assignment`) and the "Members missing a copy" list with each member's key state and one gated "Send copies" | K4–K9, RF-65 | SP06 §4–§5, SP02 §9 |
 | Palette | "Vault inbox" opens Settings → Vault on the inbox | K4 | RNF-07 |
 | Settings → Account | Devices (sessions) list and revoke — hidden without a host (O1); "Your key fingerprint" (K1), whose `keys.mine` answer is `MineKeys` — `ok`/`pending`/`unavailable` and the sentence to show; the Colleagues list with each pinned fingerprint, the `key changed — confirm` warning and its Confirm (K2) — both hidden without a host | O1, K1–K2 | SP03, SP06 §2 |
-
-The docked view and tabs (`docs/epics/E03-docked-tabs.md`) are not in these blocks.
+| Tab view (0.6.0) | Docked mode's center panel, in `tabs.ts` (mounted by `app.ts` as `view === 'tab'`): the strip (the tool's icon, the title, "not saved" on an ad-hoc tab, ↗ on a detached one, loading/failure, × to close, ⤓ on a detached tab to dock it back, and `+` for another tab of the tool), the toolbar (Detach/Dock, Save to sidebar, Open link…), and the slot under them; the page reports the slot — `tabs.slot({ rect })` from the slot's box, with `null` for Home/Settings, a detached or absent active tab, an overlay, a hidden page — and `null` once in Windows mode | RF-49…RF-51 | E03 §6, canonico §7 |
+| Open link (0.6.0) | Any `http(s)` address by hand — ⌘L, the toolbar, the palette and the push of the same global shortcut — as an ad-hoc tab (`tabs.openLink`): not saved, no autofill, no backend method (RF-68); the dialog is `app.ts`, beside the personal-tool one | RF-66, RF-68 | E03 §6 |
+| Settings → Account — Window mode (0.6.0) | Radio Docked / Windows beside the app icon, read from `tools.state`; Docked disabled with its reason where `dockable` is false; the choice goes through `tabs.setMode` | RF-52 | E03 §6 |
 
 Block 2 review fixes: the Vault tab carries a "Credential holders" card for an admin (M7)
 — every guild credential from `holders.list`, with its holders, date, scope and revoked marker — and

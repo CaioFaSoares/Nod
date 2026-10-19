@@ -24,7 +24,7 @@ _Evite_: app, aplicativo, sistema, serviço
 
 **Janela de ferramenta** — tool window (`toolWindowId`):
 A janela própria em que uma ferramenta abre, a partir da janela principal.
-_Evite_: palco, aba, painel, webview, iframe
+_Evite_: palco, painel, webview, iframe
 
 **Endereço** — `url`:
 A URL base de uma ferramenta, como `https://kanban.example.com`.
@@ -61,8 +61,30 @@ _Evite_: tela de login, launcher
 Cada alvo do trilho da tela de entrada (Offline, a guilda, `+`), com ícone ou iniciais e estado.
 _Evite_: botão, atalho
 
-**Aba**:
-Não existe no Nod. O que a pessoa chamaria de aba é uma **janela de ferramenta** ou uma **vista**.
+**Aba** — tab:
+A ferramenta posta sobre o painel central da janela principal (modo Docked) ou solta numa janela
+própria (destacada); pode haver várias por ferramenta, e trocar de aba nunca recarrega a página.
+_Evite_: painel, sub-aba, palco
+
+**Encaixada / destacada** — docked / detached:
+Encaixada é a aba posta sobre o painel central da janela principal; destacada é a mesma aba numa
+janela própria, com moldura. Ir e voltar entre as duas não recarrega a página.
+_Evite_: ancorada, flutuante
+
+**Faixa de abas** — tab strip:
+A tira no topo do painel central que lista as abas abertas, desenhada pela página da janela
+principal.
+_Evite_: barra de abas, abas nativas
+
+**Aba avulsa** — ad-hoc tab:
+A aba de um endereço fora do catálogo, ou de um link aberto dentro de uma ferramenta; não é salva,
+não é restaurada e não recebe método de backend nem preenchimento automático.
+_Evite_: aba temporária, popup
+
+**Modo Docked / modo Windows** — Docked / Windows:
+O ajuste que decide como as ferramentas abrem: Docked (padrão) mostra a aba sobre o painel central;
+Windows abre cada ferramenta em janela própria, como hoje. No Wayland o Docked não é oferecido.
+_Evite_: modo aba, modo janela
 
 ## Pessoas e acesso
 
