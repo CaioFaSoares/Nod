@@ -84,8 +84,11 @@ export const UPDATE_URL_ENV = 'NOD_UPDATE_URL';
  */
 export const DEFAULT_MIN_APP_VERSION = '0.0.0';
 
-/** semver 2.0.0's grammar (semver.org §9): three numbers, an optional pre-release and build. */
-const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+/**
+ * semver 2.0.0's grammar (semver.org §9) — three numbers, an optional pre-release and build — plus
+ * the Nod's hotfix letters on the patch (`0.5.5a`, `docs/distribuicao.md` §8, `shared/version.ts`).
+ */
+const SEMVER = /^\d+\.\d+\.\d+[a-z]*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 function parseMinAppVersion(raw: string | undefined): string {
   const value = raw?.trim();

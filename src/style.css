@@ -232,6 +232,37 @@ button {
   border-color: rgb(217 196 106 / 40%);
 }
 
+/* 0.5.5a: Settings' status line is a toast — fixed at the bottom of the window, out of the flow,
+   so a message never moves the buttons under it. The tint of .message-* sits on an opaque base. */
+.toast-region {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  z-index: 30;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(560px, calc(100vw - 32px));
+}
+
+.toast-region .message {
+  margin: 0;
+  cursor: pointer;
+  background-color: var(--bg-raised);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+
+.toast-region .message-error {
+  background-image: linear-gradient(rgb(255 107 107 / 10%), rgb(255 107 107 / 10%));
+}
+
+.toast-region .message-ok {
+  background-image: linear-gradient(rgb(90 209 155 / 10%), rgb(90 209 155 / 10%));
+}
+
+.toast-region .message-info {
+  background-image: linear-gradient(rgb(217 196 106 / 10%), rgb(217 196 106 / 10%));
+}
+
 /* --------------------------------------------------------- generic pieces */
 
 .muted {
@@ -767,11 +798,10 @@ button {
   font-size: 11px;
 }
 
+/* The views select sits in the card's action row: as tall as the buttons, never full width. */
 .tool-views {
-  gap: 6px;
-}
-
-.tool-views .button {
+  width: auto;
+  max-width: 160px;
   padding: 4px 8px;
   font-size: 11px;
 }

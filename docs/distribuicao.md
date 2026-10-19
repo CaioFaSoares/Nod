@@ -179,6 +179,15 @@ notice. Write it as patch notes for the people using Nod.
 
 - **Version bump.** Pushing again with the same `version` replaces the release's files. Installed
   apps only update when `version` in `tinyjs.base.json` goes up.
+- **Hotfix versions (0.5.5a).** A hotfix keeps the release's three numbers and adds lowercase
+  letters right after the patch: `0.5.5a`, then `0.5.5b`, `…z`, `aa`. The order is `0.5.5` <
+  `0.5.5a` < `0.5.5b` < `0.5.6` (`shared/version.ts`). Both workflows accept the form, and the
+  branch, tag and notes commit carry it as is: `release-0.5.5a`, `Release 0.5.5a: …`. The tinyjs
+  runtime's own update check reads only the three numbers, so it would never offer `0.5.5a` to a
+  Nod on `0.5.5`; the backend decides the offer with `shared/version.ts` instead
+  (`backend/main.ts` `withHotfixes`), and the install itself does not compare versions. The same
+  form is a valid `NOD_MIN_APP_VERSION` on the host (SP07 §2). macOS shows the letters in the
+  bundle's version string as written.
 - **Public repository: auto-update works.** The repository is public, so release files download
   without authentication and an installed Nod fetches its manifest and its archives straight from
   GitHub Releases. The release repository is this one — `RELEASE_REPO` already defaults to

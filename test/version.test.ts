@@ -36,6 +36,20 @@ describe('compareVersions', () => {
     expect(compareVersions('0.4.0-rc.1+build', '0.4.0-rc.1')).toBe(0);
   });
 
+  test('a hotfix letter sits after its release and before the next patch (0.5.5a)', () => {
+    // The runtime's own check reads 0.5.5a as 0.5.5; this order is what offers the hotfix.
+    expect(compareVersions('0.5.5', '0.5.5a')).toBe(-1);
+    expect(compareVersions('0.5.5a', '0.5.5')).toBe(1);
+    expect(compareVersions('0.5.5a', '0.5.5b')).toBe(-1);
+    expect(compareVersions('0.5.5z', '0.5.5aa')).toBe(-1);
+    expect(compareVersions('0.5.5b', '0.5.6')).toBe(-1);
+    expect(compareVersions('0.5.5a', '0.5.5a')).toBe(0);
+    expect(compareVersions('v0.5.5a', '0.5.5a')).toBe(0);
+    // Letters belong to the patch only, and lowercase.
+    expect(compareVersions('0.5a.5', '0.5.5')).toBe(0);
+    expect(compareVersions('0.5.5A', '0.5.5')).toBe(0);
+  });
+
   test('a text that is not a version answers "not older, not newer"', () => {
     // O2: a `minAppVersion` no one can read must not stop a Nod from syncing.
     expect(compareVersions('0.3.5', '')).toBe(0);

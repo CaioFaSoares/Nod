@@ -426,6 +426,13 @@ export function mountSettings(
   };
 
   let alive = true;
+  /**
+   * 0.5.5a: the status line is a toast — fixed over the page, out of the layout — so a message never
+   * pushes the tabs' buttons down. `toastFor` is the status the pending timer belongs to: a newer
+   * status (every action sets a fresh object) is never cleared by an older timer.
+   */
+  let toastTimer: number | null = null;
+  let toastFor: Status | null = null;
   /** `window.setInterval` of the reveal countdown; null while no secret is on screen. */
   let revealTimer: number | null = null;
   /**
@@ -592,10 +599,36 @@ export function mountSettings(
       );
     }
 
-    const status = el('div');
-    if (state.status !== null) message(status, state.status.kind, state.status.text);
+    const toast = el('div', { class: 'toast-region' });
+    if (state.status !== null) {
+      message(toast, state.status.kind, state.status.text);
+      toast.addEventListener('click', dismissToast);
+      armToast(state.status);
+    }
 
-    root.append(el('div', { class: 'stack' }, tabs, status, tabContent(owner)));
+    root.append(el('div', { class: 'stack' }, tabs, tabContent(owner)), toast);
+  }
+
+  /** How long a toast stays: an error is read longer than a confirmation. A click closes it. */
+  function armToast(status: Status): void {
+    if (toastFor === status) return;
+    toastFor = status;
+    if (toastTimer !== null) window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(
+      () => {
+        toastTimer = null;
+        if (state.status === status) dismissToast();
+      },
+      status.kind === 'error' ? 8000 : 4000,
+    );
+  }
+
+  function dismissToast(): void {
+    if (toastTimer !== null) window.clearTimeout(toastTimer);
+    toastTimer = null;
+    toastFor = null;
+    state.status = null;
+    render();
   }
 
   function tabContent(owner: Person): HTMLElement {
@@ -4237,6 +4270,7 @@ export function mountSettings(
     },
     destroy(): void {
       alive = false;
+      if (toastTimer !== null) window.clearTimeout(toastTimer);
       offCatalog();
       offHost();
       document.removeEventListener('visibilitychange', onVisibilityChange);
