@@ -81,6 +81,13 @@ A aba de um endereço fora do catálogo, ou de um link aberto dentro de uma ferr
 não é restaurada e não recebe método de backend nem preenchimento automático.
 _Evite_: aba temporária, popup
 
+**Aba embutida (embedded tab)** — embedded tab (`TabState.embedded`, id `embed_<toolId>`):
+A tool tab rendered as an `<iframe>` inside the main window's page instead of a window, for a tool
+whose address may be framed and that this machine marked "Show inside Nod" (`embedded_tools` in
+`store.json`). It is never detached, gets no autofill and no injected script, and keeps its page
+across tab switches and visits to Home or Settings (RF-69).
+_Evite_: aba iframe, webview, aba interna
+
 **Modo Docked / modo Windows** — Docked / Windows:
 O ajuste que decide como as ferramentas abrem: Docked (padrão) mostra a aba sobre o painel central;
 Windows abre cada ferramenta em janela própria, como hoje. No Wayland o Docked não é oferecido.

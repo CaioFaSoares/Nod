@@ -31,7 +31,8 @@ Princípios:
    `docs/downscale-carna.md`.
 6. **Sem código de terceiros dentro.** O Nod não tem sistema de extensões: ele cadastra endereços.
 7. **Escopo fino.** Nada entra no v1 sem uma linha de requisito aqui. O que não está na lista é
-   próxima sprint — hoje isso inclui hospedar a casca em `nod.example.com` e as abas por iframe.
+   próxima sprint — hoje isso inclui hospedar a casca em `nod.example.com` e enquadrar sites que
+   recusam framing (a aba embutida de RF-69 cobre as ferramentas que podem ser enquadradas).
 
 ## 2. Escopo
 
@@ -63,7 +64,9 @@ Fora (não-objetivos do v1):
 
 Adiado para a próxima sprint, por decisão do dono (2026-10-15): mapear `nod.example.com` e as
 abas por iframe. Só volta quando hospedar algo além das regras do sistema virar atrativo — e aí
-deixa de ser casca fina (§23, questão 11).
+deixa de ser casca fina (§23, questão 11). **Partially reopened on 2026-10-19 (RF-69)**: a tool whose
+address may be framed can open as an embedded tab, chosen per tool and per machine, without hosting
+anything; hosting the shell on its own origin — to frame sites that refuse framing — stays deferred.
 
 ## 3. Vocabulário
 
@@ -124,8 +127,12 @@ other setting.
 
 Regras:
 
-- **Nada de iframe**: as ferramentas mandam `X-Frame-Options`/CSP, e no Linux o carimbo de origin do
-  gate `api` é frame-blind (`docs/tinyjs.md` §9).
+- **Iframe só como escolha da pessoa (RF-69)**: a tool opens as an **embedded tab** only when the
+  person opts in for it ("Show inside Nod"), and only if its address may be framed. A tool that sends
+  `X-Frame-Options` or a restrictive `frame-ancestors` is never framed — the person gets the header
+  as the reason — and no third-party site is framed on the person's behalf. A framed origin gets no
+  more backend methods than its own `api.origins` entry, and on Linux the origin stamp is frame-blind
+  (`docs/tinyjs.md` §9), so an embedded tab never widens a gate (E03 §8).
 - **Vista** é um endereço nomeado dentro de uma ferramenta, com modo `window` (janela própria — o caso
   de boards) ou `navigate` (navega a janela já aberta da ferramenta — o caso de pastas de e-mail; se
   ela não estiver aberta, abre direto no endereço da vista).
@@ -138,6 +145,10 @@ Regras:
 - **Ad-hoc tabs**: an address outside the catalog, or a link clicked inside a tool, opens as a tab
   next to its source; it is not saved, not restored, and gets no backend method and no autofill
   (RF-66…RF-68).
+- **Embedded tab**: in docked mode a tool the person marked "Show inside Nod" renders as an
+  `<iframe>` inside the page instead (id `embed_<tool>`, no window), only when its address may be
+  framed. It is never detached, gets no autofill and no injected script, and keeps its page across
+  tab switches and visits to Home or Settings (RF-69, E03 §8).
 - **Atalhos**: `⌘1`…`⌘9` abrem/trazem a ferramenta do dígito, `⌘K` abre a paleta, `⌘,` Settings. Na
   janela principal funcionam pela própria página; nas janelas de ferramenta, o teclado é do site, então
   os mesmos atalhos são registrados como **globais** (`tiny.hotkey.register`) **só enquanto alguma
@@ -433,6 +444,7 @@ máquina.
 | RF-66 | Any `http(s)` link opens in the Nod: links clicked inside a tool open as a tab next to it; the palette and `nod://open?url=` open one by hand. | A documentation link on a Kanban card opens as a tab right after the Kanban tab; pasting a URL in "Open link" or calling `nod://open` does the same. |
 | RF-67 | Any tab is saved to the sidebar in one step: a personal view when its origin is already a tool, otherwise a personal tool with probed title and icon. | Save a Claude chat URL: it appears under Claude; save a new site: it appears as a new icon with its title and icon, no typing. |
 | RF-68 | An ad-hoc tab gets no backend methods and no autofill. | Calling `tiny.api.call` from an ad-hoc origin is refused; no credential is filled there. |
+| RF-69 | Embedded tabs. In docked mode on macOS a person can open a tool as an embedded tab — an iframe inside the main window instead of a window — when the tool's address may be framed (no `X-Frame-Options`, no restrictive `frame-ancestors`); the choice is per tool and per machine (`embedded_tools` in `store.json`). Only on macOS, where the `api` gate was measured to stamp a subframe's own origin (`docs/handovers/e03-iframe-spike.md` §4); elsewhere `tabs.checkEmbed` refuses (the Linux stamp is frame-blind, §7). An embedded tab is never detached, gets no autofill and no injected script, and survives tab switches and visits to Home or Settings without reloading (`shared/types.ts` `TabState.embedded`, `ToolsState.embedded`; `tabs.checkEmbed` runs `frameability(headers)` from `shared/tabs.ts`; ids `embed_<toolId>`; `docs/epics/E03-docked-tabs.md` §8). | A frameable tool marked "Show inside Nod" opens with no new window and its page inside the panel; switching away and back keeps its state; "Show inside Nod" on a tool that sends `X-Frame-Options` is refused with the header as the reason; Claude stays a window. |
 
 ## 15. Requisitos não funcionais
 
@@ -615,6 +627,7 @@ momento, isso passa a ser validado online e a se atualizar sozinho.
 | 0.5.5a — Status as a toast, hotfix versions (2026-10-18) | Settings' status line ("… granted to …", "Saved …", errors) is a toast fixed at the bottom of the window, out of the layout, so a message never moves the buttons under it; it closes on a click or after 4 s (8 s for an error). Versions gain hotfix letters after the patch (`0.5.5a`): the release workflows accept them and the Nod offers a hotfix itself, because the runtime's update check reads only three numbers (`docs/distribuicao.md` §8). | `bun test test/ host/` (`test/version.test.ts`) and `bun test/smoke/ui.ts --force`. |
 | 0.5.6 — Reaches the 0.5.5 installs (2026-10-19) | 0.5.5 never offered 0.5.5a: its runtime's update check reads only three numbers and the letter-aware check started in 0.5.5a itself. The same build goes out as 0.5.6, which every install on 0.5.5 or 0.5.5a sees and installs on its own (`docs/distribuicao.md` §8). | Published manifest `version` = `0.5.6`; `bun test test/ host/`. |
 | 0.6.0 — Docked tabs and quick links (2026-10-19) | Docked mode is the default on macOS (`docs/canonico.md` §22 "Docked mode per OS"): the open tab lies frameless on the main window's center panel, several tabs per tool, and switching tabs never reloads; a tab detaches into its own window and docks back with the same page (RF-49…RF-52). The strip draws the tabs and ⌘T/⌘W/⌃Tab/⌘⇧D/⌘L/⌘D act on them; links clicked inside a tool open as ad-hoc tabs next to it, and the palette or `nod://open?url=` opens one by hand; any tab is saved to the sidebar in one step (RF-66…RF-68). Tabs, their order, addresses and docked/detached state are restored. Windows and Linux keep Windows as their default until their spikes run, and Wayland is not offered. | `bun test test/ host/`, `bun run typecheck`; real-surface smoke `bun test/smoke/tabs.ts` on macOS only, unlocked screen with OmniWM active: 6 of 8 runs passed all 17 steps (`docs/handovers/e03-smoke.md` §3). Windows and Linux not run. |
+| 0.6.0a — Embedded tabs (2026-10-19) | On macOS, in docked mode, a tool whose address may be framed opens as an embedded tab — an iframe inside the main window, no OS window, so a tiling window manager cannot move it — chosen per tool and per machine ("Show inside Nod" / "Open as window"); refused with the header as the reason when the site forbids framing; never detached, no autofill (RF-69, `docs/epics/E03-docked-tabs.md` §8). A Windows→Docked switch with every tab detached now lands on the strip. | `bun test test/ host/`, `bun run typecheck`; real-surface smoke `bun test/smoke/tabs.ts` on macOS (`docs/handovers/e03-smoke.md` §6: the RF-69 steps passed; window-geometry steps blocked by the tiling WM). A framed login sticks only in a release build. |
 | Próxima sprint (fora das fases) | Mapear `nod.example.com` e as abas por iframe, e decidir se hospedar algo além das regras passou a ser atrativo. | Um recorte escrito com o custo (casca deixa de funcionar offline) e o ganho. |
 
 ## 22. Registro de decisões
@@ -632,7 +645,7 @@ Status: `Proposto` espera leitura do dono; `Aberto` espera pesquisa; só o dono 
 | Moldura integrada | Superada pela "Janela única de gerenciar/usar" (2026-10-15) | — | — | Superada |
 | Palco pré-aquecido | Superado pela janela única (RF-22 retirado) | — | — | Superada |
 | Aba nativa | Não existe: agrupar janelas é do SO | tabbing do SO | O runtime não tem tabbing (`docs/tinyjs.md` §3) | Proposto |
-| Abas de verdade numa janela | **Adiado para a próxima sprint** (2026-10-15): exigiria hospedar a casca num origin do mesmo site e iframar as ferramentas | manter o rail com palcos | Decisão do dono: mapear quando hospedar algo além das regras ficar atrativo; hoje custaria o funcionamento offline | Adiado |
+| Abas de verdade numa janela | **Adiado para a próxima sprint** (2026-10-15): exigiria hospedar a casca num origin do mesmo site e iframar as ferramentas | manter o rail com palcos | Decisão do dono: mapear quando hospedar algo além das regras ficar atrativo; hoje custaria o funcionamento offline. RF-69 (0.6.0a) entrega a aba em iframe para as ferramentas que podem ser enquadradas; hospedar a casca, para as que recusam, continua adiado | Adiado |
 | Release privada com seed travado | O dono monta a release com os JSONs de regras embutidos, fora do git, e distribui na mão | catálogo no repo; catálogo só importado à mão | Decisão do dono em 2026-10-15: "releases com envs travadas de jsons que eu ignoro" | Decidido (2026-10-15) |
 | Seed embutido em `resources/` | Arquivo privado listado em `resources`, empacotado pela release; build sem ele falha | importar o seed à mão na primeira execução | O runtime já empacota `resources/` e falha o build quando o caminho falta (`docs/tinyjs.md` §1) | Superada (por "Seed as optional import") |
 | Validação online e auto-update | Depois do seed: release validada online e se atualizando sozinha | continuar mandando release na mão | Próximo passo declarado pelo dono; é o que a F5 entrega | Proposto |
@@ -663,7 +676,7 @@ Status: `Proposto` espera leitura do dono; `Aberto` espera pesquisa; só o dono 
 | Credential sharing | Send, assign (to a person or a role) and share tool credentials end to end: sealed to the receiver's X25519 key, signed with Ed25519, relayed by the host as ciphertext (`docs/epics/E02-credential-sharing.md`) | admin types it once; no sharing | Owner on 2026-10-16: "mandar senhas entre sí ou apontar senhas novas para membros… passando por biometria para conseguir sequer ver"; owner approved gate #1 on 2026-10-16 | Decidido (2026-10-16) |
 | Guilds per install | One Nod is in one guild at a time; changing guild is removing the host and adding another (`docs/epics/E01-connected-mode.md` §4). 0.5.0 prepares several guilds: `EntryTarget`/`GuildProfile` carry a guild id (`shared/types.ts`) | several guilds side by side | Owner on 2026-10-16: "no momento nao. se sair e voltar ele poderia entrar em outra"; owner on 2026-10-17: "no futuro um offline pode acessar varias guilds, hoje vamos só preparar o terreno pra isso" | Decidido (2026-10-16) |
 | Sharing scope and holders | Each credential has a scope — role (default), blocked, org — and shows who holds it (`docs/epics/E02-credential-sharing.md` §1) | anyone to anyone | Owner on 2026-10-16: "só entre pessoas da mesma role… ou bloqueado ou publica pra org"; "é bom ver que consegue ver aquele password" | Decidido (2026-10-16) |
-| Docked view and tabs | Docked mode **is the default**: tabs shown over the main window's center panel as frameless windows the Nod keeps on the slot, several tabs per tool, links clicked inside a tool adopted as tabs next to it; Windows mode stays as a setting (`docs/epics/E03-docked-tabs.md`) | iframes; tool windows only | Owner on 2026-10-16: center panel showing the open tab, detachable, several tabs per tool; "padrão é docked view". The docked mechanics remain a proposal until spikes S0–S4; iframes stay out (§7). Blocked by B05 | Decidido (2026-10-16): default and intent; mechanics built in 0.6.0, pending the owner's reading |
+| Docked view and tabs | Docked mode **is the default**: tabs shown over the main window's center panel as frameless windows the Nod keeps on the slot, several tabs per tool, links clicked inside a tool adopted as tabs next to it; Windows mode stays as a setting (`docs/epics/E03-docked-tabs.md`) | iframes; tool windows only | Owner on 2026-10-16: center panel showing the open tab, detachable, several tabs per tool; "padrão é docked view". The docked mechanics remain a proposal until spikes S0–S4; iframes stay out at the time (§7) — RF-69 reopens them for frameable tools in 0.6.0a. Blocked by B05 | Decidido (2026-10-16): default and intent; mechanics built in 0.6.0, pending the owner's reading |
 | Detach without reload | Detaching or docking a tab keeps the same window and page (frame toggled, no `parent`); never a reload (`docs/epics/E03-docked-tabs.md` §3) | reopen as a framed window (page reloads) | Owner on 2026-10-16: "quero que deatachar nao perca o progresso" | Decidido (2026-10-16) |
 | Quick links | Open any `http(s)` link in an ad-hoc tab (palette, `nod://open?url=`) and save any tab to the sidebar in one step, as a personal view or personal tool (`docs/epics/E03-docked-tabs.md` §5) | catalog-only navigation (§2) | Owner on 2026-10-16: "abrir link no bond e/ou salvar link novo na barra lateral mais rápido" | Decidido (2026-10-16) |
 | Web Nod | Optional browser version served by the host behind `WEB_UI=true`: same accounts, tools open in new browser tabs, no autofill or vault; clients as a kind of person (`docs/epics/E04-web-nod.md`) | app only; iframe tabs on the web (§23 q11) | Owner on 2026-10-16: "hospedar junto do stack, opcionalmente, uma versão não headless… para clientes acessarem material nosso"; later phase | Proposto |
@@ -716,6 +729,9 @@ Status: `Proposto` espera leitura do dono; `Aberto` espera pesquisa; só o dono 
 | Docked mode per OS | Docked is the default on macOS, where the spikes (`docs/handovers/e03-spikes.md`) and the real-surface smoke (`docs/handovers/e03-smoke.md`) ran by execução on 2026-10-19; on Windows and Linux the setting offers Docked but the default stays Windows until S1–S4 run there; on Wayland Docked is not offered | Docked the default everywhere, as "Docked view and tabs" decides | That row is the owner's "padrão é docked view"; nothing has been run on Windows or Linux, so this departs from it there until the owner reads it | Proposto |
 | Views in docked mode | `window`-mode views open as a new tab; `navigate`-mode views navigate the tool's current tab (E03 §7 q3) | — | — | Proposto |
 | Identity popups stay floating | In docked mode a popup whose URL is a known identity path (`shared/probe.ts` `isIdentityPath`) stays a floating popup window as today; any other `http(s)` popup from a tool becomes an ad-hoc tab next to its source | — | — | Proposto |
+| Embedded tabs (iframe) | In docked mode a tool whose address may be framed opens as an **embedded tab** — an `<iframe>` inside the main window instead of a window — per tool and per machine (`embedded_tools` in `store.json`, RF-69, `docs/epics/E03-docked-tabs.md` §8); an embedded tab is never detached, gets no autofill and no injected script, and keeps its page across tab switches and visits to Home or Settings | the OmniWM float rule only (keep the OS windows); change the runtime (Electron/Tauri); wait for an embedded webview in tinyjs | Owner on 2026-10-19: "eu gostaria que a janela nao fosse uma janela a nivel de sistema, e sim encaixasse como uma aba de verdade dentro do Nod"; chose "Iframe for your own tools" and "Build it + rewrite cookies on your proxy" | Decidido (2026-10-19) |
+| Embedded tab preference per machine | Which tools open as embedded tabs is a setting of this machine (`embedded_tools` in `store.json`, no secret, `ToolsState.embedded`); it is not a catalog field and does not travel with the tool to other machines | a field on the catalog entry, synced from the host | The orchestrator's reading of RF-69: whether a tool may be framed, and whether its login survives the frame, depends on this machine's engine and cookies | Proposto |
+| Version of the embedded-tabs release | RF-69 ships as **0.6.0a**, not 0.6.1 — every "0.6.1" in docs and comments became "0.6.0a"; Nod 0.6.0 offers the letter itself (`shared/version.ts`) | publish 0.6.1 | Owner on 2026-10-19: "com o que ja colocamos de atualizacoes desde 0.6.0 monte o pr para a 0.6.0a" | Decidido (2026-10-19) |
 
 ## 23. Questões abertas e riscos
 

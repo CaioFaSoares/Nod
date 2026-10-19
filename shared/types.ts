@@ -436,6 +436,18 @@ export interface TabState {
   adhoc: boolean;
   loading: boolean;
   error: string | null;
+  /**
+   * E03 embedded tabs (RF-69): an `<iframe>` in the main page instead of a window — no window, no
+   * autofill, never detached. `url` is the address the iframe loads (the full one, not `auditUrl`).
+   */
+  embedded: boolean;
+}
+
+/** RF-69: whether a tool's address may be framed, read from its response headers by the backend. */
+export interface EmbedCheck {
+  frameable: boolean;
+  /** why not, in words the page shows: `X-Frame-Options: SAMEORIGIN`, `frame-ancestors 'self'`, … */
+  reason: string | null;
 }
 
 export interface ToolsState {
@@ -450,6 +462,8 @@ export interface ToolsState {
   dockable: boolean;
   /** the backend registers the tab shortcuts globally; the page must not handle them a second time */
   tabHotkeys: boolean;
+  /** RF-69: the tools this machine opens as embedded tabs (docked mode only) */
+  embedded: Id[];
 }
 
 /** E03 (RF-67): where `tabs.save` put the tab — a personal view under an entry, or a personal tool. */
@@ -1052,6 +1066,14 @@ export interface ApiContract {
   'tabs.save': [{ id: string }, SaveTabResult];
   /** E03 (RF-52): Docked or Windows, stored on this machine; the next tool opened follows it. */
   'tabs.setMode': [{ mode: WindowMode }, ToolsState];
+  /** RF-69: reads the tool's response headers and answers whether its address may be framed. */
+  'tabs.checkEmbed': [{ toolId: Id }, EmbedCheck];
+  /**
+   * RF-69: this machine opens the tool as an embedded tab (`true`) or as a window (`false`); the
+   * tool's open tabs are reopened the new way (a reload, by the person's choice). `true` is refused
+   * with the `EmbedCheck` reason when the address may not be framed.
+   */
+  'tabs.setEmbedded': [{ toolId: Id; embedded: boolean }, ToolsState];
 
   'events.list': [EventFilter, AuditEvent[]];
   /** SP04 §5: the sent/pending counters of Settings → Activity (`{ sent: 0, pending: 0 }` with no host). */

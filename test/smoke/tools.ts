@@ -500,6 +500,8 @@ export interface TabTools {
   originA: string;
   originB: string;
   originC: string;
+  /** RF-69: a reporting tool whose pages carry `X-Frame-Options: SAMEORIGIN` (never frameable). */
+  originD: string;
   /** Every report every page posted so far, oldest first. */
   reports(): TabReport[];
   /** Queues one command for the page of one load; that page's next poll answers it. */
@@ -611,12 +613,21 @@ export function startTabTools(): TabTools {
   const origins: Record<string, string> = {};
   const servers: Array<{ stop: (closeActiveConnections?: boolean) => void }> = [];
 
-  function start(label: string): string {
+  function start(label: string, noFraming = false): string {
     const server = Bun.serve({
       hostname: '127.0.0.1',
       port: 0,
       async fetch(req) {
         const url = new URL(req.url);
+        const html = (body: string, extra: Record<string, string> = {}): Response =>
+          new Response(body, {
+            headers: {
+              'content-type': 'text/html; charset=utf-8',
+              'cache-control': 'no-store',
+              ...(noFraming ? { 'x-frame-options': 'SAMEORIGIN' } : {}),
+              ...extra,
+            },
+          });
         if (url.pathname === '/icon.png') {
           return new Response(PNG_1X1, {
             headers: {
@@ -637,11 +648,7 @@ export function startTabTools(): TabTools {
           queues.delete(pid);
           return smokeJson(queued);
         }
-        if (req.method === 'GET') {
-          return new Response(reportPage(label), {
-            headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-          });
-        }
+        if (req.method === 'GET') return html(reportPage(label));
         return notFound();
       },
     });
@@ -652,11 +659,14 @@ export function startTabTools(): TabTools {
   origins.A = start('A');
   origins.B = start('B');
   origins.C = start('C');
+  // RF-69: the same page behind `X-Frame-Options: SAMEORIGIN` — what `tabs.checkEmbed` must refuse.
+  origins.D = start('D', true);
 
   return {
     originA: origins.A,
     originB: origins.B,
     originC: origins.C,
+    originD: origins.D,
     reports: () => [...reports],
     command(pid, cmd, arg, tag): void {
       const queued = queues.get(pid) ?? [];

@@ -33,6 +33,8 @@ interface DriverConfig {
   originA: string;
   originB: string;
   originC: string;
+  /** RF-69: the tool that answers `X-Frame-Options: SAMEORIGIN`. */
+  originD: string;
 }
 
 const smokeWindow = window as unknown as { __NOD_TABS_SMOKE__?: DriverConfig };
@@ -139,6 +141,8 @@ let link1Id = '';
 let link2Id = '';
 /** The personal tool `tabs.save` creates for the origin no catalog names (RF-67). */
 let personalId = '';
+/** RF-69: the framed page of the embedded Tool A tab, once "Show inside Nod" ran. */
+let framed: Tracked | null = null;
 /** The slot's screen rect as of the last measurement, which is what the docked tab must match. */
 let layout: Rect = { x: 0, y: 0, width: 0, height: 0 };
 
@@ -392,6 +396,23 @@ async function onScreen(): Promise<{ windows: OnScreen[]; why: string; locked: b
   };
 }
 
+/** The run's own windows the WM has taken over (`mode: tiling`), as the desk reports them. */
+async function wmTiled(): Promise<string[]> {
+  const payload = await desk('/desk/onscreen');
+  const tiled = payload.tiled;
+  if (!Array.isArray(tiled)) return [];
+  return tiled.filter((item): item is string => typeof item === 'string');
+}
+
+/** `blocked by the tiling WM`, with the windows the WM took over and where the tab really is. */
+async function blockedByTiler(tab: Tracked, why: string): Promise<Blocked> {
+  const tiled = await wmTiled();
+  return blocked(
+    `blocked by the tiling WM (${tiled.join('; ')}): the tool window is on an OmniWM tile, not on the ` +
+      `slot, so ${why}; ${await placementNumbers(tab)}`,
+  );
+}
+
 /**
  * Why nothing can be placed right now, or null. `src/tabs.ts` reports no slot while the page is
  * hidden (`currentRect`), so on a locked or covered desktop the backend has nothing to put a docked
@@ -526,7 +547,16 @@ function tabOf(state: ToolsState, id: string): TabState {
 
 /** Activates a tab through its own row — the strip click the person makes (RF-49/RF-50). */
 async function activateRow(id: string): Promise<void> {
-  const state = await stateOf();
+  let state = await stateOf();
+  if (document.querySelector('.tab-strip') === null) {
+    // Home or Settings has the panel (a lock/unlock leaves it there): the strip is the way back.
+    const tab = tabOf(state, id);
+    const title = state.tools.find((tool) => tool.id === tab.toolId)?.title ?? '';
+    expect(title !== '', `no tool title for ${id} to bring the panel back from`);
+    await clickSidebarTool(title);
+    await waitForValue('the tab strip', () => document.querySelector('.tab-strip'));
+    state = await stateOf();
+  }
   const rows = await stripRows();
   const row = rows[rowIndex(state, id)];
   expect(row !== undefined, `the strip has no row for ${id}`);
@@ -911,10 +941,14 @@ async function reseat(): Promise<string> {
   return floated;
 }
 
+/** WKWebView's `performance.timeOrigin` jitters by a millisecond between reads; a reload is not. */
+const ORIGIN_TOLERANCE_MS = 2;
+
 function expectSame(tab: Tracked, report: TabReport, what: string): void {
   expect(
-    report.timeOrigin === tab.timeOrigin,
-    `${what} reloaded the page: timeOrigin ${tab.timeOrigin} → ${report.timeOrigin}`,
+    Math.abs(report.timeOrigin - tab.timeOrigin) <= ORIGIN_TOLERANCE_MS,
+    `${what} reloaded the page: timeOrigin ${tab.timeOrigin} → ${report.timeOrigin} ` +
+      `(+${Math.round(report.timeOrigin - tab.timeOrigin)} ms)`,
   );
   expect(
     report.draft === tab.draft,
@@ -979,6 +1013,7 @@ async function checkDefaultMode(): Promise<string> {
 async function checkOnSlot(tab: Tracked, what: string, count = 1): Promise<Outcome> {
   const hidden = await hiddenNow();
   if (hidden !== null) return blocked(`${hidden}; ${await placementNumbers(tab)}`);
+  if ((await wmTiled()).length > 0) return await blockedByTiler(tab, 'this tab cannot be measured');
   // The tiler moves a fresh window off the rect the backend placed it on, so the run's own windows
   // are floated and the panel reseated first — the same recipe the design gives the Nod itself: it
   // places the active tab again whenever the slot is reported.
@@ -1030,6 +1065,9 @@ async function checkResizeFollow(): Promise<Outcome> {
   const first = a1;
   expect(first !== null, 'the first tab was never tracked');
   const hidden = await hiddenNow();
+  if (hidden === null && (await wmTiled()).length > 0) {
+    return await blockedByTiler(first, 'the resize cannot be followed');
+  }
   if (hidden !== null) {
     const width = window.innerWidth;
     const height = window.innerHeight;
@@ -1201,6 +1239,9 @@ async function checkDockBack(): Promise<Outcome> {
   const loads = loadedTimes(await reports(), first.pid);
   expect(loads === 1, `the page loaded ${loads} times across detach and dock`);
   const hidden = await hiddenNow();
+  if (hidden === null && (await wmTiled()).length > 0) {
+    return await blockedByTiler(first, 'the dock cannot be measured on the slot');
+  }
   if (hidden !== null) {
     const after = await latestReport(first.pid);
     const measured = await measure(first, 'after the dock', false);
@@ -1444,7 +1485,8 @@ async function checkWindowsMode(): Promise<string> {
   const mainWindow = screen.windows.find((window) => window.title === MAIN_TITLE);
   const space = mainWindow === undefined ? null : spaceFrom(main, mainWindow);
   const toolWindows = screen.windows.filter((window) => window.title !== MAIN_TITLE);
-  const tool = toolWindows[0];
+  // Several tool windows are on screen in this mode: the one under test is the tool's own, by title.
+  const tool = toolWindows.find((window) => window.title === 'Tool B') ?? toolWindows[0];
   const frame = space === null || tool === undefined ? null : toPoints(tool, space);
   const border = frame === null ? null : frame.height - page.innerHeight;
   expect(border !== null, `the Tool B window is not on screen; ${screen.windows.length} window(s)`);
@@ -1545,6 +1587,266 @@ async function checkRestore(): Promise<string> {
   );
 }
 
+// ------------------------------------------------------------- RF-69 embedded tabs
+
+/**
+ * Closes every tab so the RF-69 steps start from an empty strip: through each row's × while the
+ * strip is on screen. Switching Windows→Docked leaves every tab detached and the panel on Home, so
+ * there is no strip to click — the same `tabs.close` the × runs is called instead (setup only).
+ */
+async function closeAllTabs(): Promise<number> {
+  let closed = 0;
+  const strip = document.querySelector('.tab-strip') !== null;
+  for (let guard = 0; guard < 12; guard += 1) {
+    const state = await stateOf();
+    if (state.tabs.length === 0) return closed;
+    if (strip) {
+      const rows = await stripRows();
+      const close = rows[0]?.querySelector<HTMLButtonElement>('.tab-close');
+      if (close === null || close === undefined) return closed;
+      close.click();
+    } else {
+      await call('tabs.close', { id: state.tabs[0].id });
+    }
+    await waitForState(`one fewer tab (${state.tabs.length - 1})`, (next) => next.tabs.length < state.tabs.length);
+    closed += 1;
+  }
+  return closed;
+}
+
+/** The visible iframe of an embedded tab, and its box against the slot's. */
+async function embeddedGeometry(what: string): Promise<{ frame: HTMLIFrameElement; rect: Rect; slot: Rect }> {
+  const frame = await waitForValue('the embedded iframe', () => {
+    const found = document.querySelector<HTMLIFrameElement>('iframe.tab-embed');
+    return found !== null && !found.hidden ? found : null;
+  });
+  const slotNode = document.querySelector('.tab-slot');
+  expect(slotNode !== null, `${what}: the panel has no slot`);
+  const slot = slotNode.getBoundingClientRect();
+  const rect = frame.getBoundingClientRect();
+  expect(
+    near(rect.x, slot.x) && near(rect.y, slot.y) && near(rect.width, slot.width) && near(rect.height, slot.height),
+    `${what}: the iframe is at ${Math.round(rect.x)},${Math.round(rect.y)} ${Math.round(rect.width)}x` +
+      `${Math.round(rect.height)} and the slot at ${Math.round(slot.x)},${Math.round(slot.y)} ` +
+      `${Math.round(slot.width)}x${Math.round(slot.height)}`,
+  );
+  return {
+    frame,
+    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+    slot: { x: slot.x, y: slot.y, width: slot.width, height: slot.height },
+  };
+}
+
+async function checkDockedAgain(): Promise<string> {
+  await openSettingsTab('Account');
+  const card = await waitForValue('the Window mode card', () => sectionCard('Window mode'));
+  const docked = card.querySelector<HTMLInputElement>('input[name=window-mode][value=docked]');
+  expect(docked !== null && !docked.disabled, 'the Docked option is not offered on this machine');
+  docked.click();
+  await waitForState('docked mode', (state) => state.mode === 'docked');
+  const closed = await closeAllTabs();
+  await clickSidebarTool('Tool A');
+  const state = await waitForState('one docked Tool A tab', (next) =>
+    next.tabs.length === 1 && next.active === 'tool_tool-a' ? next : null,
+  );
+  return (
+    `Docked back from the Account card, ${closed} old tab(s) closed through their ×, ` +
+    `${state.tabs.map((tab) => tab.id).join(', ')} (one docked tab); embedded list ` +
+    `${JSON.stringify(state.embedded)}`
+  );
+}
+
+async function checkEmbedOnSlot(): Promise<string> {
+  await activateRow('tool_tool-a');
+  await reseat();
+  const slotBox = document.querySelector('.tab-slot');
+  expect(slotBox !== null, 'the panel has no slot');
+  await clickToolbar('Show inside Nod');
+  const state = await waitForState('the tab to become embedded', (next) =>
+    next.tabs.some((tab) => tab.embedded) ? next : null,
+  );
+  const tab = state.tabs.find((item) => item.embedded);
+  expect(tab !== undefined, 'no embedded tab came back');
+  const embeddedTab = tab as TabState;
+  expect(embeddedTab.id === 'embed_tool-a', `the embedded id is ${embeddedTab.id}`);
+  expect(state.active === embeddedTab.id, `active = ${JSON.stringify(state.active)}`);
+  expect(state.embedded.includes('tool-a'), `embedded list = ${JSON.stringify(state.embedded)}`);
+  const rows = await stripRows();
+  const row = rows[rowIndex(state, embeddedTab.id)];
+  expect(row.querySelector('.tab-embedded') !== null, 'the strip does not mark it ▣ (inside Nod)');
+  expect(row.querySelector('.tab-dock') === null, 'an embedded tab offers a dock button');
+
+  const settled = await settleScreen();
+  const windows = settled.reading.windows.filter((window) => window.title !== MAIN_TITLE);
+  expect(
+    windows.length === 0,
+    `${windows.length} tool window(s) still on screen for an embedded tab: ` +
+      windows.map((window) => `${JSON.stringify(window.title)} ${window.width}x${window.height}`).join('; '),
+  );
+  const geometry = await embeddedGeometry('show inside Nod');
+  const src = geometry.frame.getAttribute('src') ?? '';
+  expect(src === `${CONFIG.originA}/tab`, `the iframe src is ${src}`);
+
+  const report = await waitForReport(
+    'the framed Tool A page',
+    (item) => item.tool === 'A' && item.note === 'load' && item.pid !== (a1?.pid ?? ''),
+  );
+  framed = track(report);
+  expect(report.href === `${CONFIG.originA}/tab`, `the framed page is at ${report.href}`);
+  geometry.frame.dataset.smoke = 'framed';
+  return (
+    `Show inside Nod → ${embeddedTab.id} (▣, no dock button), active; the window server shows ` +
+    `${windows.length} tool window(s) (settled in ${settled.ms} ms); the iframe is ` +
+    `${Math.round(geometry.rect.width)}x${Math.round(geometry.rect.height)} at ` +
+    `${Math.round(geometry.rect.x)},${Math.round(geometry.rect.y)} = the slot; src ${src}; the framed ` +
+    `page reported itself (timeOrigin ${Math.round(report.timeOrigin)}, draft ${report.draft})`
+  );
+}
+
+async function checkEmbedSurvives(): Promise<string> {
+  const page = framed;
+  expect(page !== null, 'the embedded page was never tracked');
+  const marked = document.querySelector<HTMLIFrameElement>('iframe.tab-embed');
+  expect(marked !== null, 'the iframe is gone before the switches');
+  // Another tab on the panel, then the embedded one again; then Home and back through the sidebar.
+  await clickSidebarTool('Tool B');
+  await waitForState('Tool B on the panel', (next) => next.active === 'tool_tool-b');
+  await activateRow('embed_tool-a');
+  const afterSwitch = document.querySelector<HTMLIFrameElement>('iframe.tab-embed');
+  expect(afterSwitch === marked, 'the iframe was re-created by the tab switch');
+  await openHome();
+  const layer = document.querySelector<HTMLElement>('.tab-embeds');
+  expect(layer === null || layer.hidden, 'the iframe layer is still shown on Home');
+  await clickSidebarTool('Tool A');
+  await waitForState('the embedded tab back on the panel', (next) => next.active === 'embed_tool-a');
+  const back = document.querySelector<HTMLIFrameElement>('iframe.tab-embed');
+  expect(back === marked, 'the iframe is not the same node after Home');
+  expect(back.dataset.smoke === 'framed', 'the iframe lost the marker the driver set');
+  const again = await ask(page.pid, 'report');
+  expectSame(page, again, 'the switches and Home');
+  const loads = loadedTimes(await reports(), page.pid);
+  expect(loads === 1, `the framed page loaded ${loads} times`);
+  return (
+    `tab switch + Home + sidebar back: the same iframe node (data-smoke kept), timeOrigin ` +
+    `${Math.round(again.timeOrigin)} and draft ${again.draft} unchanged, ${loads} load`
+  );
+}
+
+async function checkEmbedRefused(): Promise<string> {
+  await clickSidebarTool('Tool D');
+  const opened = await waitForState('the Tool D window', (next) =>
+    next.tabs.some((tab) => tab.id === 'tool_tool-d') && next.active === 'tool_tool-d' ? next : null,
+  );
+  const before = opened.tabs.find((tab) => tab.id === 'tool_tool-d') as TabState;
+  expect(before.embedded === false, 'Tool D opened embedded');
+  await clickToolbar('Show inside Nod');
+  const banner = await waitForStatus('cannot be shown inside Nod');
+  const said = text(banner);
+  expect(/x-frame-options/i.test(said), `the banner says ${JSON.stringify(said)}`);
+  const state = await stateOf();
+  const tab = state.tabs.find((item) => item.id === 'tool_tool-d') as TabState;
+  expect(tab.embedded === false, 'Tool D became embedded anyway');
+  expect(!state.embedded.includes('tool-d'), `the preference was stored: ${JSON.stringify(state.embedded)}`);
+  const frame = document.querySelector('iframe.tab-embed');
+  return (
+    `Tool D (${CONFIG.originD}/tab, X-Frame-Options: SAMEORIGIN) → "Show inside Nod" refused: ` +
+    `${JSON.stringify(said)}; the tab stays a window (embedded ${tab.embedded}, embedded list ` +
+    `${JSON.stringify(state.embedded)}); iframes on the page: ${frame === null ? 0 : 1}`
+  );
+}
+
+async function checkOpenAsWindow(): Promise<Outcome> {
+  const before = await stateOf();
+  const open = before.tabs.find((tab) => tab.toolId === 'tool-a');
+  expect(open !== undefined, 'no Tool A tab is open to bring back');
+  await activateRow((open as TabState).id);
+  await clickToolbar('Open as window');
+  const state = await waitForState('the tab to become a window again', (next) =>
+    next.tabs.some((tab) => tab.id === 'tool_tool-a' && !tab.embedded) ? next : null,
+  );
+  expect(!state.embedded.includes('tool-a'), `the preference stayed: ${JSON.stringify(state.embedded)}`);
+  const tab = tabOf(state, 'tool_tool-a');
+  expect(tab.toolId === 'tool-a', `the docked tab is ${tab.id}`);
+  if ((await wmTiled()).length > 0) return await blockedByTiler(a1 as Tracked, 'the window cannot be measured on the slot');
+  await reseat();
+  const measured = await measure(a1 as Tracked, 'after Open as window', false);
+  expectPageBox(measured, 'after Open as window');
+  expectOnSlot(measured, 'after Open as window');
+  expect(
+    document.querySelector('iframe.tab-embed') === null,
+    'the iframe of the converted tab is still in the document',
+  );
+  const loads = loadedTimes(await reports(), (a1 as Tracked).pid);
+  return (
+    `Open as window → ${tab.id} (docked, active), the iframe removed; the real window is on the slot: ` +
+    `${measuredText(measured)}; tab 1's own page still has ${loads} load`
+  );
+}
+
+async function checkEmbedRestored(): Promise<string> {
+  const before = await stateOf();
+  const open = before.tabs.find((tab) => tab.toolId === 'tool-a');
+  expect(open !== undefined, 'no Tool A tab is open to embed');
+  await activateRow((open as TabState).id);
+  await clickToolbar('Show inside Nod');
+  await waitForState('the tab embedded again', (next) =>
+    next.tabs.some((tab) => tab.embedded && tab.id === 'embed_tool-a') ? next : null,
+  );
+  const geometry = await embeddedGeometry('before the lock');
+  const page = framed;
+  expect(page !== null, 'the embedded page was never tracked');
+  geometry.frame.dataset.smoke = 'before-lock';
+
+  const lock = all<HTMLButtonElement>('.sidebar-action').find((button) =>
+    text(button).includes('Lock'),
+  );
+  expect(lock !== undefined, 'the sidebar has no Lock action');
+  lock.click();
+  await waitForValue('the entry rail', () => document.querySelector('.entry-rail .tile'));
+  const tile = await waitForValue('the Offline tile', () =>
+    document.querySelector<HTMLButtonElement>('.entry-rail [data-tile=offline]'),
+  );
+  tile.click();
+  const email = await waitForValue('the offline email field', () =>
+    document.querySelector<HTMLInputElement>('.entry-pane input[name=email]'),
+  );
+  setValue(email, EMAIL);
+  const password = await waitForValue('the offline password field', () =>
+    document.querySelector<HTMLInputElement>('.entry-pane input[name=password]'),
+  );
+  setValue(password, PASSWORD);
+  const enter = await waitForValue('the Enter offline button', () =>
+    document.querySelector<HTMLButtonElement>('.entry-pane [data-action=enter-offline]'),
+  );
+  enter.click();
+  await waitForValue('the unlocked shell', () => document.querySelector('.shell'));
+
+  const restored = await waitForState('the embedded tab restored', (next) =>
+    next.tabs.some((tab) => tab.embedded) ? next : null,
+  );
+  const tab = restored.tabs.find((item) => item.embedded) as TabState;
+  expect(tab.id === 'embed_tool-a', `the restored embedded id is ${tab.id}`);
+  expect(tab.toolId === 'tool-a', `the restored embedded tab has toolId ${JSON.stringify(tab.toolId)}`);
+  const frame = await waitForValue('the restored iframe', () =>
+    document.querySelector<HTMLIFrameElement>('iframe.tab-embed'),
+  );
+  expect(
+    (frame.getAttribute('src') ?? '') === `${CONFIG.originA}/tab`,
+    `the restored iframe src is ${frame.getAttribute('src')}`,
+  );
+  const report = await waitForReport(
+    'the restored framed page',
+    (item) => item.tool === 'A' && item.note === 'load' && item.pid !== page.pid,
+  );
+  framed = track(report);
+  return (
+    `locked and entered again: ${tab.id} (embedded, tool-a) reopened with its iframe ` +
+    `(${frame === null ? 'missing' : 'src ' + (frame.getAttribute('src') ?? '')}); the new framed page ` +
+    `loaded (timeOrigin ${Math.round(report.timeOrigin)}) — the frame is a fresh page after the lock, ` +
+    `as every tab is`
+  );
+}
+
 // ------------------------------------------------------------- harness
 
 /** A check's answer: the step's detail, or the reason the session made its subject unobservable. */
@@ -1577,6 +1879,12 @@ const CHECKS: Checks = [
   ['RF-52 Windows mode: framed windows, no panel', checkWindowsMode],
   ['RF-19 a second open focuses, never reloads', checkRf19],
   ['T6 lock and unlock restore the tabs', checkRestore],
+  ['RF-69 docked again with one tab to embed', checkDockedAgain],
+  ['RF-69 Show inside Nod: no window, an iframe on the slot', checkEmbedOnSlot],
+  ['RF-69 switches and Home never reload the frame', checkEmbedSurvives],
+  ['RF-69 an X-Frame-Options tool is refused', checkEmbedRefused],
+  ['RF-69 lock and unlock restore it embedded', checkEmbedRestored],
+  ['RF-69 Open as window brings the tab back', checkOpenAsWindow],
 ];
 
 async function run(): Promise<void> {

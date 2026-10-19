@@ -1,10 +1,11 @@
-// E03 (RF-49…RF-52, RF-66…RF-68): the tab view of the main window — the strip of the open tabs,
+// E03 (RF-49…RF-52, RF-66…RF-69): the tab view of the main window — the strip of the open tabs,
 // the toolbar that acts on the active one, and the slot the backend lays the docked tab on.
-// The page owns the strip and reports the slot; `backend/tabs.ts` owns the windows and the geometry,
-// and the pure helpers live in `shared/tabs.ts`. This module talks to the backend only through
-// `./api`, and `src/app.ts` mounts it — docked mode only (RF-52) — handing it the two things that
-// need the window's own state: the toast and the catalog of a save (RF-67), and the link dialog
-// (RF-66).
+// The page owns the strip and reports the slot; `backend/tool-windows.ts` owns the windows and the
+// geometry, and the pure helpers live in `shared/tabs.ts`. This module talks to the backend only
+// through `./api`, and `src/app.ts` mounts it — docked mode only (RF-52) — handing it the two things
+// that need the window's own state: the banner and the catalog of a save (RF-67), and the link
+// dialog (RF-66). RF-69 embedded tabs add the iframe layer (`createEmbedLayer`), mounted by the
+// shell rather than by this view so Home and Settings never take the iframes out of the document.
 
 import { call } from './api';
 import { button, el, glyph } from './ui';
@@ -36,14 +37,22 @@ export interface TabsApi {
   next: (step: 1 | -1) => void;
   /** RF-67 (⌘D): the tab's address saved to the sidebar — the app's own `save` does the rest. */
   save: (id: string) => void;
+  /**
+   * RF-69: the tool opens as an embedded tab (`true`) or as a window (`false`). The app checks
+   * `tabs.checkEmbed` first and shows the reason when the address may not be framed; the backend
+   * stores the preference and converts the tool's open tabs in place.
+   */
+  setEmbedded: (toolId: Id, embedded: boolean) => void;
 }
 
 /** What the two halves of the page hand each other. */
 export interface TabsDeps {
   /** Runs a `tabs.*` action: the answer goes to `src/app.ts`, which redraws from it. */
   run: (action: () => Promise<ToolsState>) => void;
-  /** RF-67: the app's own half of a save — the toast and the catalog of the new entry. */
+  /** RF-67: the app's own half of a save — the banner and the catalog of the new entry. */
   save: (id: string) => void;
+  /** RF-69: the app's half of the embedding toggle — the frameability check and its message. */
+  setEmbedded: (toolId: Id, embedded: boolean) => void;
 }
 
 /** E03: one definition of each action, shared by the strip, the palette and the keyboard. */
@@ -62,6 +71,7 @@ export function tabsApi(deps: TabsDeps): TabsApi {
     // RF-50 (⌃Tab / ⌃⇧Tab): the strip's neighbours, wrapping.
     next: (step) => deps.run(() => call('tabs.next', { step })),
     save: deps.save,
+    setEmbedded: deps.setEmbedded,
   };
 }
 
@@ -91,6 +101,95 @@ export interface TabsViewCtx {
   actions: TabsApi;
   /** RF-66: "Open link…" — the dialog of `src/app.ts`, beside the personal-tool one */
   openLink: () => void;
+  /** RF-69: the iframes of the embedded tabs, mounted once by the shell and kept across views */
+  embeds: EmbedLayer;
+}
+
+/**
+ * RF-69: the iframe layer of the embedded tabs. One `<iframe>` per open embedded tab, keyed by tab
+ * id — created once, kept across every re-render of the view, hidden (`display:none`) while its tab
+ * is not the active one, and removed when the tab closes. `src` is written only when the backend's
+ * `url` changes, so a redraw never reloads a tool.
+ *
+ * The element is mounted on the shell's content box, not on the tab view: Home and Settings replace
+ * the panel, and taking the iframes with it would reload every embedded tool on the way back
+ * (RF-50). `place` puts the layer over the slot rect and `place(null)` hides it while the panel is
+ * not the tab view; neither detaches the iframes from the document, and a `display:none` iframe
+ * never reloads (spike §1).
+ */
+export interface EmbedLayer {
+  /** the element the shell keeps mounted */
+  element: HTMLElement;
+  /** reconciles the iframes with a `tools`/`tabs.*` answer */
+  update(state: ToolsState): void;
+  /** puts the layer over the slot rect; `null` hides it (no slot on screen) */
+  place(rect: SlotRect | null): void;
+  destroy(): void;
+}
+
+/** RF-69: builds the layer of the embedded tabs (`EmbedLayer` above); the shell mounts it once. */
+export function createEmbedLayer(): EmbedLayer {
+  // Until a tab view places it over the slot there is nothing to show.
+  const element = el('div', { class: 'tab-embeds' });
+  element.hidden = true;
+  const frames = new Map<string, HTMLIFrameElement>();
+
+  function create(tab: TabState): HTMLIFrameElement {
+    const frame = el('iframe', {
+      class: 'tab-embed',
+      title: tab.title,
+      attrs: {
+        // Spike §5: a framed tool gets camera/mic silently when its origin carries `media.*`; the
+        // rest of the list is what a tool expects of a browser and costs nothing here. No `sandbox`:
+        // it changed no measured result (spike §6).
+        allow: 'camera; microphone; display-capture; fullscreen; clipboard-read; clipboard-write',
+        referrerpolicy: 'strict-origin-when-cross-origin',
+      },
+    });
+    frames.set(tab.id, frame);
+    element.append(frame);
+    return frame;
+  }
+
+  return {
+    element,
+    update(state: ToolsState): void {
+      const open = new Set<string>();
+      for (const tab of state.tabs) {
+        if (!tab.embedded) continue;
+        open.add(tab.id);
+        const frame = frames.get(tab.id) ?? create(tab);
+        // RF-69: the address is the backend's. Comparing the last one written is what keeps a
+        // redraw from reloading the tool.
+        if (tab.url !== '' && frame.dataset.url !== tab.url) {
+          frame.dataset.url = tab.url;
+          frame.setAttribute('src', tab.url);
+        }
+        if (frame.title !== tab.title) frame.title = tab.title;
+        frame.hidden = tab.id !== state.active;
+      }
+      for (const [id, frame] of frames) {
+        if (open.has(id)) continue;
+        frame.remove();
+        frames.delete(id);
+      }
+    },
+    place(rect: SlotRect | null): void {
+      if (rect === null) {
+        element.hidden = true;
+        return;
+      }
+      element.hidden = false;
+      element.style.left = `${rect.x}px`;
+      element.style.top = `${rect.y}px`;
+      element.style.width = `${rect.width}px`;
+      element.style.height = `${rect.height}px`;
+    },
+    destroy(): void {
+      frames.clear();
+      element.remove();
+    },
+  };
 }
 
 /** E03: the mounted view — `update` on a new answer, `destroy` when the panel leaves it. */
@@ -132,12 +231,18 @@ export function mountTabs(root: HTMLElement, ctx: TabsViewCtx): TabsHandle {
    * covers the window (the palette and the dialogs of `src/app.ts`, every one of them a `.overlay`
    * child of `document.body`), and while the active tab is detached or there is none. Home, Settings
    * and the locked screen never mount this view at all: they report the `null` of `destroy`.
+   *
+   * RF-69: an embedded tab has no window to place, but the rect is still what tells the backend the
+   * tab view is up (its hotkeys act on the embedded tab) and what places the iframe layer. It is
+   * never the null of an overlay: an overlay covers the iframe naturally, so the frame stays where
+   * it is (the null rule below is the docked window's alone).
    */
   function currentRect(): SlotRect | null {
     if (document.visibilityState === 'hidden') return null;
-    if (document.querySelector('.overlay') !== null) return null;
     const active = activeTab(state);
-    if (active === null || !active.docked) return null;
+    if (active === null) return null;
+    if (!active.embedded && document.querySelector('.overlay') !== null) return null;
+    if (!active.docked && !active.embedded) return null;
     const box = slot.getBoundingClientRect();
     if (box.width === 0 || box.height === 0) return null;
     return {
@@ -149,10 +254,19 @@ export function mountTabs(root: HTMLElement, ctx: TabsViewCtx): TabsHandle {
   }
 
   /** The slot moved, or stopped being one: one report, and only when the numbers changed. */
-  const syncSlot = (): void => send(currentRect());
+  const syncSlot = (): void => {
+    const rect = currentRect();
+    send(rect);
+    // RF-69: an embedded tab lives in this layer, over the same rect the backend lays a window on.
+    // While the panel is not the tab view the view is destroyed and the layer hidden, not detached.
+    ctx.embeds.place(rect);
+  };
 
   function draw(): void {
     const active = activeTab(state);
+    // RF-69: one iframe per open embedded tab, before the strip is redrawn — the layer is keyed by
+    // tab id, so this updates the frames without re-creating them.
+    ctx.embeds.update(state);
     strip.replaceChildren(
       ...state.tabs.map((tab) => tabNode(tab, tab.id === state.active, state.tools, ctx.actions)),
       newTabButton(active, ctx.actions),
@@ -184,7 +298,9 @@ export function mountTabs(root: HTMLElement, ctx: TabsViewCtx): TabsHandle {
       overlays.disconnect();
       window.removeEventListener('resize', syncSlot);
       document.removeEventListener('visibilitychange', syncSlot);
-      // Home or Settings took the panel, or the session locked: there is no slot any more.
+      // Home or Settings took the panel, or the session locked: there is no slot any more. RF-69:
+      // the iframes stay in the document (only hidden), so the embedded tools keep running.
+      ctx.embeds.place(null);
       send(null);
     },
   };
@@ -201,6 +317,7 @@ function tabNode(tab: TabState, active: boolean, tools: ToolStatus[], actions: T
   const name =
     `${tab.title}` +
     (tab.toolId === null ? ' — not saved' : '') +
+    (tab.embedded ? ' — inside Nod' : '') +
     (tab.docked ? '' : ' — in its own window') +
     (tab.error === null ? '' : ` — failed: ${tab.error}`);
   const node = el(
@@ -217,8 +334,9 @@ function tabNode(tab: TabState, active: boolean, tools: ToolStatus[], actions: T
     ...tabFlags(tab),
     // A detached tab carries its own way back: the backend keeps the slot on a tab that is docked,
     // so `tabs.dock` has no active tab to act on for this one (the toolbar's Detach/Dock speaks for
-    // the tab that is on the panel — RF-51).
-    tab.docked ? null : dockButton(tab, actions),
+    // the tab that is on the panel — RF-51). RF-69: an embedded tab is never detached, and offers
+    // no detach/dock control at all; its mark is the ▣ `tabFlags` adds.
+    tab.docked || tab.embedded ? null : dockButton(tab, actions),
     closeButton(tab, actions),
   );
   node.addEventListener('click', () => actions.activate(tab.id));
@@ -245,12 +363,16 @@ function tabMark(tab: TabState, tools: ToolStatus[]): HTMLElement {
   return el('span', { class: 'tab-mark' }, glyph(tab.title, icon));
 }
 
-/** RF-51/RF-66: what the tab is and is not — not saved, in its own window, failed, still loading. */
+/** RF-51/RF-66/RF-69: what the tab is and is not — not saved, inside Nod, in its own window, failed, loading. */
 function tabFlags(tab: TabState): HTMLElement[] {
   const flags: HTMLElement[] = [];
   // RF-66/RF-68: an ad-hoc tab is not saved anywhere until the person saves it (RF-67).
   if (tab.toolId === null) {
     flags.push(el('span', { class: 'tab-flag tab-unsaved', title: 'Not saved — save it to the sidebar' }, '•'));
+  }
+  // RF-69: this tab is a page inside the Nod, not a window of its own.
+  if (tab.embedded) {
+    flags.push(el('span', { class: 'tab-flag tab-embedded', title: 'Inside Nod' }, '▣'));
   }
   // RF-51: this tab left the panel for a window of its own.
   if (!tab.docked) {
@@ -323,27 +445,48 @@ function newTabButton(active: TabState | null, actions: TabsApi): HTMLButtonElem
 }
 
 /**
- * E03: the toolbar of the panel. Detach/Dock and Save to sidebar act on the active tab (RF-51,
- * RF-67); "Open link…" is always there, because a link opened by hand (RF-66) needs no tab to
- * start from.
+ * E03: the toolbar of the panel. Detach/Dock, the embedding toggle and Save to sidebar act on the
+ * active tab (RF-51, RF-67, RF-69); "Open link…" is always there, because a link opened by hand
+ * (RF-66) needs no tab to start from.
  */
 function toolbarButtons(active: TabState | null, ctx: TabsViewCtx): HTMLElement[] {
   const buttons: HTMLElement[] = [];
   if (active !== null) {
+    const toolId = active.toolId;
+    // RF-69: an embedded tab has no window to detach and no dock to come back from.
+    if (!active.embedded) {
+      buttons.push(
+        button(
+          active.docked ? 'Detach' : 'Dock',
+          () => {
+            if (active.docked) ctx.actions.detach(active.id);
+            else ctx.actions.dock(active.id);
+          },
+          {
+            kind: 'ghost',
+            title: active.docked
+              ? `Take ${active.title} out into its own window`
+              : `Bring ${active.title} back onto the panel`,
+          },
+        ),
+      );
+    }
+    // RF-69: the tool's place, not an individual tab's — `setEmbedded` converts every open tab of
+    // the tool. An ad-hoc tab is nobody's tool and has no toggle (RF-68).
+    if (toolId !== null) {
+      buttons.push(
+        active.embedded
+          ? button('Open as window', () => ctx.actions.setEmbedded(toolId, false), {
+              kind: 'ghost',
+              title: `Open ${active.title} in a window of its own`,
+            })
+          : button('Show inside Nod', () => ctx.actions.setEmbedded(toolId, true), {
+              kind: 'ghost',
+              title: `Show ${active.title} inside Nod instead of a window`,
+            }),
+      );
+    }
     buttons.push(
-      button(
-        active.docked ? 'Detach' : 'Dock',
-        () => {
-          if (active.docked) ctx.actions.detach(active.id);
-          else ctx.actions.dock(active.id);
-        },
-        {
-          kind: 'ghost',
-          title: active.docked
-            ? `Take ${active.title} out into its own window`
-            : `Bring ${active.title} back onto the panel`,
-        },
-      ),
       button('Save to sidebar', () => ctx.actions.save(active.id), {
         kind: 'ghost',
         title: `Save ${active.title} to the sidebar`,

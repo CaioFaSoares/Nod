@@ -143,7 +143,7 @@ export function openPalette(ctx: {
       items.push({ label, key: matchKey(label), run: () => tabs.activate(tab.id) });
       // RF-51: a detached tab is docked back from here too — the strip may not be on screen (Home,
       // Settings), and with every tab detached the backend has no active tab for the row below.
-      if (!tab.docked) {
+      if (!tab.docked && !tab.embedded) {
         const dock = `Dock tab: ${tab.title}`;
         items.push({ label: dock, key: matchKey(dock), run: () => tabs.dock(tab.id) });
       }
@@ -155,18 +155,28 @@ export function openPalette(ctx: {
       if (toolId !== null) {
         const newTab = 'New tab';
         items.push({ label: newTab, key: matchKey(newTab), run: () => tabs.newTab(toolId) });
+        // RF-69: the same toggle the toolbar shows, for the tool of the active tab.
+        const mode = active.embedded ? 'Open as window' : 'Show inside Nod';
+        items.push({
+          label: mode,
+          key: matchKey(mode),
+          run: () => tabs.setEmbedded(toolId, !active.embedded),
+        });
       }
       const close = 'Close tab';
       items.push({ label: close, key: matchKey(close), run: () => tabs.close(active.id) });
-      const toggle = active.docked ? 'Detach tab' : 'Dock tab';
-      items.push({
-        label: toggle,
-        key: matchKey(toggle),
-        run: () => {
-          if (active.docked) tabs.detach(active.id);
-          else tabs.dock(active.id);
-        },
-      });
+      // RF-69: an embedded tab has no window to detach and no dock to come back from.
+      if (!active.embedded) {
+        const toggle = active.docked ? 'Detach tab' : 'Dock tab';
+        items.push({
+          label: toggle,
+          key: matchKey(toggle),
+          run: () => {
+            if (active.docked) tabs.detach(active.id);
+            else tabs.dock(active.id);
+          },
+        });
+      }
       const save = 'Save tab to sidebar';
       items.push({ label: save, key: matchKey(save), run: () => tabs.save(active.id) });
     }

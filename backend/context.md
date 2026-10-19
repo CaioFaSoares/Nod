@@ -177,3 +177,24 @@ tool is re-labelled in place (a tool tab keeps its own tool). Both `tabs.save` a
 `HOST_WRITES` through `main.ts`'s `saveTabToSidebar`, so a disconnected guild refuses the write on
 either path; the rest of the `tabs.*` methods are this machine's own. `shared/tabs.ts` holds the
 pure half (ids, strip order, link parsing, the slot formula, the persisted list, `saveTarget`).
+
+**0.6.0a (RF-69) — embedded tabs (`tool-windows.ts`).** A tool listed in `store.json`'s
+`embedded_tools` opens as an **embedded tab** in docked mode: an `<iframe>` inside the main page,
+with id `embed_<entry>` for the first and `embed_<entry>_t<n>` after, never a window. The tab manager
+guards `window` calls as before, but an embedded tab has no window at all — no cascade, no `eval`,
+no warning banner, never detached (`tabs.detach` answers `cannot detach an embedded tab`) and never
+in `popups`; `closeAll` forgets them from the strip and the persisted list keeps them for `restore`.
+`showableTab()` answers null while the active tab is embedded, so every docked window is hidden and
+the page draws the iframe; `ToolsState.active` still names it and the page keeps reporting
+`tabs.slot`. Hotkeys target it like any active tab (⌘W/⌘T/⌃Tab/⌘D); ⌘⇧D is a no-op. `tools.open`,
+`tabs.new`, the digit shortcuts, `tools.openView` and `restore` create embedded tabs for a listed
+tool; a `navigate` view updates that tab's `url` (the page re-renders the iframe `src`) instead of
+`eval`ling. A popup policy with `opener: 'main'` while an embedded tab is active belongs to that
+tab: identity paths stay floating, other `http(s)` addresses are adopted as ad-hoc tabs right after
+it. `tabs.checkEmbed` fetches `entry.url` (`redirect: 'follow'`, 10 s deadline) and runs the pure
+`frameability(headers)` of `shared/tabs.ts` — any `X-Frame-Options`, or a CSP `frame-ancestors`
+other than exactly `*`, refuses the frame; a failed fetch answers `could not reach the tool`.
+`tabs.setEmbedded` runs the same check before storing the preference and converts every open tab of
+the tool in place — windows closed for embedded tabs, windows opened for the reverse — keeping the
+strip position and the active tab. In windows mode the preference stays in `store.json` but every
+tool opens as a window, and switching to windows converts embedded tabs into framed windows.

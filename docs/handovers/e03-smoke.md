@@ -118,3 +118,87 @@ restore all behaved as the contract says.
 - a `window` view's own tab, `navigate` views, and the identity-provider popup policy (S4) — outside
   this smoke's scope;
 - Windows and Linux: not run (no machine), as in the spikes.
+
+## 6. RF-69 embedded tabs (0.6.0a), and the tiling-WM rule
+
+Owner decision 2026-10-19: the smoke adds **no** window-manager configuration. It keeps what it
+already did (float this run's own windows before a measurement) and gained the rule below; a geometry
+step the tiler has taken over is recorded, never passed, and the run goes on.
+
+> A geometry check whose window `omniwmctl query windows` reports as `mode: "tiling"` at check time is
+> **`blocked by the tiling WM`**, with the windows and frames quoted. Never `ok`; never a hard abort.
+
+The runner's `/desk/onscreen` now also answers *which of this run's windows the WM has tiled*
+(`tiled: string[]`, title + frame), and the driver asks it at the start of every placement step
+(`checkOnSlot`, the resize follow, the dock-back, "Open as window"). The step's detail reads e.g.
+`blocked by the tiling WM (Nod 1235x1312@2326,1528; Tool A 1235x1312@3587,1528): the tool window is
+on an OmniWM tile, not on the slot … the slot box is 2394,-1228 1167x1190, the tab's page is
+1235x1312 and the real frame is 3587,-1350 1235x1312`.
+
+New fake tool and steps: **origin D** answers `X-Frame-Options: SAMEORIGIN` (`startTabTools`), the
+seed names it `tool-d`; six steps were added, and the lock/unlock one now comes **before** "Open as
+window" so it runs whatever happens to the conversion step:
+
+| Step | What it drives |
+| --- | --- |
+| RF-69 docked again with one tab to embed | the Account card back to Docked, the old tabs closed, `tool_tool-a` as one docked tab |
+| RF-69 Show inside Nod: no window, an iframe on the slot | the toolbar action; the row becomes `embed_tool-a` ▣ with no dock button, the window server shows **no** tool window, the visible `iframe.tab-embed`'s rect is the slot's, its `src` is the tool's URL, and the framed page reports itself |
+| RF-69 switches and Home never reload the frame | another tab, back, Home, sidebar back: the same iframe node (a `data-smoke` marker survives), same `timeOrigin`/draft, one load |
+| RF-69 an X-Frame-Options tool is refused | Tool D: the banner carries `X-Frame-Options: SAMEORIGIN`, the tab stays a window, the preference stays `["tool-a"]` |
+| RF-69 lock and unlock restore it embedded | embedded, locked, entered through the Offline tile: `embed_tool-a` comes back embedded with its iframe |
+| RF-69 Open as window brings the tab back | "Open as window": a docked window again, the iframe removed, the real frame on the slot (tiler-guarded) |
+
+### Results (execução, unlocked screen, OmniWM active)
+
+One run (before the tiling guard) reached the RF-69 steps with every printed step green:
+
+| Step | Result | Numbers |
+| --- | --- | --- |
+| RF-52 default | ok | `mode=docked dockable=true`, no strip |
+| RF-49 open one docked tab | ok | `tool_tool-a` docked+active, slot `1167x1190`, loaded in 957 ms |
+| RF-49 lands on the slot | ok (that run) | page `1167x1190` on the slot; CGWindowList 1 tool window = the slot |
+| RF-49 follows a resize / RF-50 second tab slot | ok (that run) | landed per the slot after the reseat |
+| RF-50 second tab / switching | ok | `tool_tool-a, tool_tool-a_t2`; 1→2→1, draft+`timeOrigin` kept, **1 load** |
+| RF-51 detach / dock back | ok | frame **0 → 122 pt**; docked back onto `2444,-1278 1167x1190`, 1 load |
+| RF-66 popup / Open link… | ok | `popup1` after its opener, took the slot in **110 ms**; `link_1`/`link_2` in place |
+| RF-68 ad-hoc API | ok | tool tab `ok`; `popup1` → `login.report only comes from a tool window`; `link_1` → `"login.report" is disabled by tinyjs.json "api"` |
+| RF-67 view / tool | ok | view `doc` of tool-b; personal tool `p-…` with the probed title, sidebar `3 → 4` |
+| RF-52 Windows mode | ok | `mode=windows active=null`, 5 tabs off the panel, Tool B window with a frame |
+| RF-19 | ok | same window, 1 load |
+| T6 | ok | tabs reopened in order, 2 ad-hoc tabs gone |
+| RF-69 docked again | ok | 4 tabs closed, `tool_tool-a` one docked tab, embedded list `[]` |
+| **RF-69 Show inside Nod** | **ok** | `embed_tool-a` ▣, no dock button, active; **0 tool windows** (settled 572 ms); iframe `1167x1190` at `68,90` = the slot; `src …/tab`; framed page reported (`timeOrigin 1792420944577`, `draft-6c8x8p`) |
+| **RF-69 switches + Home** | **ok** | same iframe node, same `timeOrigin`/draft, **1 load** |
+| **RF-69 XFO refused** | **ok** | `Tool D cannot be shown inside Nod — X-Frame-Options: SAMEORIGIN`; tab stays a window; preference `["tool-a"]` |
+| **RF-69 lock/unlock embedded** | **ok** | locked from the sidebar, entered through the Offline tile: `embed_tool-a` (embedded, tool-a) reopened with its iframe (`src …/tab`), a fresh framed page (27.0 s for the step) |
+| RF-69 Open as window | **blocked by the tiling WM** | `Tool A 1235x1312@3360,1528` — the WM took the window, so the slot measurement is not observable; the conversion itself is the step before it |
+
+### The three-run tally on the tiling-guard build
+
+| Run | Steps | Where it stands |
+| --- | --- | --- |
+| 1 | 14 ok, 4 blocked by the WM, then failed at RF-52 Windows mode | `the windows-mode window has no frame (-157 pt of border)`: that check took the *tiled* Tool B window (`omniwmctl` says `Tool B tiling 1235x1312@4672,1528`) and subtracted its page box from the tile's height. **Not a product failure**; in run 3 the same step passed (the WM had not taken that window then). The same tiler guard belongs on that check and on the popup's `waitPlaced` |
+| 2 | 8 ok, 3 blocked by the WM, then failed at RF-66 popup | `the tab did not land on the slot within 2000 ms: … page box 1235x1312`: the popup was re-tiled while `waitPlaced` waited. Same class as above |
+| **3** | **`ok`: 19 ok, 4 blocked by the WM, 23 steps, 50.2 s** | everything ran: RF-52, RF-49 (open ok; landing/follow blocked by the WM with their frames), RF-50 (second tab; its slot blocked), RF-51 detach+dock ✓, RF-66 ✓, RF-68 ✓, RF-67 ✓✓, RF-52 Windows ✓, RF-19 ✓, T6 ✓, RF-69 docked ✓, Show inside Nod ✓, switches/Home ✓, XFO refused ✓, lock/unlock embedded ✓, Open as window → blocked by the WM |
+
+Every run: the owner's `resources/seed.json` came back (299 B) and `pgrep -fl tinyjs` showed nothing.
+
+### Non-WM failures, with causes
+
+1. **`timeOrigin` moving by 1 ms** (`…763 → …764`) failed "RF-50 switching keeps the draft" and
+   "RF-19" once each: WKWebView's `performance.timeOrigin` is not stable to the millisecond between
+   reads. The check now tolerates ±2 ms and keeps the **load count** as the proof of a reload.
+2. **The harness sometimes records "did not run" after a step printed `ok`** (the XFO step's
+   successor in the best run). Not diagnosed: no recorded step failed, yet the loop stopped. Worth a
+   look at `run()`'s `stopped` bookkeeping.
+3. The parse gate and the boot abort, both added after the owner saw a vite overlay on screen: the
+   runner refuses to launch unless `Bun.build` parses `test/smoke/tabs-driver.ts`, and a launch with
+   no window and no result after 25 s is killed and reported instead of waiting the full timeout.
+
+### Dev runs and framed logins
+
+`docs/handovers/e03-iframe-spike.md` stands: under `bun run app:dev` the top page is
+`http://127.0.0.1`, so a framed tool's cookies are third-party and blocked — **a framed login is
+release-only** (a release's `file://` top keeps them, except `SameSite=Lax`/`Strict`). Everything
+asserted here is framing, geometry, state and no-reload; the framed reporting page needs no cookies,
+which is why it works in dev.
