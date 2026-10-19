@@ -167,15 +167,19 @@ catalog only open in tabs, and can become sidebar items in one step.
 
 ## 6. Requirements (proposal)
 
+RF-55…RF-57 were spent on shipped work (update notice, build icon, guild icon — `docs/canonico.md`
+§14) after this epic was written, so its link, save and safety requirements are renumbered
+RF-66…RF-68 (2026-10-18). RF-49…RF-52 are still free.
+
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
 | RF-49 | In docked mode, the open tab fills the center panel and follows the main window's size and position. | Resize and move `main`: the tab stays on the panel without a visible gap at rest. |
 | RF-50 | A tool can have several tabs; switching tabs never reloads. | Two Claude tabs, a draft typed in one; switch away and back: the draft is still there. |
 | RF-51 | A tab detaches into its own window and docks back without reloading. | Type a draft in a Claude tab, detach, move it to another screen, dock it back: the draft is still there and the page never reloaded. |
 | RF-52 | Docked or Windows is a setting; Windows mode behaves exactly as today. | Switching the setting changes how the next tool opens; RF-19 still passes in Windows mode. |
-| RF-55 | Any `http(s)` link opens in the Nod: links clicked inside a tool open as a tab next to it; the palette and `nod://open?url=` open one by hand. | A documentation link on a Kanban card opens as a tab right after the Kanban tab; pasting a URL in "Open link" or calling `nod://open` does the same. |
-| RF-56 | Any tab is saved to the sidebar in one step: a personal view when its origin is already a tool, otherwise a personal tool with probed title and icon. | Save a Claude chat URL: it appears under Claude; save a new site: it appears as a new icon with its title and icon, no typing. |
-| RF-57 | An ad-hoc tab gets no backend methods and no autofill. | Calling `tiny.api.call` from an ad-hoc origin is refused; no credential is filled there. |
+| RF-66 | Any `http(s)` link opens in the Nod: links clicked inside a tool open as a tab next to it; the palette and `nod://open?url=` open one by hand. | A documentation link on a Kanban card opens as a tab right after the Kanban tab; pasting a URL in "Open link" or calling `nod://open` does the same. |
+| RF-67 | Any tab is saved to the sidebar in one step: a personal view when its origin is already a tool, otherwise a personal tool with probed title and icon. | Save a Claude chat URL: it appears under Claude; save a new site: it appears as a new icon with its title and icon, no typing. |
+| RF-68 | An ad-hoc tab gets no backend methods and no autofill. | Calling `tiny.api.call` from an ad-hoc origin is refused; no credential is filled there. |
 
 ## 7. Open questions
 

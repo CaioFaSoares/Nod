@@ -1,8 +1,8 @@
-# Effort blocks — E01 and E02
+# Effort blocks — E01, E02 and E03
 
-How the next two epics (`docs/epics/E01-connected-mode.md`, `docs/epics/E02-credential-sharing.md`)
-split into stories, how big each one is, and in which of the two effort blocks it lands. E03
-(blocked by B05), E04 and E05 (later phases) stay out of these blocks.
+How the epics (`docs/epics/E01-connected-mode.md`, `docs/epics/E02-credential-sharing.md`,
+`docs/epics/E03-docked-tabs.md`) split into stories, how big each one is, and in which effort block
+it lands. E04 and E05 (later phases, `Proposto`) have trackers (#69, #70) but no stories yet.
 
 Evidence: sizes are judgement from `leitura` of the epics, the code and the past handovers. Nothing
 was executed, and no velocity exists yet.
@@ -97,11 +97,42 @@ Why this cut:
 | K9 | #37 | E02 | Share with updates: re-seal on rotation; rotation pending on revoke | 5 | med | med | K8 |
 | K10 | #38 | E02 | Two-machine smoke for block 2 (E01 outcomes 6–7, E02) + docs update | 3 | low | low | all |
 
-## 5. Issues
+## 5. Block 3 — Docked tabs and quick links (56 points)
+
+E03 alone: 14 points of spikes, 42 of stories. Sized against the same anchors (§1), with the
+`v2-tool-windows` 8 as the reference for runtime window work. The spikes go first: each answers a
+question the runtime decides (`docs/tinyjs.md` §3, §10), and if D1 or D2 fails on an OS, docked mode
+is offered only where it passes.
+
+| ID | Issue | Story | Points | Complexity | Uncertainty | After |
+| --- | --- | --- | --- | --- | --- | --- |
+| G3 | #51 | Gate: E03 requirements into `docs/canonico.md` §14 | — | — | — | — |
+| D0 | #52 | Spike S0: fix B05, tool windows land at the requested rect | 3 | med | high | — |
+| D1 | #53 | Spike S1: frameless window on the slot; `setChrome` frame toggle keeps the page | 3 | med | high | D0 |
+| D2 | #54 | Spike S2: follow `main` (ResizeObserver, move polling), gap and lag per OS | 3 | med | high | D1 |
+| D3 | #55 | Spike S3: focus order, the docked tab never drops behind `main` | 2 | low | high | D1 |
+| D4 | #56 | Spike S4: `target=_blank` and OAuth popups adopted as tabs | 3 | med | high | D1 |
+| T1 | #57 | Tab model: several windows per tool, switch without reload | 5 | med | med | D0, G3 |
+| T2 | #58 | Docked slot: the visible tab lies on the center panel and follows `main` | 8 | high | med | T1, D1–D3 |
+| T3 | #59 | Tab strip, ⌘T/⌘W/⌃Tab, views as tabs | 5 | med | low | T1 |
+| T4 | #60 | Detach and dock back without reload | 3 | med | low | T2, D1 |
+| T5 | #61 | Docked / Windows setting; Windows mode unchanged | 2 | low | low | T2 |
+| T6 | #62 | Restore tabs, order, addresses, docked/detached state | 3 | low | low | T3, T4 |
+| Q1 | #63 | Links clicked inside a tool open as an ad-hoc tab next to it | 5 | med | med | D4, T3 |
+| Q2 | #64 | Open link by hand: palette (⌘L) and `nod://open?url=` | 3 | low | low | T3 |
+| Q3 | #65 | Save any tab to the sidebar in one step (⌘D) | 3 | low | low | Q1, Q2 |
+| Q4 | #66 | Ad-hoc tabs get no backend methods and no autofill | 2 | low | low | Q1 |
+| X1 | #67 | Block 3 real-page smoke + docs | 3 | low | med | all |
+
+The spikes may run before G3 closes: they measure and ship no product code. RF-55…RF-57 of the
+epic's first draft were renumbered RF-66…RF-68 (those numbers were spent on shipped work).
+
+## 6. Issues
 
 Each story is a GitHub issue in `CaioFaSoares/Nod`, labelled `epic:*`, `area:*`, `sp:<points>`
-and `type:story` or `type:spike`, in milestone "Block 1 — One guild, synced" or "Block 2 — Mine and
-shared". The epic trackers are #2 (E01) and #3 (E02).
+and `type:story` or `type:spike`, in milestone "Block 1 — One guild, synced", "Block 2 — Mine and
+shared" or "Block 3 — Docked tabs and quick links". The epic trackers are #2 (E01), #3 (E02),
+#68 (E03), #69 (E04) and #70 (E05); they stay open.
 
 Gate #1 comes first: under `AGENTS.md` no product code starts until the owner moves
 the epics' requirements into `docs/canonico.md` §14. The issues hold the status; this file never

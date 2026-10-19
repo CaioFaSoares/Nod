@@ -18,7 +18,7 @@ import { HOST_ROUTES, codeKindOf, isPng } from '../shared/host-api';
 import { leftoverLocalTools, parseSnapshot } from '../shared/host-merge';
 import { joinLink, parseJoinLink } from '../shared/join-link';
 import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED, MAIN_WINDOW, toolOfWindow } from '../shared/types';
-import { tooOldFor } from '../shared/version';
+import { compareVersions, tooOldFor } from '../shared/version';
 import { encryptVaultBytes, encryptVaultValue, plainVaultCredential } from '../shared/vault-crypto';
 import type {
   AppIconChoice,
@@ -1357,10 +1357,22 @@ async function refreshUpdateNotice(): Promise<void> {
     });
     return;
   }
+  info = withHotfixes(info);
   const latest = info.latest;
   updateNotice =
     info.available && latest !== null && latest !== (await dismissedUpdate()) ? info : null;
   push('update', updateNotice);
+}
+
+/**
+ * 0.5.5a (`docs/distribuicao.md` §8): the runtime's `update.check` compares only the three numbers,
+ * so a Nod on 0.5.5 hears "nothing new" about 0.5.5a. The Nod's own comparison (`shared/version.ts`)
+ * reads the hotfix letters and turns that answer into the offer. It only ever adds an offer the
+ * runtime missed; `update.install` does not compare versions, it installs what the manifest names.
+ */
+function withHotfixes(info: UpdateInfo): UpdateInfo {
+  if (info.available || info.latest === null) return info;
+  return { ...info, available: compareVersions(info.current, info.latest) < 0 };
 }
 
 /** RF-55: one check shortly after the launch, then one every 24 hours. Without a channel the seed
@@ -3626,7 +3638,7 @@ const methods: { [M in Method]: Handler<M> } = {
     };
   },
 
-  'nod.checkUpdate': () => required(runtime, 'nod.checkUpdate').update.check(),
+  'nod.checkUpdate': async () => withHotfixes(await required(runtime, 'nod.checkUpdate').update.check()),
 
   'nod.installUpdate': async (): Promise<boolean> => {
     const r = required(repo, 'nod.installUpdate');

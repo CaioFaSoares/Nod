@@ -4,15 +4,22 @@
 //
 // Pure, like every module of `shared/`: no `tjs`, no `tiny`, no DOM, no `bun:*` and no import.
 //
-// The runtime already compares versions for RF-55's update notice (`~/.tinyjs/runtime/update.js`,
-// `parseVer`/`isNewer`), but that one is not this fix's to import: it lives in the runtime, not in
-// the repository, and the Nod's own gate is decided in the backend (O2). Semver 2.0.0 §11 is the
-// rule below, on purpose narrow: three numeric components (1 or 2 are padded with zeros) and an
-// optional pre-release; build metadata (`+…`) is ignored, as §10 says.
+// The runtime also compares versions for RF-55's update notice (`~/.tinyjs/runtime/update.js`,
+// `parseVer`/`isNewer`), but it reads only the three numbers: to it `0.5.5a` is `0.5.5`, so it never
+// offers a hotfix to a Nod on that release. The Nod decides "is there a newer build" here instead
+// (`backend/main.ts` `refreshUpdateNotice`), for the update notice as for the O2 gate. The rule is
+// semver 2.0.0 §11, on purpose narrow: three numeric components (1 or 2 are padded with zeros),
+// optional hotfix letters on the patch (`docs/distribuicao.md` §8) and an optional pre-release;
+// build metadata (`+…`) is ignored, as §10 says.
 
-/** A version as the comparison reads it: `1.2` → `[1,2,0]`, `1.0.0-rc.1` → `[1,0,0]` + `['rc','1']`. */
+/**
+ * A version as the comparison reads it: `1.2` → `[1,2,0]`, `1.0.0-rc.1` → `[1,0,0]` + `['rc','1']`,
+ * `0.5.5a` → `[0,5,5]` + hotfix `a` (`docs/distribuicao.md` §8: the hotfix letters follow the patch).
+ */
 interface Version {
   numbers: readonly number[];
+  /** `''` for a plain release; `a`, `b`, … for its hotfixes, each newer than the one before. */
+  hotfix: string;
   /** Empty when there is no pre-release, which is what makes `1.0.0` newer than `1.0.0-rc` (§11.3). */
   prerelease: readonly string[];
 }
@@ -20,6 +27,8 @@ interface Version {
 /** Semver §9: numeric identifiers carry no leading zero; the others are `[0-9A-Za-z-]+`. */
 const NUMERIC_IDENTIFIER = /^[0-9]+$/;
 const IDENTIFIER = /^[0-9A-Za-z-]+$/;
+/** The patch with its hotfix letters: `5`, `5a`, `5b`. Only the third number carries letters. */
+const PATCH_WITH_HOTFIX = /^([0-9]+)([a-z]*)$/;
 
 /**
  * `null` when the text is not a version this file can compare: a host that serves something else —
@@ -38,7 +47,14 @@ function parseVersion(text: string): Version | null {
   const parts = core.split('.');
   if (parts.length > 3) return null;
   const numbers: number[] = [];
-  for (const part of parts) {
+  let hotfix = '';
+  for (const [index, part] of parts.entries()) {
+    const patch = index === 2 ? PATCH_WITH_HOTFIX.exec(part) : null;
+    if (patch !== null) {
+      numbers.push(Number.parseInt(patch[1] ?? '', 10));
+      hotfix = patch[2] ?? '';
+      continue;
+    }
     if (!NUMERIC_IDENTIFIER.test(part)) return null;
     numbers.push(Number.parseInt(part, 10));
   }
@@ -48,13 +64,15 @@ function parseVersion(text: string): Version | null {
   for (const identifier of prerelease) {
     if (!IDENTIFIER.test(identifier)) return null;
   }
-  return { numbers, prerelease };
+  return { numbers, hotfix, prerelease };
 }
 
 /**
- * Semver 2.0.0 §11: the three numbers first, then the pre-release identifiers — numeric ones
- * numerically (and below the alphanumeric ones, §11.4.3), the others in ASCII order, a shorter list
- * below a longer one that starts the same, and no pre-release above every pre-release (§11.3).
+ * Semver 2.0.0 §11: the three numbers first, then the hotfix letters (`0.5.5` < `0.5.5a` <
+ * `0.5.5b` < `0.5.6`; a longer run of letters is newer, `z` < `aa`), then the pre-release
+ * identifiers — numeric ones numerically (and below the alphanumeric ones, §11.4.3), the others in
+ * ASCII order, a shorter list below a longer one that starts the same, and no pre-release above
+ * every pre-release (§11.3).
  *
  * `0` when either text is not a version (see `parseVersion`): "not older and not newer", which is
  * the safe answer for a comparison that decides whether to stop writing to the host.
@@ -67,6 +85,11 @@ export function compareVersions(left: string, right: string): number {
   for (let index = 0; index < 3; index += 1) {
     const difference = (a.numbers[index] ?? 0) - (b.numbers[index] ?? 0);
     if (difference !== 0) return difference < 0 ? -1 : 1;
+  }
+
+  if (a.hotfix !== b.hotfix) {
+    if (a.hotfix.length !== b.hotfix.length) return a.hotfix.length < b.hotfix.length ? -1 : 1;
+    return a.hotfix < b.hotfix ? -1 : 1;
   }
 
   if (a.prerelease.length === 0 && b.prerelease.length === 0) return 0;
