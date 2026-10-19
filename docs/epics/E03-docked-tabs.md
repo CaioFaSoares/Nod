@@ -49,7 +49,8 @@ window manager the Nod's windows must be floated by a WM rule, or docked tabs ar
 A web page can't host a third-party site:
 
 - iframes are out, because the tools send `X-Frame-Options`/CSP and the origin stamp is frame-blind
-  on Linux (`docs/canonico.md` §7, `docs/tinyjs.md` §9);
+  on Linux (`docs/canonico.md` §7, `docs/tinyjs.md` §9) — this holds for 0.6.0; RF-69 (§8) reopens a
+  frame only for a tool whose address may be framed and only by the person's opt-in;
 - the runtime has **one webview per window** and no native tabs (`docs/tinyjs.md` §3, §10.6).
 
 So the center panel can't *contain* the tool. It can only look as if it does: each tab is still its
@@ -193,3 +194,104 @@ RF-66…RF-68 (2026-10-18). RF-49…RF-52 are still free.
 2. ~~Default mode~~ — decided 2026-10-16: Docked.
 3. Views with `mode: window` (`docs/canonico.md` §7) open as a new tab in docked mode, and views
    with `mode: navigate` navigate the tool's current tab (proposal, following the tab-centered use).
+
+## 8. Embedded tabs (0.6.0a)
+
+**Why.** The docked tab of §3 is still an OS window laid over the panel, and OmniWM re-tiles it like
+any other window; the owner asked for the window not to be a system-level window at all — "eu gostaria
+que a janela nao fosse uma janela a nivel de sistema, e sim encaixasse como uma aba de verdade dentro
+do Nod" (2026-10-19). He chose "Iframe for your own tools" when told the frame only works where the
+address may be framed, and then "Build it + rewrite cookies on your proxy" when told about the
+`SameSite=Lax` limit. RF-69 in `docs/canonico.md` §14; the decision rows are "Embedded tabs (iframe)"
+and "Embedded tab preference per machine" in §22.
+
+The spike is `docs/handovers/e03-iframe-spike.md` (whole). It measured, in tinyjs 0.57.2 on macOS,
+what the model rests on: a frameable tool renders inside an `<iframe>` of the main page; `inject` is
+installed per window main frame only, so a frame gets no autofill and no script; no subframe
+navigation reaches `onNavigate`; `window.open` from the frame arrives as an ordinary popup; a parked
+`display:none` iframe never reloads (timers throttled). The spike decided the cookies half: with the
+release page (`file://`) the frame shares the app jar and persistent cookies survive a relaunch,
+**except `SameSite=Lax`** (and, by leitura, `Strict`), which are never stored nor sent from the frame;
+under `bun run app:dev` (`http://127.0.0.1:5173` page) every third-party cookie is blocked.
+
+**Model, in one paragraph.** An embedded tab is kind `embedded` (`TabState.embedded`, id
+`embed_<toolId>`), has **no window**, is always docked and is never detached. The page keeps one
+`<iframe>` per embedded tab in a layer inside the slot — created once, hidden with `display:none` when
+another tab is active, never re-created on a re-render — so switching tabs, opening Home or Settings
+and coming back never reloads it. The preference is per machine and per tool: `embedded_tools` in
+`store.json` (no secret), read by `ToolsState.embedded`; `tabs.checkEmbed` asks the address
+(`frameability(headers)` in `shared/tabs.ts`) and `tabs.setEmbedded` refuses with the header as the
+reason when it may not be framed. The backend shows no window while an embedded tab is active.
+
+**Limits per tool.** Measured framing (`execução`, both regimes) plus the login conclusion.
+
+| Tool | Framing | Login inside the frame | What it takes |
+| --- | --- | --- | --- |
+| Jitsi (`jitsi.copland.studio`) | renders, no `X-Frame-Options`/CSP | works as far as the spike measured (landing page, no login attempt) | nothing |
+| AFFiNE (`affine.copland.studio`) | renders, no `X-Frame-Options`/CSP | its session cookie is `SameSite=Lax` — leitura: `packages/backend/server/src/core/auth/service.ts` of toeverything/AFFiNE — so the release frame drops it and the tab looks logged out | the proxy rewrite below (`SameSite=Lax` → `None`, `Secure`) |
+| Planka (`kanban.copland.studio`) | renders, no `X-Frame-Options`/CSP | will **not** keep a login even with the proxy: its client writes `accessToken` from JavaScript with `sameSite: 'strict'` (leitura: `client/src/utils/access-token-storage.js` of plankanban/planka), and no response-header rewrite can change a cookie the page creates itself | none known — leave it as a window |
+| Claude (`claude.ai`) | **refused**, measured: `X-Frame-Options: SAMEORIGIN` (and a CSP on its challenge page) | n/a | none — stays a window, as the RF-69 acceptance says |
+
+Dev runs (`bun run app:dev`) never keep a framed login: the page is `http://127.0.0.1:5173`, so the
+frame is third-party and WebKit neither stores nor sends its cookies — only release builds (the
+`file://` page) keep a login. Windows and Linux were not measured; the runtime's own notes say Linux
+stamps origins frame-blind, so the `api` gate could not tell a frame from a top-level page there.
+
+**Proxy recipe for the owner's own hosts (leitura, not executed).** This is what "rewrite cookies on
+your proxy" means, for both proxies the owner's Coolify can put in front: turn every
+`SameSite=Lax|Strict` in a `Set-Cookie` response header into `SameSite=None` and make sure `Secure`
+is present (a `SameSite=None` cookie without `Secure` is dropped by the engine). Scope it to the
+tool's host only.
+
+Caddy, on the site block that fronts the tool:
+
+```caddyfile
+affine.example.com {
+	reverse_proxy 127.0.0.1:3000 {
+		# 1) Lax/Strict -> None
+		header_down Set-Cookie "(?i);\s*SameSite=(Lax|Strict)" "; SameSite=None"
+		# 2) append Secure when the attribute is missing (the cookie then ends in SameSite=None)
+		header_down Set-Cookie "(?i)^(.*; SameSite=None)$" "$1; Secure"
+	}
+}
+```
+
+Traefik cannot rewrite a response header with its own middleware, so it needs a plugin (for example
+`rewriteheaders`, `github.com/XenitAB/rewrite-headers`, declared under `experimental.plugins` in the
+static config). Dynamic config file:
+
+```yaml
+http:
+  middlewares:
+    nod-cookie-rewrite:
+      plugin:
+        rewriteheaders:
+          rewrites:
+            - header: Set-Cookie
+              regex: "(?i);\\s*SameSite=(Lax|Strict)"
+              replacement: "; SameSite=None"
+            - header: Set-Cookie
+              regex: "(?i)^(.*; SameSite=None)$"
+              replacement: "$1; Secure"
+```
+
+Coolify (Traefik labels on the service; the file provider must load the snippet above, and the
+router name is the one Coolify generated — check it in the service's labels):
+
+```yaml
+labels:
+  - "traefik.http.routers.affine-https.middlewares=nod-cookie-rewrite@file"
+  - "traefik.http.routers.affine-http.middlewares=nod-cookie-rewrite@file"
+```
+
+The attribute order matters: both rules expect `SameSite` to be the cookie's last attribute (or to
+end the header) before `Secure` is appended; if a tool emits `Secure` before `SameSite`, add a third
+rewrite instead of relying on the second. Confirm the plugin's key and rewrite field names against
+its README — this recipe is leitura.
+
+**Tradeoff.** `SameSite=None` makes the cookie go on cross-site requests from any site, so CSRF
+protection then rests on the tool's own tokens: only apply it to a host the owner controls, and never
+to a host where the tool has no CSRF defense. It also widens where a leaked cookie can be replayed.
+The rewrite changes headers in flight only; the Nod's own storage and the vault are untouched, and an
+embedded tab still gets no autofill, no injected script and no backend method beyond its
+`api.origins` entry.

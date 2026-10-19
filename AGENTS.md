@@ -53,6 +53,8 @@ sistema. É um downscale da Carna, não uma continuação dela.
   `shares.send`/`shares.accept`/`assignments.set`/`assignments.sealMissing`, código em `invites.issue`.
   O runtime só esconde `secrets.*` e `clip.*`.
 - Abrir ferramenta de terceiro em iframe dentro da casca, ou conceder `api` com `"all"` ou
-  wildcard de subdomínio.
+  wildcard de subdomínio. Exceção decidida pelo dono em 2026-10-19 (`docs/canonico.md` §22,
+  "Embedded tabs (iframe)"; RF-69): a aba embutida, por escolha da pessoa, só para endereço que
+  aceita ser enquadrado e só no macOS, onde o gate `api` carimba a origem do subframe.
 - Inventar endereço, produto ou capacidade das ferramentas internas que o dono não confirmou.
 - Prometer comportamento que o runtime não documenta (`docs/tinyjs.md` §10, §11).

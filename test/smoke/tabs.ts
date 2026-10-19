@@ -115,6 +115,8 @@ function temporarySeed(tools: TabTools): string {
     entries: [
       { ...base, id: 'tool-a', title: 'Tool A', url: `${tools.originA}/tab`, order: 10 },
       { ...base, id: 'tool-b', title: 'Tool B', url: `${tools.originB}/tab`, order: 20 },
+      // RF-69: a tool whose pages answer `X-Frame-Options: SAMEORIGIN` — never embeddable.
+      { ...base, id: 'tool-d', title: 'Tool D', url: `${tools.originD}/tab`, order: 30 },
     ],
     invites: [],
     update: null,
@@ -426,6 +428,7 @@ function generatePage(
     originA: tools.originA,
     originB: tools.originB,
     originC: tools.originC,
+    originD: tools.originD,
   });
   const html =
     '<!doctype html>\n' +
@@ -522,6 +525,12 @@ function startDesk(deps: { tools: TabTools; pid: PidRef }): Desk {
       }
       if (url.pathname === '/desk/onscreen') {
         const screen = await onScreenWindows(deps.pid.value);
+        // Owner decision 2026-10-19: the smoke must not touch window-manager state beyond what it
+        // already did. The driver gets the WM's own view instead, so a geometry step the tiler has
+        // taken over says `blocked by the tiling WM` with numbers rather than failing or passing.
+        const tiled = (await ownWindows(deps.pid.value))
+          .filter((window) => window.mode === 'tiling')
+          .map((window) => `${window.title} ${window.frame.width}x${window.frame.height}@${window.frame.x},${window.frame.y}`);
         return deskJson({
           ok: true,
           windows: screen.windows,
@@ -529,6 +538,7 @@ function startDesk(deps: { tools: TabTools; pid: PidRef }): Desk {
           why: screen.why,
           screenLocked: screen.locked,
           frontmost: screen.frontmost,
+          tiled,
         });
       }
       return deskJson({ ok: false, error: 'not found' }, 404);
@@ -615,15 +625,29 @@ async function runPhase(
   }, 1_000);
 
   appOutput = output;
+  // A page that never boots (a broken module, a dev server that never came up) must not keep a
+  // broken window on screen for the whole timeout: 25 s without a result and without a window of
+  // this run is the answer, and the `finally` below kills the app and restores the seed.
+  const bootFailed = Promise.withResolvers<SmokeResult>();
+  void (async () => {
+    for (let tick = 0; tick < 25; tick += 1) {
+      await Bun.sleep(1_000);
+      if (storedResult(storePath, nonce) !== null) return;
+      if ((await ownWindows(pid.value)).length > 0) return;
+      if (app.exitCode !== null) break;
+    }
+    bootFailed.resolve({
+      ok: false,
+      error: 'the page never booted: no window of this run and no result after 25 s',
+      steps: [],
+    });
+  })();
+
   try {
-    const result = await waitForStoredResult(
-      app,
-      box,
-      storePath,
-      nonce,
-      'tabs_smoke_result',
-      FINISH_TIMEOUT_MS,
-    );
+    const result = await Promise.race([
+      waitForStoredResult(app, box, storePath, nonce, 'tabs_smoke_result', FINISH_TIMEOUT_MS),
+      bootFailed.promise,
+    ]);
     appOutput = output;
     return result;
   } finally {
@@ -661,12 +685,35 @@ async function runPhase(
 
 // ------------------------------------------------------------- main
 
+/**
+ * The driver runs inside the page, so vite transforms it: a syntax error there opens the app's
+ * window with a vite overlay and no page at all. Parsing it here, before any launch, is what keeps a
+ * broken smoke off the owner's screen.
+ */
+async function driverParseError(): Promise<string | null> {
+  const result = await Bun.build({
+    entrypoints: [join(import.meta.dir, 'tabs-driver.ts')],
+    target: 'browser',
+    outdir: join(GENERATED_DIR, 'parse-check'),
+    throw: false,
+  });
+  rmSync(join(GENERATED_DIR, 'parse-check'), { recursive: true, force: true });
+  if (result.success) return null;
+  return result.logs.map((log) => String(log)).join('\n').slice(0, 1200);
+}
+
 async function main(): Promise<number> {
   if (existsSync(SEED) && !process.argv.includes('--force')) {
     console.error(
       `refusing to run: ${SEED} exists. Move it away or run again with --force ` +
         `(the smoke moves it to ${SEED_BACKUP} and restores it at the end).`,
     );
+    return 2;
+  }
+
+  const parseError = await driverParseError();
+  if (parseError !== null) {
+    console.error(`refusing to run: test/smoke/tabs-driver.ts does not parse\n${parseError}`);
     return 2;
   }
 
@@ -715,7 +762,8 @@ async function main(): Promise<number> {
 
     tools = startTabTools();
     console.log(
-      `reporting tools: A=${tools.originA} B=${tools.originB} C=${tools.originC} (loopback only)`,
+      `reporting tools: A=${tools.originA} B=${tools.originB} C=${tools.originC} ` +
+        `D=${tools.originD} (XFO SAMEORIGIN, loopback only)`,
     );
     const wm = await runTool(['omniwmctl', 'ping']);
     console.log(

@@ -8,11 +8,15 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
+  EMBED_WINDOW_PREFIX,
   LINK_WINDOW_PREFIX,
   defaultMode,
+  embedWindowId,
+  frameability,
   insertAfter,
   linkWindowId,
   neighbourAfterClose,
+  nextEmbedNumber,
   nextLinkNumber,
   nextTabNumber,
   parseLinkUrl,
@@ -55,6 +59,79 @@ describe('tab window ids', () => {
     expect(nextLinkNumber(['link_1', 'link_2'])).toBe(3);
     expect(nextLinkNumber(['link_1', 'link_3'])).toBe(2);
     expect(nextLinkNumber(['tool_claude_t2'])).toBe(1);
+  });
+});
+
+describe('embedded tab ids (RF-69)', () => {
+  test('the first embedded tab is embed_<tool>, every further one _t<n> from 2', () => {
+    expect(EMBED_WINDOW_PREFIX).toBe('embed_');
+    expect(embedWindowId('claude')).toBe('embed_claude');
+    expect(embedWindowId('claude', 1)).toBe('embed_claude');
+    expect(embedWindowId('claude', 2)).toBe('embed_claude_t2');
+    expect(embedWindowId('kanban', 5)).toBe('embed_kanban_t5');
+  });
+
+  test('nextEmbedNumber is the first n >= 2 still free', () => {
+    expect(nextEmbedNumber('claude', [])).toBe(2);
+    expect(nextEmbedNumber('claude', ['embed_claude'])).toBe(2);
+    expect(nextEmbedNumber('claude', ['embed_claude', 'embed_claude_t2'])).toBe(3);
+    expect(nextEmbedNumber('claude', ['embed_claude_t2', 'embed_claude_t4'])).toBe(3);
+    expect(nextEmbedNumber('claude', ['tool_claude_t2'])).toBe(2);
+  });
+});
+
+describe('frameability', () => {
+  test('no restrictive header means the address may be framed', () => {
+    expect(frameability({})).toEqual({ frameable: true, reason: null });
+    expect(frameability({ 'content-type': 'text/html' })).toEqual({ frameable: true, reason: null });
+  });
+
+  test('X-Frame-Options refuses the frame whatever its value', () => {
+    expect(frameability({ 'X-Frame-Options': 'DENY' })).toEqual({
+      frameable: false,
+      reason: 'X-Frame-Options: DENY',
+    });
+    expect(frameability({ 'x-frame-options': 'SAMEORIGIN' })).toEqual({
+      frameable: false,
+      reason: 'X-Frame-Options: SAMEORIGIN',
+    });
+    expect(frameability({ 'X-FRAME-OPTIONS': 'ALLOW-FROM https://a.example' })).toEqual({
+      frameable: false,
+      reason: 'X-Frame-Options: ALLOW-FROM https://a.example',
+    });
+  });
+
+  test('a CSP frame-ancestors other than exactly * refuses the frame', () => {
+    expect(frameability({ 'content-security-policy': "default-src 'self'; frame-ancestors 'self'" })).toEqual({
+      frameable: false,
+      reason: "frame-ancestors 'self'",
+    });
+    expect(frameability({ 'Content-Security-Policy': 'frame-ancestors https://app.example' })).toEqual({
+      frameable: false,
+      reason: 'frame-ancestors https://app.example',
+    });
+    expect(frameability({ 'content-security-policy': 'frame-ancestors' })).toEqual({
+      frameable: false,
+      reason: 'frame-ancestors',
+    });
+  });
+
+  test('frame-ancestors * is the one accepted value', () => {
+    expect(frameability({ 'content-security-policy': 'frame-ancestors *' })).toEqual({
+      frameable: true,
+      reason: null,
+    });
+    expect(
+      frameability({ 'content-security-policy': "script-src 'self'; frame-ancestors *; object-src 'none'" }),
+    ).toEqual({ frameable: true, reason: null });
+  });
+
+  test('multiple CSP headers are all enforced', () => {
+    expect(
+      frameability({
+        'content-security-policy': 'frame-ancestors *, default-src \'self\', frame-ancestors https://a.example',
+      }),
+    ).toEqual({ frameable: false, reason: 'frame-ancestors https://a.example' });
   });
 });
 

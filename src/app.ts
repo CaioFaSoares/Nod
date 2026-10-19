@@ -9,12 +9,13 @@ import { call, errorMessage, on } from './api';
 import { mountEntry, resetEntry, showEntryInvite } from './entry';
 import { openPalette } from './palette';
 import { mountSettings } from './settings';
-import { activeTab, mountTabs, reportSlot, tabsApi } from './tabs';
-import type { TabsApi, TabsHandle } from './tabs';
+import { activeTab, createEmbedLayer, mountTabs, reportSlot, tabsApi } from './tabs';
+import type { EmbedLayer, TabsApi, TabsHandle } from './tabs';
 import { button, clear, el, field, glyph, initials, input, message } from './ui';
 import type { SettingsTab } from './settings';
 import type {
   AppInfo,
+  EmbedCheck,
   Entry,
   EntryProfiles,
   HostState,
@@ -113,6 +114,12 @@ let settings: SettingsHandle | null = null;
 let settingsTab: SettingsTab | null = null;
 /** E03: the tab view of the center panel, mounted while docked mode shows it (`src/tabs.ts`). */
 let tabView: TabsHandle | null = null;
+/**
+ * RF-69: the iframe layer of the embedded tabs. It is mounted on the panel's content box once and
+ * lives with the shell, not with the tab view, so Home and Settings visits never reload an
+ * embedded tool (RF-50); `destroyTabView` hides it instead of detaching its iframes.
+ */
+let embeds: EmbedLayer | null = null;
 
 // ------------------------------------------------------------------ helpers
 
@@ -191,6 +198,9 @@ function buildShell(): void {
   const banner = el('div', { class: 'banner' });
   const content = el('div', { class: 'content' });
   shell = { sidebar, notice, banner, content };
+  // RF-69: the iframe layer of the embedded tabs lives with the shell, beside the screens the
+  // content box shows — Home, Settings and the tab view come and go; the iframes do not.
+  ensureEmbeds();
   root.replaceChildren(
     el('div', { class: 'shell' }, sidebar, el('div', { class: 'main' }, notice, banner, content)),
   );
@@ -200,6 +210,11 @@ function teardownShell(): void {
   destroySettings();
   // E03: the tab view goes with the panel (a lock), reporting the empty slot on its way out.
   destroyTabView();
+  // RF-69: a locked window has no tabs, so the iframes go with the shell too.
+  if (embeds !== null) {
+    embeds.destroy();
+    embeds = null;
+  }
   // B7: the dialog is an overlay of the main window, so it goes with the shell (a lock). E03: the
   // "Open link…" dialog is the same kind of overlay and goes with it too.
   document.getElementById(PERSONAL_DIALOG_ID)?.remove();
@@ -385,6 +400,31 @@ function destroySettings(): void {
 }
 
 /**
+ * E03 (RF-49/RF-69): the children of the center panel, with the iframe layer of the embedded tabs
+ * left where it is. A `replaceChildren` would take the iframes out of the document — and the
+ * embedded tools would reload when the person came back (RF-50) — so every screen replaces only
+ * what it drew around that one element.
+ */
+function fillContent(content: HTMLElement, ...nodes: Array<Node | null>): void {
+  const keep = embeds === null ? null : embeds.element;
+  for (const child of Array.from(content.children)) {
+    if (child !== keep) child.remove();
+  }
+  for (const node of nodes) {
+    if (node !== null) content.append(node);
+  }
+}
+
+/** RF-69: the iframe layer of the shell, created (and mounted) the first time it is needed. */
+function ensureEmbeds(): EmbedLayer {
+  if (embeds !== null) return embeds;
+  const layer = createEmbedLayer();
+  embeds = layer;
+  shell?.content.append(layer.element);
+  return layer;
+}
+
+/**
  * The center panel draws the face `view` asks for: Home, the tab view of docked mode (E03/RF-49) or
  * one Settings tab. The Settings screen is mounted once and updated in place afterwards.
  */
@@ -409,7 +449,7 @@ function renderContent(): void {
   // E03 (RF-49): Settings takes the panel, so the tab view goes with its slot and its observers.
   destroyTabView();
   const container = el('div', { class: 'settings-view' });
-  shell.content.replaceChildren(container);
+  fillContent(shell.content, container);
   settingsTab = view;
   settings = mountSettings(container, { session, info, tab: view, host, join: joinInvite });
 }
@@ -428,12 +468,14 @@ function renderTabView(): void {
     return;
   }
   const container = el('div', { class: 'tab-view' });
-  shell.content.replaceChildren(container);
+  fillContent(shell.content, container);
   tabView = mountTabs(container, {
     state,
     actions: tabActions,
     // RF-66: the dialog of `openLinkDialog`, beside the personal-tool one.
     openLink: () => openLinkDialog(),
+    // RF-69: the iframes of the embedded tabs, mounted by the shell and kept across views.
+    embeds: ensureEmbeds(),
   });
 }
 
@@ -472,7 +514,8 @@ function renderHome(content: HTMLElement): void {
   } else {
     appendCatalog(body);
   }
-  content.replaceChildren(
+  fillContent(
+    content,
     el(
       'header',
       { class: 'content-header' },
@@ -1048,6 +1091,9 @@ const tabActions: TabsApi = tabsApi({
   save: (id) => {
     void saveTab(id);
   },
+  setEmbedded: (toolId, embedded) => {
+    void applyEmbedded(toolId, embedded);
+  },
 });
 
 /**
@@ -1059,6 +1105,37 @@ function tabOnPanel(): TabState | null {
 }
 
 /**
+ * RF-69: "Show inside Nod"/"Open as window" of the toolbar and the palette. Becoming embedded asks
+ * the backend first (`tabs.checkEmbed`, the same check `tabs.setEmbedded` runs): a tool whose
+ * address may not be framed keeps its window and the panel says why; nothing else changes. The
+ * conversion itself (the preference and every open tab of the tool, in place) is the backend's.
+ */
+async function applyEmbedded(toolId: Id, embedded: boolean): Promise<void> {
+  clearBanner();
+  if (embedded) {
+    let check: EmbedCheck;
+    try {
+      check = await call('tabs.checkEmbed', { toolId });
+    } catch (e) {
+      showBanner(e);
+      return;
+    }
+    if (!check.frameable) {
+      const title = tools.find((tool) => tool.id === toolId)?.title ?? 'This tool';
+      if (shell !== null) {
+        message(
+          shell.banner,
+          'info',
+          `${title} cannot be shown inside Nod — ${check.reason ?? 'the address refuses framing'}`,
+        );
+      }
+      return;
+    }
+  }
+  await runTools(() => call('tabs.setEmbedded', { toolId, embedded }));
+}
+
+/**
  * E03 (RF-49/RF-52): one `tools.state`/`tools`/`tabs.*` answer lands here. The center panel has two
  * faces, Home and the tab view, and Windows mode has only the first: a tab view left behind by a
  * mode that moved to Windows, or by the last tab closing, would be a strip with nothing under it.
@@ -1066,6 +1143,9 @@ function tabOnPanel(): TabState | null {
 function applyTools(state: ToolsState): void {
   tabsState = state;
   tools = state.tools;
+  // RF-69: the iframe layer follows every answer even while Home or Settings hide it — a closed
+  // tab's iframe goes, a new embedded tab's frame is created (hidden) at once.
+  embeds?.update(state);
   if (view !== 'tab') return;
   if (state.mode !== 'docked' || state.tabs.length === 0) view = 'home';
 }
@@ -1413,15 +1493,23 @@ on('session', (next) => {
 
 on('tools', (next) => {
   // E03: the strip draws this answer. A push is not a person asking for a tab, so the window keeps
-  // the view it is on — the `tab` push below is the one that says "show this tab".
+  // the view it is on — the `tab` push below is the one that says "show this tab". The one
+  // exception is the mode switch (Settings → Account, RF-52/RF-69): moving to docked with tabs open
+  // must land on the strip, because every tab may be detached and the strip is where their ⤓ is.
+  const previous = tabsState;
   applyTools(next);
+  if (previous !== null && previous.mode !== 'docked' && next.mode === 'docked' && next.tabs.length > 0) {
+    view = 'tab';
+  }
   refreshChrome();
 });
 
 /**
  * E03: the backend opened or activated a tab — a shortcut, an adopted popup, a `nod://open` link.
- * The page shows the tab view with it; a detached tab is its own window (the backend focused it
- * there) and a tab the page has not been told about yet arrives with its own `tools` push.
+ * The page shows the tab view with it. A detached tab is its own window (the backend focused it
+ * there), and the panel still shows the strip: with every tab detached the backend has no active
+ * tab, and the strip is the only place its ⤓ is (RF-51). A tab the page has not been told about yet
+ * arrives with its own `tools` push.
  */
 on('tab', (id) => {
   const state = tabsState;
@@ -1431,7 +1519,6 @@ on('tab', (id) => {
     void runTools(() => call('tools.state'));
     return;
   }
-  if (!tab.docked) return;
   view = 'tab';
   // The sidebar's own mark follows the tab the backend put on the panel (`renderContent` alone
   // would leave the rail saying the previous tool).
@@ -1547,9 +1634,10 @@ document.addEventListener('keydown', (event) => {
 });
 
 /**
- * E03 (§7): ⌘T new tab, ⌘W close tab, ⌃Tab/⌃⇧Tab next and previous, ⌘⇧D detach or dock, ⌘D save the
- * tab to the sidebar. True when the event was one of them. ⌘L ("Open link…") is not one of these:
- * the caller handles it, because the dialog works from Home and Settings as well.
+ * E03 (§7): ⌘T new tab, ⌘W close tab, ⌃Tab/⌃⇧Tab next and previous, ⌘⇧D detach or dock (a no-op
+ * on an embedded tab, RF-69), ⌘D save the tab to the sidebar. True when the event was one of them.
+ * ⌘L ("Open link…") is not one of these: the caller handles it, because the dialog works from Home
+ * and Settings as well.
  *
  * The caller only reaches it in docked mode and while the tab view is the panel — the tab on the
  * slot is what these act on. It also keeps out while the backend registers the same keys globally:
@@ -1581,6 +1669,8 @@ function handleTabKey(event: KeyboardEvent, key: string): boolean {
   }
   if (key === 'd' && event.shiftKey && tab !== null) {
     event.preventDefault();
+    // RF-69: an embedded tab has no window to detach into or dock from — the key is a no-op.
+    if (tab.embedded) return true;
     if (tab.docked) tabActions.detach(tab.id);
     else tabActions.dock(tab.id);
     return true;

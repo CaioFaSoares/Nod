@@ -632,7 +632,7 @@ function credentialHolders(): CredentialHolders[] {
  */
 function toolsState(): ToolsState {
   if (windows !== null) return windows.state();
-  return { tools: [], tabs: [], active: null, mode: 'windows', dockable: false, tabHotkeys: false };
+  return { tools: [], tabs: [], active: null, mode: 'windows', dockable: false, tabHotkeys: false, embedded: [] };
 }
 
 /**
@@ -3768,6 +3768,22 @@ const methods: { [M in Method]: Handler<M> } = {
     const mode = parameters(params, 'invalid mode').mode;
     if (mode !== 'docked' && mode !== 'windows') throw new Error('invalid mode');
     return await required(windows, 'tabs.setMode').setMode(mode);
+  },
+
+  /** RF-69: whether the tool's address may be framed — the backend reads its response headers. */
+  'tabs.checkEmbed': async (params) => {
+    const p = parameters(params, 'invalid tool');
+    return await required(windows, 'tabs.checkEmbed').checkEmbed(text(p.toolId, 'invalid tool'));
+  },
+
+  /** RF-69: opens the tool inside Nod (or back as a window); its open tabs convert in place. */
+  'tabs.setEmbedded': async (params) => {
+    const p = parameters(params, 'invalid tool');
+    if (typeof p.embedded !== 'boolean') throw new Error('invalid embedded');
+    return await required(windows, 'tabs.setEmbedded').setEmbedded(
+      text(p.toolId, 'invalid tool'),
+      p.embedded,
+    );
   },
 
   // -------------------------------------------------------------- audit
