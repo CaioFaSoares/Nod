@@ -176,11 +176,12 @@ jobs:
         if: matrix.runtime == 'electrobun'
         run: NOD_APP_ID=copland.nod bun run eb:build
 
-      # Now that the devkit is projected, the Electrobun project is typechecked for real (the root
-      # script refuses to skip under CI=true).
-      - name: typecheck (Electrobun included)
+      # Now that the devkit is projected, the Electrobun project is typechecked for real. Only that
+      # project: `prepare` already checked the page, backend and host (this leg never installs the
+      # host's dependencies).
+      - name: typecheck (Electrobun project)
         if: matrix.runtime == 'electrobun'
-        run: bun run typecheck
+        run: bunx tsc -p electrobun/tsconfig.json --noEmit
 
       # Camera/microphone are gated by the two usage strings in the plist the app runs with. `eb:build`
       # asserts them, and this step keeps the contract visible before anything is published: hutch
