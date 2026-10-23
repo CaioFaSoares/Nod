@@ -69,17 +69,21 @@ jobs:
     needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: true
+      # Every leg runs to the end so one failure does not hide another; the release job still needs
+      # all of them.
+      fail-fast: false
       matrix:
         include:
-          # macOS: the Electrobun target, one native runner per architecture (it builds the arch it
-          # runs on). `app` is Electrobun's own directory name (`x64`, not `x86_64`).
-          - { target: macos-arm64, os: macos-15, arch: arm64, app: stable-macos-arm64 }
-          - { target: macos-x86_64, os: macos-15-intel, arch: x86_64, app: stable-macos-x64 }
+          # Apple silicon: the Electrobun target (`app` is Electrobun's own directory name).
+          - { target: macos-arm64, os: macos-15, arch: arm64, app: stable-macos-arm64, runtime: electrobun }
+          # Intel Macs: the tinyjs build of the same code. Electrobun 2.0.4 publishes no darwin-x64
+          # core or Hutch (release v2.0.4 assets; the first 0.7.0 run failed with "release manifest
+          # is incomplete for macos-x64"), so Intel stays on tinyjs, as Windows/Linux do.
+          - { target: macos-x86_64, os: macos-15, arch: x86_64, runtime: tinyjs }
           # Windows/Linux: the tinyjs build of the same code.
-          - { target: linux-x86_64, os: ubuntu-24.04 }
-          - { target: linux-arm64, os: ubuntu-24.04-arm }
-          - { target: windows, os: windows-2025 }
+          - { target: linux-x86_64, os: ubuntu-24.04, runtime: tinyjs }
+          - { target: linux-arm64, os: ubuntu-24.04-arm, runtime: tinyjs }
+          - { target: windows, os: windows-2025, runtime: tinyjs }
     defaults:
       run:
         shell: bash
@@ -99,8 +103,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-0
 
-      - name: install tinyjs (Linux)
-        if: runner.os == 'Linux'
+      - name: install tinyjs (macOS, Linux)
+        if: matrix.runtime == 'tinyjs' && runner.os != 'Windows'
         run: |
           curl -fsSL https://tinyjs.app/install | TINYJS_NO_MODIFY_PATH=1 sh
           echo "$HOME/.tinyjs" >> "$GITHUB_PATH"
@@ -136,7 +140,7 @@ jobs:
 
       # tinyjs legs only: Electrobun generates its own config (and picks the icon) below.
       - name: generate tinyjs.json
-        if: runner.os != 'macOS'
+        if: matrix.runtime == 'tinyjs'
         run: |
           bun scripts/gen-config.ts build
           # RF-56: gen-config picks the private icon on its own; a release wearing the wrong icon is
@@ -154,7 +158,7 @@ jobs:
       # `electrobun.config.ts`; `eb:build` regenerates it for the build right after.
       # `build.win.icon` is the resolved PNG (macOS names the iconset generated from it).
       - name: check the app icon (Electrobun)
-        if: runner.os == 'macOS'
+        if: matrix.runtime == 'electrobun'
         run: |
           bun scripts/gen-electrobun-config.ts dev
           icon=$(bun -e 'const { default: config } = await import("./electrobun.config.ts"); console.log(config.build.win?.icon ?? "none")')
@@ -169,26 +173,26 @@ jobs:
       # the identifier the tinyjs builds wear, so an update from 0.6.0c keeps the same app data —
       # and the same identity the facade checks before it swaps a staged bundle in.
       - name: build the Electrobun target
-        if: runner.os == 'macOS'
+        if: matrix.runtime == 'electrobun'
         run: NOD_APP_ID=copland.nod bun run eb:build
 
       # Now that the devkit is projected, the Electrobun project is typechecked for real (the root
       # script refuses to skip under CI=true).
       - name: typecheck (Electrobun included)
-        if: runner.os == 'macOS'
+        if: matrix.runtime == 'electrobun'
         run: bun run typecheck
 
       # Camera/microphone are gated by the two usage strings in the plist the app runs with. `eb:build`
       # asserts them, and this step keeps the contract visible before anything is published: hutch
       # packs the payload tar before `postWrap`, so a regression there must fail the release.
       - name: assert the macOS usage strings in the shipped bundle
-        if: runner.os == 'macOS'
+        if: matrix.runtime == 'electrobun'
         run: bun run eb:verify
 
       # The tinyjs updater on users' machines refuses to swap in a bundle that fails this check, so
       # a release that fails it would be invisible to every installed Nod. Fail here instead.
       - name: verify the shipped signature
-        if: runner.os == 'macOS'
+        if: matrix.runtime == 'electrobun'
         run: codesign --verify --strict --deep "build/${{ matrix.app }}/Nod.app"
 
       # The notes are the body of the `Release <version>:` commit — what installed Nods show in the
@@ -213,7 +217,7 @@ jobs:
       # publish uses) and its `mac.<arch>` entry. The release job merges the two halves with the
       # Windows/Linux ones.
       - name: publish the macOS half (Electrobun)
-        if: runner.os == 'macOS'
+        if: matrix.runtime == 'electrobun'
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
@@ -223,6 +227,12 @@ jobs:
             --base-url "https://github.com/${{ vars.NOD_RELEASE_REPO || github.repository }}/releases/latest/download" \
             --notes-file "${{ runner.temp }}/release-notes.md" \
             --out dist/publish
+
+      - name: publish (macOS Intel, tinyjs)
+        if: matrix.runtime == 'tinyjs' && runner.os == 'macOS'
+        run: |
+          tinyjs version
+          tinyjs publish --arch "${{ matrix.arch }}" --notes-file "${{ runner.temp }}/release-notes.md"
 
       - name: publish (Linux)
         if: runner.os == 'Linux'
@@ -269,10 +279,10 @@ jobs:
           pattern: publish-*
           path: parts
 
-      # Each runner writes its own half: the macOS legs the Electrobun `mac.<arch>` blocks (they no
-      # longer run `tinyjs publish`), Linux `linux.<arch>` and Windows `win`. They coexist, so a
-      # recursive merge gives the one manifest every OS reads. The top-level `url`/`sha256` stay the
-      # arm64 zip: that is what a tinyjs reader from before the `mac` block installs.
+      # Each runner writes its own half: the Apple silicon leg the Electrobun `mac.arm64` block, the
+      # Intel leg the tinyjs `mac.x86_64` block, Linux `linux.<arch>` and Windows `win`. They coexist,
+      # so a recursive merge gives the one manifest every OS reads. The top-level `url`/`sha256` stay
+      # the arm64 zip: that is what a tinyjs reader from before the `mac` block installs.
       - name: merge manifests
         run: |
           mkdir -p out
