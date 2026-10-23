@@ -10,9 +10,10 @@
 //   - the setup code of that host (`bun host/cli/setup-code.ts`, the same environment) — held in
 //     memory, never printed, never written to a file;
 //   - the local fake tools of `test/smoke/tools.ts` (the stand-ins for the internal tools);
-//   - the real app (`tinyjs dev`) under two app ids (`...smoke-admin`, `...smoke-person`) and its
-//     own dev port each, the way `test/smoke/run.ts` launches one (temporary seed, gen-config,
-//     `TINYJS_HTML` page, result channel through `<app data>/store.json`).
+//   - the real app (`tinyjs dev`, or `electrobun dev` under `--runtime=electrobun`) under two app
+//     ids (`...smoke-admin`, `...smoke-person`) and its own dev port each, the way
+//     `test/smoke/run.ts` launches one (temporary seed, generated config, driver page, result
+//     channel through the runtime's `store.json` — `test/smoke/tools.ts`).
 //
 // The pages drive the flow; this runner is the world around them, and it takes part through one
 // loopback endpoint ("the desk"): the admin page asks it for the setup code, hands the invite code
@@ -86,7 +87,6 @@
 // writes to a pipe, the desk answers the page), and only step names, statuses and counts are
 // printed. The desk carries fingerprints (public digests) and nothing else. `resources/seed.json` is
 // never lost: it is moved aside exactly like `run.ts --force` does and restored in `finally`.
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -96,24 +96,31 @@ import {
   appDataDir as dataDir,
   freePort,
   generateDevConfig,
+  generateElectrobunDevConfig,
   issueSetupCode,
-  killProcessTree as killTree,
+  launchSmokeApp,
+  smokeAppId,
+  smokeRuntime,
+  runtimeDataDir,
   startHostControl as hostControl,
   startTools,
   waitForStoredResult,
 } from './tools';
-import type { HostControl, Tools } from './tools';
+import type { HostControl, SmokeLaunch, Tools } from './tools';
+
+/** Which target this run measures: `--runtime=electrobun` or `NOD_RUNTIME=electrobun` (default tinyjs). */
+const RUNTIME = smokeRuntime();
 
 /** The two app ids of the smoke: the real installation is never touched. */
-const ADMIN_APP_ID = 'copland.nod.smoke-admin';
-const PERSON_APP_ID = 'copland.nod.smoke-person';
+const ADMIN_APP_ID = smokeAppId('copland.nod.smoke-admin', RUNTIME);
+const PERSON_APP_ID = smokeAppId('copland.nod.smoke-person', RUNTIME);
 /**
  * The two machines the block 2 flow adds: Q, a second member of `team` (the assignment seals to
  * both, and the revocation of one holder leaves the other to rotate to), and the admin's own second
  * machine (B7's personal half across machines and canonico §22's one pair per person).
  */
-const OTHER_APP_ID = 'copland.nod.smoke-person2';
-const ADMIN_SECOND_APP_ID = 'copland.nod.smoke-admin2';
+const OTHER_APP_ID = smokeAppId('copland.nod.smoke-person2', RUNTIME);
+const ADMIN_SECOND_APP_ID = smokeAppId('copland.nod.smoke-admin2', RUNTIME);
 
 /** The connected accounts this smoke creates. Fake addresses, like the fake tools. */
 const ADMIN_EMAIL = 'admin@smoke.test';
@@ -164,7 +171,6 @@ const HOST_DATA = join(CONNECTED_DIR, 'host-data');
 const MARKER = '__CONFIG__';
 
 const FINISH_TIMEOUT_MS = 180_000;
-const OUTPUT_LIMIT = 4000;
 
 interface Step {
   step: string;
@@ -410,50 +416,47 @@ async function runPhase(
   // The seed of this app id: `gen-config` reads it here (the runtime gate of `login.report`) and the
   // app reads it at boot (its local catalog, applied on the first one). Two machines, two seeds.
   writeFileSync(SEED, temporarySeed(tools, phase.appId));
-  const gen = generateDevConfig(ROOT, phase.appId, devPort);
-  if (gen.code !== 0) {
-    return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
+  if (RUNTIME === 'tinyjs') {
+    const gen = generateDevConfig(ROOT, phase.appId, devPort);
+    if (gen.code !== 0) {
+      return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
+    }
   }
   const page = generatePage(phase, nonce, tools, address, deskOrigin, methods, icon);
 
-  const app = spawn('tinyjs', ['dev'], {
-    cwd: ROOT,
-    detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      TINYJS_HTML: page,
-      NOD_APP_ID: phase.appId,
-      NOD_DEV_PORT: String(devPort),
-    },
-  });
-  let output = '';
-  const append = (chunk: Buffer | string): void => {
-    output = (output + chunk.toString()).slice(-OUTPUT_LIMIT);
-  };
-  app.stdout?.on('data', append);
-  app.stderr?.on('data', append);
-  const box: { error: string | null } = { error: null };
-  app.on('error', (error) => {
-    box.error = `failed to start the app: ${error.message}`;
-    append(box.error);
-  });
+  let app: SmokeLaunch;
+  try {
+    app = await launchSmokeApp({
+      root: ROOT,
+      runtime: RUNTIME,
+      appId: phase.appId,
+      devPort,
+      page,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      steps: [],
+    };
+  }
 
   try {
     const result = await waitForStoredResult(
-      app,
-      box,
-      join(dataDir(phase.appId), 'store.json'),
+      app.app,
+      app.box,
+      app.storePath,
       nonce,
       'smoke_result',
       FINISH_TIMEOUT_MS,
     );
-    if (!result.ok && output.trim().length > 0) {
-      return { ...result, error: `${result.error}\n--- app output ---\n${output.trim()}` };
+    const output = app.output().trim();
+    if (!result.ok && output.length > 0) {
+      return { ...result, error: `${result.error}\n--- app output ---\n${output}` };
     }
     return result;
   } finally {
-    await killTree(app);
+    await app.stop();
   }
 }
 
@@ -702,7 +705,7 @@ interface AdminVault {
 }
 
 function adminVault(): AdminVault {
-  const file = join(dataDir(ADMIN_APP_ID), 'nod.db');
+  const file = join(runtimeDataDir(ADMIN_APP_ID, RUNTIME), 'nod.db');
   if (!existsSync(file)) return { lines: ["the admin's database is missing"], personId: null, keychainKey: null };
   const db = new Database(file, { readonly: true });
   try {
@@ -757,7 +760,7 @@ interface PersonVault {
 }
 
 function personVault(expectedOrigin: string): PersonVault {
-  const file = join(dataDir(PERSON_APP_ID), 'nod.db');
+  const file = join(runtimeDataDir(PERSON_APP_ID, RUNTIME), 'nod.db');
   if (!existsSync(file))
     return {
       lines: ["P's database is missing"],
@@ -820,7 +823,7 @@ function personVault(expectedOrigin: string): PersonVault {
  * whole point of the step, and a local row would mean it never travelled.
  */
 function machinePersonalRows(appId: string): { lines: string[]; rows: number } {
-  const file = join(dataDir(appId), 'nod.db');
+  const file = join(runtimeDataDir(appId, RUNTIME), 'nod.db');
   if (!existsSync(file)) return { lines: ['(the database is missing)'], rows: -1 };
   const db = new Database(file, { readonly: true });
   try {
@@ -848,12 +851,13 @@ interface IconFileCheck {
 
 /**
  * SP04 §2/SP05 §6, the runner's half of the proof: the file the app itself wrote under its own data
- * dir. The page cannot report this — where that directory is, is this runner's own `dataDir()` — so
+ * dir. The page cannot report this — where that directory is, is this runner's own
+ * `runtimeDataDir()` — so
  * the last link of the chain is read here: the bytes on P's disk hash to what the host answered for
  * the admin's upload, and the icon is the guild's own PNG, not another one.
  */
 async function personGuildIconFile(icon: GuildIconFixture): Promise<IconFileCheck> {
-  const file = join(dataDir(PERSON_APP_ID), GUILD_ICON_FILE);
+  const file = join(runtimeDataDir(PERSON_APP_ID, RUNTIME), GUILD_ICON_FILE);
   if (!existsSync(file)) {
     return {
       lines: [`${GUILD_ICON_FILE}: (missing), the uploaded PNG's sha256 is ${digestHead(icon.sha256)}`],
@@ -873,7 +877,7 @@ async function personGuildIconFile(icon: GuildIconFixture): Promise<IconFileChec
 
 /** The same file after the admin removed the icon: SP04 §2's `null` deletes it on the next sync. */
 function personGuildIconGone(): IconFileCheck {
-  const file = join(dataDir(PERSON_APP_ID), GUILD_ICON_FILE);
+  const file = join(runtimeDataDir(PERSON_APP_ID, RUNTIME), GUILD_ICON_FILE);
   const size = existsSync(file) ? readFileSync(file).byteLength : null;
   return {
     lines: [`${GUILD_ICON_FILE}: ${size === null ? '(gone)' : `still there (${size} bytes)`}`],
@@ -923,17 +927,26 @@ async function main(): Promise<number> {
       renameSync(SEED_BACKUP, SEED);
       console.log('private seed restored');
     }
-    const finalGen = generateDevConfig(ROOT, null, null);
-    if (finalGen.code !== 0) {
-      console.error(`final gen-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
-      if (previousTinyjsJson !== null) {
-        writeFileSync(TINYJS_JSON, previousTinyjsJson);
-        console.error('tinyjs.json restored to its previous content');
+    if (RUNTIME === 'tinyjs') {
+      const finalGen = generateDevConfig(ROOT, null, null);
+      if (finalGen.code !== 0) {
+        console.error(`final gen-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
+        if (previousTinyjsJson !== null) {
+          writeFileSync(TINYJS_JSON, previousTinyjsJson);
+          console.error('tinyjs.json restored to its previous content');
+        } else {
+          rmSync(TINYJS_JSON, { force: true });
+        }
       } else {
-        rmSync(TINYJS_JSON, { force: true });
+        console.log('tinyjs.json regenerated in dev');
       }
     } else {
-      console.log('tinyjs.json regenerated in dev');
+      const finalGen = generateElectrobunDevConfig(ROOT, null, null);
+      if (finalGen.code !== 0) {
+        console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
+      } else {
+        console.log('electrobun.config.ts regenerated in dev');
+      }
     }
     // The four app data dirs and the host's temp data dir go with it; the owner's install is
     // untouchable (different app ids).

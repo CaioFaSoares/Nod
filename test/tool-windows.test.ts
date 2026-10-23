@@ -121,7 +121,7 @@ interface FakeState {
   visible: boolean;
   minimized: boolean;
   focused: boolean;
-  /** Wayland answers false, and there docked mode is never offered (RF-49) */
+  /** Wayland answers false; there the backend runs in windows mode (RF-49, RF-52) */
   canPosition: boolean;
   credential: { username: string; secret: string } | null;
   /** The vault index: the origin the credential was saved for. It decides the fill, and it is
@@ -170,7 +170,7 @@ function fakeEnvironment(): FakeEnvironment {
     visible: true,
     minimized: false,
     focused: false,
-    canPosition: true,
+    canPosition: false,
     credential: { username: 'ana', secret: 's3cret' },
     vaultOrigin: 'https://kanban.example',
     failEval: false,
@@ -183,9 +183,9 @@ function fakeEnvironment(): FakeEnvironment {
   const registered: { id: string; combo: string }[] = [];
   const unregistered: string[] = [];
   const calls = { credential: 0, saveTab: [] as string[] };
-  // The fixture runs in Windows mode: the day-one behavior these tests pin (RF-52). A docked test
-  // asks for the other setting with `env.store.set('window_mode', 'docked')`.
-  const store = new Map<string, unknown>([['window_mode', 'windows']]);
+  // The fixture runs in Windows mode (Wayland): the day-one behavior these tests pin (RF-52). A
+  // docked test asks for the other mode by making the runtime able to position windows.
+  const store = new Map<string, unknown>();
 
   function handle(id: string): FakeHandle {
     const existing = handles.get(id);
@@ -429,10 +429,10 @@ function winState(win: string, over: Record<string, unknown> = {}): Record<strin
   return { win, fullscreen: false, maximized: false, minimized: false, focused: true, ...over };
 }
 
-/** The same fake, with the Docked setting and the panel the main page reports (E03/RF-49). */
+/** The same fake, able to position windows, and the panel the main page reports (E03/RF-49). */
 function dockedEnvironment(): FakeEnvironment {
   const env = fakeEnvironment();
-  env.store.set('window_mode', 'docked');
+  env.state.canPosition = true;
   return env;
 }
 
@@ -1416,12 +1416,10 @@ describe('tabs — docked mode (RF-49…RF-52, RF-66…RF-68)', () => {
         adhoc: false,
         loading: true,
         error: null,
-        embedded: false,
       },
     ]);
     expect(toolWindows.state()).toMatchObject({
       mode: 'docked',
-      dockable: true,
       tabHotkeys: true,
       active: 'tool_kanban',
     });
@@ -1715,34 +1713,11 @@ describe('tabs — docked mode (RF-49…RF-52, RF-66…RF-68)', () => {
     ]);
   });
 
-  test('switching to Windows reframes every docked tab and keeps every page alive (RF-52)', async () => {
-    const env = dockedEnvironment();
-    const toolWindows = makeToolWindows(env);
-    await dockedKanban(toolWindows);
-    await toolWindows.newTab('kanban');
-
-    const state = await toolWindows.setMode('windows');
-    expect(state.mode).toBe('windows');
-    expect(state.active).toBeNull();
-    expect(state.tabHotkeys).toBe(false);
-    expect(env.store.get('window_mode')).toBe('windows');
-    expect(handle(env, 'tool_kanban').chrome).toEqual({ frame: true });
-    expect(handle(env, 'tool_kanban_t2').chrome).toEqual({ frame: true });
-    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'tool_kanban_t2']);
-    expect(handle(env, 'tool_kanban').close).toBe(0);
-    expect(state.tabs.every((tab) => !tab.docked)).toBe(true);
-    expect(openTools(env)).toEqual([
-      { toolId: 'kanban', url: ENTRY_AUDIT },
-      { toolId: 'kanban', url: ENTRY_AUDIT },
-    ]);
-  });
-
-  test('docked is refused where the runtime cannot position windows (RF-49)', async () => {
-    const env = dockedEnvironment();
-    env.state.canPosition = false;
+  test('windows mode is where the runtime cannot position windows (RF-49, RF-52)', async () => {
+    const env = fakeEnvironment();
     const toolWindows = makeToolWindows(env);
     await toolWindows.open('kanban');
-    expect(toolWindows.state()).toMatchObject({ mode: 'windows', dockable: false, tabHotkeys: false });
+    expect(toolWindows.state()).toMatchObject({ mode: 'windows', tabHotkeys: false });
     expect(handle(env, 'tool_kanban').chrome).toBeNull();
     expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT }]);
   });
@@ -1767,13 +1742,6 @@ describe('tabs — docked mode (RF-49…RF-52, RF-66…RF-68)', () => {
     expect(comboOf('open-link')).toBe('cmd+l');
     expect(comboOf('tab-save')).toBe('cmd+d');
     expect(toolWindows.state().tabHotkeys).toBe(true);
-
-    // The day-one set is untouched; leaving docked mode releases the tab ones again.
-    await toolWindows.setMode('windows');
-    expect(env.unregistered).toEqual([
-      'tab-new', 'tab-close', 'tab-detach', 'tab-next', 'tab-prev', 'open-link', 'tab-save',
-    ]);
-    expect(toolWindows.state().tabHotkeys).toBe(false);
   });
 
   test('⌘T acts on the active tab tool, ⌘W on the active tab, ⌘L asks the page for a link', async () => {
@@ -1884,7 +1852,6 @@ describe('tabs — docked mode (RF-49…RF-52, RF-66…RF-68)', () => {
         adhoc: false,
         loading: true,
         error: null,
-        embedded: false,
       },
     ]);
   });
@@ -2002,350 +1969,5 @@ describe('tabs — hotkey target, relay and the unlock guards (E03 review)', () 
     await restoring;
     expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban']);
     expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban']);
-  });
-});
-
-// ---------------------------------------------------------------- embedded tabs (RF-69)
-
-describe('tabs — embedded (RF-69)', () => {
-  const realFetch = globalThis.fetch;
-  beforeEach(() => {
-    // Every embedded-tab open now runs the RF-70 check: an empty answer is the neutral one.
-    globalThis.fetch = async () => new Response(null, { status: 200 });
-  });
-  afterEach(() => {
-    globalThis.fetch = realFetch;
-  });
-
-  /** The backend's `fetch` answers `headers`, which is all `tabs.checkEmbed` reads. */
-  function serve(headers: Record<string, string>): void {
-    globalThis.fetch = async () => new Response(null, { status: 200, headers });
-  }
-
-  /**
-   * Serves a whole entry: an HTML body with headers for the entry URL, bodies for the scripts it
-   * lists, and a failure for anything marked `fail` (or not listed at all). Returns the addresses
-   * the backend asked for, in order, so a test can prove the check ran once.
-   */
-  function serveSites(
-    sites: Record<string, { body?: string; headers?: Record<string, string>; fail?: boolean }>,
-  ): string[] {
-    const calls: string[] = [];
-    globalThis.fetch = (async (input: string | URL | Request) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      calls.push(url);
-      const site = sites[url];
-      if (site === undefined || site.fail === true) throw new Error('offline');
-      return new Response(site.body ?? null, { status: 200, headers: site.headers ?? {} });
-    }) as unknown as typeof fetch;
-    return calls;
-  }
-
-  test('opening a listed tool creates an embedded tab and never opens a window', async () => {
-    const env = dockedEnvironment();
-    env.store.set('embedded_tools', ['kanban']);
-    const toolWindows = makeToolWindows(env);
-    await dockedKanban(toolWindows);
-
-    expect(env.opened).toEqual([]);
-    const state = toolWindows.state();
-    expect(state.tabs).toEqual([
-      {
-        id: 'embed_kanban',
-        toolId: 'kanban',
-        title: 'Kanban',
-        url: ENTRY_URL,
-        docked: true,
-        adhoc: false,
-        loading: false,
-        error: null,
-        embedded: true,
-      },
-    ]);
-    expect(state.active).toBe('embed_kanban');
-    expect(state.embedded).toEqual(['kanban']);
-    expect(state.tools.find((status) => status.id === 'kanban')?.openWindows).toBe(1);
-    expect(state.tools.find((status) => status.id === 'kanban')?.loading).toBe(false);
-    // The page is told to show the tab, as with any backend-opened tab.
-    expect(env.pushed).toContainEqual({ event: 'tab', data: 'embed_kanban' });
-  });
-
-  test('an active embedded tab hides every docked window', async () => {
-    const env = dockedEnvironment();
-    env.store.set('embedded_tools', ['kanban']);
-    const toolWindows = makeToolWindows(env);
-    await dockedKanban(toolWindows); // embed_kanban, active
-    await toolWindows.open('mail'); // tool_mail is the active docked window
-    expect(toolWindows.state().active).toBe('tool_mail');
-    const mail = handle(env, 'tool_mail');
-
-    toolWindows.activate('embed_kanban');
-    expect(toolWindows.state().active).toBe('embed_kanban');
-    expect(mail.hides).toBe(1); // no docked window may cover the iframe
-    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_mail']);
-  });
-
-  test('switching back to the window tab shows it again', async () => {
-    const env = dockedEnvironment();
-    env.store.set('embedded_tools', ['kanban']);
-    const toolWindows = makeToolWindows(env);
-    await dockedKanban(toolWindows);
-    await toolWindows.open('mail');
-    const mail = handle(env, 'tool_mail');
-    toolWindows.activate('embed_kanban');
-    expect(mail.hides).toBe(1);
-
-    toolWindows.activate('tool_mail');
-    expect(toolWindows.state().active).toBe('tool_mail');
-    expect(mail.shows.length).toBe(1);
-  });
-
-  test('setEmbedded converts the open tabs in place both ways, keeping the strip position and the active tab', async () => {
-    serve({});
-    const env = dockedEnvironment();
-    const toolWindows = makeToolWindows(env);
-    await dockedKanban(toolWindows); // tool_kanban
-    await toolWindows.open('mail'); // tool_mail, active
-    toolWindows.activate('tool_kanban');
-    const kanban = handle(env, 'tool_kanban');
-    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban', 'tool_mail']);
-
-    // Window → iframe: the window closes, the tab keeps its place and stays active.
-    const embedded = await toolWindows.setEmbedded('kanban', true);
-    expect(embedded.tabs.map((tab) => tab.id)).toEqual(['embed_kanban', 'tool_mail']);
-    expect(embedded.active).toBe('embed_kanban');
-    expect(embedded.embedded).toEqual(['kanban']);
-    expect(embedded.tabs[0].embedded).toBe(true);
-    expect(kanban.close).toBe(1);
-    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'tool_mail']);
-
-    // iframe → window: the same position, a docked window at the tab's address.
-    const back = await toolWindows.setEmbedded('kanban', false);
-    expect(back.tabs.map((tab) => tab.id)).toEqual(['tool_kanban', 'tool_mail']);
-    expect(back.active).toBe('tool_kanban');
-    expect(back.embedded).toEqual([]);
-    expect(back.tabs[0].embedded).toBe(false);
-    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban', 'tool_mail', 'tool_kanban']);
-    expect(handle(env, 'tool_kanban').position).toEqual([SLOT_SCREEN.x, SLOT_SCREEN.y]);
-  });
-
-  test('setEmbedded refuses an address that may not be framed and changes nothing', async () => {
-    serve({ 'X-Frame-Options': 'DENY' });
-    const env = dockedEnvironment();
-    const toolWindows = makeToolWindows(env);
-    await dockedKanban(toolWindows);
-
-    await expect(toolWindows.setEmbedded('kanban', true)).rejects.toThrow('X-Frame-Options: DENY');
-    expect(toolWindows.state().embedded).toEqual([]);
-    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban']);
-    expect(env.store.get('embedded_tools')).toBeUndefined();
-  });
-
-  test('setEmbedded refuses a tool whose login cookie is SameSite=Strict and records the reason', async () => {
-    const calls = serveSites({
-      [ENTRY_URL]: {
-        body: '<html></html>',
-        headers: { 'set-cookie': 'token=1; Path=/; SameSite=Strict' },
-      },
-    });
-    const env = dockedEnvironment();
-    const toolWindows = makeToolWindows(env);
-    await dockedKanban(toolWindows);
-    const reason = 'the tool keeps cookies with SameSite=Strict, which a tab inside Nod cannot store';
-
-    await expect(toolWindows.setEmbedded('kanban', true)).rejects.toThrow(reason);
-    expect(toolWindows.state().embedded).toEqual([]);
-    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban']);
-    expect(toolWindows.state().embedBlocked).toEqual({ kanban: reason });
-    expect(env.store.get('embed_blocked')).toEqual({ kanban: reason });
-    expect(calls).toEqual([ENTRY_URL]);
-
-    // The block already in the store refuses again with no second request.
-    await expect(toolWindows.setEmbedded('kanban', true)).rejects.toThrow(reason);
-    expect(calls).toHaveLength(1);
-
-    // RF-70 item 6: leaving the iframe is always allowed, and the block stays for a later decision.
-    const left = await toolWindows.setEmbedded('kanban', false);
-    expect(left.embedded).toEqual([]);
-    expect(left.embedBlocked).toEqual({ kanban: reason });
-  });
-
-  test('reportLoginFails converts the embedded tabs in place, blocks the tool and reloads nothing else', async () => {
-    const env = dockedEnvironment();
-    env.store.set('embedded_tools', ['kanban']);
-    const toolWindows = makeToolWindows(env);
-    await dockedKanban(toolWindows); // embed_kanban
-    await toolWindows.open('mail'); // tool_mail, a window tab of another tool
-    await toolWindows.activate('embed_kanban'); // the iframe is active again
-    const mail = handle(env, 'tool_mail');
-    const before = env.opened.length;
-    const reason = 'the tool did not keep its login inside Nod';
-
-    const state = await toolWindows.reportLoginFails('kanban');
-    expect(state.tabs.map((tab) => tab.id)).toEqual(['tool_kanban', 'tool_mail']);
-    expect(state.tabs[0].embedded).toBe(false);
-    expect(state.active).toBe('tool_kanban'); // the active iframe became the active window
-    expect(state.embedded).toEqual([]);
-    expect(state.embedBlocked).toEqual({ kanban: reason });
-    expect(env.store.get('embedded_tools')).toEqual([]);
-    expect(env.store.get('embed_blocked')).toEqual({ kanban: reason });
-    // Only the converted tab opened a window; the other tool's tab was never closed or reloaded.
-    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_mail', 'tool_kanban']);
-    expect(env.opened.length).toBe(before + 1);
-    expect(mail.close).toBe(0);
-  });
-
-  test('restore converts an embedded tab whose tool the check now flags into a window tab', async () => {
-    const calls = serveSites({
-      [ENTRY_URL]: {
-        body: '<html></html>',
-        headers: { 'set-cookie': 'token=1; Path=/; SameSite=Lax' },
-      },
-    });
-    const env = dockedEnvironment();
-    env.store.set('embedded_tools', ['kanban']);
-    env.store.set('open_tools', [{ toolId: 'kanban', active: true }]);
-    const toolWindows = makeToolWindows(env);
-
-    await toolWindows.restore();
-    const reason = 'the tool keeps cookies with SameSite=Lax, which a tab inside Nod cannot store';
-    expect(env.opened.map((entry) => entry.id)).toEqual(['tool_kanban']);
-    expect(toolWindows.state().tabs.map((tab) => tab.id)).toEqual(['tool_kanban']);
-    expect(toolWindows.state().tabs[0].embedded).toBe(false);
-    expect(toolWindows.state().embedded).toEqual([]);
-    expect(toolWindows.state().embedBlocked).toEqual({ kanban: reason });
-    expect(env.store.get('embed_blocked')).toEqual({ kanban: reason });
-    expect(calls).toEqual([ENTRY_URL]); // one session check, never one per restored tab
-  });
-
-  test('a blocked tool from the store refuses setEmbedded without a network call', async () => {
-    const calls = serveSites({});
-    const env = dockedEnvironment();
-    const reason = 'the tool did not keep its login inside Nod';
-    env.store.set('embed_blocked', { kanban: reason });
-    env.store.set('embedded_tools', ['kanban']);
-    const toolWindows = makeToolWindows(env);
-
-    expect(await toolWindows.checkEmbed('kanban')).toEqual({ frameable: false, reason });
-    expect(toolWindows.state().embedBlocked).toEqual({ kanban: reason });
-    // A tool blocked on record is not embedded even when the preference still lists it.
-    expect(toolWindows.state().embedded).toEqual([]);
-    await expect(toolWindows.setEmbedded('kanban', true)).rejects.toThrow(reason);
-    expect(calls).toEqual([]);
-  });
-
-  test('checkEmbed reads a same-origin script and refuses a strict login cookie write', async () => {
-    serveSites({
-      [ENTRY_URL]: { body: '<html><script src="/app.js"></script></html>' },
-      'https://kanban.example/app.js': {
-        body: 'Cookie.set("accessToken", t, {expires: t, path: "/", sameSite: "strict"});',
-      },
-    });
-    const env = dockedEnvironment();
-    const toolWindows = makeToolWindows(env);
-    const reason =
-      "the tool's page saves its login in a SameSite=strict cookie, which a tab inside Nod cannot store";
-
-    expect(await toolWindows.checkEmbed('kanban')).toEqual({ frameable: false, reason });
-    expect(toolWindows.state().embedBlocked).toEqual({ kanban: reason });
-    expect(env.store.get('embed_blocked')).toEqual({ kanban: reason });
-  });
-
-  test('a network failure during the script scan does not block the iframe', async () => {
-    serveSites({
-      [ENTRY_URL]: { body: '<html><script src="/app.js"></script></html>' },
-      'https://kanban.example/app.js': { fail: true },
-    });
-    const env = dockedEnvironment();
-    env.store.set('embedded_tools', ['kanban']);
-    const toolWindows = makeToolWindows(env);
-
-    const state = await toolWindows.open('kanban');
-    expect(state.tabs.map((tab) => tab.id)).toEqual(['embed_kanban']);
-    expect(state.tabs[0].embedded).toBe(true);
-    expect(state.embedBlocked).toEqual({});
-  });
-
-  test('checkEmbed reads the response headers and reports an unreachable tool', async () => {
-    const env = dockedEnvironment();
-    const toolWindows = makeToolWindows(env);
-
-    serve({ 'Content-Security-Policy': "frame-ancestors 'self'" });
-    expect(await toolWindows.checkEmbed('kanban')).toEqual({
-      frameable: false,
-      reason: "frame-ancestors 'self'",
-    });
-
-    serve({ 'content-security-policy': 'frame-ancestors *' });
-    expect(await toolWindows.checkEmbed('kanban')).toEqual({ frameable: true, reason: null });
-
-    globalThis.fetch = async () => {
-      throw new Error('offline');
-    };
-    expect(await toolWindows.checkEmbed('kanban')).toEqual({
-      frameable: false,
-      reason: 'could not reach the tool',
-    });
-  });
-
-  test('an embedded tab refuses to detach', async () => {
-    const env = dockedEnvironment();
-    env.store.set('embedded_tools', ['kanban']);
-    const toolWindows = makeToolWindows(env);
-    await dockedKanban(toolWindows);
-    expect(() => toolWindows.detach('embed_kanban')).toThrow('cannot detach an embedded tab');
-    expect(toolWindows.state().tabs[0].docked).toBe(true);
-  });
-
-  test('a popup with opener main belongs to the active embedded tab and is adopted after it', async () => {
-    const env = dockedEnvironment();
-    env.store.set('embedded_tools', ['kanban']);
-    const toolWindows = makeToolWindows(env);
-    await dockedKanban(toolWindows); // embed_kanban, active
-
-    expect(
-      toolWindows.onPopup({
-        window: 'popup9',
-        opener: 'main',
-        url: 'https://news.example/x',
-        kind: 'policy',
-      }),
-    ).toBe('window');
-    toolWindows.onPopup({
-      window: 'popup9',
-      kind: 'open',
-      action: 'window',
-      url: 'https://news.example/x',
-    });
-
-    const state = toolWindows.state();
-    expect(state.tabs.map((tab) => tab.id)).toEqual(['embed_kanban', 'popup9']);
-    expect(state.tabs[1]).toMatchObject({ toolId: null, adhoc: true, title: 'news.example' });
-    expect(state.active).toBe('popup9');
-  });
-
-  test('restore follows the preference, and windows mode ignores it', async () => {
-    const docked = dockedEnvironment();
-    docked.store.set('embedded_tools', ['kanban']);
-    docked.store.set('open_tools', [
-      { toolId: 'kanban', active: true },
-      { toolId: 'kanban', url: 'https://kanban.example/app?board=1' },
-    ]);
-    const inDocked = makeToolWindows(docked);
-    await inDocked.restore();
-    expect(docked.opened).toEqual([]);
-    expect(inDocked.state().tabs.map((tab) => tab.id)).toEqual(['embed_kanban', 'embed_kanban_t2']);
-    expect(inDocked.state().tabs.every((tab) => tab.embedded)).toBe(true);
-    expect(inDocked.state().active).toBe('embed_kanban');
-    expect(inDocked.state().tabs[1].url).toBe('https://kanban.example/app?board=1');
-
-    // The preference is kept, but windows mode opens every tool as a window.
-    const windows = fakeEnvironment();
-    windows.store.set('embedded_tools', ['kanban']);
-    const inWindows = makeToolWindows(windows);
-    await inWindows.open('kanban');
-    expect(windows.opened.map((entry) => entry.id)).toEqual(['tool_kanban']);
-    expect(inWindows.state().tabs[0].embedded).toBe(false);
-    expect(inWindows.state().embedded).toEqual(['kanban']);
   });
 });

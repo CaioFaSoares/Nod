@@ -6,7 +6,7 @@ import { call, errorMessage } from './api';
 import { el, message } from './ui';
 import { categoryOf } from '../shared/catalog';
 import type { TabsApi } from './tabs';
-import type { Entry, Id, TabState, ToolStatus, VaultItem } from '../shared/types';
+import type { Entry, Id, TabState, ToolStatus } from '../shared/types';
 import type { SettingsTab } from './settings';
 
 const OVERLAY_ID = 'palette-overlay';
@@ -78,11 +78,6 @@ function filter(items: Item[], query: string): Item[] {
 export type PaletteTabs = TabsApi & {
   active: TabState | null;
   open: TabState[];
-  /**
-   * 0.6.0b: the default credential of the active embedded tab, when the page knows the vault —
-   * null while the metadata has not been read or the tool has none.
-   */
-  credential: VaultItem | null;
 };
 
 export function openPalette(ctx: {
@@ -98,7 +93,7 @@ export function openPalette(ctx: {
   /** K4: "Vault inbox" — Settings → Vault, scrolled to the shares waiting; null without a guild. */
   openInbox: (() => void) | null;
   /** E03: "Open tabs" — the tab view of docked mode, from the page's own state; null in Windows
-   * mode and while the strip is empty. */
+   * mode (Wayland) and while the strip is empty. */
   openTabs: (() => void) | null;
   /** E03: a tool opens through the app, so a docked tab lands on the center panel (RF-49). A
    * failure is the window's banner, the same one the sidebar and Home use. */
@@ -151,7 +146,7 @@ export function openPalette(ctx: {
       items.push({ label, key: matchKey(label), run: () => tabs.activate(tab.id) });
       // RF-51: a detached tab is docked back from here too — the strip may not be on screen (Home,
       // Settings), and with every tab detached the backend has no active tab for the row below.
-      if (!tab.docked && !tab.embedded) {
+      if (!tab.docked) {
         const dock = `Dock tab: ${tab.title}`;
         items.push({ label: dock, key: matchKey(dock), run: () => tabs.dock(tab.id) });
       }
@@ -163,55 +158,18 @@ export function openPalette(ctx: {
       if (toolId !== null) {
         const newTab = 'New tab';
         items.push({ label: newTab, key: matchKey(newTab), run: () => tabs.newTab(toolId) });
-        // RF-69: the same toggle the toolbar shows, for the tool of the active tab.
-        const mode = active.embedded ? 'Open as window' : 'Show inside Nod';
-        items.push({
-          label: mode,
-          key: matchKey(mode),
-          run: () => tabs.setEmbedded(toolId, !active.embedded),
-        });
-        // RF-70: the same report the embedded toolbar offers — the login did not survive the
-        // iframe, so the tool stops embedding and its tabs go back to windows.
-        if (active.embedded) {
-          const login = "Login won't stay? Open as window";
-          items.push({
-            label: login,
-            key: matchKey(login),
-            run: () => tabs.reportLoginFails(toolId),
-          });
-        }
       }
       const close = 'Close tab';
       items.push({ label: close, key: matchKey(close), run: () => tabs.close(active.id) });
-      // 0.6.0b (RF-69): the Sign in control of an embedded tab — no script reaches the iframe, so
-      // the login is copied to the person. Same two actions the toolbar offers.
-      if (active.embedded && tabs.credential !== null) {
-        const credential = tabs.credential;
-        const username = 'Copy username';
-        items.push({
-          label: username,
-          key: matchKey(username),
-          run: () => tabs.copyUsername(credential),
-        });
-        const password = 'Copy password';
-        items.push({
-          label: password,
-          key: matchKey(password),
-          run: () => tabs.copyPassword(credential),
-        });
-      }
-      // RF-69: an embedded tab has no window to detach and no dock to come back from.
-      if (!active.embedded) {
-        const toggle = active.docked ? 'Detach tab' : 'Dock tab';
-        items.push({
-          label: toggle,
-          key: matchKey(toggle),
-          run: () => {
-            if (active.docked) tabs.detach(active.id);
-            else tabs.dock(active.id);
-          },
-        });
-      }
+      const toggle = active.docked ? 'Detach tab' : 'Dock tab';
+      items.push({
+        label: toggle,
+        key: matchKey(toggle),
+        run: () => {
+          if (active.docked) tabs.detach(active.id);
+          else tabs.dock(active.id);
+        },
+      });
       const save = 'Save tab to sidebar';
       items.push({ label: save, key: matchKey(save), run: () => tabs.save(active.id) });
     }

@@ -49,8 +49,10 @@ window manager the Nod's windows must be floated by a WM rule, or docked tabs ar
 A web page can't host a third-party site:
 
 - iframes are out, because the tools send `X-Frame-Options`/CSP and the origin stamp is frame-blind
-  on Linux (`docs/canonico.md` §7, `docs/tinyjs.md` §9) — this holds for 0.6.0; RF-69 (§8) reopens a
-  frame only for a tool whose address may be framed and only by the person's opt-in;
+  on Linux (`docs/canonico.md` §7, `docs/tinyjs.md` §9) — this holds for 0.6.0; RF-69 (§8) reopened a
+  frame only for a tool whose address may be framed and only by the person's opt-in, and was removed
+  again on 2026-10-22 (§22 "Seamless tabs: always inside, detach on demand"), so iframes are out
+  again without exception;
 - the runtime has **one webview per window** and no native tabs (`docs/tinyjs.md` §3, §10.6).
 
 So the center panel can't *contain* the tool. It can only look as if it does: each tab is still its
@@ -183,7 +185,7 @@ RF-66…RF-68 (2026-10-18). RF-49…RF-52 are still free.
 | RF-49 | In docked mode, the open tab fills the center panel and follows the main window's size and position. | Resize and move `main`: the tab stays on the panel without a visible gap at rest. |
 | RF-50 | A tool can have several tabs; switching tabs never reloads. | Two Claude tabs, a draft typed in one; switch away and back: the draft is still there. |
 | RF-51 | A tab detaches into its own window and docks back without reloading. | Type a draft in a Claude tab, detach, move it to another screen, dock it back: the draft is still there and the page never reloaded. |
-| RF-52 | Docked or Windows is a setting; Windows mode behaves exactly as today. | Switching the setting changes how the next tool opens; RF-19 still passes in Windows mode. |
+| RF-52 | (Superseded by §22 "Seamless tabs: always inside, detach on demand", 2026-10-22. What remains: Windows mode is only the runtime's fallback where windows cannot be positioned.) | — |
 | RF-66 | Any `http(s)` link opens in the Nod: links clicked inside a tool open as a tab next to it; the palette and `nod://open?url=` open one by hand. | A documentation link on a Kanban card opens as a tab right after the Kanban tab; pasting a URL in "Open link" or calling `nod://open` does the same. |
 | RF-67 | Any tab is saved to the sidebar in one step: a personal view when its origin is already a tool, otherwise a personal tool with probed title and icon. | Save a Claude chat URL: it appears under Claude; save a new site: it appears as a new icon with its title and icon, no typing. |
 | RF-68 | An ad-hoc tab gets no backend methods and no autofill. | Calling `tiny.api.call` from an ad-hoc origin is refused; no credential is filled there. |
@@ -196,6 +198,12 @@ RF-66…RF-68 (2026-10-18). RF-49…RF-52 are still free.
    with `mode: navigate` navigate the tool's current tab (proposal, following the tab-centered use).
 
 ## 8. Embedded tabs (0.6.0a)
+
+**Removed on 2026-10-22.** The embedded tab and its login-block work (RF-69, RF-70, this whole
+section) are gone: every tool now opens as a tab inside the Nod window and detaches on demand — a
+native view on Electrobun (`docs/epics/E06-embedded-webview.md`), the frameless window over the panel
+on tinyjs — with no per-tool choice and no iframe anywhere (`docs/canonico.md` §22 "Seamless tabs:
+always inside, detach on demand"). The text below is history, kept for the record.
 
 **Why.** The docked tab of §3 is still an OS window laid over the panel, and OmniWM re-tiles it like
 any other window; the owner asked for the window not to be a system-level window at all — "eu gostaria

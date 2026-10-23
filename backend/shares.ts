@@ -970,7 +970,7 @@ export function createShares(deps: SharesDeps): Shares {
   // ---------------------------------------------------------------- inbox (SP04 §2)
 
   function inbox(): InboxShare[] {
-    const me = requirePerson();
+    requirePerson();
     const people = roster();
     return openShares().map((share) => {
       const from = people.find((person) => person.id === share.from);

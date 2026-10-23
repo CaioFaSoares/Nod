@@ -62,8 +62,8 @@ Cada alvo do trilho da tela de entrada (Offline, a guilda, `+`), com ícone ou i
 _Evite_: botão, atalho
 
 **Aba** — tab:
-A ferramenta posta sobre o painel central da janela principal (modo Docked) ou solta numa janela
-própria (destacada); pode haver várias por ferramenta, e trocar de aba nunca recarrega a página.
+A ferramenta posta sobre o painel central da janela principal ou solta numa janela própria
+(destacada); pode haver várias por ferramenta, e trocar de aba nunca recarrega a página.
 _Evite_: painel, sub-aba, palco
 
 **Encaixada / destacada** — docked / detached:
@@ -81,16 +81,18 @@ A aba de um endereço fora do catálogo, ou de um link aberto dentro de uma ferr
 não é restaurada e não recebe método de backend nem preenchimento automático.
 _Evite_: aba temporária, popup
 
-**Aba embutida (embedded tab)** — embedded tab (`TabState.embedded`, id `embed_<toolId>`):
-A tool tab rendered as an `<iframe>` inside the main window's page instead of a window, for a tool
-whose address may be framed and that this machine marked "Show inside Nod" (`embedded_tools` in
-`store.json`). It is never detached, gets no autofill and no injected script, and keeps its page
-across tab switches and visits to Home or Settings (RF-69).
+**Aba embutida (embedded tab)** — embedded tab:
+*Removida em 2026-10-22.* Era a aba de ferramenta desenhada como um `<iframe>` dentro da página da
+janela principal, em vez de uma janela; foi substituída pelas abas dentro da janela que se destacam
+sob demanda (`docs/canonico.md` §22 "Seamless tabs: always inside, detach on demand"). O termo não se
+usa mais.
 _Evite_: aba iframe, webview, aba interna
 
 **Modo Docked / modo Windows** — Docked / Windows:
-O ajuste que decide como as ferramentas abrem: Docked (padrão) mostra a aba sobre o painel central;
-Windows abre cada ferramenta em janela própria, como hoje. No Wayland o Docked não é oferecido.
+*Removido como ajuste em 2026-10-22.* Não há escolha de modo: onde o runtime posiciona janelas
+(`canPosition !== false`) a ferramenta abre como aba sobre o painel central; só onde não posiciona
+(Wayland) o Nod cai no modo Windows, uma janela própria por ferramenta — o fallback do runtime, sem
+ajuste em Settings (`docs/canonico.md` §22 "Seamless tabs: always inside, detach on demand").
 _Evite_: modo aba, modo janela
 
 ## Pessoas e acesso

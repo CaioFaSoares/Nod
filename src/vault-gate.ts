@@ -1,7 +1,6 @@
 // K5/SP02 §9: the page's half of the gate — the decision between the operating system's prompt
-// and the Nod password, and the fallback when a system prompt did not confirm. Settings → Vault and
-// the embedded tab's "Sign in" control share this one definition; the prompt itself belongs to the
-// screen that asks (Settings shows it inline on the card, `app.ts` in a dialog).
+// and the Nod password, and the fallback when a system prompt did not confirm. Settings → Vault uses
+// this one definition; the prompt itself belongs to the screen that asks it (inline on the card).
 import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED } from '../shared/types';
 
 /**

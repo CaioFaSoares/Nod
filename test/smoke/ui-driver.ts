@@ -1251,6 +1251,29 @@ async function inviteJoinThroughUi(): Promise<string> {
   const titles = await waitForValue("the team role's tools in the new member's sidebar", () => {
     const list = sidebarTitles();
     return list.some((title) => title.includes('Tool A')) ? list : null;
+  }).catch(async (error: unknown) => {
+    // What the page and the backend say when the sidebar stays empty: whether the catalog and the
+    // tools are there and the screen is stale, or neither of them arrived at all.
+    const timed = async <T>(run: Promise<T>): Promise<T | string> =>
+      await Promise.race([run, sleep(3000).then(() => 'no answer in 3000 ms')]).catch(
+        (why: unknown) => `error: ${message(why)}`,
+      );
+    const page = await timed(call('tools.state'));
+    const tools =
+      typeof page === 'object' && page !== null && 'tools' in page && Array.isArray(page.tools)
+        ? page.tools.length
+        : null;
+    const entries = await timed(call('catalog.list'));
+    const sizes = Array.isArray(entries) ? `${entries.length} entry(ies)` : String(entries);
+    const banner = all<HTMLElement>('.shell .banner .message, .shell .notice')
+      .map(text)
+      .join(' | ');
+    throw new Error(
+      `${message(error)}; the shell has ${all('.sidebar-tools > *').length} sidebar node(s) ` +
+        `and titles ${JSON.stringify(sidebarTitles())}; tools.state ${
+          tools === null ? String(page) : `${tools} tool(s)`
+        }; catalog.list ${sizes}; banner ${banner || '(nothing)'}`,
+    );
   });
   return `card "${head}" with role ${TEAM_ROLE_NAME} and the guild icon; joined in ${state.mode} mode as ${state.person?.email}; ${titles.length} tool(s) of the team role in the sidebar`;
 }

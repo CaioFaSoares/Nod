@@ -5,7 +5,9 @@
 // `store`, log or file: the database holds only a verifier — the v1 PBKDF2 `PasswordHash` or the V2
 // `check` of SP02 §6 — and the `bv1.` values sealed under the `vaultKey` (RF-63), and the system
 // keychain holds `nod.bio.<person>` with `base64url(vaultKey)` (SP02 §9). The keys of an unlock live
-// in this module's memory and `lock()` forgets them (SP02 §6).
+// in this module's memory and `lock()` forgets them (SP02 §6). 0.7.0: where the runtime cannot back
+// an unlock with the keychain (`biometricAvailable` false — the Electrobun target), no item is
+// written, `enableBiometric` refuses, and `purgeBiometricItems` deletes what a migration left.
 import {
   PBKDF2_ITERATIONS,
   PASSWORD_V2_ALGORITHM,
@@ -130,6 +132,13 @@ export interface SessionDeps {
   };
   /** `app.authenticate` at runtime; a double in the tests. */
   authenticate: (reason: string) => Promise<boolean>;
+  /**
+   * 0.7.0: whether this runtime may back an unlock with the system keychain — `authenticate` plus
+   * the Nod-specific `biometricUnlock` capability (`backend/main.ts`). `false` on the Electrobun
+   * target, whose `bun` binary shares Bun's Developer ID, so any Electrobun app could read
+   * `nod.bio.<person>` (`docs/handovers/e07-migration.md` §5): there the unlock is by password only
+   * and `purgeBiometricItems` removes what a migrated 0.6.0c left behind.
+   */
   biometricAvailable: boolean;
   /**
    * SP02 §7, RF-63: keys of `bv1.` values sealed under this person's `vaultKey` beside the vault and
@@ -249,6 +258,15 @@ export interface Session {
    * remains the only way into this machine.
    */
   disableBiometric(): Promise<SessionState>;
+  /**
+   * 0.7.0: with biometric unlock unavailable on this runtime (`SessionDeps.biometricAvailable`
+   * false — the Electrobun target, `docs/handovers/e07-migration.md` §5), a machine that migrated
+   * from tinyjs 0.6.0c keeps no vault key in the system keychain. Every person `store` lists under
+   * `biometric_people` loses `nod.bio.<person>` here and has the flag cleared, so the entry screen
+   * offers no fingerprint. The item's value is never read; deletion only. Idempotent, and a no-op
+   * where biometric unlock exists.
+   */
+  purgeBiometricItems(): Promise<void>;
   /**
    * The keys of the unlocked session (SP02 §6); `null` while locked. A password unlock gives both;
    * a biometric unlock has no password behind it, so `authKey` is `null` there while `vaultKey` is
@@ -826,6 +844,30 @@ export function createSession(deps: SessionDeps): Session {
     return state();
   }
 
+  /**
+   * 0.7.0: no biometric item survives where biometric unlock is unavailable. The Electrobun target
+   * says so through `system.capabilities().biometricUnlock` (`backend/main.ts`), because its `bun`
+   * binary carries Bun's Developer ID and the keychain then lets any Electrobun app read
+   * `nod.bio.<person>` without a prompt (`docs/handovers/e07-migration.md` §5). A Mac that migrated
+   * from tinyjs 0.6.0c still has the item: it goes here, before the entry screen is drawn, and the
+   * flag with it so no fingerprint is offered. The value is never read — deletion only — and the
+   * sweep is idempotent: a person whose item is already gone still has the stale flag cleared.
+   */
+  async function purgeBiometricItems(): Promise<void> {
+    if (deps.biometricAvailable) return;
+    const people = await biometricPeople();
+    for (const personId of Object.keys(people)) {
+      await deps.keychain.delete(biometricKey(personId));
+      await markBiometric(personId, false);
+    }
+    // A pending rewrite belongs to a biometric item that no longer can exist; without this the
+    // marker would outlive the feature on this machine.
+    if ((await deps.store.get(BIOMETRIC_PENDING_KEY)) !== null) {
+      await deps.store.set(BIOMETRIC_PENDING_KEY, null);
+    }
+    knownBiometric = false;
+  }
+
   // ---------------------------------------------------------------- connected account (SP02 §6)
 
   /**
@@ -1205,6 +1247,7 @@ export function createSession(deps: SessionDeps): Session {
     lastPerson,
     enableBiometric,
     disableBiometric,
+    purgeBiometricItems,
     keys,
     vaultKey,
     onActivated,

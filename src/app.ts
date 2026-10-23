@@ -9,14 +9,12 @@ import { call, errorMessage, on } from './api';
 import { mountEntry, resetEntry, showEntryInvite } from './entry';
 import { openPalette } from './palette';
 import { mountSettings } from './settings';
-import { runGate } from './vault-gate';
-import { activeTab, createEmbedLayer, mountTabs, reportSlot, tabsApi } from './tabs';
-import type { EmbedLayer, TabsApi, TabsHandle } from './tabs';
+import { activeTab, mountTabs, reportSlot, tabsApi } from './tabs';
+import type { TabsApi, TabsHandle } from './tabs';
 import { button, clear, el, field, glyph, initials, input, message } from './ui';
 import type { SettingsTab } from './settings';
 import type {
   AppInfo,
-  EmbedCheck,
   Entry,
   EntryProfiles,
   HostState,
@@ -29,9 +27,7 @@ import type {
   ToolStatus,
   ToolsState,
   UpdateInfo,
-  VaultItem,
 } from '../shared/types';
-import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED } from '../shared/types';
 import { categoryOf, groupByCategory } from '../shared/catalog';
 import type { PresenceEntry } from '../shared/host-api';
 
@@ -82,6 +78,13 @@ let info: AppInfo | null = null;
 /** Answer of `tools.state` or the push `tools`. */
 let tools: ToolStatus[] = [];
 /**
+ * How many `tools` pushes have been applied. A read issued before one of them hands back the state
+ * of a moment ago, and `loadUnlocked` must not put an older answer over a newer push (a member
+ * joining the guild has the first snapshot land between two of its reads); this is what orders the
+ * two.
+ */
+let toolsRevision = 0;
+/**
  * E03: the whole answer of `tools.state`/`tools`/`tabs.*` — the tabs in strip order, the active
  * one, the mode and whether the backend owns the tab shortcuts (RF-49…RF-52). `null` before the
  * first answer and after a lock.
@@ -89,6 +92,8 @@ let tools: ToolStatus[] = [];
 let tabsState: ToolsState | null = null;
 /** Answer of `catalog.list` or a refresh triggered by the push `catalog`. */
 let catalog: Entry[] = [];
+/** `toolsRevision`'s counterpart for the catalog: a push owns the answer newer than a read. */
+let catalogRevision = 0;
 /**
  * B7/SP05 §4: the person's ordered favorites, from `favorites.list`. The sidebar's order comes from
  * the backend already; this list is what draws the toggle's state.
@@ -117,25 +122,6 @@ let settings: SettingsHandle | null = null;
 let settingsTab: SettingsTab | null = null;
 /** E03: the tab view of the center panel, mounted while docked mode shows it (`src/tabs.ts`). */
 let tabView: TabsHandle | null = null;
-/**
- * RF-69: the iframe layer of the embedded tabs. It is mounted on the panel's content box once and
- * lives with the shell, not with the tab view, so Home and Settings visits never reload an
- * embedded tool (RF-50); `destroyTabView` hides it instead of detaching its iframes.
- */
-let embeds: EmbedLayer | null = null;
-/**
- * 0.6.0b (RF-69): the person's vault metadata, read lazily for the embedded tab's Sign in control.
- * Settings reads it when its Vault tab opens; there is no vault push, so this cache is refreshed
- * when an embedded tab lands on the panel (and after a conversion). It holds usernames and labels,
- * never a secret — the password only ever travels inside the gated `vault.copy`.
- */
-let vaultItems: VaultItem[] | null = null;
-/** The `vault.list` call in flight, so a redraw does not repeat it. */
-let vaultPending: Promise<void> | null = null;
-/** Bumped on every session change: a read that lands after a lock cannot feed the next session. */
-let vaultEpoch = 0;
-/** 0.6.0b: a system prompt failed in this unlocked session, so the gate asks for the password. */
-let gateFallback = false;
 
 // ------------------------------------------------------------------ helpers
 
@@ -214,9 +200,6 @@ function buildShell(): void {
   const banner = el('div', { class: 'banner' });
   const content = el('div', { class: 'content' });
   shell = { sidebar, notice, banner, content };
-  // RF-69: the iframe layer of the embedded tabs lives with the shell, beside the screens the
-  // content box shows — Home, Settings and the tab view come and go; the iframes do not.
-  ensureEmbeds();
   root.replaceChildren(
     el('div', { class: 'shell' }, sidebar, el('div', { class: 'main' }, notice, banner, content)),
   );
@@ -226,11 +209,6 @@ function teardownShell(): void {
   destroySettings();
   // E03: the tab view goes with the panel (a lock), reporting the empty slot on its way out.
   destroyTabView();
-  // RF-69: a locked window has no tabs, so the iframes go with the shell too.
-  if (embeds !== null) {
-    embeds.destroy();
-    embeds = null;
-  }
   // B7: the dialog is an overlay of the main window, so it goes with the shell (a lock). E03: the
   // "Open link…" dialog is the same kind of overlay and goes with it too.
   document.getElementById(PERSONAL_DIALOG_ID)?.remove();
@@ -456,31 +434,6 @@ function destroySettings(): void {
 }
 
 /**
- * E03 (RF-49/RF-69): the children of the center panel, with the iframe layer of the embedded tabs
- * left where it is. A `replaceChildren` would take the iframes out of the document — and the
- * embedded tools would reload when the person came back (RF-50) — so every screen replaces only
- * what it drew around that one element.
- */
-function fillContent(content: HTMLElement, ...nodes: Array<Node | null>): void {
-  const keep = embeds === null ? null : embeds.element;
-  for (const child of Array.from(content.children)) {
-    if (child !== keep) child.remove();
-  }
-  for (const node of nodes) {
-    if (node !== null) content.append(node);
-  }
-}
-
-/** RF-69: the iframe layer of the shell, created (and mounted) the first time it is needed. */
-function ensureEmbeds(): EmbedLayer {
-  if (embeds !== null) return embeds;
-  const layer = createEmbedLayer();
-  embeds = layer;
-  shell?.content.append(layer.element);
-  return layer;
-}
-
-/**
  * The center panel draws the face `view` asks for: Home, the tab view of docked mode (E03/RF-49) or
  * one Settings tab. The Settings screen is mounted once and updated in place afterwards.
  */
@@ -505,7 +458,7 @@ function renderContent(): void {
   // E03 (RF-49): Settings takes the panel, so the tab view goes with its slot and its observers.
   destroyTabView();
   const container = el('div', { class: 'settings-view' });
-  fillContent(shell.content, container);
+  shell.content.replaceChildren(container);
   settingsTab = view;
   settings = mountSettings(container, { session, info, tab: view, host, join: joinInvite });
 }
@@ -519,28 +472,17 @@ function renderContent(): void {
 function renderTabView(): void {
   const state = tabsState;
   if (shell === null || state === null) return;
-  const active = activeTab(state);
-  // 0.6.0b (RF-69): the Sign in control of an embedded tab needs the vault metadata. There is no
-  // vault push, so it is read when the view mounts — which is also how a change made in Settings →
-  // Vault is picked up — and while it is still unknown when an embedded tab becomes active in place.
-  if (active !== null && active.embedded && active.toolId !== null) {
-    if (tabView === null || vaultItems === null) void readVault();
-  }
   if (tabView !== null) {
     tabView.update(state);
     return;
   }
   const container = el('div', { class: 'tab-view' });
-  fillContent(shell.content, container);
+  shell.content.replaceChildren(container);
   tabView = mountTabs(container, {
     state,
     actions: tabActions,
     // RF-66: the dialog of `openLinkDialog`, beside the personal-tool one.
     openLink: () => openLinkDialog(),
-    // RF-69: the iframes of the embedded tabs, mounted by the shell and kept across views.
-    embeds: ensureEmbeds(),
-    // 0.6.0b: the credential of an embedded tool, for the Sign in control (metadata only).
-    credential: defaultCredential,
   });
 }
 
@@ -579,8 +521,8 @@ function renderHome(content: HTMLElement): void {
   } else {
     appendCatalog(body);
   }
-  fillContent(
-    content,
+  const card = presenceCard();
+  content.replaceChildren(
     el(
       'header',
       { class: 'content-header' },
@@ -592,7 +534,7 @@ function renderHome(content: HTMLElement): void {
       }),
     ),
     body,
-    ...[presenceCard()].filter((card) => card !== null),
+    ...(card === null ? [] : [card]),
   );
 }
 
@@ -1113,10 +1055,17 @@ async function installUpdateNow(): Promise<void> {
   const target = shell;
   if (target === null) return;
   message(target.banner, 'info', 'Installing the update…');
+  let installed: boolean;
   try {
-    await call('nod.installUpdate');
+    installed = await call('nod.installUpdate');
   } catch (e) {
     showBanner(e);
+    return;
+  }
+  // `false` is the backend refusing the install (bad hash, failed swap, rollback): the bundle on
+  // disk is untouched, so the banner must not claim success over it.
+  if (!installed) {
+    message(target.banner, 'error', 'The update could not be installed');
     return;
   }
   message(target.banner, 'ok', 'Update installed');
@@ -1161,18 +1110,6 @@ const tabActions: TabsApi = tabsApi({
   save: (id) => {
     void saveTab(id);
   },
-  setEmbedded: (toolId, embedded) => {
-    void applyEmbedded(toolId, embedded);
-  },
-  reportLoginFails: (toolId) => {
-    void reportLoginFails(toolId);
-  },
-  copyUsername: (item) => {
-    void copyUsername(item);
-  },
-  copyPassword: (item) => {
-    copyPassword(item);
-  },
 });
 
 /**
@@ -1184,246 +1121,13 @@ function tabOnPanel(): TabState | null {
 }
 
 /**
- * 0.6.0b (RF-69): the credential the login cascade uses for `toolId` — the default one, or the
- * tool's first while the list holds no default. Only metadata comes from `vault.list`; the page
- * never holds a secret.
- */
-function defaultCredential(toolId: Id): VaultItem | null {
-  if (vaultItems === null) return null;
-  const forTool = vaultItems.filter((item) => item.toolId === toolId);
-  return forTool.find((item) => item.isDefault) ?? forTool[0] ?? null;
-}
-
-/**
- * 0.6.0b (RF-69): reads the vault's metadata for the embedded tab's Sign in control. There is no
- * vault push, so the read happens when an embedded tab lands on the panel and after a conversion;
- * the answer redraws the toolbar in place, and a failure keeps the last knowledge for the next
- * mount to retry. Settings → Vault reads the same list when its tab opens.
- */
-function readVault(): Promise<void> {
-  if (vaultPending !== null) return vaultPending;
-  const epoch = vaultEpoch;
-  const pending: Promise<void> = call('vault.list')
-    .then((items) => {
-      if (epoch === vaultEpoch) vaultItems = items;
-    })
-    .catch(() => undefined)
-    .finally(() => {
-      if (vaultPending === pending) vaultPending = null;
-      if (epoch === vaultEpoch && view === 'tab' && tabView !== null && tabsState !== null) {
-        tabView.update(tabsState);
-      }
-    })
-    .then(() => undefined);
-  vaultPending = pending;
-  return pending;
-}
-
-/** 0.6.0b: the username is on screen in Settings → Vault, so it is copied as ordinary text. */
-async function copyUsername(item: VaultItem): Promise<void> {
-  clearBanner();
-  try {
-    await navigator.clipboard.writeText(item.username);
-    if (shell !== null) message(shell.banner, 'ok', 'Username copied');
-  } catch {
-    if (shell !== null) {
-      message(shell.banner, 'error', 'Could not copy; select it in Settings → Vault and copy it by hand');
-    }
-  }
-}
-
-/** 0.6.0b: the password prompt of a gate outside Settings — the Sign in control of an embedded tab. */
-const GATE_DIALOG_ID = 'gate-dialog';
-
-/**
- * K5/SP02 §9: renders the password prompt `runGate` asks for. The decision to ask, and the
- * system-prompt → password fallback, are the same helper Settings → Vault uses; only the place the
- * prompt appears differs (a dialog here, the card itself there). The typed value goes back to the
- * action and is never kept: the field is cleared before the call.
- */
-function askGatePassword(note: string | null, run: (password?: string) => Promise<void>): void {
-  if (document.getElementById(GATE_DIALOG_ID) !== null) return;
-  const password = input('gate-password', { type: 'password', autocomplete: 'current-password' });
-  password.classList.add('gate-password');
-  const overlay = el('div', { id: GATE_DIALOG_ID, class: 'overlay' });
-
-  const close = (): void => {
-    document.removeEventListener('keydown', onKey);
-    overlay.remove();
-  };
-
-  function onKey(event: KeyboardEvent): void {
-    if (event.key !== 'Escape') return;
-    event.preventDefault();
-    close();
-  }
-
-  const confirm = button(
-    'Confirm',
-    () => {
-      const typed = password.value;
-      // Read once and cleared right away: neither the field nor this window keeps it.
-      password.value = '';
-      close();
-      return run(typed === '' ? undefined : typed);
-    },
-    { kind: 'primary' },
-  );
-  const hint =
-    note !== null
-      ? note
-      : info !== null && info.biometricAvailable
-        ? 'This is a development run: the action takes your password.'
-        : 'This machine has no biometrics: the action asks for your password.';
-  const card = el(
-    'div',
-    { class: 'palette', role: 'dialog', aria: { modal: 'true', label: 'Password' } },
-    el('h2', { class: 'dialog-title' }, 'Password'),
-    el('p', { class: 'muted' }, 'Nod asks for your password before it copies the credential.'),
-    field('Password', password, hint),
-    el('div', { class: 'row' }, confirm, button('Cancel', () => close(), { kind: 'ghost' })),
-  );
-  password.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter') return;
-    event.preventDefault();
-    confirm.click();
-  });
-  overlay.append(card);
-  overlay.addEventListener('mousedown', (event) => {
-    if (event.target === overlay) close();
-  });
-  document.addEventListener('keydown', onKey);
-  document.body.append(overlay);
-  password.focus();
-}
-
-/**
- * 0.6.0b (RF-69): copies the credential's password through the gated `vault.copy`, exactly as
- * Settings → Vault's Copy does — the same item, the same fallback flow (`runGate`), and the same
- * wording. Nothing of the secret comes back to the page.
- */
-function copyPassword(item: VaultItem): void {
-  clearBanner();
-  let failure: string | null = null;
-  const run = async (password?: string): Promise<void> => {
-    failure = null;
-    try {
-      await call('vault.copy', password === undefined ? { itemId: item.id } : { itemId: item.id, password });
-      if (shell !== null) message(shell.banner, 'ok', 'Copied — paste it now: this page never held it');
-    } catch (e) {
-      failure = errorMessage(e);
-      // A gate answer asks for the password; every other refusal is the window's banner.
-      if (failure !== GATE_PROMPT_FAILED && failure !== GATE_PASSWORD_REQUIRED && shell !== null) {
-        message(shell.banner, 'error', failure);
-      }
-    }
-  };
-  runGate({
-    systemPrompt:
-      session !== null &&
-      !gateFallback &&
-      (session.biometric || (info !== null && info.biometricAvailable && !info.devRun)),
-    run,
-    failure: () => failure,
-    systemPromptFailed: () => {
-      gateFallback = true;
-    },
-    ask: (note, submit) => askGatePassword(note, submit),
-  });
-}
-
-/**
- * RF-70: the one sentence for a tool that must stay a window — its login cannot survive an iframe.
- * The reason comes from the backend (`embed_blocked`), so the page never guesses why.
- */
-function embedRefusalNotice(title: string, reason: string): void {
-  if (shell === null) return;
-  message(
-    shell.banner,
-    'info',
-    `${title} can't be shown inside Nod: ${reason}. It opens as a window tab, where Nod fills your login.`,
-  );
-}
-
-/**
- * RF-70: a tool whose login cannot survive an iframe is announced once — when a `tools` answer first
- * carries it in `embedBlocked` after it had embedded tabs (the backend converted them in place, or
- * the person reported the lost login). Later pushes carry it as already blocked and stay silent.
- */
-function announceEmbedBlocked(previous: ToolsState | null, next: ToolsState): void {
-  if (previous === null) return;
-  for (const [toolId, reason] of Object.entries(next.embedBlocked)) {
-    if (toolId in previous.embedBlocked) continue;
-    if (!previous.tabs.some((tab) => tab.toolId === toolId && tab.embedded)) continue;
-    const title = next.tools.find((tool) => tool.id === toolId)?.title ?? 'This tool';
-    embedRefusalNotice(title, reason);
-    return;
-  }
-}
-
-/**
- * RF-69: "Show inside Nod"/"Open as window" of the toolbar and the palette. Becoming embedded asks
- * the backend first (`tabs.checkEmbed`, the same check `tabs.setEmbedded` runs): a tool whose
- * address may not be framed keeps its window and the panel says why; nothing else changes. The
- * conversion itself (the preference and every open tab of the tool, in place) is the backend's.
- */
-async function applyEmbedded(toolId: Id, embedded: boolean): Promise<void> {
-  clearBanner();
-  if (embedded) {
-    let check: EmbedCheck;
-    try {
-      check = await call('tabs.checkEmbed', { toolId });
-    } catch (e) {
-      showBanner(e);
-      return;
-    }
-    if (!check.frameable) {
-      const title = tools.find((tool) => tool.id === toolId)?.title ?? 'This tool';
-      embedRefusalNotice(title, check.reason ?? 'the address refuses framing');
-      return;
-    }
-  }
-  const applied = await runTools(() => call('tabs.setEmbedded', { toolId, embedded }));
-  if (!applied || !embedded) return;
-  // 0.6.0b (RF-69): no script reaches a subframe, so an embedded tool is never filled by the
-  // login cascade. The person's saved credential is still useful through the tab's Sign in control;
-  // say so after the conversion has landed, without blocking the new tab.
-  await readVault();
-  if (defaultCredential(toolId) !== null && shell !== null) {
-    const title = tools.find((tool) => tool.id === toolId)?.title ?? 'This tool';
-    message(
-      shell.banner,
-      'info',
-      `${title} will not be signed in automatically inside Nod — use Sign in on the tab to copy your login.`,
-    );
-  }
-}
-
-/**
- * RF-70: the person says the login did not survive the iframe ("Login won't stay? Open as window").
- * The backend blocks the tool, removes it from `embedded_tools` and converts its embedded tabs to
- * window tabs in place; the answer's `embedBlocked` carries the reason and `applyTools` announces
- * the block once, without a second read of the state here.
- */
-async function reportLoginFails(toolId: Id): Promise<void> {
-  await runTools(() => call('tabs.reportLoginFails', { toolId }));
-}
-
-/**
  * E03 (RF-49/RF-52): one `tools.state`/`tools`/`tabs.*` answer lands here. The center panel has two
- * faces, Home and the tab view, and Windows mode has only the first: a tab view left behind by a
- * mode that moved to Windows, or by the last tab closing, would be a strip with nothing under it.
+ * faces, Home and the tab view, and Windows mode (the Wayland case) has only the first: a tab view
+ * left behind by the last tab closing would be a strip with nothing under it.
  */
 function applyTools(state: ToolsState): void {
-  const previous = tabsState;
   tabsState = state;
   tools = state.tools;
-  // RF-70: the notice follows the answer that blocked a tool, whether the backend found the risk
-  // (item 4 of the contract) or the person reported the lost login.
-  announceEmbedBlocked(previous, state);
-  // RF-69: the iframe layer follows every answer even while Home or Settings hide it — a closed
-  // tab's iframe goes, a new embedded tab's frame is created (hidden) at once.
-  embeds?.update(state);
   if (view !== 'tab') return;
   if (state.mode !== 'docked' || state.tabs.length === 0) view = 'home';
 }
@@ -1588,12 +1292,6 @@ async function lockSession(): Promise<void> {
   tools = [];
   // E03: the tab view went with the shell (`teardownShell`), and a locked window has no tabs.
   tabsState = null;
-  // 0.6.0b: a locked window holds no vault metadata, and the gate starts from the system prompt
-  // again for the next unlocked session.
-  vaultEpoch += 1;
-  vaultItems = null;
-  vaultPending = null;
-  gateFallback = false;
   catalog = [];
   favorites = [];
   // Locked windows cannot read `host.state` (SP05 §3): the badge waits for the next unlock.
@@ -1610,12 +1308,14 @@ async function lockSession(): Promise<void> {
 
 async function loadUnlocked(): Promise<void> {
   let state: ToolsState;
-  // 0.6.0b: every unlock starts with no vault metadata (the Sign in control reads it lazily) and
-  // with the gate trying the system prompt first.
-  vaultEpoch += 1;
-  vaultItems = null;
-  vaultPending = null;
-  gateFallback = false;
+  // A push that lands while these reads are in flight is the newer answer: the backend sends a whole
+  // `ToolsState` (and the catalog) on every change, and a read that left before it can only hand back
+  // the state of a moment ago. `Promise.all` makes that easy to hit — the first snapshot of a member
+  // joining the guild lands between two of the five answers — and applying the read's empty list over
+  // that push left the new member's sidebar empty with no later push to correct it (the reader is
+  // here, so the reads are the only writers left). A push took over those fields instead.
+  const toolsAt = toolsRevision;
+  const catalogAt = catalogRevision;
   try {
     const [answer, entries, hostState, ids, tiles] = await Promise.all([
       call('tools.state'),
@@ -1629,20 +1329,31 @@ async function loadUnlocked(): Promise<void> {
       call('session.profiles'),
     ]);
     state = answer;
-    catalog = entries;
+    if (catalogRevision === catalogAt) {
+      catalog = entries;
+      favorites = ids;
+    }
     host = hostState;
-    favorites = ids;
     profiles = tiles;
   } catch (e) {
     showBanner(e);
     return;
   }
-  // E03 (RF-52): Windows mode has no slot of the page's own — the backend is told once, here, so a
-  // slot left over from a docked session is not followed by a window of a mode that has none.
+  // E03 (RF-52): Windows mode (Wayland) has no slot of the page's own — the backend is told once,
+  // here, so a stale slot is not followed by a window of a mode that has none.
   if (state.mode === 'windows') reportSlot(null);
   // E03 (RF-49/RF-50): the page's whole answer — the tabs, the active one, the mode — and the panel
   // shows its active tab at once: the tabs a docked session had open are restored and docked again.
-  applyToolsState(state);
+  // A `tools` push that arrived during the reads already carries that whole answer (`tabsState`), so
+  // the pushed one is what the panel follows.
+  if (toolsRevision === toolsAt) {
+    applyToolsState(state);
+  } else if (tabsState !== null) {
+    showActiveTab(tabsState);
+    refreshChrome();
+  } else {
+    applyToolsState(state);
+  }
   void loadPresence();
   // K4: how many shares the inbox is holding, for the badge the sidebar draws.
   void loadInboxCount();
@@ -1734,11 +1445,6 @@ function openPaletteNow(): void {
         ? {
             active: panelTab,
             open: tabsState.tabs,
-            // 0.6.0b: the Sign in rows of an embedded tab; the metadata is read by the tab view.
-            credential:
-              panelTab !== null && panelTab.toolId !== null
-                ? defaultCredential(panelTab.toolId)
-                : null,
             ...tabActions,
           }
         : null,
@@ -1786,13 +1492,11 @@ on('session', (next) => {
   if (!next.unlocked) {
     teardownShell();
     tools = [];
+    // The lock is newer than any read a shell left in flight: it must not be undone by that read.
+    toolsRevision += 1;
+    catalogRevision += 1;
     // E03: the tab view went with the shell, and a locked window has no tabs.
     tabsState = null;
-    // 0.6.0b: a locked window holds no vault metadata and no gate fallback from the old session.
-    vaultEpoch += 1;
-    vaultItems = null;
-    vaultPending = null;
-    gateFallback = false;
     catalog = [];
     favorites = [];
     host = null;
@@ -1819,14 +1523,9 @@ on('session', (next) => {
 
 on('tools', (next) => {
   // E03: the strip draws this answer. A push is not a person asking for a tab, so the window keeps
-  // the view it is on — the `tab` push below is the one that says "show this tab". The one
-  // exception is the mode switch (Settings → Account, RF-52/RF-69): moving to docked with tabs open
-  // must land on the strip, because every tab may be detached and the strip is where their ⤓ is.
-  const previous = tabsState;
+  // the view it is on — the `tab` push below is the one that says "show this tab".
+  toolsRevision += 1;
   applyTools(next);
-  if (previous !== null && previous.mode !== 'docked' && next.mode === 'docked' && next.tabs.length > 0) {
-    view = 'tab';
-  }
   refreshChrome();
 });
 
@@ -1860,6 +1559,7 @@ on('openLink', () => {
 });
 
 on('catalog', () => {
+  catalogRevision += 1;
   void loadCatalog();
 });
 
@@ -1960,8 +1660,8 @@ document.addEventListener('keydown', (event) => {
 });
 
 /**
- * E03 (§7): ⌘T new tab, ⌘W close tab, ⌃Tab/⌃⇧Tab next and previous, ⌘⇧D detach or dock (a no-op
- * on an embedded tab, RF-69), ⌘D save the tab to the sidebar. True when the event was one of them.
+ * E03 (§7): ⌘T new tab, ⌘W close tab, ⌃Tab/⌃⇧Tab next and previous, ⌘⇧D detach or dock,
+ * ⌘D save the tab to the sidebar. True when the event was one of them.
  * ⌘L ("Open link…") is not one of these: the caller handles it, because the dialog works from Home
  * and Settings as well.
  *
@@ -1995,8 +1695,6 @@ function handleTabKey(event: KeyboardEvent, key: string): boolean {
   }
   if (key === 'd' && event.shiftKey && tab !== null) {
     event.preventDefault();
-    // RF-69: an embedded tab has no window to detach into or dock from — the key is a no-op.
-    if (tab.embedded) return true;
     if (tab.docked) tabActions.detach(tab.id);
     else tabActions.dock(tab.id);
     return true;

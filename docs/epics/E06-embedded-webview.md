@@ -93,10 +93,11 @@ Estimate (`[INFERENCE]`, from the per-part sizes above, not measured):
 - macOS + Windows: **~1.5–2 weeks**;
 - all three: **~3–4+ weeks**, with Linux the long pole.
 
-Relation to E03: the iframe embedded tab (RF-69) stays as the cheap path for frameable first-party
-tools. E06 is the path that works for every site and removes the OS window entirely; if it lands,
-`backend/tool-windows.ts` keeps its model — slot, polling and detach become attach, bounds updates
-and detach of a view.
+Relation to E03: E03's iframe embedded tab (RF-69/RF-70) was removed on 2026-10-22
+(`docs/canonico.md` §22 "Seamless tabs: always inside, detach on demand"); the tab-inside-the-window
+model holds on both runtimes, and E06 is what gives it a native view on every site instead of the
+frameless OS window tinyjs uses. If it lands, `backend/tool-windows.ts` keeps its model — slot,
+polling and detach become attach, bounds updates and detach of a view.
 
 ## 4. Prior art
 
@@ -138,19 +139,15 @@ upstream. The risks, in order:
 - **Upstream acceptance is uncertain.** Issue #46 shows interest; it is not a design agreement, and
   the maintainer may prefer a different model (iframe/webview in page, or nothing).
 
-## 7. Second runtime addition worth carrying in the same fork
+## 7. Clearing site data per origin (superseded on 0.58.0)
 
-**Clear site data per origin.** There is no runtime API for it today (`backend/tiny.d.ts` has no
-cookie or storage call), and the access-revocation work of §8 needs it.
-
-- macOS: `WKWebsiteDataStore.removeDataOfTypes(_:modifiedSince:)` plus record matching by domain.
-- Windows: WebView2 `CookieManager.DeleteCookiesWithDomainAndPath` and
-  `Profile.ClearBrowsingData`.
-- Linux: WebKitGTK's website data manager `remove`.
-
-It is a small surface (one method, `siteData.clearOrigin(origin)` for example) and it rides the same
-fork/release path as the view. Without it, only non-`HttpOnly` cookies and `localStorage` of the
-entry origin are reachable by `eval` — which rarely ends a session.
+Written against 0.57.2, where no runtime call cleared cookies, so this was a second addition for the
+fork. **tinyjs 0.58.0 ships `app.cookies`** (§11): `app.cookies.remove({ url })` deletes every cookie a
+request to the origin would carry, HttpOnly included, on all three OSes — no fork needed for cookies.
+What 0.58.0 does not cover is `localStorage`/IndexedDB of the origin (leitura of the 0.63.0
+`tiny.d.ts`: `TinyCookies` only); a tool that keeps its session there still needs the native calls
+(`WKWebsiteDataStore.removeDataOfTypes`, WebView2 `Profile.ClearBrowsingData`, WebKitGTK website data
+manager) or an `eval` on its own origin.
 
 ## 8. Access revocation research
 
@@ -174,7 +171,8 @@ Owner, 2026-10-19:
 - Saving a new secret fans out `update` shares and overwrites the copy at the receiver's next sync,
   but the tool's cookie session and the old password **at the tool** stay valid.
 - Cookies: one browser profile per app id (`docs/tinyjs.md` §3), and RF-03 wants sessions to survive
-  a restart. No code or runtime API clears site data (`backend/tiny.d.ts`).
+  a restart. No code in the Nod clears site data; on 0.57.2 the runtime had no call for it, and
+  0.58.0 added `app.cookies` (§7, §11).
 - Reveal and copy are **not audited**: there is no such `EventType` (`shared/types.ts:270-317`).
 
 **Principle.** Anything the revoked person's Nod does is cooperative — a modified client can ignore
@@ -184,11 +182,11 @@ it. Only the tool's own server is a hard cut, and only if the tool offers a way 
 | --- | --- | --- | --- |
 | 1 | **Cooperative enforcement** | Delete the received copy at the next sync; close the tabs; an optional per-entry **logout URL** the Nod opens in the background (a real server-side logout without a cookie API); an online holder check before filling a shared credential, with an owner-chosen offline grace | Works only on an unmodified Nod; the logout URL is per tool and must be catalog data |
 | 2 | **Raise the bar** | A **fill-only** sharing scope (no reveal/copy for receivers; the value still reaches the page DOM); content-free reveal/copy audit events pushed to the host; "rotation pending" as a task with a link to the tool's admin | Fill-only still exposes the value to the page; audit is after the fact |
-| 3 | **Local site-data clearing** | Needs §7 in the fork: clear the origin's cookies and storage on revocation | Without the runtime API, `eval` reaches only non-`HttpOnly` cookies and `localStorage`, which rarely ends a session |
+| 3 | **Local cookie clearing** | `app.cookies.remove({ url })` (tinyjs 0.58.0+, §11) on revocation: the origin's cookies go, HttpOnly session cookies included | Needs the runtime upgrade from 0.57.2; `localStorage` sessions are not covered (§7); cooperative like (1) |
 | 4 | **Hard cut** | Tools authenticate through the host (OIDC/forward-auth, E01 §13 M4): disabling a person or a role cuts access at the tool's next request | Works for self-hosted tools with SSO (Planka and AFFiNE support OIDC, Jitsi JWT — to confirm in their docs), never for Claude/Discord |
 
-**Recommended order:** (1) plus audit, then fill-only scope, then (4) for the owner's own tools, and
-(3) only with the fork.
+**Recommended order:** (1) plus audit and (3) once the Nod runs on tinyjs 0.58.0+, then fill-only
+scope, then (4) for the owner's own tools.
 
 **Open questions for the owner:** should fill-only be a separate scope or the default for received
 credentials; how long the offline grace is; whether the logout URL is catalog data.
@@ -220,3 +218,192 @@ honest; does the login stick) in days, before investing in Windows and Linux.
    maintainer's answer before shipping the fork?
 8. **Revocation scope.** The four options of §8 are independent; which ones enter the same effort
    block as the view?
+
+## 11. What changed in tinyjs since 0.57.7 (review of 2026-10-22, leitura)
+
+Owner, 2026-10-22: "quero que revise se algo mudou do lado do tinyjs para resolver isso. se nao, quero
+começar a explorar quais possibilidade temos, e se for o caso podemos embeber alguma coisa em outro
+stack miniscula só pra resolver esse problema mas fica como ponto de pesquisa".
+
+Read: `CHANGELOG.md` of `tarwin/tinyjsapp` from 0.57.8 to **0.63.0** (latest, 2026-10-22), the
+`template/types/tiny.d.ts` of that tag, and issue #46. Nothing compiled or run. The Nod still pins
+`minTinyjsVersion` 0.57.2 and every spike and smoke ran on 0.57.2.
+
+- **No embedded webview.** Issue #46 (the "inside your own UI, like an iframe or `<webview>`" thread)
+  was **closed on 2026-10-20 by `app.cookies`**, not by a view. No release from 0.57.8 to 0.63.0 adds a
+  view, a child webview, subframe injection or an embedded-tab primitive. Claude (XFO) and autofill
+  inside a tab still need §3.
+- **`app.cookies` (0.58.0, all three OSes)**: the backend reads and writes the app's single cookie
+  jar, HttpOnly cookies included — `get({ url?, name?, domain?, path? })`, `set({ url | domain, name,
+  value, path?, expires?, secure?, httpOnly?, sameSite? })` (`sameSite` defaults to `'lax'`),
+  `remove({ name, domain, path? } | { url, name? })`. Backend only; pages get no cookie API.
+- **0.63.0** carries security fixes the Nod benefits from (events to pages now pass the `"api"` gate,
+  so tool pages stop hearing the main page's pushes; restrictive-looking `"api"` values are now
+  restrictive; update redirects checked per hop) and the hotkey parser shared by the three launchers.
+  **0.61.0** adds opt-in signed updates (`update.publicKey`, Ed25519). **0.63.0** also makes every
+  `target=_blank rel=noopener` on macOS reach `onWindowOpen`, which RF-66 popup adoption relies on.
+
+What `app.cookies` changes for the Nod (inferences, each needs an execução before it is a fact):
+
+| Problem | Before | With `app.cookies` |
+| --- | --- | --- |
+| Revocation (§8 option 3) | needed the fork's site-data call | **no fork needed**: on a revoked credential or role the Nod can `remove({ url })` every cookie of the tool's origin, HttpOnly session cookies included — a local logout without a logout URL |
+| Planka/AFFiNE embedded (RF-70) | a `Strict`/`Lax` login cookie is never stored by the frame | a "promote" path: the person signs in once in a **window** tab (top-level, the cookie is stored), then the Nod rewrites that tool's cookies to `sameSite: 'none', secure: true` and the embedded tab sends them. Needs a spike: whether the tool rewrites its cookie back to `Strict` on the next response, how long the promoted session lasts, and the CSRF tradeoff (a `None` cookie goes along on cross-site requests from any site) |
+| Login persistence for embedded tabs in dev | third-party cookies blocked under `http://127.0.0.1` | unchanged (dev only) |
+| Claude inside the window | XFO `SAMEORIGIN` refuses the frame | unchanged: no cookie helps a frame the site refuses |
+
+Upgrade cost: moving `minTinyjsVersion` and the CI `TINYJS_VERSION` from 0.57.2 to 0.63.0 means
+re-running `bun test test/ host/`, the three smokes and the RF-49…RF-70 surface checks, and reading
+the 0.63.0 event-gate change against the Nod's `app.push` use (tool pages listed in `api.origins` now
+need `event.<name>` to hear an event; the Nod pushes nothing a tool page should hear).
+
+## 12. Other stacks, as a research point
+
+Still the only path to a real in-window tab for any site (Claude included) with autofill is a native
+webview attached inside the main window. Options besides the tinyjs fork (§3), by what they would
+cost the Nod (leitura of public docs, 2026-10-22; nothing run):
+
+| Option | What it is | Fit | Cost / risk |
+| --- | --- | --- | --- |
+| **Fork tinyjs** (§3) | add a view to the three launchers | keeps the whole Nod as is | macOS ~3–5 days, all OSes 3–4+ weeks (§3); fork upkeep |
+| **Sidecar helper app** (tinyjs `executables/`) | a tiny native process (Swift on macOS) that hosts a `WKWebView` and is driven by the Nod's backend over a socket | no runtime change; the same small proof as §9 | macOS cannot put a view into **another process's** window: the sidecar owns its own window, so it is the 0.6.0 docked model again (positioning, focus, a tiling WM). Worth one probe only: a non-activating `NSPanel` (floating subrole) that tiling managers commonly leave floating — unmeasured with OmniWM. Inference, not measured: a separate app would most likely get its own cookie store, so logins would not be shared with the Nod's window tabs |
+| **Backend FFI** (txiki.js) | call AppKit from the backend | none | the backend (`tjs`) and the webview launcher are separate processes linked by a socket (§2): FFI in the backend cannot reach the launcher's `NSWindow` |
+| **Electrobun** | Bun-based desktop framework, system webview (WKWebView / WebView2 / WebKitGTK, optional CEF), with `<electrobun-webview>`: a separate native view kept aligned to an element of the host page, like an isolated iframe (framework.blackboard.sh/electrobun, "Electrobun Webview Tag") | the closest match to the Nod's need, and the Nod's backend is already TypeScript | a runtime switch: the backend (`backend/main.ts`, `tjs:sqlite`, `app.secrets`, hotkeys, tray, update, the `"api"` gate the Nod relies on) is rewritten against another API; reverses §22 "Runtime"; younger project; its Linux story to check |
+| **Tauri v2** | `add_child` / `new Webview(…)` child webviews | real child webviews | still behind `unstable` in 2.12, open Linux/Wayland and positioning bugs (§4); Rust shell, full rewrite of the backend |
+| **Electron** | `WebContentsView` | stable, the reference implementation | ~100 MB+ per install and Chromium's own profile; reverses the 6 MB premise (RNF-02) |
+| **Wait upstream** | ask for a view on tinyjs | no work | the maintainer shipped #46 as cookies; a view is real per-launcher work and his call |
+
+Cheapest next steps, in order, each one an execução that turns an inference into a fact:
+
+1. **Spike `app.cookies` on 0.63.0** in a throwaway app (not the Nod): `remove({ url })` logs a tool
+   out (revocation without the fork), and the "promote to `SameSite=None`" path keeps a Strict-cookie
+   tool signed in inside an iframe in a built app.
+2. **Probe a sidecar `NSPanel`** under OmniWM: does a non-activating floating panel stay out of the
+   tiling? If yes, the docked model gets a WM-proof variant without touching tinyjs.
+3. **macOS-only view in the fork** (§9), for Claude and autofill inside the window.
+
+Electrobun stays a research point: worth a spike only if 1–3 fail, since it means rewriting the
+backend on another runtime.
+
+## 13. Electrobun parity target (2026-10-22)
+
+Owner, 2026-10-22, after reading §12 and the spike:
+
+> acredito que agora essa talvez seja uma boa escolha para evitar problemas no futuro, entao teria
+> que acabar entrando agora mesmo sendo o e06, e ja evitamos mais retrabalho la na frente
+
+and:
+
+> orchestrate the development for a full parity in electronbun
+
+The decision is recorded in `docs/canonico.md` §22 ("Electrobun parity build", Decidido; "Electrobun
+replaces tinyjs as the shipped runtime", Proposto). This section is the target's contract; the
+row-by-row proof against the tinyjs surface is `docs/handovers/e06-parity-matrix.md`.
+
+### 13.1 Strategy: a facade, not a rewrite
+
+The Electrobun target runs the **same Nod** on a second runtime. Nothing under `backend/`, `shared/`
+or `src/` changed: `backend/main.ts` still calls `init(app)`, `app.win.open`, `app.push`,
+`app.secrets`, `tjs`, `tjs:sqlite` and the hooks; the page still calls `tiny.api` / `tiny.dialog`.
+
+| Layer | Where | What it does |
+|---|---|---|
+| Entry | `electrobun/bun/index.ts` | Installs the `tjs` shim, builds the bridge preload, wires the gate/RPC/downloads/update/native, calls `createApp`, then `backend.init(app)`, then opens the main window |
+| `TinyApp` facade | `electrobun/bun/facade/app.ts` (composition), `windows.ts`, `native.ts`, `update.ts`, `store.ts`, `downloads.ts` | The ~60 members the backend actually uses (`e06-tinyjs-surface.md` A–E); the rest of `tiny.d.ts` is not implemented and the backend never reaches it |
+| Origin gate | `electrobun/bun/facade/gate-core.ts` (pure policy) + `gate.ts` (registry) | Replaces tinyjs's `api.origins`: the runtime observes each view's committed origin (`did-commit-navigation`) and stamps `meta.window`/`meta.origin` itself; every non-main view is `sandbox: true` |
+| Page bridge | `electrobun/view/bridge.ts` (main window, document-start preload), `electrobun/view/tool-bridge.ts` (sandboxed views) | Same `window.tiny` members the page already uses; a tool page gets `tiny.win.id` baked in and its `api.call` settles through `executeJavascript` |
+| Native helper | `electrobun/native/NodNative.swift` → `libNodNative.dylib` (`bun:ffi`, in-process) | Keychain, LocalAuthentication, app icon, open/save panels, `setWindowFrame`, `setContentMinSize` (`docs/handovers/e06-native.md`); the view re-parent and the core's `resizeWebview`/`webviewSetHidden`/`listViews` are a second binding in `facade/native.ts` |
+| Config | `scripts/gen-electrobun-config.ts` → gitignored `electrobun.config.ts` | Reads `tinyjs.base.json` + `resources/seed.json`; identifier, page views, resources, native library, update base URL, media usage strings via `scripts/eb-postwrap.ts` (patched into the wrapper) and `scripts/eb-postbuild.ts` (`scripts.postPackage`, repairs/asserts the packed payload; `bun run eb:verify`) |
+| Publish | `scripts/eb-publish.ts`, `.github/workflows/electrobun.yml` | Artifact naming, sha256, merged `eb-manifest.json`, attach to an existing release (`docs/distribuicao.md` §10) |
+
+Window policy stays where it was: `backend/tool-windows.ts` decides slot, dock/detach and tabs.
+The target only makes the runtime obey — on Electrobun a docked tab is a **native `BrowserView`
+laid over the main window** (`createEmbedded`), so a tiling window manager has nothing to retile;
+detach re-parents the live view into a framed window and dock moves it back, with no reload
+(`setChrome` → `detachTab`/`dockTab`).
+
+### 13.2 Layout
+
+```
+electrobun/
+  bun/index.ts              entry: preload, RPC, gate, downloads, update, native, backend.init
+  bun/tjs-shim.ts           global tjs over Bun file APIs
+  bun/sqlite-shim.ts        tjs:sqlite over bun:sqlite (aliased by the generated config)
+  bun/facade/app.ts         TinyApp: paths/info/system/store/push/tray/hotkeys/quit/clipboard
+  bun/facade/windows.ts     win.open/window/getState/screens, docked views, detach, hooks
+  bun/facade/gate.ts        view registry, admission, host-message request/reply
+  bun/facade/gate-core.ts   the pure per-view policy (main/tool/popup/link/embed)
+  bun/facade/geometry.ts    page box <-> outer frame, slot rects, decorations
+  bun/facade/downloads.ts   host-routed saves (~/Downloads, de-dup naming, onDownload audit)
+  bun/facade/native.ts      bun:ffi client of libNodNative.dylib (degrades when absent)
+  bun/facade/store.ts       JSON store at the data dir (atomic write)
+  bun/facade/update.ts      eb-manifest.json check, sha256 staging, swap + rollback helper
+  view/bridge.ts            window.tiny for the main window
+  view/tool-bridge.ts       window.tiny for sandboxed tool/popup/link views + download capture
+  shared-rpc.ts             the typed RPC schema between page and bun
+  native/NodNative.swift    the helper source; build/ holds the compiled dylib
+```
+
+The generated `electrobun.config.ts` and `.hutch/` are gitignored. The tinyjs path (`tinyjs.json`,
+`scripts/gen-config.ts`, `app:dev`/`app:build`) is untouched and still the default target.
+
+### 13.3 How to run
+
+```sh
+bun run eb:dev      # build the native dylib, generate the dev config, start vite + electrobun dev
+                    # identifier copland.nod.eb-dev, dev port 5173 (never touches copland.nod)
+bun run eb:build    # dylib + build config + vite build + electrobun build --env=stable
+                    # -> build/stable-macos-arm64/Nod.app, artifacts/*.tar.zst
+
+bun test/smoke/run.ts       --runtime=electrobun --force
+bun test/smoke/ui.ts        --runtime=electrobun --force
+bun test/smoke/tabs.ts      --runtime=electrobun --force
+bun test/smoke/connected.ts --runtime=electrobun --force
+```
+
+`--runtime=electrobun` (or `NOD_RUNTIME=electrobun`) selects the target; an unknown value throws, so
+a typo never measures the other runtime. `NOD_APP_ID` and `NOD_DEV_PORT` isolate a launch; the
+smokes use their own identifiers (`…-eb`). Results of the four runners: `docs/handovers/e06-parity-smoke.md`.
+
+### 13.4 What it solves
+
+- **Claude (and any XFO/CSP site) inside the Nod window.** A native view is not a frame: measured
+  `https://claude.ai/` → login page rendered in-window, cookies shared with a top-level window
+  (`e06-view-spike.md` §1c).
+- **Autofill in the tab.** `BrowserView.executeJavascript` reaches the top frame of a sandboxed view
+  (measured: filled `#user`/`#pass` and read them back), so the existing login cascade applies —
+  the thing the iframe route could never do.
+- **No tiling-WM interference for docked tabs.** A native docked view has no window, so a tiler
+  cannot see it (`e06-view-spike.md` §1/§3). Note: the smoke's tabs round still reports a `Tool A`
+  window frame — the carrier-window fallback — so the smoke has not yet exercised this branch
+  (matrix §Gaps 13).
+- **Detach/dock without reload.** Re-parenting keeps `performance.timeOrigin`, the typed draft, RPC
+  and navigation hooks (`e06-view-spike.md` §2).
+- **The backend model survives.** Slot, tab strip, popups-as-tabs, deep links, tray, hotkeys,
+  updates and the audit trail are the same code, proven by the same smokes.
+- **App-level hide and the real tray icon.** `main.hide()` now reaches `NSApp.hide` through the
+  native helper (`facade/native.ts` `hideApp`), so focus returns to the previous app, while
+  `{ app: false }` keeps the window-only hide; `sf:`/`emoji:` tray specs are drawn to an 18 pt png
+  (`renderTrayIcon`) instead of being replaced by the bundled `tray.png` (leitura only — the final
+  surface round is still pending).
+
+### 13.5 Costs measured
+
+| Metric | Value | Source |
+|---|---|---|
+| Built artifact (macos-arm64) | **21 MB** `.app` | `e06-surface-check.md` §11 |
+| Installed bundle after an update | **68 MB** (`Contents/MacOS` 66 MB: Bun runtime + dylibs; `Resources` 2 MB) | same |
+| Unpacked after first run | 67 MB (spike) | `e06-electrobun-spike.md` §3 |
+| App data high-water during the spike | 150 MB (`updates/` 68 MB + `self-extraction/` 81 MB + DB ≈1.5 MB) | `e06-surface-check.md` §11 |
+| RSS, main + one tool window | **≈23.3 MB** total (launcher 736 KB + bun 23,168 KB) | same |
+| RSS, one window + embedded `claude.ai` view | 221 MB summed (one WebContent process per view) | `e06-electrobun-spike.md` §3 |
+
+The size premise moved: tinyjs's ~6 MB (RNF-02) is not the Electrobun floor — the Bun runtime is
+66 MB installed and every webview is its own WebKit content process. The owner's decision on the
+size target is still `Proposto` in §22; the numbers above are the input for it.
+
+Gaps by area, honestly listed (26 items): `docs/handovers/e06-parity-matrix.md` §Gaps. The headline
+ones: no `Content-Disposition` navigation download, no `onNavigate` fail/crash,
+no update signature (sha256 only), one unreproduced rollback no-op, guild app icon unreachable
+offline, Windows/Linux never run, the product's docked-view/detach path not yet proven by a smoke,
+and the final `tabs.ts` round after the `tiny.win.id` fix pending.

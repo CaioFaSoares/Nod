@@ -269,7 +269,6 @@ export function rectEquals(a: SlotRect | null, b: SlotRect | null): boolean;
 export interface PersistedTab { toolId: Id; view?: number; url?: string; detached?: true; active?: true }
 export function parsePersistedTabs(raw: unknown): PersistedTab[];
 export function saveTarget(url: string, entries: Array<{ id: Id; url: string }>): { kind: 'view'; entryId: Id } | { kind: 'tool' } | null;
-export function defaultMode(os: 'macos' | 'windows' | 'linux'): WindowMode;  // docked on macOS
 ```
 Puro: decide ids de janela, a ordem da faixa, que links são aceitos, o retângulo de tela do slot e o
 alvo do "salvar". A lista viva de abas e as chamadas de geometria são do backend
@@ -494,7 +493,6 @@ next(step: 1 | -1): ToolsState                // 'tabs.next' (⌃Tab/⌃⇧Tab),
 detach(id) / dock(id): ToolsState             // 'tabs.detach'/'tabs.dock' (⌘⇧D) — same window, no reload (RF-51)
 setSlot(rect: SlotRect | null): true          // 'tabs.slot' (RF-49): the center panel as the page sees it
 openLink(url): Promise<ToolsState>            // 'tabs.openLink' (RF-66)
-setMode(mode: WindowMode): Promise<ToolsState>  // 'tabs.setMode' (RF-52): Docked or Windows
 tabForSave(id) / adoptSavedTab(id, toolId)    // 'tabs.save' (RF-67)
 ```
 - **Toda janela de ferramenta é uma aba (E03).** O id da primeira aba de uma ferramenta continua o do
@@ -504,11 +502,13 @@ tabForSave(id) / adoptSavedTab(id, toolId)    // 'tabs.save' (RF-67)
   (`toolId: null`) nunca é persistida, nunca conta para uma ferramenta, nunca entra na cascata, nunca
   recebe `eval` e não tem método de backend nenhum (o gate de `api.origins` recusa a origin não
   listada — RF-66, RF-68).
-- **Dois modos (RF-52; `window_mode` no `store`).** **windows** é o comportamento do dia um — uma
-  janela com moldura por ferramenta, abrir uma aberta só foca, nada recarrega (RF-19). **docked** (o
-  padrão no macOS, `shared/tabs.ts` `defaultMode`) deixa a aba ativa **sem moldura** sobre o slot que
-  a página reporta, seguindo a `main` e escondendo com ela; só a aba ativa aparece e as outras mantêm
-  a página viva, escondidas (RF-50).
+- **Modo derivado do runtime (2026-10-22; `backend/tool-windows.ts` `effectiveMode`).** Não há ajuste
+  Docked/Windows: onde o runtime posiciona janelas (`canPosition !== false`) toda ferramenta abre como
+  aba sobre o slot — **docked**, o padrão —, e só onde ele não posiciona (Wayland) o Nod cai em
+  **windows**, o comportamento do dia um — uma janela com moldura por ferramenta, abrir uma aberta só
+  foca, nada recarrega (RF-19). Em docked a aba ativa fica **sem moldura** sobre o slot que a página
+  reporta, seguindo a `main` e escondendo com ela; só a aba ativa aparece e as outras mantêm a página
+  viva, escondidas (RF-50). (§22 "Seamless tabs: always inside, detach on demand".)
 - **Slot (RF-49).** A página manda `tabs.slot` com o retângulo do painel central em CSS px;
   `shared/tabs.ts` `slotToScreen` converte para coordenadas de tela e o backend põe ali a aba ativa,
   pulando a reposição quando nada mudou (`rectEquals`). O runtime não reporta movimento da `main`
@@ -517,40 +517,26 @@ tabForSave(id) / adoptSavedTab(id, toolId)    // 'tabs.save' (RF-67)
   troca de Space ou monitor a movem sem foco), um poll de 50 ms (`MOVE_POLL_MS`) lê `getState()` e
   reposiciona (lag ≈ um intervalo, medido em `docs/handovers/e03-spikes.md` §4). Ao ganhar foco, a aba docked sobe de
   novo com `show({ activate: false })` para não ficar atrás da `main`. Wayland (`canPosition: false`)
-  não oferece o modo.
+  não tem slot: cai no modo windows.
 - **Troca e desencaixe (RF-50, RF-51).** Trocar de aba é `hide({ app: false })` na atual e `show` na
   próxima — a página escondida fica viva, nada recarrega (mesmo mecanismo de RNF-09). `detach`/`dock`
   são `setChrome({ frame: true|false })` na **mesma** janela: rascunho, scroll e estado da página
   sobrevivem (`docs/handovers/e03-spikes.md` §3).
 - **Popups (E03 §5).** Em docked, um popup `http(s)` que uma aba abriu é adotado como aba ad-hoc logo
   depois dela (o evento `open` não traz o `opener`, então a resposta `policy` o memoriza) e perde a
-  moldura; um caminho de identidade conhecido (`isIdentityPath`) continua popup flutuante nos dois
-  modos. Em windows a resposta `policy` vale `'window'` se a origin é a da entrada, uma origin de
+  moldura; um caminho de identidade conhecido (`isIdentityPath`) continua popup flutuante. No
+  fallback windows a resposta `policy` vale `'window'` se a origin é a da entrada, uma origin de
   provedor já vista naquela janela, ou `isIdentityPath(url)`; senão `'external'` + evento
   `external_opened`; outros esquemas `'deny'`. `kind 'open'` com `action 'window'` também guarda a
   janela para fechar no bloqueio (D1).
-- **Abas embutidas (RF-69, E03 §8).** Em docked, uma ferramenta cujo endereço pode ser enquadrado e
-  que a pessoa marcou como "Show inside Nod" abre como aba **embedded** — tipo `embedded`, id
-  `embed_<toolId>` (a primeira; `embed_<toolId>_t<n>` depois), `toolId` preenchido e **nenhuma
-  janela**: a página desenha um `<iframe>` numa camada dentro do slot e o mantém vivo, escondido com
-  `display:none` quando outra aba está ativa, então trocar de aba ou passar por Home/Settings não
-  recarrega. Enquanto a aba ativa é embedded o backend não mostra janela nenhuma (`showableTab()`
-  nulo) e continua recebendo `tabs.slot`, porque a página segue reportando o retângulo. A preferência
-  é por ferramenta e por máquina: `embedded_tools` no `store` (sem segredo), exposta em
-  `ToolsState.embedded`. `tabs.checkEmbed` sonda o endereço com o `fetch` de `backend/probe-net.ts` e
-  responde pela função pura `frameability(headers)` de `shared/tabs.ts` (`X-Frame-Options` qualquer
-  valor, ou `frame-ancestors` diferente de `*`, recusa); `tabs.setEmbedded` roda a mesma checagem,
-  grava a lista e converte as abas abertas da ferramenta no lugar (janela → embedded e vice-versa,
-  incluindo janelas destacadas). Aba embedded nunca é destacada (`detach` recusa) e não recebe
-  autofill nem script injetado — `inject` não alcança subframes (`docs/handovers/e03-iframe-spike.md`
-  §4).
 - **Atalhos.** `digit-1`..`digit-9` abrem e `palette` sobe a `main` (`push 'palette'`). Em docked o
   backend registra também, globalmente e só com alguma janela do Nod focada: `tab-new` (⌘T),
   `tab-close` (⌘W), `tab-next`/`tab-prev` (⌃Tab/⌃⇧Tab), `tab-detach`/`tab-dock` (⌘⇧D), `open-link`
   (⌘L, `push 'openLink'` — a página abre o diálogo) e `tab-save` (⌘D); `unregister` quando nenhuma
   está.
 - **Persistência.** `open_tools` guarda cada aba com `{ toolId, view, url, detached, active }` (abas
-  ad-hoc fora); `restore()` reabre na ordem e no estado salvos. `window_mode` guarda a preferência.
+  ad-hoc fora); `restore()` reabre na ordem e no estado salvos. Não há chave de modo no `store`: o
+  modo vem do runtime (`canPosition`, §4 acima).
 - Fill gate (B9, RF-38): a cascata context reads
   `hasCredential = vaultOrigin(toolId) !== null && vaultOrigin(toolId) === window.origin`, where
   `window.origin` is the canonical origin of the entry address the window opened at. A tool whose
@@ -746,7 +732,7 @@ export function createHostAdmin(connection: HostConnection): HostAdmin;
 | `index.html` | `lang="en"`, título `Nod`, `<div id="app">`, `src/app.ts`, `src/style.css`. |
 | `src/app.ts` | Boot e roteamento. Bloqueado: tela de entrada (criar a conta de admin / entrar / entrar com convite / Touch ID / espera). Desbloqueado: **sidebar** à esquerda (logo; um ícone por ferramenta com dígito e estado — aberta, carregando, falhou; no rodapé Settings e Lock) e **conteúdo**: Home (cartões das ferramentas: abrir/focar, vistas, fechar, estado e resultado de login) ou Settings (`src/settings.ts`). Teclado: ⌘/Ctrl+1..9 abre, ⌘/Ctrl+K paleta, ⌘/Ctrl+, Settings. Ouve `session`, `tools`, `catalog`, `palette`, and the connected events `host`, `join` (a `nod://join` invite) and `update` (the new-version notice). A `host` push drives the "offline" badge and the signed-out notice; a "Join a guild" path lives on the blocked screen beside create-account and invite. |
 | `src/palette.ts` | `export function openPalette(ctx): void` — overlay dentro da janela com busca (subsequência, sem acento) sobre ferramentas, vistas e ações (Home, cada aba de Settings, Lock, Quit); ↑/↓/Enter/Esc; foco preso enquanto aberta. |
-| `src/tabs.ts` | E03: a visão de abas do painel central — a faixa das abas abertas, a barra que age na ativa e o slot onde o backend deita a aba docked. `tabsApi(deps)` é a metade da página dos métodos `tabs.*` (uma definição por ação, compartilhada pela faixa, pela paleta e pelo teclado); `mountTabs(root, ctx)` monta a visão e devolve `{ update, destroy }`; `reportSlot(rect)` manda o retângulo do slot ao backend; `activeTab(state)` é a aba docked que a faixa, a barra e a paleta miram. `src/app.ts` a monta só em docked (RF-52). RF-69: a visão também mantém a **camada de iframes** — um `<iframe>` por aba embedded, criado uma vez e chaveado pelo id da aba, escondido com `display:none` fora da ativa, removido quando a aba fecha e só com `src` trocado quando o `url` do backend muda — e a barra oferece "Show inside Nod"/"Open as window" (a primeira chama `tabs.checkEmbed` e mostra o motivo quando recusa). |
+| `src/tabs.ts` | E03: a visão de abas do painel central — a faixa das abas abertas, a barra que age na ativa e o slot onde o backend deita a aba docked. `tabsApi(deps)` é a metade da página dos métodos `tabs.*` (uma definição por ação, compartilhada pela faixa, pela paleta e pelo teclado); `mountTabs(root, ctx)` monta a visão e devolve `{ update, destroy }`; `reportSlot(rect)` manda o retângulo do slot ao backend; `activeTab(state)` é a aba docked que a faixa, a barra e a paleta miram. `src/app.ts` a monta só quando o runtime permite posicionar janelas — não há modo escolhido (§22 "Seamless tabs: always inside, detach on demand"). |
 | `src/settings.ts` | `export function mountSettings(root: HTMLElement, ctx: { session: SessionState; info: AppInfo; tab?: SettingsTab }): { setTab(tab: SettingsTab): void; update(session: SessionState): void; destroy(): void }`, com `export type SettingsTab = 'account' \| 'hosts' \| 'vault' \| 'tools' \| 'roles' \| 'people' \| 'activity' \| 'catalog'`. Todas as pessoas: Account (trocar senha, habilitar/desabilitar biometria, versão, atualização; e, com host, os dispositivos com Revoke de O1, a impressão digital da chave própria de K1 e os colegas com o aviso `key changed` de K2) e Vault (salvar/revelar 10 s/remover; export/import com `tiny.dialog`; e o compartilhamento de K4–K9: inbox, escopo, Send, holders com Remove e o chip `rotation pending`). **Hosts** (todos, SP05 §4): without a host, address → `host.discover` → guild + fingerprint → email + code (or password) → set password; with a host, guild, address, fingerprint, last sync, pending writes, "Sync now", "Remove host" (keep-personal), and a "Keep your local tools" step after a join (B8b). Só admin: Tools (colar endereço → `catalog.probe` → formulário pré-preenchido; vistas, papéis, `noFill`; aviso quando a origin não está em `info.gateOrigins`; "usually signs in via …" de `catalog.get`), Roles (CRUD + concessões), People (papéis, revogar, emitir convite mostrando o código uma vez), Activity (lista + exportar JSONL; sent vs pending from `events.syncStatus` while a host exists), Catalog (exportar/importar seed com modo merge/overwrite). Só admin, conectado: the four admin tabs read/write the host through the same RPC and a "publish local tools" card calls `host.bootstrap` once. |
 | `src/style.css` | Tema escuro sóbrio, monospace, contraste alto, `:focus-visible`. Classes usadas por `src/ui.ts`: `.button .button-primary .button-danger .button-ghost .field .field-label .field-hint .input .message .message-error .message-ok .message-info`. |
 | `src/ui.ts` | Helpers de DOM (já escrito pelo coordenador; não editar). |
@@ -766,3 +752,27 @@ export function createHostAdmin(connection: HostConnection): HostAdmin;
   `"resources"` list above, so a release stages no stamp and answers `false`.
 - Gates: `bun test test/`, `bunx tsc -p tsconfig.json`, `bunx tsc -p backend/tsconfig.json`,
   `bun run app:build` com e sem seed, `bun test/smoke/run.ts`.
+
+## 7. Second runtime target — Electrobun (E06)
+
+Decided 2026-10-22 (`docs/canonico.md` §22 "Electrobun parity build"): the same Nod also runs on
+**Electrobun 2.0.4** (Bun main process + system webview, devkit projected into `.hutch/` by the
+`electrobun` CLI). `backend/`, `shared/` and `src/` are **unchanged by the target**; it is a runtime layer
+in `electrobun/` plus its build scripts (`gen-electrobun-config.ts`, `build-nod-native.ts`, `eb-icon.ts`,
+`eb-postwrap.ts`, `eb-postbuild.ts`, `eb-plist.ts`, `eb-publish.ts`).
+
+| Piece | Where | Contract |
+|---|---|---|
+| Entry | `electrobun/bun/index.ts` | `installTjs()`, main preload, RPC (`electrobun/shared-rpc.ts`), gate, downloads, update, native, then `createApp(...)` and `backend.init(app)` |
+| `TinyApp` / window facade | `electrobun/bun/facade/app.ts`, `windows.ts` | Implements the members `backend/main.ts`/`tool-windows.ts` actually call (inventory A–E); `win.open` keeps the page-box contract, docked tabs are native `BrowserView`s over the main window, `setChrome({frame})` detaches/docks without reload |
+| Gate, per view | `electrobun/bun/facade/gate-core.ts` + `gate.ts` | Electrobun's RPC handler receives no sender/origin, so the Nod owns the gate: one registry `viewId → { windowId, kind, committedOrigin }`, fed by `did-commit-navigation` and checked on every call. `main` = all methods only while the committed origin is the app's (`views://mainview` or the dev URL); `tool` = `login.report` only; `popup`/`link`/`embed` = none. Every non-main view is `sandbox: true`, so it has no RPC and only `host-message` (downloads, tool calls). Refusals use the byte-identical tinyjs sentence |
+| Page bridge | `electrobun/view/bridge.ts`, `electrobun/view/tool-bridge.ts` | Same `window.tiny` surface `src/` already uses; the tool bridge bakes `tiny.win.id` and settles each call through `executeJavascript` |
+| `tjs` / sqlite | `electrobun/bun/tjs-shim.ts`, `sqlite-shim.ts` | `tjs` over Bun file APIs; `tjs:sqlite` over `bun:sqlite` (`build.bun.alias` in the generated config) |
+| Native dylib | `electrobun/native/NodNative.swift` → `libNodNative.dylib`, `scripts/build-nod-native.ts`, `electrobun/bun/facade/native.ts` | In-process `bun:ffi`: Keychain, LocalAuthentication (begin/poll/cancel), app icon, save/open panels, `setWindowFrame`, `setContentMinSize`. A second binding in the same file reaches the core's view primitives (`resizeWebview`, `webviewSetHidden`, `listViews`, live top URL), which is what the docked tab and the re-parent use. AppKit work hops to the main queue; absent dylib or non-macOS degrades to `available: false` |
+| Update channel | `electrobun/bun/facade/update.ts`, `scripts/eb-publish.ts` | The release `manifest.json` itself (the seed's `update.url`, the tinyjs format every Nod reads): the facade takes `version`, `notes` and `mac.<arch> = { url, sha256 }` — a `ditto` zip of the Electrobun `Nod.app` — downloads, verifies the digest, matches the bundle identity/version, stages it and runs a swap helper with an `updates/rollback/` copy. `scripts/eb-publish.ts` produces that zip + half; `release.yml` merges it with the Windows/Linux tinyjs halves. Electrobun has no signature, so the sha256 is the integrity check, and the release fails unless `codesign --verify --strict --deep` accepts the bundle |
+| Config | `scripts/gen-electrobun-config.ts` (gitignored `electrobun.config.ts`) | From `tinyjs.base.json` + `resources/seed.json`: identifier (`NOD_APP_ID`, default `copland.nod.eb`, `copland.nod` refused), `views/mainview` page, `views/bridge` preload, `resources/`, native library, URL scheme, media usage strings (`scripts/eb-postwrap.ts` into the wrapper, `scripts/eb-postbuild.ts` as `scripts.postPackage`/`eb:verify` repairing and asserting the packed payload tar), app icon (RF-56): the same `iconForConfig` tinyjs uses, named as `build.mac.icons` (`.eb-icon.iconset` from `scripts/eb-icon.ts`, converted by hutch's `iconutil`), `build.win.icon` and `build.linux.icon` (the PNG) |
+
+Commands: `bun run eb:dev` / `bun run eb:build` (§6 covers the tinyjs commands). The tinyjs target
+remains the default and the release pipeline's runtime until §22's "Electrobun replaces tinyjs"
+row stops being `Proposto`. Parity evidence: `docs/handovers/e06-parity-matrix.md`; costs and
+solved problems: `docs/epics/E06-embedded-webview.md` §13.

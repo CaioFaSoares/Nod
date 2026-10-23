@@ -906,6 +906,67 @@ describe('biometrics', () => {
   });
 });
 
+describe('the 0.7.0 sweep of biometric items (Electrobun unlocks by password only)', () => {
+  test('without biometric unlock, the boot sweep deletes every listed item and clears the flag', async () => {
+    const s = scene({ biometricAvailable: false });
+    const id = await firstAccount(s);
+    // A Mac that migrated from tinyjs 0.6.0c: the flag, the item holding the vault key, and a stale
+    // `false` entry whose item outlived it.
+    s.saved.set('biometric_people', { [id]: true, 'migrated-1': true, 'migrated-2': false });
+    s.secrets.set(`nod.bio.${id}`, 'base64url-vault-key');
+    s.secrets.set('nod.bio.migrated-1', 'base64url-vault-key');
+    s.secrets.set('nod.bio.migrated-2', 'base64url-vault-key');
+    s.keychainReads.length = 0;
+
+    await s.session.purgeBiometricItems();
+
+    // Deletion only: the item's value is never read.
+    expect(s.keychainReads).toEqual([]);
+    expect([...s.secrets.keys()].filter((key) => key.startsWith('nod.bio.'))).toEqual([]);
+    expect(s.saved.get('biometric_people')).toEqual({
+      [id]: false,
+      'migrated-1': false,
+      'migrated-2': false,
+    });
+    // The entry screen offers no fingerprint and enabling refuses.
+    expect((await s.session.state()).biometric).toBe(false);
+    expect(await messageOf(() => s.session.enableBiometric(PASSWORD))).toBe(
+      'biometrics are not available on this system',
+    );
+    expect(await messageOf(() => s.session.unlockBiometric())).toBe(
+      'biometrics are not available on this system',
+    );
+    expect(s.reasons).toEqual([]);
+  });
+
+  test('the sweep is idempotent and leaves a person not listed alone', async () => {
+    const s = scene({ biometricAvailable: false });
+    const id = await firstAccount(s);
+    s.saved.set('biometric_people', { [id]: true });
+    s.secrets.set(`nod.bio.${id}`, 'base64url-vault-key');
+
+    await s.session.purgeBiometricItems();
+    await s.session.purgeBiometricItems();
+
+    expect(s.secrets.has(`nod.bio.${id}`)).toBe(false);
+    expect(s.saved.get('biometric_people')).toEqual({ [id]: false });
+  });
+
+  test('with the capability absent, the sweep is a no-op: the item and the flag stay', async () => {
+    const s = scene({ biometricAvailable: true });
+    const id = await firstAccount(s);
+    await s.session.unlock({ email: EMAIL, password: PASSWORD });
+    await s.session.enableBiometric(PASSWORD);
+    const vaultKey = keysOf(s).vaultKey;
+
+    await s.session.purgeBiometricItems();
+
+    expect(s.secrets.get(`nod.bio.${id}`)).toBe(vaultKey);
+    expect(s.saved.get('biometric_people')).toEqual({ [id]: true });
+    expect((await s.session.state()).biometric).toBe(true);
+  });
+});
+
 describe('lock', () => {
   test('forgets the current person, records the event once and keeps the rest of the state', async () => {
     const s = scene();

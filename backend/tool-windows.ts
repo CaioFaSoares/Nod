@@ -7,10 +7,11 @@
 // belong to no entry: an **ad-hoc tab** (`link_<n>`, or a popup the site opened and the Nod adopted)
 // is never persisted, never counted for a tool, never cascaded and never gets `eval` (RF-66, RF-68).
 //
-// Two modes (RF-52; `window_mode` in `store.json`): **windows** is the day-one behavior — one framed
-// window per tool, opening an open tool only focuses it, nothing reloads (RF-19) — and **docked**,
+// Two modes, never chosen by a person (RF-52): **docked** wherever the runtime can position windows,
 // where the active tab lies frameless on the slot the main page reports, follows the main window and
-// hides with it. Only the active docked tab is visible; the others keep their page alive, hidden
+// hides with it; and **windows** only where the runtime cannot position windows at all (Wayland),
+// the day-one behavior — one framed window per tool, opening an open tool only focuses it, nothing
+// reloads (RF-19). Only the active docked tab is visible; the others keep their page alive, hidden
 // (RF-50), and detaching or docking is a `setChrome` on the same window — never a reload (RF-51).
 // The geometry, the poll and the stacking recipe are `docs/handovers/e03-spikes.md` §8.
 //
@@ -24,20 +25,14 @@ import { newCascade, stepCascade } from '../shared/login-cascade';
 import { isIdentityPath } from '../shared/probe';
 import { combo, ctrlCombo, digits, shiftCombo } from '../shared/shortcuts';
 import {
-  defaultMode,
-  embedWindowId,
-  frameability,
   insertAfter,
   linkWindowId,
-  loginCookieRisk,
   neighbourAfterClose,
-  nextEmbedNumber,
   nextLinkNumber,
   nextTabNumber,
   parseLinkUrl,
   parsePersistedTabs,
   rectEquals,
-  scriptSources,
   slotToScreen,
   stepTab,
   tabWindowId,
@@ -47,7 +42,6 @@ import type { CascadeAction, CascadeSignal, CascadeState } from '../shared/login
 import type { PersistedTab } from '../shared/tabs';
 import type {
   AuditEvent,
-  EmbedCheck,
   Entry,
   EventType,
   Id,
@@ -76,25 +70,6 @@ const CASCADE_OFFSET = 28;
 const FILL_CHECK_MS = 4000;
 /** Key of the persisted list of open tabs in the store. */
 const STORE_KEY = 'open_tools';
-/** Key of the Docked/Windows setting in the store (E03, RF-52): a preference, never a secret. */
-const MODE_KEY = 'window_mode';
-/** RF-69: the tools this machine opens as embedded tabs; a preference, never a secret. */
-const EMBEDDED_KEY = 'embedded_tools';
-/**
- * RF-70: the tools whose login cannot survive an iframe, with the reason the page shows. Loaded
- * with the mode and kept so a later "Allow again" can simply delete a key.
- */
-const BLOCKED_KEY = 'embed_blocked';
-/** RF-70: the reason `tabs.reportLoginFails` stores — the person saw the embedded login fail. */
-const LOGIN_FAILED = 'the tool did not keep its login inside Nod';
-/** RF-69/RF-70: the entry fetch and its HTML body get this long before the check gives up. */
-const EMBED_TIMEOUT_MS = 10_000;
-/** RF-70: the entry HTML read for the script list, past which the scan is not worth it. */
-const EMBED_HTML_LIMIT = 2 * 1024 * 1024;
-/** RF-70: one script, read up to this many bytes (`scriptSources` caps the list at 8). */
-const EMBED_SCRIPT_LIMIT = 12 * 1024 * 1024;
-/** RF-70: the whole same-origin script scan, all fetches included. */
-const EMBED_SCAN_MS = 10_000;
 /** The docked tab follows the main window by polling it: 50 ms lag, ~0.04 ms a read (S2). */
 const MOVE_POLL_MS = 50;
 
@@ -216,21 +191,10 @@ export interface ToolWindows {
   setSlot(rect: SlotRect | null): true;
   /** `tabs.openLink` (RF-66): an `http(s)` link as an ad-hoc tab after the active one */
   openLink(url: string): Promise<ToolsState>;
-  /** `tabs.setMode` (RF-52): Docked or Windows; nothing reloads either way */
-  setMode(mode: WindowMode): Promise<ToolsState>;
   /** E03/RF-67: what `tabs.save` reads of a tab — its address as the page has it, or nothing */
   tabForSave(id: string): { id: string; toolId: Id | null; url: string } | null;
   /** E03/RF-67: the tab that just became a personal tool is a tool tab of the new entry */
   adoptSavedTab(id: string, toolId: Id): ToolsState;
-
-  // ---------------------------------------------------------------- RF-69 embedded tabs
-
-  /** `tabs.checkEmbed`: reads the tool's response and says whether it may be framed */
-  checkEmbed(toolId: Id): Promise<EmbedCheck>;
-  /** `tabs.setEmbedded`: stores the preference and converts the tool's open tabs in place */
-  setEmbedded(toolId: Id, embedded: boolean): Promise<ToolsState>;
-  /** `tabs.reportLoginFails` (RF-70): the embedded login failed — block the tool and unembed it */
-  reportLoginFails(toolId: Id): Promise<ToolsState>;
 }
 
 /**
@@ -264,8 +228,6 @@ interface TabWindow {
   adhoc: boolean;
   /** false: detached — its own framed window, off the panel (RF-51) */
   docked: boolean;
-  /** RF-69: an `<iframe>` in the main page — no window, no cascade, no `eval`, never detached */
-  embedded: boolean;
   /** whether we last showed it; a hidden tab keeps its page alive (RF-50) */
   shown: boolean;
   /** the slot rect the window sits on, so a re-place is skipped while nothing moved (S2) */
@@ -304,82 +266,6 @@ function isForeign(entry: Entry, view: number | null): boolean {
   return entry.scope === 'personal' || (view !== null && entry.views[view]?.scope === 'personal');
 }
 
-/**
- * RF-70: `embed_blocked` as the store keeps it — tool id → reason. Anything but a plain object
- * answers `{}`; an entry without a non-empty string reason says nothing and is dropped, so a
- * hand-edited store can never make a tool unembeddable without a sentence to show.
- */
-function readEmbedBlocked(raw: unknown): Record<Id, string> {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {};
-  const out: Record<Id, string> = {};
-  for (const [toolId, reason] of Object.entries(raw)) {
-    if (toolId === '' || typeof reason !== 'string' || reason === '') continue;
-    out[toolId] = reason;
-  }
-  return out;
-}
-
-/**
- * RF-70: at most `limit` bytes of a response body as text, stopping at `deadline` too. A body that
- * breaks off keeps what had arrived — the login scan is best effort and may not refuse an iframe
- * it could not read.
- */
-async function readCapped(response: Response, limit: number, deadline: number): Promise<string> {
-  const body = response.body;
-  if (body === null) return '';
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let text = '';
-  let size = 0;
-  try {
-    while (size < limit) {
-      if (Date.now() > deadline) break;
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value === undefined) continue;
-      const room = limit - size;
-      const chunk = value.byteLength > room ? value.subarray(0, room) : value;
-      text += decoder.decode(chunk, { stream: true });
-      size += chunk.byteLength;
-      if (chunk.byteLength < value.byteLength) break;
-    }
-  } catch {
-    // keep what arrived: a broken body ends the read, not the check
-  } finally {
-    try {
-      await reader.cancel();
-    } catch {
-      // the stream may already be closed
-    }
-  }
-  return text + decoder.decode();
-}
-
-/**
- * The runtime's `fetch` takes no `AbortSignal` (`TinyFetchInit` in `backend/tiny.d.ts`), so a
- * deadline races the promise instead — the same recipe as `backend/probe-net.ts`.
- */
-async function fetchWithin(url: string, ms: number): Promise<Response> {
-  let timer: number | undefined;
-  try {
-    return await Promise.race([
-      fetch(url, { redirect: 'follow' }),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error('timed out')), ms);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** RF-70: one embed check's answer, and whether its reason is a login block worth storing. */
-interface EmbedProbe {
-  check: EmbedCheck;
-  /** true when `check.reason` came from `loginCookieRisk` (not from the frame headers) */
-  blocks: boolean;
-}
-
 export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWindows {
   /** The live tabs, by window id. */
   const tabs = new Map<string, TabWindow>();
@@ -389,17 +275,9 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   let recent: string[] = [];
   /** The active tab — the one a docked mode shows on the slot; null while in windows mode. */
   let active: string | null = null;
-  /** The stored mode; null until the store answered (then `defaultMode(deps.os)`). */
-  let mode: WindowMode | null = null;
-  /** RF-69: the tools this machine opens as embedded tabs, loaded with the mode. */
-  let embeddedTools: Id[] = [];
-  /** RF-70: the tools that may not be embedded, with the reason, loaded with the mode. */
-  let embedBlocked: Record<Id, string> = {};
-  /** RF-70: the per-session answer of the embedded-tab check, one promise per tool. */
-  const embedProbes = new Map<Id, Promise<EmbedProbe>>();
   /** Whether the runtime can position windows here (`canPosition !== false`, i.e. not Wayland). */
   let dockable = true;
-  let modeLoaded: Promise<void> | null = null;
+  let capabilitiesLoaded: Promise<void> | null = null;
   /** The slot the main page reported: page coordinates, and the screen rect they land on. */
   let slotPage: SlotRect | null = null;
   let slotScreen: SlotRect | null = null;
@@ -407,7 +285,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   let mainMinimized = false;
   let mainVisible = true;
   /** The move poll (S2): armed while a docked tab is on the slot and main is there to follow. */
-  let poll: number | null = null;
+  let poll: ReturnType<typeof setInterval> | null = null;
   /** Last cascade result in this session, per tool (`ToolStatus.login`). */
   const logins = new Map<Id, LoginResult>();
   /** Failures with no live window behind them (the window never opened). */
@@ -426,10 +304,10 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   /** Shortcuts this module registered — the same id is never registered twice. */
   const registered = new Set<string>();
 
-  // The stored mode and this machine's capabilities come from the store and from main's own state,
-  // and `state()` is synchronous: they are read once, here, so the answer is in place long before
-  // the page's first call (and every entry point awaits the same promise).
-  void loadMode();
+  // This machine's capability of positioning windows comes from main's own state, and `state()` is
+  // synchronous: it is read once, here, so the answer is in place long before the page's first call
+  // (and every entry point awaits the same promise).
+  void loadCapabilities();
 
   // ------------------------------------------------------------ runtime, always under a guard
 
@@ -591,44 +469,21 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   // ------------------------------------------------------------ mode and the main window (RF-49, RF-52)
 
   /**
-   * The mode in force: `windows` wherever the runtime cannot position a window (Wayland), the
-   * stored one otherwise, and `defaultMode(deps.os)` when the store holds nothing (docked on macOS).
+   * The mode in force: `docked` wherever the runtime can position a window, `windows` where it
+   * cannot (Wayland). Nothing stores it and no person chooses it (RF-52).
    */
   function effectiveMode(): WindowMode {
-    if (!dockable) return 'windows';
-    return mode ?? defaultMode(deps.os);
+    return dockable ? 'docked' : 'windows';
   }
 
-  /** The stored mode and the machine's capabilities, once; every entry point calls it. */
-  async function loadMode(): Promise<void> {
-    if (modeLoaded !== null) return await modeLoaded;
-    modeLoaded = (async (): Promise<void> => {
-      try {
-        const raw = await deps.store.get(MODE_KEY);
-        mode = raw === 'docked' || raw === 'windows' ? raw : null;
-      } catch {
-        mode = null; // an unreadable store leaves the default of this OS
-      }
-      try {
-        const raw = await deps.store.get(EMBEDDED_KEY);
-        embeddedTools = Array.isArray(raw)
-          ? [...new Set(raw.filter((id): id is Id => typeof id === 'string' && id !== ''))]
-          : [];
-      } catch {
-        embeddedTools = []; // ditto: an unreadable list means nothing is embedded
-      }
-      try {
-        embedBlocked = readEmbedBlocked(await deps.store.get(BLOCKED_KEY));
-      } catch {
-        embedBlocked = {}; // an unreadable store blocks nothing
-      }
-      // A tool may have been blocked after it was embedded (another Nod, a hand-edited store):
-      // its tabs restore as windows, never as an iframe.
-      embeddedTools = embeddedTools.filter((id) => embedBlocked[id] === undefined);
+  /** This machine's capability of positioning windows, once; every entry point calls it. */
+  async function loadCapabilities(): Promise<void> {
+    if (capabilitiesLoaded !== null) return await capabilitiesLoaded;
+    capabilitiesLoaded = (async (): Promise<void> => {
       const state = await mainState();
       if (state !== null) dockable = state.canPosition !== false;
     })();
-    return await modeLoaded;
+    return await capabilitiesLoaded;
   }
 
   /** The main window's own state, under the guard every runtime call goes through. */
@@ -739,11 +594,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     }
   }
 
-  /** RF-69: whether this machine opens the tool as an embedded tab (docked mode only). */
-  function embedsTool(toolId: Id): boolean {
-    return effectiveMode() === 'docked' && embeddedTools.includes(toolId);
-  }
-
   /** The active tab, or null in windows mode where nothing is on the panel. */
   function activeTab(): TabWindow | null {
     const tab = active === null ? undefined : tabs.get(active);
@@ -770,9 +620,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     if (effectiveMode() !== 'docked' || slotScreen === null || !mainVisible || mainMinimized) {
       return null;
     }
-    const tab = activeDockedTab();
-    // RF-69: an embedded tab renders in the main page — no docked window may cover it.
-    return tab !== null && !tab.embedded ? tab : null;
+    return activeDockedTab();
   }
 
   /**
@@ -784,7 +632,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   function syncDocked(raise = false): void {
     const wanted = showableTab();
     for (const tab of tabs.values()) {
-      if (!tab.docked || tab.embedded) continue;
+      if (!tab.docked) continue;
       if (tab === wanted) {
         place(tab);
         if (!tab.shown || raise) {
@@ -810,9 +658,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       effectiveMode() === 'docked' &&
       !mainMinimized &&
       mainVisible &&
-      slotPage !== null &&
-      // RF-69: an embedded tab is in the main page itself — there is no window to follow main.
-      (activeDockedTab()?.embedded ?? true) === false;
+      slotPage !== null;
     if (!wanted) {
       stopPoll();
       return;
@@ -892,61 +738,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     const first = view === null ? toolWindowId(toolId) : toolWindowId(toolId, view);
     if (!tabs.has(first)) return first;
     return tabWindowId(toolId, nextTabNumber(toolId, order));
-  }
-
-  /** RF-69: `embed_<entry>` for the first embedded tab, `embed_<entry>_t<n>` after it. */
-  function freeEmbedId(toolId: Id): string {
-    const first = embedWindowId(toolId);
-    if (!tabs.has(first)) return first;
-    return embedWindowId(toolId, nextEmbedNumber(toolId, order));
-  }
-
-  /** RF-69: registers an embedded tab — no window, no cascade, never detached. */
-  function addEmbeddedTab(
-    entry: Entry,
-    view: number | null,
-    address: string,
-    after: string | null,
-    activate: boolean,
-  ): string | null {
-    const windowId = freeEmbedId(entry.id);
-    if (opening.has(windowId)) return null;
-    opening.add(windowId);
-    try {
-      const origin = entryOrigin(entry.url);
-      tabs.set(windowId, {
-        windowId,
-        toolId: entry.id,
-        view,
-        url: address,
-        origin,
-        cascade: newCascade(origin),
-        loading: false,
-        error: null,
-        seenOrigins: new Set(),
-        cancelFillCheck: null,
-        foreign: isForeign(entry, view),
-        adhoc: false,
-        docked: true,
-        embedded: true,
-        shown: false,
-        placed: null,
-      });
-      order = insertAfter(order, after, windowId);
-      touch(windowId);
-      if (activate) active = windowId;
-      syncDocked();
-      updatePoll();
-      publish();
-      return windowId;
-    } finally {
-      opening.delete(windowId);
-    }
-  }
-
-  /** RF-69: the tool's most recent embedded tab, if it has one. */
-  function recentEmbedded(toolId: Id): TabWindow | null {
-    return mostRecent(tabsOf(toolId).filter((tab) => tab.embedded));
   }
 
   /**
@@ -1062,7 +853,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       foreign: spec.foreign,
       adhoc: spec.toolId === null,
       docked,
-      embedded: false,
       shown: true,
       placed: null,
     };
@@ -1092,10 +882,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
 
   /** Opens the tool's own tab, cold, at `address` (A8) — docked or as a framed window. */
   async function openColdTab(entry: Entry, address: string, docked: boolean): Promise<string | null> {
-    // RF-69: a tool this machine embeds never gets a window — the tab is the iframe in main.
-    if (docked && embedsTool(entry.id)) {
-      return addEmbeddedTab(entry, null, address, null, true);
-    }
     const windowId = toolWindowId(entry.id);
     if (opening.has(windowId)) return null;
     opening.add(windowId);
@@ -1140,29 +926,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
    * comes forward, and only a tool with no tab at all opens another.
    */
   async function openToolDocked(entry: Entry): Promise<string | null> {
-    // RF-70 item 4: a tool that is embedded here is checked once per session before its tab is
-    // opened. A block found now converts its embedded tabs to windows, and the path below then
-    // opens (or reaches) a window tab instead of an iframe.
-    if (embedsTool(entry.id) || tabsOf(entry.id).some((tab) => tab.embedded)) {
-      await enforceEmbed(entry);
-    }
-    // RF-69: the tool is embedded on this machine — an open embedded tab is what the person wants,
-    // a new one only when it has none. A window tab left from another mode is still reached.
-    if (embedsTool(entry.id)) {
-      const embedded = recentEmbedded(entry.id);
-      if (embedded !== null) {
-        activateTab(embedded);
-        return embedded.windowId;
-      }
-      const away = mostRecent(tabsOf(entry.id));
-      if (away !== null) {
-        selectTab(away.windowId);
-        return away.windowId;
-      }
-      const opened = await openColdTab(entry, entry.url, true);
-      if (opened !== null) record(entry.id, 'tool_opened', auditUrl(entry.url), null, null);
-      return opened;
-    }
     const list = tabsOf(entry.id);
     const onPanel = mostRecent(list.filter((tab) => tab.docked));
     if (onPanel !== null) {
@@ -1183,19 +946,8 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   async function addTab(toolId: Id): Promise<string | null> {
     const entry = entryOf(toolId);
     if (entry === null) throw new Error('unknown tool');
-    await loadMode();
-    const mode = effectiveMode();
-    const docked = mode === 'docked';
-    // RF-69: ⌘T of an embedded tool opens another iframe tab of the tool, never a window; RF-70
-    // runs the session check first, so a tool that just became blocked opens a window instead.
-    if (docked && embedsTool(entry.id) && !(await enforceEmbed(entry))) {
-      const embeddedId = addEmbeddedTab(entry, null, entry.url, null, true);
-      if (embeddedId === null) return null;
-      record(entry.id, 'tool_opened', auditUrl(entry.url), null, null);
-      persist();
-      publish();
-      return embeddedId;
-    }
+    await loadCapabilities();
+    const docked = effectiveMode() === 'docked';
     const windowId = freeTabId(entry.id, null);
     if (opening.has(windowId)) return null;
     opening.add(windowId);
@@ -1230,16 +982,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     title: string,
     docked: boolean,
   ): Promise<string | null> {
-    // RF-69: a window view of an embedded tool is another iframe tab at the view's address; the
-    // RF-70 session check runs first, as on every other path that would create an iframe tab.
-    if (docked && embedsTool(entry.id) && !(await enforceEmbed(entry))) {
-      const embeddedId = addEmbeddedTab(entry, index, address, null, true);
-      if (embeddedId === null) return null;
-      record(entry.id, 'view_opened', auditUrl(address), null, viewLabel(entry, index));
-      persist();
-      publish();
-      return embeddedId;
-    }
     const windowId = toolWindowId(entry.id, index);
     if (tabs.has(windowId)) {
       selectTab(windowId);
@@ -1285,7 +1027,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     // what opens; the caller (`tabs.openLink`, `onOpenUrl`) may have parsed the same way already.
     const href = parseLinkUrl(url);
     if (href === null) throw new Error('invalid link');
-    await loadMode();
+    await loadCapabilities();
     const docked = effectiveMode() === 'docked';
     const windowId = linkWindowId(nextLinkNumber(order));
     let opened = false;
@@ -1414,12 +1156,11 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       toolId: tab.toolId,
       title: tabTitle(tab),
       // RF-69: the iframe loads the full address; a window tab keeps the audit form.
-      url: tab.embedded ? tab.url : (auditUrl(tab.url) ?? ''),
+      url: auditUrl(tab.url) ?? '',
       docked: tab.docked,
       adhoc: tab.adhoc,
       loading: tab.loading,
       error: tab.error,
-      embedded: tab.embedded,
     };
   }
 
@@ -1459,10 +1200,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       // Only a docked mode has a tab on the slot; `active` is never a detached or windows-mode tab.
       active: current === 'docked' ? (activeDockedTab()?.windowId ?? null) : null,
       mode: current,
-      dockable,
       tabHotkeys: deps.hotkeys && current === 'docked',
-      embedded: [...embeddedTools],
-      embedBlocked: { ...embedBlocked },
     };
   }
 
@@ -1490,7 +1228,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
 
   /** Feeds the cascade, synchronously, and fires the action it asks for. An ad-hoc tab has none. */
   function signal(tab: TabWindow, input: CascadeSignal): void {
-    if (tab.toolId === null || tab.embedded) return;
+    if (tab.toolId === null) return;
     try {
       const step = stepCascade(tab.cascade, input, cascadeContext(tab));
       tab.cascade = step.state;
@@ -1515,7 +1253,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
    * (`spawn`), and the sidebar and Home mark the entry too. An ad-hoc tab never gets it (RF-66).
    */
   function warnForeign(tab: TabWindow): void {
-    if (tab.toolId === null || tab.embedded) return;
+    if (tab.toolId === null) return;
     if (!tab.foreign || !atEntryOrigin(tab)) return;
     evaluate(tab.windowId, warningScript());
   }
@@ -1657,7 +1395,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     // Only the tabs of this module: the main window's own navigation is not its business, and a
     // popup left floating is the runtime's (E03 §5).
     const tab = tabs.get(ev.window);
-    if (tab === undefined || tab.embedded) return undefined;
+    if (tab === undefined) return undefined;
     const scheme = schemeOf(ev.url);
     if (ev.kind === 'policy') {
       if (scheme === 'http:' && !isLoopback(ev.url)) {
@@ -1697,8 +1435,8 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
 
   function onReport(windowId: string, report: ReportState, origin: string | undefined): void {
     const tab = tabs.get(windowId);
-    // RF-68/RF-69: only a tool window reports a login; an ad-hoc or embedded tab has no adapter.
-    if (tab === undefined || tab.toolId === null || tab.embedded) return;
+    // RF-68: only a tool window reports a login; an ad-hoc tab has no adapter.
+    if (tab === undefined || tab.toolId === null) return;
     // P9: a report that claims an origin other than the entry origin is ignored.
     if (origin !== undefined && origin !== tab.origin) return;
     signal(tab, { type: 'report', state: report });
@@ -1726,14 +1464,8 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     if (info.kind !== 'policy') return undefined;
     const opener = info.opener;
     if (opener === undefined) return undefined;
-    // RF-69: a popup of an iframe reaches us with `opener: 'main'` — while an embedded tab is
-    // active, it is that tab's popup, with the same rules a tool window's popup gets.
-    const fromMain = opener === MAIN_WINDOW ? activeTab() : null;
-    const tab =
-      fromMain !== null && fromMain.embedded && effectiveMode() === 'docked'
-        ? fromMain
-        : tabs.get(opener);
-    if (tab === undefined || tab === null) return undefined;
+    const tab = tabs.get(opener);
+    if (tab === undefined) return undefined;
     const scheme = schemeOf(info.url);
     if (scheme !== 'https:' && scheme !== 'http:') {
       record(tab.toolId, 'navigation_blocked', auditUrl(info.url), 'denied', scheme);
@@ -1772,7 +1504,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       foreign: false,
       adhoc: true,
       docked: true,
-      embedded: false,
       shown: true,
       placed: null,
     };
@@ -1829,8 +1560,8 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
 
   /**
    * Global shortcuts exist only while some Nod window is focused (canonico §7). Docked mode adds the
-   * tab ones (E03): ⌘T, ⌘W, ⌘⇧D, ⌃Tab, ⌃⇧Tab, ⌘L and ⌘D. Windows mode has no strip, so it keeps
-   * exactly the day-one set (RF-52) — switching there releases the tab ones again.
+   * tab ones (E03): ⌘T, ⌘W, ⌘⇧D, ⌃Tab, ⌃⇧Tab, ⌘L and ⌘D. Windows mode (Wayland) has no strip, so
+   * it keeps exactly the day-one set (RF-52).
    */
   function updateHotkeys(): void {
     if (!(deps.hotkeys && focused.size > 0)) {
@@ -1939,7 +1670,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     }
     if (id === 'tab-detach') {
       const tab = hotkeyTab();
-      if (tab === null || tab.embedded) return; // RF-69: an embedded tab never detaches
+      if (tab === null) return;
       // The palette offers one toggle row for this (RF-51): a docked tab leaves the panel and a
       // detached one comes back to it, whichever the person is looking at.
       if (tab.docked) {
@@ -1989,7 +1720,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     for (const [windowId, tab] of [...tabs]) {
       if (tab.toolId !== toolId) continue;
       dropTab(windowId);
-      if (!tab.embedded) closeWindow(windowId);
+      closeWindow(windowId);
       dropped = true;
     }
     return dropped;
@@ -2013,7 +1744,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     if (tab === undefined) throw new Error('unknown tab');
     const heir = successorTab(id)?.windowId ?? null;
     dropTab(id);
-    if (!tab.embedded) closeWindow(id);
+    closeWindow(id);
     if (active === null) active = heir;
     updateHotkeys();
     syncDocked();
@@ -2047,8 +1778,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   function detach(id: string): ToolsState {
     const tab = tabs.get(id);
     if (tab === undefined) throw new Error('unknown tab');
-    // RF-69: an embedded tab is always on the main page — there is no window to detach.
-    if (tab.embedded) throw new Error('cannot detach an embedded tab');
     if (tab.docked) {
       const wasActive = active === id;
       detachTab(tab, true, 0);
@@ -2121,8 +1850,8 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   function closeAll(): void {
     stopPoll();
     for (const windowId of [...tabs.keys()]) {
-      const tab = dropTab(windowId);
-      if (tab !== null && !tab.embedded) closeWindow(windowId);
+      dropTab(windowId);
+      closeWindow(windowId);
     }
     for (const popup of [...popups]) {
       popups.delete(popup);
@@ -2161,318 +1890,12 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     publish();
   }
 
-  // ------------------------------------------------------------ embedded tabs (RF-69, RF-70)
-
-  /**
-   * RF-69/RF-70: the tool's address fetched as the browser would (`redirect: 'follow'`), read by
-   * the pure rules of `shared/tabs.ts`: first the frame headers, then the login-cookie risk — the
-   * entry's `Set-Cookie`, and the same-origin scripts its HTML loads. A network failure is the
-   * page's own sentence, `could not reach the tool`; a failure inside the script scan only ends
-   * the scan, because the header verdict still stands. The HTML body is dropped after the scan.
-   */
-  async function probeEmbed(address: string): Promise<EmbedProbe> {
-    // The `api` gate stamps a subframe's own origin on macOS (`docs/handovers/e03-iframe-spike.md`
-    // §4); canonico §7 records the Linux stamp as frame-blind, and nothing was measured on Windows.
-    // A framed site must never inherit the main page's `"all"`, so the iframe is macOS-only.
-    if (deps.os !== 'macos') {
-      return {
-        check: { frameable: false, reason: 'embedded tabs are only available on macOS' },
-        blocks: false,
-      };
-    }
-    try {
-      const entryDeadline = Date.now() + EMBED_TIMEOUT_MS;
-      const response = await fetchWithin(address, EMBED_TIMEOUT_MS);
-      const headers: Record<string, string> = {};
-      response.headers.forEach((value, name) => {
-        const key = name.toLowerCase();
-        headers[key] = headers[key] === undefined ? value : `${headers[key]}, ${value}`;
-      });
-      const verdict = frameability(headers);
-      if (!verdict.frameable) {
-        try {
-          await response.body?.cancel();
-        } catch {
-          // the body is not needed: a refused cancel leaves the connection to the runtime
-        }
-        return { check: verdict, blocks: false };
-      }
-      // One entry per header: `getSetCookie` keeps them apart, and a joined one would make the
-      // commas ambiguous. A runtime without it hands over the single joined value it has.
-      const setCookies =
-        typeof response.headers.getSetCookie === 'function'
-          ? response.headers.getSetCookie()
-          : [response.headers.get('set-cookie') ?? ''].filter((value) => value !== '');
-      const cookieRisk = loginCookieRisk({ setCookies, scripts: [] });
-      if (cookieRisk !== null) {
-        try {
-          await response.body?.cancel();
-        } catch {
-          // ditto: nothing of the body is needed once the cookie already refuses the frame
-        }
-        return { check: { frameable: false, reason: cookieRisk }, blocks: true };
-      }
-      const html = await readCapped(response, EMBED_HTML_LIMIT, entryDeadline);
-      const scripts: string[] = [];
-      const deadline = Date.now() + EMBED_SCAN_MS;
-      for (const source of scriptSources(html, address)) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) break; // the scan is best effort; what arrived is what is read
-        try {
-          const script = await fetchWithin(source, remaining);
-          if (!script.ok) {
-            try {
-              await script.body?.cancel();
-            } catch {
-              // a refused cancel leaves the connection to the runtime
-            }
-            continue;
-          }
-          scripts.push(await readCapped(script, EMBED_SCRIPT_LIMIT, deadline));
-        } catch {
-          // RF-70: a network failure during the scan does NOT block; the header check stands.
-        }
-      }
-      const scriptRisk = loginCookieRisk({ setCookies: [], scripts });
-      if (scriptRisk !== null) {
-        return { check: { frameable: false, reason: scriptRisk }, blocks: true };
-      }
-      return { check: { frameable: true, reason: null }, blocks: false };
-    } catch {
-      return { check: { frameable: false, reason: 'could not reach the tool' }, blocks: false };
-    }
-  }
-
-  /** RF-70: the embed check once per session per tool; the promise itself is the cache. */
-  function probeOnce(entry: Entry): Promise<EmbedProbe> {
-    const cached = embedProbes.get(entry.id);
-    if (cached !== undefined) return cached;
-    const probe = probeEmbed(entry.url);
-    embedProbes.set(entry.id, probe);
-    return probe;
-  }
-
-  /** RF-70: stores a block (id → reason) so the refusal survives the next boot. */
-  function blockTool(toolId: Id, reason: string): void {
-    if (embedBlocked[toolId] === reason) return;
-    embedBlocked = { ...embedBlocked, [toolId]: reason };
-    try {
-      void deps.store.set(BLOCKED_KEY, { ...embedBlocked }).catch(() => undefined);
-    } catch {
-      // the block of this run stands even when the store refuses it
-    }
-  }
-
-  /**
-   * RF-70 item 4: when an embedded tab of a tool is opened, activated or restored, the check runs
-   * once per session. A found block converts the tool's embedded tabs to window tabs in place,
-   * drops it from `embedded_tools` and pushes `tools`; an unreachable tool changes nothing (the
-   * header check already passed when the tab was embedded). Returns true when the tool is blocked.
-   */
-  async function enforceEmbed(entry: Entry): Promise<boolean> {
-    let reason = embedBlocked[entry.id];
-    if (reason === undefined) {
-      const probe = await probeOnce(entry);
-      if (!probe.blocks || probe.check.reason === null) return false;
-      reason = probe.check.reason;
-    }
-    blockTool(entry.id, reason);
-    const listed = embeddedTools.includes(entry.id);
-    const live = [...tabs.values()].some((tab) => tab.toolId === entry.id && tab.embedded);
-    if (!listed && !live) return true; // already blocked and nothing to convert
-    if (listed) {
-      embeddedTools = embeddedTools.filter((id) => id !== entry.id);
-      saveEmbeddedTools();
-    }
-    await unembedTabs(entry);
-    syncDocked();
-    updatePoll();
-    persist();
-    publish();
-    return true;
-  }
-
-  async function checkEmbed(toolId: Id): Promise<EmbedCheck> {
-    const entry = entryOf(toolId);
-    if (entry === null) throw new Error('unknown tool');
-    await loadMode();
-    // A block already on record (from the store, the check or the person) is the answer; there is
-    // nothing new a fetch could say about it.
-    const known = embedBlocked[toolId];
-    if (known !== undefined) return { frameable: false, reason: known };
-    const probe = await probeEmbed(entry.url);
-    if (probe.blocks && probe.check.reason !== null) blockTool(toolId, probe.check.reason);
-    return probe.check;
-  }
-
-  /**
-   * RF-69: turns every open tab of the tool into an embedded tab **in place** — same strip
-   * position, same active-ness. The windows are closed (their page is gone; the iframe starts a
-   * fresh one), detached ones included.
-   */
-  function embedTabs(entry: Entry): void {
-    for (const id of [...order]) {
-      const tab = tabs.get(id);
-      if (tab === undefined || tab.toolId !== entry.id || tab.embedded) continue;
-      const index = order.indexOf(id);
-      const recentAt = recent.indexOf(id);
-      const wasActive = active === id;
-      dropTab(id);
-      closeWindow(id);
-      const windowId = freeEmbedId(entry.id);
-      const origin = entryOrigin(entry.url);
-      tabs.set(windowId, {
-        windowId,
-        toolId: entry.id,
-        view: tab.view,
-        url: tab.url,
-        origin,
-        cascade: newCascade(origin),
-        loading: false,
-        error: null,
-        seenOrigins: new Set(),
-        cancelFillCheck: null,
-        foreign: tab.foreign,
-        adhoc: false,
-        docked: true,
-        embedded: true,
-        shown: false,
-        placed: null,
-      });
-      order.splice(Math.min(index, order.length), 0, windowId);
-      recent = recent.filter((entryId) => entryId !== windowId);
-      recent.splice(Math.min(recentAt < 0 ? 0 : recentAt, recent.length), 0, windowId);
-      if (wasActive) active = windowId;
-    }
-  }
-
-  /**
-   * RF-69: the reverse conversion — every embedded tab of the tool becomes a window again, in the
-   * same strip position. In docked mode it lands on the slot; in windows mode it is a framed window.
-   */
-  async function unembedTabs(entry: Entry): Promise<void> {
-    for (const id of [...order]) {
-      const tab = tabs.get(id);
-      if (tab === undefined || tab.toolId !== entry.id || !tab.embedded) continue;
-      const index = order.indexOf(id);
-      const recentAt = recent.indexOf(id);
-      const wasActive = active === id;
-      const windowId = freeTabId(entry.id, tab.view);
-      if (opening.has(windowId)) continue;
-      opening.add(windowId);
-      try {
-        const created = await spawn({
-          windowId,
-          toolId: entry.id,
-          view: tab.view,
-          address: tab.url,
-          title: tabTitle(tab),
-          entryUrl: entry.url,
-          foreign: tab.foreign,
-          after: null,
-          detached: false,
-          activate: false,
-        });
-        if (!created) continue;
-        tabs.delete(id);
-        order = order.filter((entryId) => entryId !== id);
-        recent = recent.filter((entryId) => entryId !== id);
-        focused.delete(id);
-        if (active === id) active = null;
-        order = order.filter((entryId) => entryId !== windowId);
-        order.splice(Math.min(index, order.length), 0, windowId);
-        recent = recent.filter((entryId) => entryId !== windowId);
-        recent.splice(Math.min(recentAt < 0 ? 0 : recentAt, recent.length), 0, windowId);
-        if (wasActive) active = windowId;
-      } finally {
-        opening.delete(windowId);
-      }
-    }
-  }
-
-  /** Every embedded tab, whichever tool it belongs to — the mode switch converts them all. */
-  async function unembedAll(): Promise<void> {
-    const tools = new Set<Id>();
-    for (const tab of tabs.values()) {
-      if (tab.embedded && tab.toolId !== null) tools.add(tab.toolId);
-    }
-    for (const toolId of tools) {
-      const entry = entryOf(toolId);
-      if (entry !== null) await unembedTabs(entry);
-    }
-  }
-
-  /** Writes the machine's embedded-tool preference; a store failure keeps it for this run. */
-  function saveEmbeddedTools(): void {
-    try {
-      void deps.store.set(EMBEDDED_KEY, [...embeddedTools]).catch(() => undefined);
-    } catch {
-      // a store failure leaves the preference of this run only
-    }
-  }
-
-  async function setEmbedded(toolId: Id, embedded: boolean): Promise<ToolsState> {
-    const entry = entryOf(toolId);
-    if (entry === null) throw new Error('unknown tool');
-    await loadMode();
-    // The page asks for `tabs.checkEmbed` before this call and shows its reason early; the same
-    // check runs here so no caller can embed an address that would be refused by the browser.
-    if (embedded) {
-      // RF-70: a block found before — by the check or by the person — refuses before any network
-      // call, with the sentence the page shows.
-      const blocked = embedBlocked[toolId];
-      if (blocked !== undefined) throw new Error(blocked);
-      const probe = await probeEmbed(entry.url);
-      if (probe.blocks && probe.check.reason !== null) blockTool(toolId, probe.check.reason);
-      if (!probe.check.frameable) {
-        throw new Error(probe.check.reason ?? 'this tool cannot be embedded');
-      }
-      embedProbes.set(toolId, Promise.resolve(probe));
-      if (!embeddedTools.includes(toolId)) embeddedTools = [...embeddedTools, toolId];
-      // RF-69: embedded is a docked-mode shape; in windows mode the preference is only remembered
-      // and the tool keeps opening as a framed window.
-      if (effectiveMode() === 'docked') embedTabs(entry);
-    } else {
-      // RF-70 item 6: leaving the iframe is always allowed, even for a blocked tool; the block
-      // stays so a later "Allow again" only has to delete the key.
-      embeddedTools = embeddedTools.filter((id) => id !== toolId);
-      await unembedTabs(entry);
-    }
-    saveEmbeddedTools();
-    syncDocked();
-    updatePoll();
-    persist();
-    publish();
-    return state();
-  }
-
-  /**
-   * RF-70 item 5: the person saw the embedded tab fall back to its login screen. The tool is
-   * blocked from now on, leaves `embedded_tools`, and its embedded tabs become window tabs in
-   * place — the active one included, so the login cascade fills them as usual. No other tool's
-   * tab is reloaded.
-   */
-  async function reportLoginFails(toolId: Id): Promise<ToolsState> {
-    const entry = entryOf(toolId);
-    if (entry === null) throw new Error('unknown tool');
-    await loadMode();
-    blockTool(toolId, LOGIN_FAILED);
-    embeddedTools = embeddedTools.filter((id) => id !== toolId);
-    saveEmbeddedTools();
-    await unembedTabs(entry);
-    syncDocked();
-    updatePoll();
-    persist();
-    publish();
-    return state();
-  }
-
   // ------------------------------------------------------------ surface
 
   async function open(id: Id): Promise<ToolsState> {
     const entry = entryOf(id);
     if (entry === null) throw new Error('unknown tool');
-    await loadMode();
+    await loadCapabilities();
     if (effectiveMode() === 'docked') announce(await openToolDocked(entry));
     else await openTool(entry);
     persist();
@@ -2487,14 +1910,8 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       throw new Error('view not found');
     }
     const view = entry.views[index];
-    await loadMode();
+    await loadCapabilities();
     const docked = effectiveMode() === 'docked';
-    // RF-70: this path can create an iframe tab cold (`openViewNavigate`) or a window view tab;
-    // one session check covers both, and a block found here turns the tool's iframe tabs into
-    // windows before the decision below.
-    if (docked && (embedsTool(entry.id) || tabsOf(entry.id).some((tab) => tab.embedded))) {
-      await enforceEmbed(entry);
-    }
     const acted =
       view.mode === 'window'
         ? // A view window is its own tab: `tool_<entry>_<index>`.
@@ -2523,21 +1940,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       record(entry.id, 'view_opened', auditUrl(view.url), null, view.label);
       return opened;
     }
-    // RF-69: an embedded tab has no page the backend may `eval`; the url it carries is what the
-    // main page re-renders the iframe's `src` from. The active one wins when the tool has several.
-    const activeNow = activeTab();
-    const target =
-      docked && activeNow !== null && activeNow.embedded && activeNow.toolId === entry.id
-        ? activeNow
-        : current;
-    if (target.embedded) {
-      selectTab(target.windowId);
-      target.url = view.url;
-      record(entry.id, 'view_opened', auditUrl(view.url), null, view.label);
-      persist();
-      publish();
-      return target.windowId;
-    }
     selectTab(current.windowId);
     if (current.toolId !== null && !evaluate(current.windowId, `location.href = ${JSON.stringify(view.url)}`)) {
       current.error = EVAL_FAILED;
@@ -2556,47 +1958,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   async function activate(id: string): Promise<ToolsState> {
     const tab = selectTab(id);
     if (tab === null) throw new Error('unknown tab');
-    // RF-70 item 4: activating an embedded tab runs the session check; when it finds a block the
-    // iframe tab is converted to a window tab in place, active preserved.
-    if (tab.embedded && tab.toolId !== null) {
-      const entry = entryOf(tab.toolId);
-      if (entry !== null) await enforceEmbed(entry);
-    }
-    persist();
-    publish();
-    return state();
-  }
-
-  /**
-   * E03/RF-52: Docked or Windows, stored on this machine. Nothing reloads and nothing closes: the
-   * docked tabs of the mode being left each become their own framed window (spikes §8.3), and the
-   * tab list keeps every page alive either way.
-   */
-  async function setMode(chosen: WindowMode): Promise<ToolsState> {
-    await loadMode();
-    mode = dockable ? chosen : 'windows';
-    try {
-      void deps.store.set(MODE_KEY, mode).catch(() => undefined);
-    } catch {
-      // a store failure leaves the setting of this run only
-    }
-    if (effectiveMode() === 'windows') {
-      // RF-69: an embedded tab has no window to detach; it opens as a framed window of its own.
-      await unembedAll();
-      // Every tab leaves the panel where it stands; the one that was on the slot takes the focus.
-      const wasActive = activeTab();
-      active = null;
-      let step = 0;
-      for (const tab of tabs.values()) {
-        if (!tab.docked) continue;
-        detachTab(tab, tab === wasActive, step);
-        step += 1;
-      }
-      stopPoll();
-    }
-    updateHotkeys();
-    syncDocked();
-    updatePoll();
     persist();
     publish();
     return state();
@@ -2604,7 +1965,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
 
   /** E03 (T6): reopens the tabs of `open_tools` in order, docked/detached and active as saved. */
   async function restore(): Promise<void> {
-    await loadMode();
+    await loadCapabilities();
     const persisted = await readPersisted();
     for (const item of persisted) {
       const entry = entryOf(item.toolId);
@@ -2622,27 +1983,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
         // A view that is gone, or one in `navigate` mode, reopens as the tool itself (A8).
       }
       if (item.url !== undefined) address = item.url; // where the tab was, when it is its own
-      // RF-69: the preference is what restore follows in docked mode; the `detached` flag of the
-      // item says nothing for a tool that now lives in the main page.
-      // RF-70 item 4: the check runs once per tool before its iframe tabs are restored. A block
-      // found now leaves the tool out of `embedded_tools`, so this and its other items restore as
-      // window tabs — converted once, never as an iframe.
-      if (
-        effectiveMode() === 'docked' &&
-        embeddedTools.includes(entry.id) &&
-        !(await enforceEmbed(entry))
-      ) {
-        const embeddedId = addEmbeddedTab(entry, view, address, null, item.active === true);
-        if (embeddedId === null) continue;
-        record(
-          entry.id,
-          view === null ? 'tool_opened' : 'view_opened',
-          auditUrl(address),
-          null,
-          view === null ? null : viewLabel(entry, view),
-        );
-        continue;
-      }
       const windowId = freeTabId(entry.id, view);
       // A ⌘1 or a click can reach the same tool while the geometry of this one is still being
       // read: the id is claimed here, as every other open path claims it.
@@ -2713,7 +2053,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     if (active === null) active = firstDocked()?.windowId ?? null;
     failures.delete(id);
     updateHotkeys();
-    await loadMode();
+    await loadCapabilities();
     if (effectiveMode() === 'docked') announce(await openToolDocked(entry));
     else await openTool(entry);
     persist();
@@ -2744,11 +2084,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     dock,
     setSlot,
     openLink,
-    setMode,
     tabForSave,
     adoptSavedTab,
-    checkEmbed,
-    setEmbedded,
-    reportLoginFails,
   };
 }
