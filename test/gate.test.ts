@@ -63,6 +63,39 @@ describe('the factor of the K5 gate (SP02 §9)', () => {
   });
 });
 
+describe('the runtime-neutral capability split (0.7.0)', () => {
+  test('`biometricUnlock: false` keeps the gate prompt and refuses the session unlock', async () => {
+    mock.module('tjs:sqlite', () => ({ Database: class {} }));
+    const { authenticateFactors, gateFactor } = await import('../backend/main');
+
+    // The Electrobun target: `authenticate` backs the gate (the system prompt is still offered),
+    // but not a session unlock — its `bun` binary shares Bun's Developer ID, so the keychain would
+    // let any Electrobun app read `nod.bio.<person>` (`docs/handovers/e07-migration.md` §5).
+    const electrobun = authenticateFactors('macos', { authenticate: true, biometricUnlock: false });
+    expect(electrobun).toEqual({ systemPrompt: true, biometricUnlock: false });
+    expect(gateFactor(undefined, electrobun.systemPrompt, false, false)).toBe('biometrics');
+    expect(gateFactor('typed', electrobun.systemPrompt, false, false)).toBe('biometrics');
+
+    // tinyjs: the key is absent, and an absent key means supported.
+    expect(authenticateFactors('macos', { authenticate: true })).toEqual({
+      systemPrompt: true,
+      biometricUnlock: true,
+    });
+    expect(authenticateFactors('macos', { authenticate: true, biometricUnlock: true })).toEqual({
+      systemPrompt: true,
+      biometricUnlock: true,
+    });
+
+    // Linux has no `app.authenticate`: neither answer exists there.
+    expect(authenticateFactors('linux', {})).toEqual({ systemPrompt: false, biometricUnlock: false });
+    // A machine without the prompt has no unlock to back either.
+    expect(authenticateFactors('windows', { authenticate: false })).toEqual({
+      systemPrompt: false,
+      biometricUnlock: false,
+    });
+  });
+});
+
 describe('the build-mode stamp (SP02 §9, canonico §22)', () => {
   test('names a dev run only for the exact `dev` text', () => {
     // `scripts/gen-config.ts dev` writes it, and the backend reads it back at start-up.

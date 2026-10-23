@@ -1442,7 +1442,16 @@ declare interface TinyApp {
     info(): Promise<TinySystemInfo>;
     architecture(): Promise<string>;
     /** anything ABSENT is supported (no `api` key: the backend isn't gated) */
-    capabilities(): Promise<Record<string, boolean | string>>;
+    capabilities(): Promise<Record<string, boolean | string> & {
+      /**
+       * Nod-specific optional key (not tinyjs): whether `authenticate` may also back a **session
+       * unlock** that lives in the system keychain. The Electrobun target answers `false` because
+       * its `bun` binary carries Bun's Developer ID (team 7FRXF46ZSN), so the keychain lets any
+       * Electrobun app read `nod.bio.<person>` without a prompt
+       * (`docs/handovers/e07-migration.md` §5). Absent = supported (tinyjs).
+       */
+      biometricUnlock?: boolean;
+    }>;
     requirements(ids?: string[] | null, opts?: { refresh?: boolean }): Promise<TinyRequirement[]>;
     missing(ids?: string[] | null): Promise<TinyRequirement[]>;
     battery(): Promise<TinyBattery | null>;

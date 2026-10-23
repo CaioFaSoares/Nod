@@ -236,8 +236,12 @@ export function generateConfig(
  * I/O half of RF-56, run before `generateConfig`: resolves the icon source, refuses a file the
  * build could not use and stages a PNG given through `NOD_ICON` as `STAGED_ICON`. Returns the
  * `icon` value for `generateConfig`, or `null` when there is no file to name.
+ *
+ * Shared with the Electrobun target (`scripts/gen-electrobun-config.ts` and `scripts/eb-icon.ts`)
+ * so both builds wear the same icon: the precedence, the PNG check and the staging are this one
+ * function, never a second copy.
  */
-async function iconForConfig(root: string): Promise<string | null> {
+export async function iconForConfig(root: string): Promise<string | null> {
   const envIcon = process.env.NOD_ICON ?? '';
   const source = iconSource(
     envIcon,

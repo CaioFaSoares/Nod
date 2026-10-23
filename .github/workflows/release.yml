@@ -1,5 +1,7 @@
 # Builds Nod for every OS and publishes the zips + auto-update manifest as a GitHub Release
-# whenever a branch named release-* is pushed. Process and caveats: docs/distribuicao.md §8.
+# whenever a branch named release-* is pushed. macOS ships the Electrobun target, Windows and Linux
+# the tinyjs one — one release, one `manifest.json` every reader understands. Process and caveats:
+# docs/distribuicao.md §8 and §10.
 name: release
 
 on:
@@ -57,7 +59,9 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile
         working-directory: host
-      - run: bun run typecheck
+      # The Electrobun project is typechecked where the devkit exists: after `eb:build` (the CLI
+      # projects it) on the macOS legs. Here the devkit is absent, so `typecheck` would refuse in CI.
+      - run: bun run typecheck:app
       - run: bun test test/
 
   build:
@@ -68,7 +72,11 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { target: macos, os: macos-15 }
+          # macOS: the Electrobun target, one native runner per architecture (it builds the arch it
+          # runs on). `app` is Electrobun's own directory name (`x64`, not `x86_64`).
+          - { target: macos-arm64, os: macos-15, arch: arm64, app: stable-macos-arm64 }
+          - { target: macos-x86_64, os: macos-15-intel, arch: x86_64, app: stable-macos-x64 }
+          # Windows/Linux: the tinyjs build of the same code.
           - { target: linux-x86_64, os: ubuntu-24.04 }
           - { target: linux-arm64, os: ubuntu-24.04-arm }
           - { target: windows, os: windows-2025 }
@@ -91,8 +99,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-0
 
-      - name: install tinyjs (macOS, Linux)
-        if: runner.os != 'Windows'
+      - name: install tinyjs (Linux)
+        if: runner.os == 'Linux'
         run: |
           curl -fsSL https://tinyjs.app/install | TINYJS_NO_MODIFY_PATH=1 sh
           echo "$HOME/.tinyjs" >> "$GITHUB_PATH"
@@ -126,7 +134,9 @@ jobs:
             echo "app icon: assets/icon.png (tracked default)"
           fi
 
+      # tinyjs legs only: Electrobun generates its own config (and picks the icon) below.
       - name: generate tinyjs.json
+        if: runner.os != 'macOS'
         run: |
           bun scripts/gen-config.ts build
           # RF-56: gen-config picks the private icon on its own; a release wearing the wrong icon is
@@ -138,7 +148,49 @@ jobs:
             exit 1
           fi
 
-      # Outside .build: `tinyjs build` (inside `publish`) wipes .build before packing.
+      # RF-56 for the Electrobun target: the private icon from NOD_PRIVATE_RESOURCES has to be the
+      # one the bundle wears. `dev` on purpose — the icon choice is the same in both modes, and
+      # `build` refuses to generate before `bun run build` writes `dist/`. This only writes
+      # `electrobun.config.ts`; `eb:build` regenerates it for the build right after.
+      # `build.win.icon` is the resolved PNG (macOS names the iconset generated from it).
+      - name: check the app icon (Electrobun)
+        if: runner.os == 'macOS'
+        run: |
+          bun scripts/gen-electrobun-config.ts dev
+          icon=$(bun -e 'const { default: config } = await import("./electrobun.config.ts"); console.log(config.build.win?.icon ?? "none")')
+          echo "electrobun.config.ts icon: $icon"
+          if [ -f resources/icon.png ] && [ "$icon" != "resources/icon.png" ]; then
+            echo "::error::NOD_PRIVATE_RESOURCES carries icon.png but the build would use $icon"
+            exit 1
+          fi
+
+      # The Electrobun CLI resolves its pinned Hutch SDK on first use (~/.hutch) and projects it into
+      # .hutch/devkit; the build writes build/stable-macos-<arch>/ and artifacts/. `copland.nod` is
+      # the identifier the tinyjs builds wear, so an update from 0.6.0c keeps the same app data —
+      # and the same identity the facade checks before it swaps a staged bundle in.
+      - name: build the Electrobun target
+        if: runner.os == 'macOS'
+        run: NOD_APP_ID=copland.nod bun run eb:build
+
+      # Now that the devkit is projected, the Electrobun project is typechecked for real (the root
+      # script refuses to skip under CI=true).
+      - name: typecheck (Electrobun included)
+        if: runner.os == 'macOS'
+        run: bun run typecheck
+
+      # Camera/microphone are gated by the two usage strings in the plist the app runs with. `eb:build`
+      # asserts them, and this step keeps the contract visible before anything is published: hutch
+      # packs the payload tar before `postWrap`, so a regression there must fail the release.
+      - name: assert the macOS usage strings in the shipped bundle
+        if: runner.os == 'macOS'
+        run: bun run eb:verify
+
+      # The tinyjs updater on users' machines refuses to swap in a bundle that fails this check, so
+      # a release that fails it would be invisible to every installed Nod. Fail here instead.
+      - name: verify the shipped signature
+        if: runner.os == 'macOS'
+        run: codesign --verify --strict --deep "build/${{ matrix.app }}/Nod.app"
+
       # The notes are the body of the `Release <version>:` commit — what installed Nods show in the
       # update notice (RF-55). A merge commit (`Merge pull request #…`) or a dispatched run (no
       # head_commit, the case of release-branch.yml) would otherwise publish a header or nothing.
@@ -157,12 +209,20 @@ jobs:
           notes=$(printf '%s\n' "$notes" | sed '/^Merge pull request #/,/^$/d')
           printf '%s\n' "${notes:-Nod $VERSION}" > "${{ runner.temp }}/release-notes.md"
 
-      - name: publish (macOS arm64 + x86_64)
+      # One macOS half of the release manifest: `nod-<v>-macos-<arch>.zip` (the name the tinyjs
+      # publish uses) and its `mac.<arch>` entry. The release job merges the two halves with the
+      # Windows/Linux ones.
+      - name: publish the macOS half (Electrobun)
         if: runner.os == 'macOS'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          tinyjs version
-          tinyjs publish --arch arm64 --notes-file "${{ runner.temp }}/release-notes.md"
-          tinyjs publish --arch x86_64 --notes-file "${{ runner.temp }}/release-notes.md"
+          bun scripts/eb-publish.ts build \
+            --arch "${{ matrix.arch }}" \
+            --version "$VERSION" \
+            --base-url "https://github.com/${{ vars.NOD_RELEASE_REPO || github.repository }}/releases/latest/download" \
+            --notes-file "${{ runner.temp }}/release-notes.md" \
+            --out dist/publish
 
       - name: publish (Linux)
         if: runner.os == 'Linux'
@@ -209,14 +269,19 @@ jobs:
           pattern: publish-*
           path: parts
 
-      # Each OS writes its own manifest (mac: url/sha256 + "mac" block; Linux: "linux".<arch>;
-      # Windows: "win"). They coexist, so a recursive merge gives the one manifest every OS reads.
+      # Each runner writes its own half: the macOS legs the Electrobun `mac.<arch>` blocks (they no
+      # longer run `tinyjs publish`), Linux `linux.<arch>` and Windows `win`. They coexist, so a
+      # recursive merge gives the one manifest every OS reads. The top-level `url`/`sha256` stay the
+      # arm64 zip: that is what a tinyjs reader from before the `mac` block installs.
       - name: merge manifests
         run: |
           mkdir -p out
           versions=$(jq -s '[.[].version] | unique | length' parts/*/manifest.json)
           [ "$versions" = 1 ] || { echo "::error::manifests disagree on version"; jq -s '[.[].version]' parts/*/manifest.json; exit 1; }
-          jq -s 'reduce .[] as $m ({}; . * $m)' parts/*/manifest.json > out/manifest.json
+          jq -s 'reduce .[] as $m ({}; . * $m) | .url = .mac.arm64.url | .sha256 = .mac.arm64.sha256' \
+            parts/*/manifest.json > out/manifest.json
+          jq -e '.mac.arm64.url and .mac.arm64.sha256 and .mac.x86_64.url and .mac.x86_64.sha256' out/manifest.json > /dev/null \
+            || { echo "::error::manifest.json is missing a macOS architecture"; exit 1; }
           find parts -type f ! -name manifest.json -exec cp {} out/ \;
           ls -la out
           {

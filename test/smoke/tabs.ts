@@ -1,13 +1,16 @@
-// Real-surface smoke of E03 (RF-49…RF-52, RF-66…RF-68, release 0.6.0): the real page inside
-// `tinyjs dev`, a real tool window per tab, and reporting tool pages that measure themselves.
+// Real-surface smoke of E03 (RF-49…RF-52, RF-66…RF-68, release 0.6.0): the real page inside the app
+// (`tinyjs dev`, or `electrobun dev` under `--runtime=electrobun`), a real tool window per tab, and
+// reporting tool pages that measure themselves.
 //
 //   bun test/smoke/tabs.ts            # refuses when resources/seed.json exists
 //   bun test/smoke/tabs.ts --force    # moves the private seed to test/smoke/.gerado/seed.json.bak
 //                                     # and restores it at the end
+//   bun test/smoke/tabs.ts --runtime=electrobun --force
 //
 // The window loads a generated page that imports `src/app.ts` exactly as `index.html` does and then
-// `test/smoke/tabs-driver.ts`; `frontend.devUrl` points at that file, so `tinyjs dev` serves the real
-// `http://` entry with the runtime bridge. No host process is involved: the smoke enters a **local**
+// `test/smoke/tabs-driver.ts`; on tinyjs `frontend.devUrl` points at that file, on Electrobun
+// `NOD_MAIN_URL` does (`test/smoke/tools.ts`), so either runtime serves the real `http://` entry
+// with its page bridge. No host process is involved: the smoke enters a **local**
 // account (`session.createAccount`, no code) and the two catalog tools come from the temporary seed.
 //
 // The tool pages are the reporting servers of `test/smoke/tools.ts` (`startTabTools`): each page
@@ -22,21 +25,26 @@
 // `omniwmctl window focus` + `command toggle-focused-window-floating` — no config file is touched —
 // and hands the tiler's own view of the windows back to the driver, so a geometry check either
 // measures a floated window or says so with numbers.
-import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { TabTools } from './tools';
+import type { SmokeLaunch, TabTools } from './tools';
 import {
   appDataDir as dataDir,
   freePort,
   generateDevConfig,
-  killProcessTree,
+  generateElectrobunDevConfig,
+  launchSmokeApp,
+  smokeAppId,
+  smokeRuntime,
   startTabTools,
   waitForStoredResult,
 } from './tools';
 
+/** Which target this run measures: `--runtime=electrobun` or `NOD_RUNTIME=electrobun` (default tinyjs). */
+const RUNTIME = smokeRuntime();
+
 /** A throwaway app id: its own data dir, never the owner's `copland.nod`. */
-const APP_ID = 'copland.nod.smoke-tabs';
+const APP_ID = smokeAppId('copland.nod.smoke-tabs', RUNTIME);
 /** Catch-all of the generated page: the driver's `EMAIL`/`NAME` are the same throwaways. */
 const EMAIL = 'tabs@nod.test';
 const NAME = 'Smoke Tabs';
@@ -50,7 +58,6 @@ const TINYJS_JSON = join(ROOT, 'tinyjs.json');
 const DRIVER_ROUTE = '/test/smoke/tabs-driver.ts';
 
 const FINISH_TIMEOUT_MS = 240_000;
-const OUTPUT_LIMIT = 4000;
 /** How long a floated window is given to settle before the driver measures it. */
 const FLOAT_SETTLE_MS = 80;
 
@@ -115,10 +122,6 @@ function temporarySeed(tools: TabTools): string {
     entries: [
       { ...base, id: 'tool-a', title: 'Tool A', url: `${tools.originA}/tab`, order: 10 },
       { ...base, id: 'tool-b', title: 'Tool B', url: `${tools.originB}/tab`, order: 20 },
-      // RF-69: a tool whose pages answer `X-Frame-Options: SAMEORIGIN` — never embeddable.
-      { ...base, id: 'tool-d', title: 'Tool D', url: `${tools.originD}/tab`, order: 30 },
-      // RF-70: a tool whose page writes a SameSite=strict login cookie — the iframe would lose it.
-      { ...base, id: 'tool-e', title: 'Tool E', url: `${tools.originE}/tab`, order: 40 },
     ],
     invites: [],
     update: null,
@@ -305,6 +308,12 @@ interface ScreenReading {
  * cannot answer this by itself; `why` says so instead of pretending the runtime's own numbers are
  * the screen's. `others` counts the windows of an app whose owner name matches but whose pid is not
  * in this run's tree — the person's own Nod, say, which is why the match is by pid.
+ *
+ * The list is **on-screen only** (`winlist.swift` asks `CGWindowListCopyWindowInfo` for
+ * `.optionOnScreenOnly`), so a minimized or covered window is absent by construction; the layer-0
+ * filter drops the window server's own chrome. On Electrobun a docked tab is a native view inside
+ * the main window and therefore not in this list at all — it appears only once it is detached into
+ * its carrier window.
  */
 async function onScreenWindows(rootPid: number | null): Promise<ScreenReading> {
   const empty = (why: string): ScreenReading => ({ windows: [], others: 0, why, locked: false, frontmost: '' });
@@ -430,8 +439,6 @@ function generatePage(
     originA: tools.originA,
     originB: tools.originB,
     originC: tools.originC,
-    originD: tools.originD,
-    originE: tools.originE,
   });
   const html =
     '<!doctype html>\n' +
@@ -531,9 +538,9 @@ function startDesk(deps: { tools: TabTools; pid: PidRef }): Desk {
         // Owner decision 2026-10-19: the smoke must not touch window-manager state beyond what it
         // already did. The driver gets the WM's own view instead, so a geometry step the tiler has
         // taken over says `blocked by the tiling WM` with numbers rather than failing or passing.
-        const tiled = (await ownWindows(deps.pid.value))
-          .filter((window) => window.mode === 'tiling')
-          .map((window) => `${window.title} ${window.frame.width}x${window.frame.height}@${window.frame.x},${window.frame.y}`);
+        const tiledWindows = (await ownWindows(deps.pid.value)).filter(
+          (window) => window.mode === 'tiling',
+        );
         return deskJson({
           ok: true,
           windows: screen.windows,
@@ -541,7 +548,13 @@ function startDesk(deps: { tools: TabTools; pid: PidRef }): Desk {
           why: screen.why,
           screenLocked: screen.locked,
           frontmost: screen.frontmost,
-          tiled,
+          // The driver parses these; `tiledWindows` keeps the title apart from the frame so a tool
+          // title with a space cannot be mistaken for one.
+          tiled: tiledWindows.map(
+            (window) =>
+              `${window.title} ${window.frame.width}x${window.frame.height}@${window.frame.x},${window.frame.y}`,
+          ),
+          tiledWindows: tiledWindows.map((window) => ({ title: window.title, frame: window.frame })),
         });
       }
       return deskJson({ ok: false, error: 'not found' }, 404);
@@ -568,50 +581,42 @@ async function runPhase(
 ): Promise<SmokeResult> {
   const devPort = freePort();
   writeFileSync(SEED, temporarySeed(tools));
-  const gen = generateDevConfig(ROOT, APP_ID, devPort);
-  if (gen.code !== 0) {
-    return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
+  if (RUNTIME === 'tinyjs') {
+    const gen = generateDevConfig(ROOT, APP_ID, devPort);
+    if (gen.code !== 0) {
+      return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
+    }
   }
   const page = generatePage(nonce, devPort, deskOrigin, tools);
-  pointDevUrl(page.url);
+  // tinyjs takes the page through `frontend.devUrl`; Electrobun takes it through `NOD_MAIN_URL`.
+  if (RUNTIME === 'tinyjs') pointDevUrl(page.url);
 
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    NOD_APP_ID: APP_ID,
-    NOD_DEV_PORT: String(devPort),
-  };
-  // The smoke never runs with the runtime trace (AGENTS.md), and never with a page override.
-  delete env.TINYJS_DEBUG;
-  delete env.TINYJS_HTML;
+  let app: SmokeLaunch;
+  try {
+    app = await launchSmokeApp({
+      root: ROOT,
+      runtime: RUNTIME,
+      appId: APP_ID,
+      devPort,
+      page: page.file,
+      tinyjsPage: 'dev-url',
+    });
+  } catch (error) {
+    rmSync(page.file, { force: true });
+    return { ok: false, error: error instanceof Error ? error.message : String(error), steps: [] };
+  }
 
-  const app = spawn('tinyjs', ['dev'], {
-    cwd: ROOT,
-    detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env,
-  });
-  pid.value = app.pid ?? null;
-  console.log(`app: tinyjs dev pid ${app.pid ?? '?'} on dev port ${devPort}, page ${page.file}`);
-  let output = '';
+  pid.value = app.app.pid ?? null;
+  console.log(`app: ${app.label} (pid ${app.app.pid ?? '?'}, page ${page.file})`);
   appOutput = '';
-  const append = (chunk: Buffer | string): void => {
-    output = (output + chunk.toString()).slice(-OUTPUT_LIMIT);
-  };
-  app.stdout?.on('data', append);
-  app.stderr?.on('data', append);
-  const box: { error: string | null } = { error: null };
-  app.on('error', (error) => {
-    box.error = `failed to start the app: ${error.message}`;
-    append(box.error);
-  });
-  app.on('exit', (code, signal) => {
-    console.log(`app: tinyjs dev exited (code ${code ?? 'null'}, signal ${signal ?? 'null'})`);
+  app.app.on('exit', (code, signal) => {
+    console.log(`app: the launch exited (code ${code ?? 'null'}, signal ${signal ?? 'null'})`);
   });
 
   // The page writes its steps as they land; printing them live is what tells a stalled step from a
   // frozen page (the heartbeat stops when nothing runs) — and it leaves the step table on screen
   // even when the run ends on the timeout.
-  const storePath = join(dataDir(APP_ID), 'store.json');
+  const storePath = app.storePath;
   const printed = new Set<string>();
   let aliveAt = Date.now();
   let aliveStep = 'setup';
@@ -627,7 +632,6 @@ async function runPhase(
     if (typeof stored.alive?.step === 'string') aliveStep = stored.alive.step;
   }, 1_000);
 
-  appOutput = output;
   // A page that never boots (a broken module, a dev server that never came up) must not keep a
   // broken window on screen for the whole timeout: 25 s without a result and without a window of
   // this run is the answer, and the `finally` below kills the app and restores the seed.
@@ -636,7 +640,7 @@ async function runPhase(
     for (let tick = 0; tick < 25; tick += 1) {
       await Bun.sleep(1_000);
       if (storedResult(storePath, nonce) !== null) return;
-      if (app.exitCode !== null) break;
+      if (app.app.exitCode !== null) break;
     }
     bootFailed.resolve({
       ok: false,
@@ -647,10 +651,10 @@ async function runPhase(
 
   try {
     const result = await Promise.race([
-      waitForStoredResult(app, box, storePath, nonce, 'tabs_smoke_result', FINISH_TIMEOUT_MS),
+      waitForStoredResult(app.app, app.box, storePath, nonce, 'tabs_smoke_result', FINISH_TIMEOUT_MS),
       bootFailed.promise,
     ]);
-    appOutput = output;
+    appOutput = app.output();
     return result;
   } finally {
     clearInterval(watch);
@@ -680,7 +684,7 @@ async function runPhase(
       `session: screen locked ${screen.locked}, frontmost ${JSON.stringify(screen.frontmost)}`,
     );
     pid.value = null;
-    await killProcessTree(app);
+    await app.stop();
     rmSync(page.file, { force: true });
   }
 }
@@ -734,7 +738,17 @@ async function main(): Promise<number> {
     tools = null;
     rmSync(dataDir(APP_ID), { recursive: true, force: true });
     rmSync(TABS_DIR, { recursive: true, force: true });
-    if (previousTinyjsJson !== null) writeFileSync(TINYJS_JSON, previousTinyjsJson);
+    if (RUNTIME === 'tinyjs') {
+      if (previousTinyjsJson !== null) writeFileSync(TINYJS_JSON, previousTinyjsJson);
+    } else {
+      // The generated config named this smoke's identifier and page: put the development one back.
+      const finalGen = generateElectrobunDevConfig(ROOT, null, null);
+      if (finalGen.code !== 0) {
+        console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
+      } else {
+        console.log('electrobun.config.ts regenerated in dev');
+      }
+    }
     if (seedMoved) {
       if (existsSync(SEED)) rmSync(SEED, { force: true });
       renameSync(SEED_BACKUP, SEED);
@@ -766,8 +780,7 @@ async function main(): Promise<number> {
 
     tools = startTabTools();
     console.log(
-      `reporting tools: A=${tools.originA} B=${tools.originB} C=${tools.originC} ` +
-        `D=${tools.originD} (XFO SAMEORIGIN) E=${tools.originE} (SameSite=strict write), loopback only`,
+      `reporting tools: A=${tools.originA} B=${tools.originB} C=${tools.originC}, loopback only`,
     );
     const wm = await runTool(['omniwmctl', 'ping']);
     console.log(

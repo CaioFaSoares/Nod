@@ -3,6 +3,10 @@
 //   bun test/smoke/ui.ts            # refuses when resources/seed.json exists
 //   bun test/smoke/ui.ts --force    # moves the private seed to test/smoke/.gerado/seed.json.bak
 //                                   # and restores it at the end
+//   bun test/smoke/ui.ts --runtime=electrobun --force
+//
+// A stage that fails stops the run (`failed` breaks the loop): the stages after it did not run, and
+// the summary still names the planned stage/launch count.
 //
 // Unlike `run.ts` and `connected.ts`, this smoke renders the real page: the main window loads a
 // generated HTML that imports `src/app.ts` exactly as `index.html` does, plus
@@ -24,7 +28,6 @@
 // no password and no credential value; those live in the driver's memory and in the runner's. #38
 // hands its page the path of a fake seed file under `.gerado/` — the file picker itself
 // (`tiny.dialog`) is not driven by this smoke.
-import { spawn, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -41,24 +44,30 @@ import {
   type HeadlessMember,
 } from './headless';
 import { sha256Hex, toBase64url } from '../../shared/encoding';
-import type { HostControl, Tools } from './tools';
+import type { HostControl, SmokeLaunch, Tools } from './tools';
 import {
   appDataDir as dataDir,
   freePort,
   generateDevConfig,
+  generateElectrobunDevConfig,
   issueSetupCode,
-  killProcessTree,
+  launchSmokeApp,
+  smokeAppId,
+  smokeRuntime,
   startHostControl,
   startTools,
   waitForStoredResult,
 } from './tools';
 
-const ADMIN_APP_ID = 'copland.nod.ui-admin';
-const PERSON_APP_ID = 'copland.nod.ui-person';
+/** Which target this run measures: `--runtime=electrobun` or `NOD_RUNTIME=electrobun` (default tinyjs). */
+const RUNTIME = smokeRuntime();
+
+const ADMIN_APP_ID = smokeAppId('copland.nod.ui-admin', RUNTIME);
+const PERSON_APP_ID = smokeAppId('copland.nod.ui-person', RUNTIME);
 /** #37: a Nod with no account and no host — the invite of the guild, entered through the `+` tile. */
-const THIRD_APP_ID = 'copland.nod.ui-third';
+const THIRD_APP_ID = smokeAppId('copland.nod.ui-third', RUNTIME);
 /** #38: a Nod with no account and no host, whose first run imports a seed file (RF-61). */
-const SEED_APP_ID = 'copland.nod.ui-seed';
+const SEED_APP_ID = smokeAppId('copland.nod.ui-seed', RUNTIME);
 const APP_IDS = [ADMIN_APP_ID, PERSON_APP_ID, THIRD_APP_ID, SEED_APP_ID];
 
 /** The driver's `PASSWORD`: a throwaway of throwaway accounts, never printed. */
@@ -104,7 +113,6 @@ const IMPORT_SEED_FILE = join(GENERATED_DIR, IMPORT_SEED_FILE_NAME);
 const GUILD_ICON_FILE = join(ROOT, 'resources', 'tray.png');
 
 const FINISH_TIMEOUT_MS = 90_000;
-const OUTPUT_LIMIT = 4000;
 
 /** Tool ids of the temporary seeds (one per fake server, the leftovers have their own). */
 const TOOL_A_ID = 'tool-a';
@@ -489,56 +497,52 @@ async function runPhase(
 ): Promise<SmokeResult> {
   const devPort = freePort();
   writeFileSync(SEED, temporarySeed(tools, phase.appId));
-  const gen = generateDevConfig(ROOT, phase.appId, devPort);
-  if (gen.code !== 0) {
-    return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
+  if (RUNTIME === 'tinyjs') {
+    const gen = generateDevConfig(ROOT, phase.appId, devPort);
+    if (gen.code !== 0) {
+      return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
+    }
   }
   const page = generatePage(phase, nonce, devPort, deskOrigin, address, tools.originC, extras);
-  pointDevUrl(page.url);
+  // tinyjs takes the page through `frontend.devUrl`; Electrobun takes it through `NOD_MAIN_URL` (the
+  // launch helper generates the config with it and starts the dev server the page is served by).
+  if (RUNTIME === 'tinyjs') pointDevUrl(page.url);
 
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    NOD_APP_ID: phase.appId,
-    NOD_DEV_PORT: String(devPort),
-  };
-  // The smoke never runs with the runtime trace (AGENTS.md): it prints the login adapter's EVAL and
-  // every call. The child gets neither the debug flag nor a page override.
-  delete env.TINYJS_DEBUG;
-  delete env.TINYJS_HTML;
-
-  const app = spawn('tinyjs', ['dev'], {
-    cwd: ROOT,
-    detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env,
-  });
-  let output = '';
-  const append = (chunk: Buffer | string): void => {
-    output = (output + chunk.toString()).slice(-OUTPUT_LIMIT);
-  };
-  app.stdout?.on('data', append);
-  app.stderr?.on('data', append);
-  const box: { error: string | null } = { error: null };
-  app.on('error', (error) => {
-    box.error = `failed to start the app: ${error.message}`;
-    append(box.error);
-  });
+  let app: SmokeLaunch;
+  try {
+    app = await launchSmokeApp({
+      root: ROOT,
+      runtime: RUNTIME,
+      appId: phase.appId,
+      devPort,
+      page: page.file,
+      tinyjsPage: 'dev-url',
+    });
+  } catch (error) {
+    rmSync(page.file, { force: true });
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      steps: [],
+    };
+  }
 
   try {
     const result = await waitForStoredResult(
-      app,
-      box,
-      join(dataDir(phase.appId), 'store.json'),
+      app.app,
+      app.box,
+      app.storePath,
       nonce,
       'ui_smoke_result',
       FINISH_TIMEOUT_MS,
     );
-    if (!result.ok && output.trim().length > 0) {
-      return { ...result, error: `${result.error}\n--- app output ---\n${output.trim()}` };
+    const output = app.output().trim();
+    if (!result.ok && output.length > 0) {
+      return { ...result, error: `${result.error}\n--- app output ---\n${output}` };
     }
     return result;
   } finally {
-    await killProcessTree(app);
+    await app.stop();
     rmSync(page.file, { force: true });
   }
 }
@@ -570,7 +574,17 @@ async function main(): Promise<number> {
     for (const appId of APP_IDS) rmSync(dataDir(appId), { recursive: true, force: true });
     rmSync(UI_DIR, { recursive: true, force: true });
     rmSync(HOST_DATA, { recursive: true, force: true });
-    if (previousTinyjsJson !== null) writeFileSync(TINYJS_JSON, previousTinyjsJson);
+    if (RUNTIME === 'tinyjs') {
+      if (previousTinyjsJson !== null) writeFileSync(TINYJS_JSON, previousTinyjsJson);
+    } else {
+      // The generated config named this smoke's identifier and page: put the development one back.
+      const finalGen = generateElectrobunDevConfig(ROOT, null, null);
+      if (finalGen.code !== 0) {
+        console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
+      } else {
+        console.log('electrobun.config.ts regenerated in dev');
+      }
+    }
     if (seedMoved) {
       if (existsSync(SEED)) rmSync(SEED, { force: true });
       renameSync(SEED_BACKUP, SEED);

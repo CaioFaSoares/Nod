@@ -1,0 +1,33 @@
+{
+  "extends": "../.hutch/devkit/tsconfig.json",
+  "compilerOptions": {
+    "ignoreDeprecations": "6.0",
+    "lib": [
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "bun"
+    ],
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": [
+    "bun/**/*.ts",
+    "view/**/*.ts",
+    "../backend/tiny.d.ts",
+    "../backend/tjs.d.ts"
+  ]
+}

@@ -407,8 +407,9 @@ export interface ToolStatus {
 }
 
 /**
- * E03 (RF-52): how tools open. `docked` — tabs over the main window's center panel; `windows` —
- * every tool in its own framed window, the behavior before 0.6.0.
+ * E03 (RF-52): how tools open, decided by the machine and never by a person. `docked` — tabs over
+ * the main window's center panel, wherever the runtime can position windows; `windows` — every tool
+ * in its own framed window, only where it cannot (Wayland).
  */
 export type WindowMode = 'docked' | 'windows';
 
@@ -436,18 +437,6 @@ export interface TabState {
   adhoc: boolean;
   loading: boolean;
   error: string | null;
-  /**
-   * E03 embedded tabs (RF-69): an `<iframe>` in the main page instead of a window — no window, no
-   * autofill, never detached. `url` is the address the iframe loads (the full one, not `auditUrl`).
-   */
-  embedded: boolean;
-}
-
-/** RF-69: whether a tool's address may be framed, read from its response headers by the backend. */
-export interface EmbedCheck {
-  frameable: boolean;
-  /** why not, in words the page shows: `X-Frame-Options: SAMEORIGIN`, `frame-ancestors 'self'`, … */
-  reason: string | null;
 }
 
 export interface ToolsState {
@@ -456,20 +445,10 @@ export interface ToolsState {
   tabs: TabState[];
   /** the docked tab shown on the slot; null when none */
   active: string | null;
-  /** the effective mode: `windows` wherever docking is not offered */
+  /** the mode in force: `windows` only where the runtime cannot position windows (Wayland) */
   mode: WindowMode;
-  /** the runtime can position windows here (not Wayland), so the setting offers Docked */
-  dockable: boolean;
   /** the backend registers the tab shortcuts globally; the page must not handle them a second time */
   tabHotkeys: boolean;
-  /** RF-69: the tools this machine opens as embedded tabs (docked mode only) */
-  embedded: Id[];
-  /**
-   * RF-70: tools this machine never embeds because their login cannot survive an iframe, with the
-   * reason shown when "Show inside Nod" is refused (found by `tabs.checkEmbed` or reported by the
-   * person with `tabs.reportLoginFails`).
-   */
-  embedBlocked: Record<Id, string>;
 }
 
 /** E03 (RF-67): where `tabs.save` put the tab — a personal view under an entry, or a personal tool. */
@@ -707,11 +686,20 @@ export interface AppInfo {
   /** a tray icon exists, so closing the main window hides it instead of quitting */
   tray: boolean;
   /**
-   * K5/SP02 §9: this machine reports the `authenticate` capability, so a gated action runs the
-   * operating system's prompt (`app.authenticate`) and no password has to be typed. This is the
-   * machine's own answer, not the per-person shortcut of `SessionState.biometric`.
+   * 0.7.0: whether this runtime may back a **session unlock** with the system keychain —
+   * `authenticate` plus the Nod-specific `biometricUnlock` capability. This is what the Settings
+   * card and the entry screen's fingerprint button follow. It is not the gate's factor: the
+   * Electrobun target keeps the system prompt for gated actions (`systemPrompt`) while unlocking
+   * by password only (`docs/handovers/e07-migration.md` §5).
    */
   biometricAvailable: boolean;
+  /**
+   * K5/SP02 §9: this machine reports the `authenticate` capability, so a gated action runs the
+   * operating system's prompt (`app.authenticate`) and no password has to be typed. This is the
+   * machine's own answer, read independently of `biometricAvailable` (0.7.0), and not the
+   * per-person shortcut of `SessionState.biometric`.
+   */
+  systemPrompt: boolean;
   /**
    * SP02 §9/`docs/canonico.md` §22: this is a non-release dev run (`tinyjs dev`), where the gate
    * also accepts the account password on a machine that has `authenticate` — the path the
@@ -1070,21 +1058,6 @@ export interface ApiContract {
   'tabs.openLink': [{ url: string }, ToolsState];
   /** E03 (RF-67): the tab's address saved to the sidebar in one step (⌘D). */
   'tabs.save': [{ id: string }, SaveTabResult];
-  /** E03 (RF-52): Docked or Windows, stored on this machine; the next tool opened follows it. */
-  'tabs.setMode': [{ mode: WindowMode }, ToolsState];
-  /** RF-69: reads the tool's response headers and answers whether its address may be framed. */
-  'tabs.checkEmbed': [{ toolId: Id }, EmbedCheck];
-  /**
-   * RF-69: this machine opens the tool as an embedded tab (`true`) or as a window (`false`); the
-   * tool's open tabs are reopened the new way (a reload, by the person's choice). `true` is refused
-   * with the `EmbedCheck` reason when the address may not be framed.
-   */
-  'tabs.setEmbedded': [{ toolId: Id; embedded: boolean }, ToolsState];
-  /**
-   * RF-70: the person saw the embedded tab fall back to its login screen. The tool's embedded tabs
-   * become window tabs (the login is filled there) and "Show inside Nod" is refused from now on.
-   */
-  'tabs.reportLoginFails': [{ toolId: Id }, ToolsState];
 
   'events.list': [EventFilter, AuditEvent[]];
   /** SP04 §5: the sent/pending counters of Settings → Activity (`{ sent: 0, pending: 0 }` with no host). */

@@ -1,16 +1,14 @@
-// E03 (RF-49…RF-52, RF-66…RF-68) and RF-69: the pure half of docked tabs, embedded tabs, quick
-// links and save-in-one-step.
+// E03 (RF-49…RF-52, RF-66…RF-68): the pure half of docked tabs, quick links and save-in-one-step.
 // Contract: `local://e03-design.md` §"Pure module `shared/tabs.ts`"; requirements: docs/canonico.md §14;
 // epic: docs/epics/E03-docked-tabs.md; measured geometry: docs/handovers/e03-spikes.md §3.
 //
 // Pure (`shared/context.md`): no `tjs`, no `tiny`, no DOM. Only `URL`/`URLSearchParams`, which every
 // runtime of this repo has (the same rule `shared/join-link.ts` follows). The backend owns the live
-// tab list and the geometry calls; this module only decides ids, order, link acceptance, the screen
-// rect and whether a response may be framed, so page, backend and tests cannot disagree about any
-// of them.
+// tab list and the geometry calls; this module only decides ids, order, link acceptance and the
+// screen rect, so page, backend and tests cannot disagree about any of them.
 
 import { originOf } from './catalog';
-import { TOOL_WINDOW_PREFIX, type EmbedCheck, type Id, type SlotRect, type WindowMode } from './types';
+import { TOOL_WINDOW_PREFIX, type Id, type SlotRect } from './types';
 
 // ---------------------------------------------------------------- window ids
 
@@ -49,165 +47,6 @@ export function nextLinkNumber(liveIds: Iterable<string>): number {
   let n = 1;
   while (used.has(linkWindowId(n))) n += 1;
   return n;
-}
-
-// ---------------------------------------------------------------- embedded ids (RF-69)
-
-/**
- * RF-69: an embedded tab lives in the main page, not in a window, so it never carries a window id
- * (`tool_`, `link_`, `popup<N>`): the first tab of a tool is `embed_<toolId>`, every further one
- * `embed_<toolId>_t<n>` from 2 up. The prefix is what tells the runtime a `popup` id is not an
- * embedded tab even when the tool id happens to start with `embed_`.
- */
-export const EMBED_WINDOW_PREFIX = 'embed_';
-
-/** RF-69: id of a tool's first embedded tab (`n` 1 or absent) or of its `n`-th one. */
-export function embedWindowId(toolId: Id, n = 1): string {
-  return n <= 1 ? `${EMBED_WINDOW_PREFIX}${toolId}` : `${EMBED_WINDOW_PREFIX}${toolId}_t${n}`;
-}
-
-/** RF-69: the first free embedded tab number of a tool, from 2 up. */
-export function nextEmbedNumber(toolId: Id, liveIds: Iterable<string>): number {
-  const used = new Set(liveIds);
-  let n = 2;
-  while (used.has(embedWindowId(toolId, n))) n += 1;
-  return n;
-}
-
-/**
- * RF-69: whether a tool's address may be framed, read from the response headers the backend
- * fetched (`tabs.checkEmbed`). Header names are case-insensitive, and repeated CSP headers arrive
- * already joined by the runtime; both are handled here.
- *
- * A browser refuses the frame when `X-Frame-Options` is present at all (the contract's rule: any
- * value), and when any CSP policy carries a `frame-ancestors` directive other than exactly `*`.
- * The `reason` names the header and its value, which is what the page shows beside the toolbar
- * action; `null` means the address can be framed.
- */
-export function frameability(headers: Record<string, string>): EmbedCheck {
-  const lower = new Map<string, string>();
-  for (const [name, value] of Object.entries(headers)) {
-    const key = name.toLowerCase();
-    const prior = lower.get(key);
-    lower.set(key, prior === undefined ? value : `${prior}, ${value}`);
-  }
-  const xfo = lower.get('x-frame-options');
-  if (xfo !== undefined) {
-    return { frameable: false, reason: `X-Frame-Options: ${xfo.trim()}` };
-  }
-  const csp = lower.get('content-security-policy');
-  if (csp !== undefined) {
-    // Several policies may arrive joined by a comma; each one is enforced on its own.
-    for (const policy of csp.split(',')) {
-      for (const directive of policy.split(';')) {
-        const [name, ...sources] = directive.trim().split(/\s+/);
-        if (name === undefined || name.toLowerCase() !== 'frame-ancestors') continue;
-        const value = sources.join(' ').trim();
-        if (value !== '*') {
-          return { frameable: false, reason: `frame-ancestors${value === '' ? '' : ` ${value}`}` };
-        }
-      }
-    }
-  }
-  return { frameable: true, reason: null };
-}
-
-// ---------------------------------------------------------------- login risk (RF-70)
-
-/**
- * RF-70: why a tool cannot keep its login inside an `<iframe>` of the Nod's main page, or `null`
- * when nothing in the response suggests a problem. A framed site never stores a `Lax`/`Strict`
- * cookie (`docs/handovers/e03-iframe-spike.md`), so a login that depends on one falls back to its
- * login screen as soon as the person presses anything.
- *
- * Two signals, both generic (no product names, AGENTS.md):
- *
- * - a `Set-Cookie` of the entry response carrying `SameSite=Strict` or `SameSite=Lax`
- *   (case-insensitive). The reason quotes the value as the header wrote it.
- * - a same-origin script that writes a login cookie with a strict/lax SameSite: a
- *   `sameSite: "strict"` / `sameSite: 'lax'` option inside a **flat** object literal (no nested
- *   braces, at most 300 characters) that also carries an `expires` key — exactly `expires:`, not
- *   `expiration:`. Library defaults (`{path:"/",sameSite:"strict"}`, consent banners with
- *   `expiration`, cookie serializers) are shaped nothing like that, so they do not count; the
- *   shape is what a real login write looks like. The reason quotes the value as the script wrote
- *   it. A false positive only costs the iframe, which the contract accepts.
- *
- * `setCookies` holds one entry per header (the caller keeps them apart; a joined header would make
- * the comma ambiguous), `scripts` the bodies of the page's own scripts. Pure: no DOM, no fetch.
- */
-export function loginCookieRisk(input: { setCookies: string[]; scripts: string[] }): string | null {
-  for (const header of input.setCookies) {
-    const match = /(?:^|;)\s*samesite\s*=\s*(strict|lax)\b/i.exec(header);
-    if (match !== null) {
-      return `the tool keeps cookies with SameSite=${match[1]}, which a tab inside Nod cannot store`;
-    }
-  }
-  // The js-cookie shape a login write uses; the flat literal with `expires:` beside it is what
-  // tells a real write from a library default. Serializer strings (`SameSite=Strict`) are
-  // deliberately not matched: every cookie library ships them.
-  const sameSite = /sameSite\s*:\s*["'](strict|lax)["']/gi;
-  for (const script of input.scripts) {
-    for (const match of script.matchAll(sameSite)) {
-      const at = match.index;
-      if (at === undefined) continue;
-      const open = script.lastIndexOf('{', at);
-      const close = script.indexOf('}', at);
-      if (open === -1 || close === -1 || close - open + 1 > 300) continue;
-      const literal = script.slice(open + 1, close);
-      if (literal.includes('{') || literal.includes('}')) continue; // nested: not the write's own options
-      if (!/\bexpires\s*:/.test(literal)) continue; // `expiration:` is a consent default, not this
-      return `the tool's page saves its login in a SameSite=${match[1]} cookie, which a tab inside Nod cannot store`;
-    }
-  }
-  return null;
-}
-
-/**
- * RF-70: the same-origin scripts the entry HTML loads — `<script src>` and
- * `<link rel=modulepreload href>`, resolved against the entry URL, in document order, each address
- * once, at most 8. A cross-origin script is ignored: the backend may not read it, and a cookie it
- * writes for another site is not the tool's login. Everything else (inline scripts, `data:`
- * addresses) is skipped. Pure: the backend fetches the addresses, the page never runs this.
- */
-export function scriptSources(html: string, entryUrl: string): string[] {
-  let base: URL;
-  try {
-    base = new URL(entryUrl);
-  } catch {
-    return [];
-  }
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const tag of html.matchAll(/<(script|link)\b([^>]*)>/gi)) {
-    const attrs = tag[2] ?? '';
-    const isScript = (tag[1] ?? '').toLowerCase() === 'script';
-    const address = isScript ? attribute(attrs, 'src') : attribute(attrs, 'href');
-    if (address === null || address.trim() === '') continue;
-    const rel = attribute(attrs, 'rel');
-    if (!isScript && (rel === null || !rel.toLowerCase().split(/\s+/).includes('modulepreload'))) {
-      continue;
-    }
-    let resolved: URL;
-    try {
-      resolved = new URL(address.trim(), base);
-    } catch {
-      continue;
-    }
-    if (resolved.origin !== base.origin) continue;
-    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') continue;
-    if (seen.has(resolved.href)) continue;
-    seen.add(resolved.href);
-    out.push(resolved.href);
-    if (out.length >= 8) break;
-  }
-  return out;
-}
-
-/** Reads one attribute of an HTML tag, quoting either way or not at all; `null` when absent. */
-function attribute(attrs: string, name: string): string | null {
-  const match = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i').exec(attrs);
-  if (match === null) return null;
-  return match[1] ?? match[2] ?? match[3] ?? null;
 }
 
 // ---------------------------------------------------------------- strip order
@@ -420,14 +259,4 @@ export function saveTarget(
     if (entryOrigin === origin) return { kind: 'view', entryId: entry.id };
   }
   return { kind: 'tool' };
-}
-
-/**
- * E03 (RF-52): the mode a Nod starts in when `window_mode` holds nothing — `docked` on macOS
- * (measured to position windows, `docs/handovers/e03-spikes.md` §8), `windows` on Windows and
- * Linux (canonico §22 "Docked mode per OS"). A runtime that cannot position windows overrides this
- * to `windows` regardless; that check lives in the backend.
- */
-export function defaultMode(os: 'macos' | 'windows' | 'linux'): WindowMode {
-  return os === 'macos' ? 'docked' : 'windows';
 }

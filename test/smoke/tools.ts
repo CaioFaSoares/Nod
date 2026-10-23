@@ -14,7 +14,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 
 /** Credentials server A accepts — the same pair `test/smoke/smoke.html` saves in the vault. */
 export const USERNAME = 'person@test';
@@ -220,6 +220,66 @@ export function appDataDir(appId: string): string {
 }
 
 /**
+ * Which runtime the smokes launch: the tinyjs target (the default, the one every handover before
+ * E06 ran on) or the Electrobun target beside it (contract `local://e06-parity.md`). The same
+ * pages, the same drivers and the same checks run on both — only the launch and the store file
+ * change.
+ */
+export type SmokeRuntime = 'tinyjs' | 'electrobun';
+
+const RUNTIME_FLAG = '--runtime=';
+
+/**
+ * The runtime of this run: `--runtime=electrobun` (or `--runtime=tinyjs`) wins over `NOD_RUNTIME`,
+ * which wins over the default `tinyjs`. An unknown value throws instead of falling back: a typo that
+ * silently launched the other target would make a red parity run look green.
+ */
+export function smokeRuntime(argv: readonly string[] = process.argv): SmokeRuntime {
+  const flags = argv.filter((arg) => arg.startsWith(RUNTIME_FLAG));
+  if (flags.length > 1) throw new Error(`only one ${RUNTIME_FLAG} flag is allowed`);
+  const raw = (flags[0]?.slice(RUNTIME_FLAG.length) ?? process.env.NOD_RUNTIME ?? 'tinyjs')
+    .trim()
+    .toLowerCase();
+  if (raw === 'tinyjs' || raw === 'electrobun') return raw;
+  throw new Error(
+    `unknown runtime ${JSON.stringify(raw)}: use --runtime=tinyjs or --runtime=electrobun`,
+  );
+}
+
+/**
+ * App id of one launch. The Electrobun target gets its own suffix (`-eb`), so the two targets never
+ * share `appDataDir` — a smoke that ran on both would otherwise wipe the data it is measuring.
+ */
+export function smokeAppId(base: string, runtime: SmokeRuntime): string {
+  return runtime === 'electrobun' ? `${base}-eb` : base;
+}
+
+/**
+ * Directory the backend's own files live in for one launch (`store.json`, `nod.db`,
+ * `guild-icon.png`) — `app.paths().data` of the runtime. Both runtimes use the app data dir root:
+ * since 0.7.0 the Electrobun target resolves its data to the tinyjs layout for a fresh identifier
+ * (`electrobun/bun/facade/data-dir.ts` `resolveDataDir`), so an updated Mac keeps its account, and
+ * every smoke wipes its throwaway id first.
+ */
+export function runtimeDataDir(appId: string, _runtime: SmokeRuntime): string {
+  return appDataDir(appId);
+}
+
+/** `store.json` of one launch — the result channel of every smoke here (`runtimeDataDir`). */
+export function storeFilePath(appId: string, runtime: SmokeRuntime): string {
+  return join(runtimeDataDir(appId, runtime), 'store.json');
+}
+
+/** The page under the project root, as the dev server serves it (`/test/smoke/.gerado/…`). */
+export function devPageUrl(root: string, devPort: number, page: string): string {
+  const path = relative(root, page).split(sep).join('/');
+  if (path === '' || path.startsWith('../') || path.startsWith('/')) {
+    throw new Error(`the page must live under the project root (${root}): ${page}`);
+  }
+  return `http://127.0.0.1:${devPort}/${path}`;
+}
+
+/**
  * `bun scripts/gen-config.ts dev`, with the smoke id and dev port; with `null` for both the child
  * gets neither key — which is how the final regeneration puts back the base id and default port.
  */
@@ -277,6 +337,211 @@ export async function killProcessTree(app: ChildProcess): Promise<void> {
       /* already dead */
     }
   }
+}
+
+// ---------------------------------------------------------------- the launch (both runtimes)
+
+/**
+ * `bun scripts/gen-electrobun-config.ts dev` under the smoke's identifier and page override. With
+ * `null` for both, the child gets neither variable: that is how the last launch of a run puts the
+ * development config back (`NOD_APP_ID` -> `copland.nod.eb`, no `NOD_MAIN_URL`).
+ *
+ * `NOD_MAIN_URL` is read by `electrobun/bun/index.ts` in a dev run only (a packaged build always
+ * loads `views://mainview/index.html`), and it is what points the main window at the generated
+ * driver page instead of the project's `index.html`.
+ */
+export function generateElectrobunDevConfig(
+  root: string,
+  appId: string | null,
+  mainUrl: string | null,
+): { code: number; output: string } {
+  const env: Record<string, string | undefined> = { ...process.env };
+  if (appId !== null) env.NOD_APP_ID = appId;
+  else delete env.NOD_APP_ID;
+  if (mainUrl !== null) env.NOD_MAIN_URL = mainUrl;
+  else delete env.NOD_MAIN_URL;
+  const result = Bun.spawnSync(['bun', 'scripts/gen-electrobun-config.ts', 'dev'], {
+    cwd: root,
+    env,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  return {
+    code: result.exitCode ?? -1,
+    output: (result.stdout?.toString() ?? '') + (result.stderr?.toString() ?? ''),
+  };
+}
+
+const DEV_SERVER_BOOT_TIMEOUT_MS = 30_000;
+
+interface DevServer {
+  output(): string;
+  stop(): Promise<void>;
+}
+
+/**
+ * `bun run dev` (vite) on the launch's own port. Electrobun has no dev server of its own — the
+ * tinyjs launcher starts `frontend.dev` for itself — so the Electrobun launch starts the same one
+ * here. The `dev` script carries `--strictPort`: vite refuses instead of moving to another port, so
+ * the URL the window loads is the one this runner waited for.
+ */
+async function startDevServer(root: string, devPort: number): Promise<DevServer> {
+  let output = '';
+  const append = (chunk: Buffer | string): void => {
+    output = (output + chunk.toString()).slice(-4000);
+  };
+  const child = spawn('bun', ['run', 'dev'], {
+    cwd: root,
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, NOD_DEV_PORT: String(devPort) },
+  });
+  child.stdout?.on('data', append);
+  child.stderr?.on('data', append);
+
+  const start = Date.now();
+  while (Date.now() < start + DEV_SERVER_BOOT_TIMEOUT_MS) {
+    if (child.exitCode !== null) {
+      throw new Error(`the dev server exited ${child.exitCode}: ${output.trim().slice(-400)}`);
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${devPort}/`);
+      if (response.ok) return { output: () => output, stop: () => killProcessTree(child) };
+    } catch {
+      /* not listening yet */
+    }
+    await Bun.sleep(150);
+  }
+  await killProcessTree(child);
+  throw new Error(
+    `the dev server did not answer http://127.0.0.1:${devPort}/ in ${DEV_SERVER_BOOT_TIMEOUT_MS} ms: ` +
+      output.trim().slice(-400),
+  );
+}
+
+/** One app launch of a smoke: the process, its result channel and how to take it down. */
+export interface SmokeLaunch {
+  /** The runtime process (`tinyjs` or the `electrobun` CLI); its pid tree is this run's app. */
+  app: ChildProcess;
+  /** Set when the spawn itself failed; `waitForStoredResult` answers with it instead of timing out. */
+  box: { error: string | null };
+  /** `<app data>/store.json` or `<app data>/dev/store.json` (`storeFilePath`). */
+  storePath: string;
+  /** One line for the runner's log: runtime, app id, page and dev port. */
+  label: string;
+  /** The last 4000 characters of the launch's (and the dev server's) output. */
+  output(): string;
+  stop(): Promise<void>;
+}
+
+export interface LaunchOptions {
+  root: string;
+  runtime: SmokeRuntime;
+  appId: string;
+  devPort: number;
+  /** Absolute path of the page the main window loads; it must live under `root`. */
+  page: string;
+  /** Extra environment of the child (never secrets — `AGENTS.md`). */
+  env?: Record<string, string | undefined>;
+  /** Called with every output chunk; the tabs runner keeps its own buffer for the failure report. */
+  onOutput?: (chunk: string) => void;
+  /**
+   * tinyjs only: how the main window gets the page. `html` (default) is `TINYJS_HTML`, a standalone
+   * page (`run.ts`, `connected.ts`). `dev-url` leaves the page to `frontend.devUrl`, which the
+   * runner has already pointed at it — the pages of `ui.ts` and `tabs.ts` import `/src/app.ts` as
+   * modules, and a `file://` page cannot resolve them. Electrobun always loads the page over http
+   * (`NOD_MAIN_URL`), so this changes nothing there.
+   */
+  tinyjsPage?: 'html' | 'dev-url';
+}
+
+/**
+ * Starts the real app with its main window on the generated page. The tinyjs path is the one every
+ * pre-E06 smoke used (`TINYJS_HTML` + `tinyjs dev`); the Electrobun path generates the dev config
+ * with the smoke's identifier, starts vite (the page modules are TypeScript), and launches
+ * `electrobun dev` with `NOD_MAIN_URL` pointing the window at the page.
+ */
+export async function launchSmokeApp(options: LaunchOptions): Promise<SmokeLaunch> {
+  const { root, runtime, appId, devPort, page } = options;
+  let output = '';
+  const append = (chunk: Buffer | string): void => {
+    const text = chunk.toString();
+    output = (output + text).slice(-4000);
+    options.onOutput?.(text);
+  };
+
+  let devServer: DevServer | null = null;
+  let env: Record<string, string | undefined>;
+  let label: string;
+
+  if (runtime === 'tinyjs') {
+    const viaHtml = (options.tinyjsPage ?? 'html') === 'html';
+    env = {
+      ...process.env,
+      ...options.env,
+      NOD_APP_ID: appId,
+      NOD_DEV_PORT: String(devPort),
+      ...(viaHtml ? { TINYJS_HTML: page } : {}),
+    };
+    if (!viaHtml) delete env.TINYJS_HTML;
+    label = viaHtml
+      ? `tinyjs dev (TINYJS_HTML=${page}, NOD_APP_ID=${appId}, NOD_DEV_PORT=${devPort})`
+      : `tinyjs dev (frontend.devUrl=${page}, NOD_APP_ID=${appId}, NOD_DEV_PORT=${devPort})`;
+  } else {
+    const mainUrl = devPageUrl(root, devPort, page);
+    const gen = generateElectrobunDevConfig(root, appId, mainUrl);
+    if (gen.code !== 0) {
+      throw new Error(`gen-electrobun-config failed (code ${gen.code}): ${gen.output.trim()}`);
+    }
+    devServer = await startDevServer(root, devPort);
+    output = devServer.output();
+    env = {
+      ...process.env,
+      ...options.env,
+      NOD_APP_ID: appId,
+      NOD_DEV_PORT: String(devPort),
+      NOD_MAIN_URL: mainUrl,
+    };
+    delete env.TINYJS_HTML;
+    delete env.TINYJS_DEBUG;
+    label =
+      `electrobun dev (NOD_MAIN_URL=${mainUrl}, NOD_APP_ID=${appId}, ` +
+      `store=${storeFilePath(appId, runtime)})`;
+  }
+
+  // The smoke never runs with the runtime trace (AGENTS.md): it prints the login adapter's EVAL and
+  // every call. No launch here gets `TINYJS_DEBUG`.
+  delete env.TINYJS_DEBUG;
+
+  const app = spawn(
+    runtime === 'tinyjs' ? 'tinyjs' : 'npx',
+    runtime === 'tinyjs' ? ['dev'] : ['--yes', 'electrobun', 'dev', '--env=dev'],
+    {
+      cwd: root,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    },
+  );
+  app.stdout?.on('data', append);
+  app.stderr?.on('data', append);
+  const box: { error: string | null } = { error: null };
+  app.on('error', (error) => {
+    box.error = `failed to start the app: ${error.message}`;
+    append(box.error);
+  });
+
+  return {
+    app,
+    box,
+    storePath: storeFilePath(appId, runtime),
+    label,
+    output: () => output,
+    async stop(): Promise<void> {
+      await killProcessTree(app);
+      if (devServer !== null) await devServer.stop();
+    },
+  };
 }
 
 export interface StoredStep {
@@ -500,10 +765,6 @@ export interface TabTools {
   originA: string;
   originB: string;
   originC: string;
-  /** RF-69: a reporting tool whose pages carry `X-Frame-Options: SAMEORIGIN` (never frameable). */
-  originD: string;
-  /** RF-70: a reporting tool whose page loads a same-origin script writing a strict SameSite cookie. */
-  originE: string;
   /** Every report every page posted so far, oldest first. */
   reports(): TabReport[];
   /** Queues one command for the page of one load; that page's next poll answers it. */
@@ -615,21 +876,12 @@ export function startTabTools(): TabTools {
   const origins: Record<string, string> = {};
   const servers: Array<{ stop: (closeActiveConnections?: boolean) => void }> = [];
 
-  function start(label: string, noFraming = false, cookieScript = false): string {
+  function start(label: string): string {
     const server = Bun.serve({
       hostname: '127.0.0.1',
       port: 0,
       async fetch(req) {
         const url = new URL(req.url);
-        const html = (body: string, extra: Record<string, string> = {}): Response =>
-          new Response(body, {
-            headers: {
-              'content-type': 'text/html; charset=utf-8',
-              'cache-control': 'no-store',
-              ...(noFraming ? { 'x-frame-options': 'SAMEORIGIN' } : {}),
-              ...extra,
-            },
-          });
         if (url.pathname === '/icon.png') {
           return new Response(PNG_1X1, {
             headers: {
@@ -650,25 +902,10 @@ export function startTabTools(): TabTools {
           queues.delete(pid);
           return smokeJson(queued);
         }
-        if (url.pathname === '/cookies.js' && cookieScript) {
-          // RF-70: the js-cookie shape a real login write has — a flat literal with `expires:` and
-          // `sameSite: "strict"`, which is what `loginCookieRisk` (shared/tabs.ts) must find.
-          return new Response(
-            'function Cookies() {}\nCookies.set = function (name, value, options) {\n' +
-              '  document.cookie = name + "=" + value;\n' +
-              '  return [name, value, options];\n' +
-              '};\n' +
-              'Cookies.set("t", "v", {expires: 365, path: "/", secure: true, sameSite: "strict"});\n',
-            { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' } },
-          );
-        }
         if (req.method === 'GET') {
-          const page = reportPage(label);
-          return html(
-            cookieScript
-              ? page.replace('</head>', '<script src="/cookies.js"></script></head>')
-              : page,
-          );
+          return new Response(reportPage(label), {
+            headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+          });
         }
         return notFound();
       },
@@ -680,17 +917,11 @@ export function startTabTools(): TabTools {
   origins.A = start('A');
   origins.B = start('B');
   origins.C = start('C');
-  // RF-69: the same page behind `X-Frame-Options: SAMEORIGIN` — what `tabs.checkEmbed` must refuse.
-  origins.D = start('D', true);
-  // RF-70: same page, but a same-origin script writes a SameSite=strict login cookie.
-  origins.E = start('E', false, true);
 
   return {
     originA: origins.A,
     originB: origins.B,
     originC: origins.C,
-    originD: origins.D,
-    originE: origins.E,
     reports: () => [...reports],
     command(pid, cmd, arg, tag): void {
       const queued = queues.get(pid) ?? [];

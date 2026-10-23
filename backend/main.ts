@@ -149,9 +149,19 @@ let keys: Keys | null = null;
  */
 let shares: Shares | null = null;
 /**
- * K5/SP02 §9: whether this machine has biometrics. The gate of `vault.reveal`, `vault.copy`,
- * `shares.send` and `shares.accept` uses `app.authenticate` when it does, and the person's password
- * otherwise; the read is once, in `init`, like the session's own.
+ * K5/SP02 §9: whether this machine has `app.authenticate`, so the gate of `vault.reveal`,
+ * `vault.copy`, `shares.send` and `shares.accept` can run the system prompt; the person's password
+ * is the factor where it does not. Read once, in `init`. This is `authenticate` alone — the gate
+ * never needs the keychain.
+ */
+let systemPrompt = false;
+/**
+ * 0.7.0: whether this runtime may use `authenticate` as a **session unlock** backed by the system
+ * keychain — `authenticate` AND the Nod-specific `biometricUnlock` capability (absent = supported,
+ * so tinyjs is unchanged). The Electrobun target reports `biometricUnlock: false` because its `bun`
+ * binary carries Bun's Developer ID, and the keychain then lets any Electrobun app read
+ * `nod.bio.<person>` without a prompt (`docs/handovers/e07-migration.md` §5): macOS 0.7.0 unlocks
+ * by password only. Read once, in `init`.
  */
 let biometrics = false;
 /**
@@ -225,9 +235,13 @@ export async function init(app: TinyApp): Promise<void> {
   // §2: the capabilities are read once here; an absent key means supported.
   const capabilities = await app.system.capabilities();
   system = app.system.os();
-  // K5/SP02 §9: the same answer the session gets, kept for the gate that guards reveal, copy,
-  // send and accept. Linux has no `app.authenticate`, so there the gate is the password.
-  biometrics = system !== 'linux' && supported(capabilities, 'authenticate');
+  // K5/SP02 §9: the gate's answer — `app.authenticate`. Linux has no such call, so there the gate
+  // is the password. 0.7.0: the session's biometric unlock also needs the Nod-specific
+  // `biometricUnlock` key (absent = supported, so tinyjs keeps it); the Electrobun target answers
+  // `false` — its `bun` binary is signed with Bun's Developer ID and the keychain would let any
+  // Electrobun app read the vault key (`docs/handovers/e07-migration.md` §5) — so macOS 0.7.0
+  // unlocks by password only.
+  ({ systemPrompt, biometricUnlock: biometrics } = authenticateFactors(system, capabilities));
   // SP02 §9/`docs/canonico.md` §22: the dev exception of the gate. The stamp is written by
   // `scripts/gen-config.ts <mode>` beside the seed and is not part of a release's resources, so a
   // built app reads none and answers a plain `false` — see `shared/build-mode.ts`.
@@ -297,6 +311,11 @@ export async function init(app: TinyApp): Promise<void> {
       return host !== null && host.personId === personId ? [hostTokenKey(host.kid, personId)] : [];
     },
   });
+  // 0.7.0: on a runtime without biometric unlock (the Electrobun target), a Mac that migrated from
+  // tinyjs 0.6.0c still carries `nod.bio.<person>` in the keychain — the vault key. It is deleted
+  // here, before the entry screen is drawn, and the store's flag with it: password only, and no
+  // fingerprint offered. Deletion only; the value is never read. Idempotent, and a no-op on tinyjs.
+  await session.purgeBiometricItems();
   // SP02 §8/RF-38: the vault reads the entry of a credential through the effective catalog, so the
   // origin it records is the entry's own url at save time — the host entry's, while connected.
   // V1: every value is sealed with the `vaultKey` the session keeps in memory; with a locked session
@@ -637,10 +656,7 @@ function toolsState(): ToolsState {
     tabs: [],
     active: null,
     mode: 'windows',
-    dockable: false,
     tabHotkeys: false,
-    embedded: [],
-    embedBlocked: {},
   };
 }
 
@@ -806,6 +822,21 @@ async function readDevRun(resourcesDir: string | null): Promise<boolean> {
 /** §2: `capabilities()` lists only the exceptions — an absent key means supported. */
 function supported(capabilities: Record<string, unknown>, key: string): boolean {
   return capabilities[key] !== false;
+}
+
+/**
+ * 0.7.0: the two answers `init` derives from `capabilities()`, pure so the rule has a test of its
+ * own. `systemPrompt` is the gate's factor and depends on `authenticate` alone (Linux has no such
+ * call). `biometricUnlock` is the session's, and needs the Nod-specific `biometricUnlock` as well —
+ * absent means supported, so tinyjs is unchanged, while the Electrobun target answers `false`
+ * (`docs/handovers/e07-migration.md` §5).
+ */
+export function authenticateFactors(
+  system: 'macos' | 'windows' | 'linux',
+  capabilities: Record<string, unknown>,
+): { systemPrompt: boolean; biometricUnlock: boolean } {
+  const systemPrompt = system !== 'linux' && supported(capabilities, 'authenticate');
+  return { systemPrompt, biometricUnlock: systemPrompt && supported(capabilities, 'biometricUnlock') };
 }
 
 /** §4: the tray menu and the per-OS icon; `false` when this machine has no tray (RF-15). */
@@ -1108,25 +1139,27 @@ export type GateFactor = 'password' | 'biometrics' | 'unavailable';
 
 /**
  * SP02 §9's factor, pure. The machine decides first: where the runtime reports `authenticate`,
- * `app.authenticate` is the factor and the page sends no password at all. The typed password is the
- * factor where that capability is absent (Linux — SP02 §9's classical fallback), in a non-release
- * dev run (`devRun`, `docs/canonico.md` §22 "Gate in a dev run": the unattended smoke passes the
- * account password so no operating system prompt can block it), and after the system prompt did
- * not confirm in this unlocked session (`promptFailed`, canonico §22 "Gate fallback when the system
- * prompt fails": the capability is per OS, so a Windows machine without Hello reports it and then
- * answers `false` to every prompt). Until a prompt fails, a release build never takes a password
- * on a capable machine. `unavailable` is the refusal: neither capability nor password.
+ * `app.authenticate` is the factor and the page sends no password at all. That answer is
+ * `authenticate` alone — 0.7.0's `biometricUnlock` key gates the session unlock only and changes
+ * nothing here (the Electrobun target keeps the system prompt, `backend/main.ts`). The typed
+ * password is the factor where that capability is absent (Linux — SP02 §9's classical fallback), in
+ * a non-release dev run (`devRun`, `docs/canonico.md` §22 "Gate in a dev run": the unattended smoke
+ * passes the account password so no operating system prompt can block it), and after the system
+ * prompt did not confirm in this unlocked session (`promptFailed`, canonico §22 "Gate fallback when
+ * the system prompt fails": the capability is per OS, so a Windows machine without Hello reports it
+ * and then answers `false` to every prompt). Until a prompt fails, a release build never takes a
+ * password on a capable machine. `unavailable` is the refusal: neither capability nor password.
  *
  * Exported for the test that pins the rule without a runtime (`test/gate.test.ts`).
  */
 export function gateFactor(
   password: string | undefined,
-  biometrics: boolean,
+  systemPrompt: boolean,
   devRun: boolean,
   promptFailed: boolean,
 ): GateFactor {
   const typed = typeof password === 'string' && password !== '';
-  if (biometrics) return typed && (devRun || promptFailed) ? 'password' : 'biometrics';
+  if (systemPrompt) return typed && (devRun || promptFailed) ? 'password' : 'biometrics';
   return typed ? 'password' : 'unavailable';
 }
 
@@ -1170,7 +1203,7 @@ async function authenticate(reason: string, password?: string): Promise<void> {
     confirmGate(person.id);
     return;
   }
-  const factor = gateFactor(password, biometrics, devRun, promptFailed);
+  const factor = gateFactor(password, systemPrompt, devRun, promptFailed);
   if (factor === 'unavailable') throw new Error(GATE_PASSWORD_REQUIRED);
   if (factor === 'biometrics') {
     if (!(await required(runtime, 'authentication').authenticate(reason))) {
@@ -1398,6 +1431,22 @@ async function refreshUpdateNotice(): Promise<void> {
 function withHotfixes(info: UpdateInfo): UpdateInfo {
   if (info.available || info.latest === null) return info;
   return { ...info, available: compareVersions(info.current, info.latest) < 0 };
+}
+
+/**
+ * RF-55/A13: why the last install was refused, for the `update` event. The Electrobun target's
+ * facade answers `refusal()` — it logs the same line to `updates/install.log`; the tinyjs runtime's
+ * `app.update` has no such hook, so a refusal there is recorded without a reason rather than not at
+ * all. An install that answered `false` and left no trace is what §9 of the surface check could not
+ * diagnose.
+ */
+function installRefusal(update: TinyApp['update'] & { refusal?: () => string | null }): string {
+  try {
+    const reason = update.refusal?.();
+    return reason === undefined || reason === null || reason === '' ? 'the install was refused' : reason;
+  } catch {
+    return 'the install was refused';
+  }
 }
 
 /** RF-55: one check shortly after the launch, then one every 24 hours. Without a channel the seed
@@ -3773,39 +3822,6 @@ const methods: { [M in Method]: Handler<M> } = {
   'tabs.save': async (params): Promise<SaveTabResult> =>
     await saveTabToSidebar(text(parameters(params, 'invalid tab').id, 'invalid tab')),
 
-  'tabs.setMode': async (params) => {
-    const mode = parameters(params, 'invalid mode').mode;
-    if (mode !== 'docked' && mode !== 'windows') throw new Error('invalid mode');
-    return await required(windows, 'tabs.setMode').setMode(mode);
-  },
-
-  /** RF-69: whether the tool's address may be framed — the backend reads its response headers. */
-  'tabs.checkEmbed': async (params) => {
-    const p = parameters(params, 'invalid tool');
-    return await required(windows, 'tabs.checkEmbed').checkEmbed(text(p.toolId, 'invalid tool'));
-  },
-
-  /** RF-69: opens the tool inside Nod (or back as a window); its open tabs convert in place. */
-  'tabs.setEmbedded': async (params) => {
-    const p = parameters(params, 'invalid tool');
-    if (typeof p.embedded !== 'boolean') throw new Error('invalid embedded');
-    return await required(windows, 'tabs.setEmbedded').setEmbedded(
-      text(p.toolId, 'invalid tool'),
-      p.embedded,
-    );
-  },
-
-  /**
-   * RF-70: the person saw the embedded tab fall back to its login screen. The tool stops being
-   * embedded and its tabs become windows, where the login cascade fills them.
-   */
-  'tabs.reportLoginFails': async (params) => {
-    const p = parameters(params, 'invalid tool');
-    return await required(windows, 'tabs.reportLoginFails').reportLoginFails(
-      text(p.toolId, 'invalid tool'),
-    );
-  },
-
   // -------------------------------------------------------------- audit
   'events.list': async (params) => {
     const r = required(repo, 'events.list');
@@ -3846,8 +3862,11 @@ const methods: { [M in Method]: Handler<M> } = {
       // SP02 §9/`docs/canonico.md` §22: what the page needs to decide between the operating
       // system's prompt and its own password field — the machine capability (not the per-person
       // shortcut of `session.biometric`) and whether this is a non-release dev run, the only case
-      // where a typed password is a factor on a machine that also has `authenticate`.
+      // where a typed password is a factor on a machine that also has `authenticate`. 0.7.0:
+      // `biometricAvailable` is the session-unlock feature (source of the Settings card and of the
+      // entry screen's fingerprint button), while the gate keeps using `systemPrompt` alone.
       biometricAvailable: biometrics,
+      systemPrompt,
       devRun,
     };
   },
@@ -3866,7 +3885,21 @@ const methods: { [M in Method]: Handler<M> } = {
       result: 'requested',
       detail: null,
     });
-    return required(runtime, 'nod.installUpdate').update.install();
+    const update = required(runtime, 'nod.installUpdate').update;
+    const installed = await update.install();
+    // A13: every refusal is audited with its reason — the install restarts nothing in that case,
+    // and the person (and the next surface check) must be able to tell it from a success.
+    if (!installed) {
+      r.addEvent({
+        personId: person.id,
+        toolId: null,
+        type: 'update',
+        url: null,
+        result: 'failed',
+        detail: installRefusal(update),
+      });
+    }
+    return installed;
   },
 
   /**

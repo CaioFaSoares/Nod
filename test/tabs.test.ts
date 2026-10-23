@@ -8,16 +8,10 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
-  EMBED_WINDOW_PREFIX,
   LINK_WINDOW_PREFIX,
-  defaultMode,
-  embedWindowId,
-  frameability,
   insertAfter,
   linkWindowId,
-  loginCookieRisk,
   neighbourAfterClose,
-  nextEmbedNumber,
   nextLinkNumber,
   nextTabNumber,
   parseLinkUrl,
@@ -25,7 +19,6 @@ import {
   parsePersistedTabs,
   rectEquals,
   saveTarget,
-  scriptSources,
   slotToScreen,
   stepTab,
   tabWindowId,
@@ -61,178 +54,6 @@ describe('tab window ids', () => {
     expect(nextLinkNumber(['link_1', 'link_2'])).toBe(3);
     expect(nextLinkNumber(['link_1', 'link_3'])).toBe(2);
     expect(nextLinkNumber(['tool_claude_t2'])).toBe(1);
-  });
-});
-
-describe('embedded tab ids (RF-69)', () => {
-  test('the first embedded tab is embed_<tool>, every further one _t<n> from 2', () => {
-    expect(EMBED_WINDOW_PREFIX).toBe('embed_');
-    expect(embedWindowId('claude')).toBe('embed_claude');
-    expect(embedWindowId('claude', 1)).toBe('embed_claude');
-    expect(embedWindowId('claude', 2)).toBe('embed_claude_t2');
-    expect(embedWindowId('kanban', 5)).toBe('embed_kanban_t5');
-  });
-
-  test('nextEmbedNumber is the first n >= 2 still free', () => {
-    expect(nextEmbedNumber('claude', [])).toBe(2);
-    expect(nextEmbedNumber('claude', ['embed_claude'])).toBe(2);
-    expect(nextEmbedNumber('claude', ['embed_claude', 'embed_claude_t2'])).toBe(3);
-    expect(nextEmbedNumber('claude', ['embed_claude_t2', 'embed_claude_t4'])).toBe(3);
-    expect(nextEmbedNumber('claude', ['tool_claude_t2'])).toBe(2);
-  });
-});
-
-describe('frameability', () => {
-  test('no restrictive header means the address may be framed', () => {
-    expect(frameability({})).toEqual({ frameable: true, reason: null });
-    expect(frameability({ 'content-type': 'text/html' })).toEqual({ frameable: true, reason: null });
-  });
-
-  test('X-Frame-Options refuses the frame whatever its value', () => {
-    expect(frameability({ 'X-Frame-Options': 'DENY' })).toEqual({
-      frameable: false,
-      reason: 'X-Frame-Options: DENY',
-    });
-    expect(frameability({ 'x-frame-options': 'SAMEORIGIN' })).toEqual({
-      frameable: false,
-      reason: 'X-Frame-Options: SAMEORIGIN',
-    });
-    expect(frameability({ 'X-FRAME-OPTIONS': 'ALLOW-FROM https://a.example' })).toEqual({
-      frameable: false,
-      reason: 'X-Frame-Options: ALLOW-FROM https://a.example',
-    });
-  });
-
-  test('a CSP frame-ancestors other than exactly * refuses the frame', () => {
-    expect(frameability({ 'content-security-policy': "default-src 'self'; frame-ancestors 'self'" })).toEqual({
-      frameable: false,
-      reason: "frame-ancestors 'self'",
-    });
-    expect(frameability({ 'Content-Security-Policy': 'frame-ancestors https://app.example' })).toEqual({
-      frameable: false,
-      reason: 'frame-ancestors https://app.example',
-    });
-    expect(frameability({ 'content-security-policy': 'frame-ancestors' })).toEqual({
-      frameable: false,
-      reason: 'frame-ancestors',
-    });
-  });
-
-  test('frame-ancestors * is the one accepted value', () => {
-    expect(frameability({ 'content-security-policy': 'frame-ancestors *' })).toEqual({
-      frameable: true,
-      reason: null,
-    });
-    expect(
-      frameability({ 'content-security-policy': "script-src 'self'; frame-ancestors *; object-src 'none'" }),
-    ).toEqual({ frameable: true, reason: null });
-  });
-
-  test('multiple CSP headers are all enforced', () => {
-    expect(
-      frameability({
-        'content-security-policy': 'frame-ancestors *, default-src \'self\', frame-ancestors https://a.example',
-      }),
-    ).toEqual({ frameable: false, reason: 'frame-ancestors https://a.example' });
-  });
-});
-
-describe('loginCookieRisk (RF-70)', () => {
-  const COOKIE_REASON = (value: string) =>
-    `the tool keeps cookies with SameSite=${value}, which a tab inside Nod cannot store`;
-  const SCRIPT_REASON = (value: string) =>
-    `the tool's page saves its login in a SameSite=${value} cookie, which a tab inside Nod cannot store`;
-
-  test('a Set-Cookie with SameSite=Strict or Lax refuses the iframe', () => {
-    expect(
-      loginCookieRisk({ setCookies: ['token=1; Path=/; HttpOnly; SameSite=Strict'], scripts: [] }),
-    ).toBe(COOKIE_REASON('Strict'));
-    expect(loginCookieRisk({ setCookies: ['token=1; SameSite=Lax'], scripts: [] })).toBe(
-      COOKIE_REASON('Lax'),
-    );
-    // The attribute name is case-insensitive; the reason quotes the value as written.
-    expect(loginCookieRisk({ setCookies: ['token=1; samesite=strict'], scripts: [] })).toBe(
-      COOKIE_REASON('strict'),
-    );
-  });
-
-  test('SameSite=None and a cookie with no SameSite are fine', () => {
-    expect(
-      loginCookieRisk({ setCookies: ['token=1; SameSite=None; Secure', 'theme=dark; Path=/'], scripts: [] }),
-    ).toBeNull();
-  });
-
-  test('a login cookie write with expires and a strict/lax sameSite refuses the iframe', () => {
-    // The shape a login write has: a flat options literal with `expires` beside `sameSite`.
-    const write =
-      'Cookie.set("accessToken", T, {expires:T,path:PATH,secure:window.location.protocol==="https:",sameSite:"strict"});';
-    expect(loginCookieRisk({ setCookies: [], scripts: [write] })).toBe(SCRIPT_REASON('strict'));
-    const lax = 'Cookies.set("session", id, { path: "/", expires: days(1), sameSite: \'lax\' });';
-    expect(loginCookieRisk({ setCookies: [], scripts: [lax] })).toBe(SCRIPT_REASON('lax'));
-  });
-
-  test('library defaults, consent banners and serializers do not match', () => {
-    // The three Jitsi shapes: js-cookie's default argument, a serializer `switch` and a consent
-    // banner's defaults. None is a login write of the page itself.
-    const snippets = [
-      'o=arguments[4]||{path:"/",sameSite:"strict"};',
-      'switch(e){case"lax":a+="; SameSite=Lax";break;case"strict":a+="; SameSite=Strict";}',
-      '{domain:"",expiration:365,sameSite:"Lax",secure:!1,upgrade:!0}',
-    ];
-    for (const snippet of snippets) {
-      expect(loginCookieRisk({ setCookies: [], scripts: [snippet] })).toBeNull();
-    }
-    // A login write whose options are not a flat literal is not read as one either.
-    expect(
-      loginCookieRisk({
-        setCookies: [],
-        scripts: ['set("t", v, { expires: T, nested: { sameSite: "strict" } });'],
-      }),
-    ).toBeNull();
-    // `expiration` is not `expires:`.
-    expect(
-      loginCookieRisk({ setCookies: [], scripts: ['set("t", v, { expiration: 365, sameSite: "strict" });'] }),
-    ).toBeNull();
-  });
-});
-
-describe('scriptSources (RF-70)', () => {
-  test('same-origin script and modulepreload addresses, in document order', () => {
-    const html = [
-      '<script src="/app.js"></script>',
-      "<script src='https://kanban.example/next.js'></script>",
-      '<script src="https://cdn.example/lib.js"></script>',
-      '<link href="/preload.js" rel="modulepreload">',
-      '<link rel="stylesheet" href="/style.css">',
-      '<script>inline()</script>',
-    ].join('');
-    expect(scriptSources(html, 'https://kanban.example/app')).toEqual([
-      'https://kanban.example/app.js',
-      'https://kanban.example/next.js',
-      'https://kanban.example/preload.js',
-    ]);
-  });
-
-  test('relative addresses resolve against the entry URL and duplicates count once', () => {
-    const html = '<script src="chunk.js"></script><script src="/app/chunk.js"></script>';
-    expect(scriptSources(html, 'https://kanban.example/app/page')).toEqual([
-      'https://kanban.example/app/chunk.js',
-    ]);
-  });
-
-  test('at most 8 scripts are read', () => {
-    const html = Array.from({ length: 12 }, (_, index) => `<script src="/s${index}.js"></script>`).join('');
-    expect(scriptSources(html, 'https://kanban.example/')).toHaveLength(8);
-  });
-
-  test('a cross-origin script or preload is ignored, and so is a malformed entry URL', () => {
-    expect(
-      scriptSources(
-        '<script src="https://other.example/a.js"></script><link rel="modulepreload" href="https://other.example/b.js">',
-        'https://kanban.example/',
-      ),
-    ).toEqual([]);
-    expect(scriptSources('<script src="/a.js"></script>', 'not a url')).toEqual([]);
   });
 });
 
@@ -521,10 +342,3 @@ describe('saveTarget', () => {
   });
 });
 
-describe('defaultMode', () => {
-  test('docked on macOS, windows elsewhere', () => {
-    expect(defaultMode('macos')).toBe('docked');
-    expect(defaultMode('windows')).toBe('windows');
-    expect(defaultMode('linux')).toBe('windows');
-  });
-});

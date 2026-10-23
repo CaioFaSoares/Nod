@@ -1,5 +1,11 @@
 # test/ — proof
 
+**All of it at once:** `bun run validate` runs typecheck (every tsconfig), the unit tests of `test/`
+and `host/`, and the page build, then prints one summary and exits non-zero on any failure;
+`bun run validate --smoke` adds the four real-surface smokes below on tinyjs and on Electrobun
+(skipped, with a line saying so, when `.hutch/devkit` is missing). The smokes open real windows for
+a few minutes and each moves `resources/seed.json` aside and restores it (`scripts/validate.ts`).
+
 Two kinds of proof, matching `AGENTS.md`'s rule that nothing is "verified" without execution:
 
 | Kind | Where | Runs | Proves |
@@ -9,6 +15,11 @@ Two kinds of proof, matching `AGENTS.md`'s rule that nothing is "verified" witho
 | Smoke, connected | `test/smoke/` (`connected.ts`, `connected.html`, `tools.ts`) | `bun test/smoke/connected.ts [--force]` | The real Nod under four app ids beside a real host process: SP05 §5 steps 2–5 and block 2's sharing (SP06 §4–§6, B7, K1–K9), no external network, no container |
 | Smoke, real page | `test/smoke/` (`ui.ts`, `ui-driver.ts`, `tools.ts`) | `bun test/smoke/ui.ts [--force]` | The real `index.html` entry (`src/app.ts` + `src/settings.ts`) inside tinyjs, driven through its own DOM: block 2's screens (#24, #25, #27–#35), beside a real host process, no external network, no container. The generated page points `frontend.devUrl` at the dev server's copy of itself (`test/smoke/.gerado/ui/`), so the window is the real `http://` page with the runtime bridge — not a re-written test page |
 | Smoke, docked tabs | `test/smoke/` (`tabs.ts`, `tabs-driver.ts`, `tools.ts`, `winlist.swift`) | `bun test/smoke/tabs.ts [--force]` | E03 on the real surface (RF-49…RF-52, RF-66…RF-68, T6): a local account, two org tools and real tool windows per tab, with three reporting tool pages (`startTabTools`) that measure themselves. No host process. The real frame of every window comes from `CGWindowListCopyWindowInfo` (`winlist.swift`), because a webview reports `window.screenX/screenY` as `0,1490` and `window.outerWidth/outerHeight` as `0x0`, and a tool page cannot call `tiny.win.getState()` (api-gated). A step whose subject needs the panel's slot is reported **blocked** — never passed — when the page is hidden (a locked screen), which `src/tabs.ts` answers with an empty slot by design |
+
+Every smoke runner also takes `--runtime=electrobun` (or `NOD_RUNTIME=electrobun`): the same page,
+drivers and checks launch the Electrobun target instead of tinyjs (`test/smoke/tools.ts`;
+`docs/handovers/e06-parity-smoke.md` carries both rounds). Without the flag the target is tinyjs,
+unchanged.
 
 `test/helpers/sqlite-bun.ts` adapts `bun:sqlite` to the backend's `SqlDb`, so `backend/repo.ts` runs
 under Bun.
@@ -144,7 +155,7 @@ What makes the geometry checkable at all, all measured on this machine:
 
 | Step | Story | Surface |
 | --- | --- | --- |
-| RF-52 default mode | RF-52 | `tools.state()`: `mode=docked`, `dockable=true` on macOS, no strip with no tab |
+| RF-52 default mode | RF-52 | `tools.state()`: `mode=docked` (the mode is machine-derived: docked wherever the runtime can position windows), no strip with no tab |
 | RF-49 the docked tab lands on the slot | RF-49 | the slot's screen rect (`getState()` of main + the slot's `getBoundingClientRect()`) against the tool window's real frame |
 | RF-49 it follows a resize | RF-49 | `tiny.win.setSize` on the main window; the tab's frame lands on the new slot within 1 s |
 | RF-50 a second tab, RF-50 switching | RF-50 | the strip's `+`, three strip clicks, the page's `timeOrigin` and draft kept, one load |
@@ -152,13 +163,30 @@ What makes the geometry checkable at all, all measured on this machine:
 | RF-66 a popup, RF-66 Open link… | RF-66 | a link a tool opens lands right after its tab; the dialog's own field and Enter |
 | RF-68 no API for an ad-hoc tab | RF-68 | the same `login.report` on a tool tab (`ok`) and on two ad-hoc tabs (refused) |
 | RF-67 a view, RF-67 a tool | RF-67 | `catalog.list` gains a view of Tool B and a personal tool with its probed title |
-| RF-52 Windows mode, RF-19 | RF-52, RF-19 | the Account card, a framed window with no strip, a second open that never reloads |
 | T6 | T6 | lock from the sidebar, enter through the Offline tile: the tabs reopen in order, ad-hoc ones do not |
+| 0.6.0b Open tabs from Home | 0.6.0b | Home's `Open tabs` button: its badge is the open count, it shows the strip, and it is disabled with no tab |
+
+Not in the list, removed with the product (owner decision §22 "Seamless tabs: always inside, detach on
+demand"): the RF-52 **Windows mode** switch (no `tabs.setMode`, no Account card — the mode is derived
+`docked` on macOS because the runtime can position windows), **RF-19** (its "second `tools.open`
+focuses, never reloads" was driven from that Windows mode, so it has no subject here), the six RF-69
+**embedded (iframe) tab** steps, the 0.6.0b embedded **Sign in copy** step and the two 0.6.0c
+login-cookie steps. The fake tools D (XFO) and E (strict cookie) went with them; `startTabTools`
+serves A, B and C only.
+
+On Electrobun a docked tab is a **native view inside the main window**, not an OS window: the slot
+steps prove it with the tool page's own `innerWidth/innerHeight` equal to the slot box **and** the
+on-screen window list showing no extra tool window; only a detached tab has a carrier window, which
+the detach step requires to appear (framed) and the dock-back step requires to disappear. The tiling
+WM can therefore only hold the main and carrier windows, so only a tiled tool/carrier window blocks a
+placement step (a tiled main window does not: the view still fills the slot).
 
 A run prints its steps as they land, each `ok`, `FAILED` or `blocked`; `blocked` is for a step whose
 subject the session made unobservable (a locked screen hides the page, and `src/tabs.ts` then reports
-no slot by design) — it is never counted as a pass. Last run with the screen unlocked: 17 steps, 0
-blocked, `ok`, 25.2 s (RF-49's landing and resize-follow measured against `CGWindowList` frames, with
-OmniWM active and the smoke floating its own windows); with the screen locked the same smoke reports
-the four slot steps as `blocked` with their numbers. `docs/handovers/e03-smoke.md` carries the step
-lines, the three-run tally and every number.
+no slot by design; a tiling WM that owns the run's window is the same answer with its numbers) — it is
+never counted as a pass, and the runner keeps going. The list is **16 steps** after the seamless-tabs
+change; the last full run before it was 27 steps (`docs/handovers/e03-smoke.md` carries those step
+lines and numbers). With OmniWM active and the smoke floating its own windows, RF-49's landing and
+resize-follow and RF-50's second slot are measured against `CGWindowList` frames; when the tiler holds
+a window instead, those steps (and the RF-66 placement) are `blocked` with the tile frames and the
+slot box.

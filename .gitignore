@@ -43,3 +43,13 @@ test/smoke/.gerado/
 
 # omp: roster do _Aleph, symlink local (ln -s <_Aleph>/.aleph/agents .omp/agents)
 .omp/agents
+
+# Electrobun (E06): projected devkit, generated config and build output
+.hutch/
+.cottontail-tmp/
+electrobun.config.ts
+build/
+artifacts/
+
+# macOS icon set `scripts/eb-icon.ts` writes from the PNG the tinyjs build wears
+.eb-icon.iconset/
