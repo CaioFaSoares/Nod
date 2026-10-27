@@ -114,7 +114,7 @@ sequenceDiagram
 
 **Releases.** Merging `dev` into `main` creates the `release-<version>` branch on its own, which
 builds every system and publishes a GitHub release. Installed Nods with an update channel notice the
-new version and show its notes.
+new version and show its notes, and the Homebrew cask in `Casks/nod.rb` moves to the new version.
 
 ```mermaid
 flowchart LR
@@ -122,7 +122,17 @@ flowchart LR
   branch --> build["release.yml<br/>tests, builds macOS · Linux · Windows"]
   build --> gh["GitHub release<br/>archives + manifest.json"]
   gh --> nods["Installed Nods<br/>see the update notice"]
+  gh --> cask["Casks/nod.rb on main<br/>version + sha256"]
 ```
+
+**Install on macOS with Homebrew.** This repository is the tap:
+
+```sh
+brew tap caiofasoares/nod https://github.com/CaioFaSoares/Nod
+brew install --cask nod
+```
+
+After that Nod updates itself; details in `docs/distribuicao.md` §3.1.
 
 ## Status
 

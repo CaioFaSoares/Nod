@@ -326,3 +326,47 @@ jobs:
               --notes-file <(jq -r '.notes // empty' out/manifest.json) \
               --latest
           fi
+
+  # The Homebrew cask (`Casks/nod.rb`, this repository is the tap — docs/distribuicao.md §3.1)
+  # names the release just published, with the sha256 its manifest carries for each macOS zip. It
+  # is committed to `main`, which every `release-*` branch starts from; a re-run of an older release
+  # leaves a newer cask alone (`scripts/brew-cask.ts`). A push by GITHUB_TOKEN starts no workflow.
+  cask:
+    name: update the Homebrew cask
+    needs: [prepare, release]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_REPO: ${{ vars.NOD_RELEASE_REPO || github.repository }}
+      GH_TOKEN: ${{ secrets.NOD_RELEASE_TOKEN || github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: write Casks/nod.rb
+        run: |
+          gh release download "$TAG" --repo "$RELEASE_REPO" --pattern manifest.json --dir "$RUNNER_TEMP"
+          bun scripts/brew-cask.ts "$RUNNER_TEMP/manifest.json" --repo="$RELEASE_REPO"
+
+      - name: commit to main
+        run: |
+          if git diff --quiet -- Casks/nod.rb && git ls-files --error-unmatch Casks/nod.rb > /dev/null 2>&1; then
+            echo "Casks/nod.rb unchanged"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898699+github-actions[bot]@users.noreply.github.com'
+          git add Casks/nod.rb
+          git commit -m "Casks/nod.rb: Nod $VERSION"
+          for attempt in 1 2 3; do
+            git push origin HEAD:main && exit 0
+            git pull --rebase origin main
+          done
+          echo "::error::could not push Casks/nod.rb to main"
+          exit 1

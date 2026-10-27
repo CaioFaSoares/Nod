@@ -78,6 +78,31 @@ fixed certificate (`signIdentity`/`TINYJS_SIGN_IDENTITY`).
 Distribuição sem esse passo exige **Developer ID Application + notarização** (Apple Developer
 Program) — melhoria opcional, ver `docs/canonico.md` §19.
 
+### 3.1 Homebrew
+
+This repository is also a Homebrew tap: `Casks/nod.rb` installs the macOS zip of the latest release,
+the Electrobun build on Apple silicon and the tinyjs one on Intel, each checked against the sha256
+the release's `manifest.json` carries.
+
+```sh
+brew tap caiofasoares/nod https://github.com/CaioFaSoares/Nod   # once per machine
+brew install --cask nod
+```
+
+- The cask clears the quarantine flag of `/Applications/Nod.app` after installing (`postflight_steps`),
+  which is step 3 above done for the person: the ad-hoc build opens without the Settings detour and
+  is never translocated.
+- `auto_updates true`: Nod installs its own updates (§8), so `brew upgrade` leaves it alone unless
+  asked with `--greedy`. `brew uninstall --cask nod` removes the app; `--zap` also removes this
+  machine's data (`~/Library/Application Support/copland.nod` and the caches) — the keychain items
+  stay.
+- `depends_on macos: :sonoma` mirrors the bundle's own `LSMinimumSystemVersion`, which `brew audit`
+  requires; the supported floor is still macOS 15 (`docs/canonico.md` RNF-01).
+- The cask is written by `scripts/brew-cask.ts` from a manifest, never by hand. The `cask` job of
+  `release.yml` runs it after publishing and commits the result to `main`, the branch `brew tap`
+  clones; re-running an older release leaves a newer cask alone. By hand:
+  `bun scripts/brew-cask.ts manifest.json --repo=CaioFaSoares/Nod`.
+
 ## 4. Windows e Linux
 
 Não há estratégia de assinatura documentada pelo runtime. O caminho é a **pasta portátil** do build
