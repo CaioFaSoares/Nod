@@ -123,3 +123,15 @@ explicit access control list or a real Developer ID for the outer bundle.
 - Removed: the throwaway app data (`copland.nod.mig`, `.mig2`, `.mig3`), their `/tmp` build trees,
   the keychain items, the WebKit/HTTPStorages entries, the local server, and the screenshots.
   `resources/seed.json` is still 299 B.
+
+## 7. The sweep on the owner's Mac (0.7.0b, 2026-10-27, `execução`)
+
+On the owner's machine the 0.7.0a bundle installed by Homebrew quit at every launch. Running its
+launcher from a terminal printed `[eb] backend init failed … NativeError: keychain delete: Invalid
+attempt to change the owner of this item.` from `purgeBiometricItems`: the item
+`nod.bio.<person>` was created on 2026-10-17 by a tinyjs build, and the keychain refuses this `bun`
+the deletion (`errSecInvalidOwnerEdit`), unlike the canary of §5, whose item Electrobun could
+delete. The refusal propagated out of `init`, so the backend never started. 0.7.0b catches it per
+person: the item stays (nothing on Electrobun reads it), the `biometric_people` flag is cleared, and
+the boot goes on. Not measured: whether another Electrobun app can read a refused item. The refusal
+suggests its ACL does not name Electrobun's `bun` as §5's item did (`leitura` of the error only).

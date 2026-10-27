@@ -96,6 +96,10 @@ brew install --cask nod
   asked with `--greedy`. `brew uninstall --cask nod` removes the app; `--zap` also removes this
   machine's data (`~/Library/Application Support/copland.nod` and the caches) — the keychain items
   stay.
+- The first launch after an install is Electrobun's self-extractor: the zip carries a small wrapper
+  that unpacks the real app in place ("Installing application files…") and opens it. Later launches
+  open the app directly. A Nod that cannot boot cannot update itself either: then
+  `brew upgrade --cask --greedy nod` (or `brew reinstall --cask nod`) brings the newer cask.
 - `depends_on macos: :sonoma` mirrors the bundle's own `LSMinimumSystemVersion`, which `brew audit`
   requires; the supported floor is still macOS 15 (`docs/canonico.md` RNF-01).
 - The cask is written by `scripts/brew-cask.ts` from a manifest, never by hand. The `cask` job of

@@ -3,7 +3,7 @@
   "title": "Nod",
   "size": "1100x720",
   "id": "copland.nod",
-  "version": "0.7.0a",
+  "version": "0.7.0b",
   "minTinyjsVersion": "0.57.2",
   "backend": "backend/main.ts",
   "frontend": {
