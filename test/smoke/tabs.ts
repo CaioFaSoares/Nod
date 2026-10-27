@@ -374,10 +374,16 @@ const CLICK_BIN = join(GENERATED_DIR, 'click');
 
 /**
  * One real left click (`test/smoke/click.swift`) at a point of the window server's space, only on a
- * window of this run. The DOM's `el.click()` the driver uses elsewhere never reaches AppKit's hit
- * test, so a native view over the page (a docked tab, hidden or detached) is invisible to it.
+ * window of this run — and, with `title`, only on the window of that title. The DOM's `el.click()`
+ * the driver uses elsewhere never reaches AppKit's hit test, so a native view over the page (a
+ * docked tab, hidden or detached) is invisible to it.
  */
-async function realClick(rootPid: number | null, x: number, y: number): Promise<{ ok: boolean; why: string }> {
+async function realClick(
+  rootPid: number | null,
+  x: number,
+  y: number,
+  title: string | null,
+): Promise<{ ok: boolean; why: string }> {
   if (rootPid === null) return { ok: false, why: 'the app is not running' };
   const compiler = Bun.which('swiftc');
   if (compiler === null) return { ok: false, why: 'no swiftc on this machine' };
@@ -387,7 +393,7 @@ async function realClick(rootPid: number | null, x: number, y: number): Promise<
     if (built.code !== 0) return { ok: false, why: `swiftc exited ${built.code}: ${built.out.trim().slice(-200)}` };
   }
   const pids = [...(await descendantPids(rootPid))].join(',');
-  const run = await runTool([CLICK_BIN, String(x), String(y), pids]);
+  const run = await runTool([CLICK_BIN, String(x), String(y), pids, ...(title === null ? [] : [title])]);
   return { ok: run.code === 0, why: run.out.trim() };
 }
 
@@ -558,11 +564,14 @@ function startDesk(deps: { tools: TabTools; pid: PidRef }): Desk {
       }
       if (url.pathname === '/desk/click' && req.method === 'POST') {
         const body: unknown = await req.json().catch(() => null);
-        const { x, y } = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+        if (typeof body !== 'object' || body === null) return deskJson({ ok: false, error: 'bad body' }, 400);
+        const x = 'x' in body ? body.x : undefined;
+        const y = 'y' in body ? body.y : undefined;
+        const title = 'title' in body && typeof body.title === 'string' ? body.title : null;
         if (typeof x !== 'number' || typeof y !== 'number') {
           return deskJson({ ok: false, error: 'bad point' }, 400);
         }
-        const clicked = await realClick(deps.pid.value, x, y);
+        const clicked = await realClick(deps.pid.value, x, y, title);
         return deskJson({ ok: true, clicked: clicked.ok, why: clicked.why });
       }
       if (url.pathname === '/desk/onscreen') {

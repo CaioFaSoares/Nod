@@ -1504,6 +1504,23 @@ describe('tabs — docked mode (RF-49…RF-52, RF-66…RF-68)', () => {
     expect(openTools(env)).toEqual([{ toolId: 'kanban', url: ENTRY_AUDIT, active: true }]);
   });
 
+  test('close all closes docked and detached tabs and empties the list the next unlock reopens (0.7.0c)', async () => {
+    const env = dockedEnvironment();
+    const toolWindows = makeToolWindows(env);
+    await dockedKanban(toolWindows);
+    await toolWindows.newTab('kanban');
+    toolWindows.detach('tool_kanban');
+
+    const state = toolWindows.closeAllTabs();
+    expect(state.tabs).toEqual([]);
+    expect(state.active).toBeNull();
+    expect(env.handles.size).toBe(0);
+    expect(openTools(env)).toEqual([]);
+    // Unlike the lock's `closeAll`, nothing comes back at the next unlock.
+    await toolWindows.restore();
+    expect(toolWindows.state().tabs).toEqual([]);
+  });
+
   test('dock works on any detached tab id, not only the selected one (RF-51)', async () => {
     const env = dockedEnvironment();
     const toolWindows = makeToolWindows(env);

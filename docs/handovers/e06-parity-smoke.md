@@ -550,3 +550,13 @@ left click, only when the topmost window at the point is this run's) and three d
 Final runs: `bun run validate --smoke` 12/12 in 362.5 s (the two Electrobun real-click steps came
 out `blocked` there — another app was frontmost); then `bun test/smoke/tabs.ts --runtime=electrobun
 --force` alone: 19/19, 0 blocked, 24.9 s. Seed restored (299 B), no process left.
+
+**0.7.0c — close all (2026-10-27).** The tabs smoke gained `0.7.0c the strip's close all closes
+every tab`: a real click on the strip's "close all" with two docked tabs leaves none and Home takes
+the panel; then, with one of two tabs detached, close all leaves no tab and no tool window. That second
+press is the DOM's, because under OmniWM the carrier window may float over the strip.
+`click.swift` now also takes the window title, so a click only counts on the main window — a tool or
+carrier window of the same run over the point makes the step `blocked`, never a misdirected click.
+Runs: `bun test/smoke/tabs.ts --force` 20 steps ok (4 blocked by the tiling WM) and
+`--runtime=electrobun --force` 20/20, 0 blocked; `bun run validate --smoke` before the harness fix
+ran every other smoke ok on both runtimes.

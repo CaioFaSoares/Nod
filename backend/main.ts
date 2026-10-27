@@ -3796,6 +3796,8 @@ const methods: { [M in Method]: Handler<M> } = {
     return required(windows, 'tabs.close').closeTab(text(p.id, 'invalid tab'));
   },
 
+  'tabs.closeAll': () => required(windows, 'tabs.closeAll').closeAllTabs(),
+
   'tabs.next': (params) =>
     required(windows, 'tabs.next').next(tabStep(parameters(params, 'invalid step').step)),
 

@@ -1295,7 +1295,8 @@ async function realClick(find: () => Element | null, what: string): Promise<{ x:
     if (typeof point === 'string') return blocked(`${what}: ${point}`);
     last = `page box ${rectText(el.getBoundingClientRect())}, server point ${Math.round(point.x)},${Math.round(point.y)}`;
     const before = trustedClicks.length;
-    const answer = await desk('/desk/click', { x: point.x, y: point.y });
+    // Only the main window: a tool or carrier window of this run over the point is a block, not a click.
+    const answer = await desk('/desk/click', { x: point.x, y: point.y, title: MAIN_TITLE });
     if (answer.clicked !== true) return blocked(`${what}: ${String(answer.why ?? 'not clicked')}`);
     for (let tick = 0; tick < 15; tick += 1) {
       await sleep(40);
@@ -1828,6 +1829,53 @@ async function checkOpenTabsButton(): Promise<Outcome> {
   );
 }
 
+// ------------------------------------------------------------- 0.7.0c: close all
+
+/** Two tabs of Tool A from the sidebar and the strip's own "+" path (`tabs.new`). */
+async function twoTabs(): Promise<ToolsState> {
+  await clickSidebarTool('Tool A');
+  await waitForState('a tab of Tool A', (next) => next.tabs.length >= 1);
+  await call('tabs.new', { toolId: 'tool-a' });
+  const state = await waitForState('two tabs', (next) => next.tabs.length >= 2);
+  await waitForValue('the tab strip', () => document.querySelector('.tab-strip'));
+  return state;
+}
+
+/**
+ * The strip's "close all": first clicked with the mouse over two docked tabs (the hit test is the
+ * subject, 0.7.0a), then with a tab detached into its own window — that carrier may sit over the
+ * strip under a tiling WM, so the second press is the DOM's, and the subject is that the detached
+ * tab and its window go too.
+ */
+async function checkCloseAll(): Promise<Outcome> {
+  const hidden = await hiddenNow();
+  if (hidden !== null) return blocked(hidden);
+  const docked = await twoTabs();
+  const clicked = await realClick(() => document.querySelector('.tab-strip .tab-close-all'), "the strip's close all");
+  if ('blocked' in clicked) return clicked;
+  await waitForState('every docked tab closed', (next) => next.tabs.length === 0);
+  await waitForValue('Home on the panel', () => document.querySelector('.home'));
+
+  const mixed = await twoTabs();
+  await call('tabs.detach', { id: mixed.tabs[0].id });
+  await waitForState('one tab detached', (next) => next.tabs.some((tab) => !tab.docked));
+  const carriers = (await onScreen()).windows.filter((window) => window.title !== MAIN_TITLE).length;
+  const button = await waitForValue('close all', () =>
+    document.querySelector<HTMLButtonElement>('.tab-strip .tab-close-all'),
+  );
+  button.click();
+  await waitForState('every tab closed, the detached one too', (next) => next.tabs.length === 0);
+  await waitForValue('the carrier window to close', async () => {
+    const left = (await onScreen()).windows.filter((window) => window.title !== MAIN_TITLE).length;
+    return left === 0 ? true : null;
+  });
+  return (
+    `a real click on close all at ${Math.round(clicked.x)},${Math.round(clicked.y)} closed ` +
+    `${docked.tabs.length} docked tabs and Home took the panel; with one of ${mixed.tabs.length} tabs ` +
+    `detached (${carriers} tool window(s) on screen) close all left 0 tabs and 0 tool windows`
+  );
+}
+
 // ------------------------------------------------------------- harness
 
 /** A check's answer: the step's detail, or the reason the session made its subject unobservable. */
@@ -1862,6 +1910,7 @@ const CHECKS: Checks = [
   ['RF-67 save a tab of a new origin (tool)', checkSaveTool],
   ['T6 lock and unlock restore the tabs', checkRestore],
   ['0.6.0b Open tabs from Home', checkOpenTabsButton],
+  ["0.7.0c the strip's close all closes every tab", checkCloseAll],
 ];
 
 // Not in this list, on purpose: RF-19 (`tools.open` twice focuses, never reloads) was driven from the
