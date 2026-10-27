@@ -3,7 +3,7 @@
 //
 // Parity target (`e06-parity.md`): in tinyjs every page has `tiny.win.id`, and `tiny.api.call`
 // returns a promise that RESOLVES with the handler's answer or REJECTS with the gate's message
-// (`"login.report" is disabled by tinyjs.json "api"`, or the backend's own error such as
+// (`"login.report" is not allowed from this window`, or the backend's own error such as
 // `login.report only comes from a tool window`). The Electrobun sandbox keeps
 // `window.__electrobunSendToHost` (a one-way channel), so the bridge adds the missing half:
 //
@@ -38,7 +38,7 @@ export interface RefusedMember {
   method: string;
 }
 
-/** Denied by `tinyjs.json` "api" for every tool entry (`gen-config.ts` `TOOL_METHODS` is the allow-list). */
+/** Denied for every tool entry (`TOOL_METHODS` in the config generator is the allow-list). */
 export const REFUSED_MEMBERS: readonly RefusedMember[] = [
   { owner: 'win', member: 'getState', method: 'win.getState' },
   { owner: 'win', member: 'show', method: 'win.show' },

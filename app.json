@@ -1,21 +1,12 @@
 {
   "name": "nod",
   "title": "Nod",
+  "version": "0.8.0",
   "size": "1100x720",
   "id": "copland.nod",
-  "version": "0.7.0c",
-  "minTinyjsVersion": "0.57.2",
-  "backend": "backend/main.ts",
-  "frontend": {
-    "build": "bun run build",
-    "dist": "dist",
-    "dev": "bun run dev",
-    "devUrl": "http://127.0.0.1:5173"
-  },
   "urlScheme": "nod",
   "popups": "window",
   "downloads": "auto",
-  "contextMenu": true,
   "permissions": {
     "camera": "Tools you open in Nod, like video calls, can use the camera.",
     "microphone": "Tools you open in Nod, like video calls, can use the microphone."

@@ -98,7 +98,7 @@ describe('the runtime-neutral capability split (0.7.0)', () => {
 
 describe('the build-mode stamp (SP02 §9, canonico §22)', () => {
   test('names a dev run only for the exact `dev` text', () => {
-    // `scripts/gen-config.ts dev` writes it, and the backend reads it back at start-up.
+    // `scripts/gen-electrobun-config.ts dev` writes it, and the backend reads it back at start-up.
     expect(stampMode('dev\n')).toBe('dev');
     expect(stampMode(' build \n')).toBe('build');
     // A release stages no stamp at all (it is not in its `"resources"` list), so absence is a

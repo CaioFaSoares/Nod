@@ -4,13 +4,13 @@
 // icon key). Run by `eb:dev` / `eb:build` before the Electrobun CLI, the way
 // `scripts/build-nod-native.ts` compiles the native helper.
 //
-// The source is the very PNG the tinyjs build wears: `iconForConfig` from `scripts/gen-config.ts`
+// The source is the very PNG the release build wears: `iconForConfig` from `scripts/app-config.ts`
 // resolves it (`NOD_ICON`, else `resources/icon.png`, else `assets/icon.png`), stages a `NOD_ICON`
 // file as `.nod-icon.png`, and refuses anything that is not a ≥1024×1024 PNG. Nothing is copied or
-// re-derived here — one precedence, one check, two targets.
+// re-derived here — one precedence, one check.
 //
 // With no icon at all no folder is written and the generated config names no icon key, so Electrobun
-// keeps its own default (the same outcome as tinyjs with `icon: null`).
+// keeps its own default.
 //
 // Usage: bun scripts/eb-icon.ts
 //
@@ -18,7 +18,7 @@
 // artifacts are built on macOS (the rule `build-nod-native.ts` keeps for swiftc).
 import { mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { iconForConfig } from './gen-config';
+import { iconForConfig } from './app-config';
 import { EB_ICON_ICONSET, ICONSET_IMAGES } from './gen-electrobun-config';
 
 function run(command: string[]): void {
@@ -52,7 +52,7 @@ if (import.meta.main) {
     const icon = await iconForConfig(root);
     if (icon === null) {
       rmSync(iconset, { recursive: true, force: true });
-      console.log('eb-icon: no app icon; Electrobun keeps its default (same as tinyjs)');
+      console.log('eb-icon: no app icon; Electrobun keeps its default');
     } else if (process.platform !== 'darwin') {
       console.warn(`eb-icon: skipped (sips is macOS-only; host is ${process.platform})`);
     } else {

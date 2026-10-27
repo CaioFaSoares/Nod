@@ -10,7 +10,8 @@
 //
 // `release.yml` runs it after publishing, so the cask always names the latest release with the
 // sha256 the manifest carries for each macOS zip — Apple silicon is the Electrobun build, Intel the
-// tinyjs one (`docs/canonico.md` §22). A manifest older than the cask on disk is refused with exit 0
+// Electrobun one, with the same zip name (`docs/canonico.md` §22). A manifest older than the cask on
+// disk is refused with exit 0
 // and nothing written: re-running the release of an old version never moves the cask backwards.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';

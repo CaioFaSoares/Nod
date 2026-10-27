@@ -278,6 +278,10 @@ declare interface TinyWinState {
   screen: { width: number; height: number; scale: number };
   /** Linux only: false on Wayland, where the compositor ignores setPosition */
   canPosition?: boolean;
+  /** Whether this runtime can re-parent a live view into another window (docked tabs). The
+   *  Electrobun target answers true on macOS and false on Windows/Linux; the backend then keeps
+   *  the windows mode (one framed window per tool). */
+  canDock?: boolean;
 }
 
 declare interface TinyAppInfo {

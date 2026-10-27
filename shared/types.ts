@@ -701,7 +701,7 @@ export interface AppInfo {
    */
   systemPrompt: boolean;
   /**
-   * SP02 §9/`docs/canonico.md` §22: this is a non-release dev run (`tinyjs dev`), where the gate
+   * SP02 §9/`docs/canonico.md` §22: this is a non-release dev run (a dev build), where the gate
    * also accepts the account password on a machine that has `authenticate` — the path the
    * unattended smoke uses. Always `false` in a release build, so the page may only offer the
    * password field in a dev run.

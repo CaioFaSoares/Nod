@@ -1,12 +1,12 @@
 # AGENTS.md — Nod
 
 Antes de qualquer coisa, leia `docs/canonico.md`. Ele é a fonte única do escopo e dos requisitos.
-Os fatos do runtime estão em `docs/tinyjs.md`; o que veio da Carna, em `docs/downscale-carna.md`;
+Os fatos do runtime estão em `docs/electrobun.md`; o que veio da Carna, em `docs/downscale-carna.md`;
 o vocabulário, em `CONTEXT.md`.
 
 ## O que é o Nod
 
-Uma casca de desktop (TypeScript fino sobre tinyjs) que reúne as ferramentas internas de um time numa
+Uma casca de desktop (TypeScript fino sobre Electrobun) que reúne as ferramentas internas de um time numa
 janela de catálogo e em janelas de ferramenta, com papéis, concessões e credenciais no chaveiro do
 sistema. É um downscale da Carna, não uma continuação dela.
 
@@ -33,8 +33,8 @@ sistema. É um downscale da Carna, não uma continuação dela.
 - **Nada avança sem leitura do dono.** Decisão nasce `Proposto` ou `Aberto` no registro do
   `canonico.md`; só o dono muda para `Decidido`.
 - **Estado é derivado, não declarado.** Nenhum arquivo lista o status de outro arquivo.
-- **Sem fallback de toolchain.** Ferramenta ausente vira bloqueio declarado, não uma segunda
-  superfície de runtime.
+- **Um runtime.** Electrobun é a única superfície de desktop; tinyjs é histórico (`docs/tinyjs.md`).
+  Ferramenta ausente vira bloqueio declarado, não uma segunda superfície de runtime.
 - **Ferramenta é dado.** Endereço, produto, ícone e papéis das ferramentas são conteúdo do catálogo;
   o código não conhece o domínio do time nem nome de produto de terceiro.
 - **O seed privado não entra no git.** Ele vive fora do repositório, é listado em `resources/` e vai
@@ -45,15 +45,11 @@ sistema. É um downscale da Carna, não uma continuação dela.
 - Escrever código de produto sem requisito aprovado no `canonico.md`.
 - Marcar requisito como atendido sem prova na superfície real (o app rodando, a janela abrindo).
 - Pôr segredo, token ou senha em arquivo, em log, em evento ou em `store.json`.
-- Rodar `tinyjs dev` com `TINYJS_DEBUG=1` usando credenciais reais: o trace do runtime imprime o
-  EVAL do adaptador de login (usuário e senha) e cada chamada de API até 160 caracteres — senha local
-  em `session.unlock`/`createAccount`/`changePassword`/`enableBiometric`, senha e código em
-  `host.activate`/`host.signIn`, segredo em `vault.save`/`vault.reveal` (e na resposta),
-  senha em `vault.exportToFile`/`vault.importFromFile`, senha do gate em `vault.reveal`/`vault.copy`/
-  `shares.send`/`shares.accept`/`assignments.set`/`assignments.sealMissing`, código em `invites.issue`.
-  O runtime só esconde `secrets.*` e `clip.*`.
-- Abrir ferramenta de terceiro em iframe dentro da casca, ou conceder `api` com `"all"` ou
-  wildcard de subdomínio. (A exceção da aba embutida, aberta em 2026-10-19, foi removida em
-  2026-10-22 com RF-69/RF-70; a proibição vale sem exceção.)
+- Rodar um launch de desenvolvimento com credenciais reais e trace de runtime ligado: o trace
+  pode imprimir o EVAL do adaptador de login (usuário e senha) e chamadas de API. Use contas,
+  códigos e segredos descartáveis em `eb:dev` e nos smokes.
+- Abrir ferramenta de terceiro em iframe dentro da casca. O gate de origin é fechado: uma view de
+  ferramenta alcança `login.report` e nada mais; `main` só tem a API na origin do app. (A exceção da
+  aba embutida, aberta em 2026-10-19, foi removida em 2026-10-22 com RF-69/RF-70.)
 - Inventar endereço, produto ou capacidade das ferramentas internas que o dono não confirmou.
-- Prometer comportamento que o runtime não documenta (`docs/tinyjs.md` §10, §11).
+- Prometer comportamento que o runtime não documenta (`docs/electrobun.md` §7).

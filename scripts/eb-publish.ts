@@ -5,8 +5,8 @@
 // in the Electrobun app.
 //
 // The release workflow runs this once per macOS runner (after `bun run eb:build` and the
-// `codesign --verify --strict --deep` gate) and merges the two halves with the Windows/Linux halves
-// `tinyjs publish` writes. Why a zip of the `.app` and not Electrobun's own
+// `codesign --verify --strict --deep` gate) and merges the two halves; the Windows/Linux legs copy
+// the runtime's own artifacts instead. Why a zip of the `.app` and not Electrobun's own
 // `artifacts/*-update.json`: that manifest has no digest and no notes, and its version decision is
 // `hash !== installedHash`; the tinyjs updater on users' machines also only knows `.zip` of a
 // bundle. The facade verifies the sha256, matches the bundle identity/version and swaps the bundle
@@ -18,7 +18,7 @@
 //
 // The pure core (`artifactName`, `downloadUrl`, `buildManifestHalf`, `releaseNotesFrom`,
 // `findBuiltApp`) is what `test/eb-publish.test.ts` exercises; the CLI is the thin shell around it.
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { parseManifest, plistString, UPDATE_ARCHES } from '../electrobun/bun/facade/update';
 import type { UpdateArch, UpdateManifest } from '../electrobun/bun/facade/update';
@@ -26,11 +26,34 @@ import type { UpdateArch, UpdateManifest } from '../electrobun/bun/facade/update
 /** The file the merge job reads from each macOS leg (`dist/publish/manifest.json`). */
 const MANIFEST_NAME = 'manifest.json';
 
-/** Release-asset prefix the tinyjs publish uses: `nod-<v>-macos-<arch>.zip`. */
+/** Release-asset prefix: `nod-<v>-macos-<arch>.zip`. */
 const ARTIFACT_PREFIX = 'nod';
 
 export function isArch(value: string): value is UpdateArch {
   return (UPDATE_ARCHES as readonly string[]).includes(value);
+}
+
+/** The three desktop platforms Electrobun builds for. */
+export type ReleasePlatform = 'macos' | 'win' | 'linux';
+
+export function isPlatform(value: string): value is ReleasePlatform {
+  return value === 'macos' || value === 'win' || value === 'linux';
+}
+
+/** `x64` is the runtime's spelling; the manifest and the archives use `x86_64`. */
+export function normalizeArch(value: string): UpdateArch | null {
+  if (value === 'x64') return 'x86_64';
+  return isArch(value) ? value : null;
+}
+
+/** The runtime's build/artifact directory spelling of an architecture. */
+export function runtimeArch(arch: UpdateArch): string {
+  return arch === 'x86_64' ? 'x64' : 'arm64';
+}
+
+/** `stable-<os>-<arch>-` prefix hutch gives update metadata and the update archive. */
+export function runtimePrefix(platform: Exclude<ReleasePlatform, 'macos'>, arch: UpdateArch): string {
+  return `stable-${platform}-${runtimeArch(arch)}-`;
 }
 
 /** `release.yml`'s version gate, the form the manifest and the tag must carry. */
@@ -57,7 +80,7 @@ export function downloadUrl(baseUrl: string, file: string): string {
 
 /**
  * One runner's half of the release `manifest.json`: version, notes and its own `mac.<arch>` entry.
- * The merge job combines the two halves with the tinyjs ones; a half that does not parse as a
+ * The merge job combines the two macOS halves; a half that does not parse as a
  * manifest (a bad digest, an empty version) is not written at all.
  */
 export function buildManifestHalf(input: {
@@ -196,7 +219,7 @@ function verifyBundleVersion(app: string, version: string): void {
   if (bundleVersion === null) throw new Error(`${app} has no bundle version`);
   if (bundleVersion.replace(/^v/, '') !== version.replace(/^v/, '')) {
     throw new Error(
-      `${app} says version ${bundleVersion}, but --version says ${version}; the Electrobun build must take the version from tinyjs.base.json`,
+      `${app} says version ${bundleVersion}, but --version says ${version}; the Electrobun build must take the version from app.json`,
     );
   }
 }
@@ -264,34 +287,102 @@ function checkFlags(flags: Record<string, string>, allowed: readonly string[]): 
 function baseVersion(): string {
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync('tinyjs.base.json', 'utf8')) as unknown;
+    raw = JSON.parse(readFileSync('app.json', 'utf8')) as unknown;
   } catch {
-    throw new Error('tinyjs.base.json is not readable here; pass --version');
+    throw new Error('app.json is not readable here; pass --version');
   }
   const version =
     typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).version : undefined;
-  if (typeof version !== 'string') throw new Error('tinyjs.base.json has no version');
+  if (typeof version !== 'string') throw new Error('app.json has no version');
   return version;
 }
 
 function usage(): string {
   return [
     'usage:',
-    '  bun scripts/eb-publish.ts build --arch <arm64|x86_64> --version <v> --base-url <url>',
-    '    [--notes-file <path>] [--build-root build] [--app <Nod.app>] [--out dist/publish]',
+    '  bun scripts/eb-publish.ts build --platform <macos|win|linux> --arch <arm64|x86_64> --version <v> --base-url <url>',
+    '    [--notes-file <path>] [--build-root build] [--app <Nod.app>] [--artifacts artifacts] [--out dist/publish]',
   ].join('\n');
+}
+
+/**
+ * Copies one Windows/Linux leg's artifacts from Hutch's `artifacts/` into the publish directory.
+ * The update metadata (`stable-<os>-<arch>-update.json`) and the compressed update archive
+ * (`stable-<os>-<arch>-Nod.tar.zst`) are what the app's Updater reads; the installer
+ * (`<os>-<arch>-Nod-Setup.*`) is what a person downloads. Every file the prefix names is copied
+ * unchanged, so a new artifact from a later Hutch version is not silently dropped.
+ */
+function publishRuntimeArtifacts(options: {
+  platform: Exclude<ReleasePlatform, 'macos'>;
+  arch: UpdateArch;
+  artifacts: string;
+  out: string;
+  version: string;
+}): string[] {
+  const prefix = runtimePrefix(options.platform, options.arch);
+  const installPrefix = `${options.platform}-${runtimeArch(options.arch)}-`;
+  const names = readdirSync(options.artifacts).filter(
+    (name) => name.startsWith(prefix) || name.startsWith(installPrefix),
+  );
+  if (names.length === 0) {
+    throw new Error(`no artifacts under ${options.artifacts} for ${options.platform}-${options.arch}`);
+  }
+  const updateName = `${prefix}update.json`;
+  if (!names.includes(updateName)) {
+    throw new Error(`missing ${updateName}; was the build a stable one?`);
+  }
+  if (!names.some((name) => name.startsWith(prefix) && name.endsWith('.tar.zst'))) {
+    throw new Error(`missing ${prefix}Nod.tar.zst; the update archive was not built`);
+  }
+  const update = JSON.parse(readFileSync(join(options.artifacts, updateName), 'utf8')) as {
+    version?: unknown;
+  };
+  if (update.version !== options.version) {
+    throw new Error(`${updateName} says ${String(update.version)}, expected ${options.version}`);
+  }
+  const copied: string[] = [];
+  for (const name of names) {
+    const source = join(options.artifacts, name);
+    const target = join(options.out, name);
+    copyFileSync(source, target);
+    copied.push(target);
+  }
+  return copied;
 }
 
 async function runBuild(argv: readonly string[]): Promise<void> {
   const { flags, rest } = parseArgs(argv);
   if (rest.length > 0) throw new Error(`unexpected argument: ${rest[0]}`);
-  checkFlags(flags, ['arch', 'version', 'base-url', 'notes-file', 'build-root', 'app', 'out']);
-  const archFlag = flags.arch ?? (process.arch === 'x64' ? 'x86_64' : process.arch);
-  if (!isArch(archFlag)) throw new Error(`--arch must be one of ${UPDATE_ARCHES.join(', ')}`);
+  checkFlags(flags, ['platform', 'arch', 'version', 'base-url', 'notes-file', 'build-root', 'app', 'out', 'artifacts']);
+  const platformFlag =
+    flags.platform ?? (process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'win' : 'linux');
+  if (!isPlatform(platformFlag)) throw new Error('--platform must be macos, win or linux');
+  const archFlag = normalizeArch(flags.arch ?? (process.arch === 'x64' ? 'x86_64' : process.arch));
+  if (archFlag === null) throw new Error(`--arch must be one of ${UPDATE_ARCHES.join(', ')} or x64`);
   const version = normalizeVersion(flags.version ?? baseVersion());
   if (version === null) throw new Error('--version must be X.Y.Z or X.Y.Z<letters>');
   const baseUrl = flags['base-url'];
   if (baseUrl === undefined) throw new Error('--base-url is required (the release download directory)');
+
+  const out = resolve(flags.out ?? 'dist/publish');
+  mkdirSync(out, { recursive: true });
+
+  if (platformFlag !== 'macos') {
+    const artifacts = resolve(flags.artifacts ?? 'artifacts');
+    if (!existsSync(artifacts)) {
+      throw new Error(`no ${artifacts}; run bun run eb:build first`);
+    }
+    const copied = publishRuntimeArtifacts({
+      platform: platformFlag,
+      arch: archFlag,
+      artifacts,
+      out,
+      version,
+    });
+    for (const file of copied) console.log(`artifact: ${file}`);
+    console.log(`platform: ${platformFlag} ${archFlag}`);
+    return;
+  }
 
   const buildRoot = resolve(flags['build-root'] ?? 'build');
   const appPath = flags.app ?? findBuiltApp(buildRoot, archFlag);
@@ -303,8 +394,6 @@ async function runBuild(argv: readonly string[]): Promise<void> {
   const app = resolve(appPath);
   verifyBundleVersion(app, version);
 
-  const out = resolve(flags.out ?? 'dist/publish');
-  mkdirSync(out, { recursive: true });
   const target = join(out, artifactName(version, archFlag));
   createArchive(app, target);
   verifyArchive(target);

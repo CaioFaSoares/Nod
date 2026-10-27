@@ -5,7 +5,7 @@
 // therefore owns the gate: the runtime observes the committed origin of every frame group
 // (`did-commit-navigation`) and this module decides, per view, whether a method is dispatched.
 //
-// Rules, matching `tinyjs.json` "api" + `backend/main.ts`'s `guarded()`:
+// Rules, matching the generated origin gate + `backend/main.ts`'s `guarded()`:
 //
 //   main  — every method, but only while the committed origin is one of the app's own origins
 //           (the build's `views://` origin, or the dev server origin from the generated config).
@@ -15,8 +15,7 @@
 //           check stays where tinyjs has it: `backend/main.ts` `requireToolOrigin`.
 //   popup | link | embed — no method at all.
 //
-// The refusal sentence is byte-identical to the tinyjs launcher's gate
-// (`~/.tinyjs/runtime/bridge.js`, `apiGate`), so a page's existing error handling keeps working.
+// The refusal sentence is stable, so a page's existing error handling keeps working.
 //
 // This file is pure: no `electrobun`, no `tjs`, no I/O. `test/electrobun-gate.test.ts` pins it.
 
@@ -25,12 +24,12 @@ import { MAIN_WINDOW } from '../../../shared/types';
 /** What kind of view a call can come from. */
 export type ViewKind = 'main' | 'tool' | 'popup' | 'link' | 'embed';
 
-/** The only method a tool view may ever reach (`tinyjs.json`'s `TOOL_METHODS`). */
+/** The only method a tool view may ever reach (`TOOL_METHODS` in the config generator). */
 export const TOOL_METHOD = 'login.report';
 
-/** The exact sentence the tinyjs gate throws (`bridge.js` `apiGate`). */
+/** The exact sentence the gate answers. */
 export function disabledMessage(method: string): string {
-  return `"${method}" is disabled by tinyjs.json "api"`;
+  return `"${method}" is not allowed from this window`;
 }
 
 /** One dispatch question: where the call came from, the observed origin, and the method. */

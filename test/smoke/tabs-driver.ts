@@ -12,8 +12,8 @@
 // Geometry, and why it is measured the way it is (all of it `execucao`, this machine):
 //
 // - a tool page cannot read its own window: `tiny.win.getState()` is an api-gated bridge method and
-//   `scripts/gen-config.ts` gives a tool origin only `login.report`/`media.*`, so the call comes back
-//   `"win.getState" is disabled by tinyjs.json "api"` (the step details carry the exact sentence);
+//   the runtime gate gives a tool view only `login.report`, so the call comes back
+//   `"win.getState" is not allowed from this window` (the step details carry the exact sentence);
 //   `window.screenX/screenY` are `0,1490` and `window.outerWidth/outerHeight` are `0x0` in a WKWebView
 //   (`backend/tiny.d.ts`, `TinyWinState.outer`). What a tool page *can* report of itself is therefore
 //   its page box (`window.innerWidth/innerHeight`), its `performance.timeOrigin` and its draft.

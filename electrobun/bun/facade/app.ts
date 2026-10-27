@@ -114,7 +114,7 @@ export interface AppHooks {
 export interface AppDeps {
   /** The build identifier (`copland.nod.eb-dev`, …); never used to reach app data of another id. */
   identifier: string;
-  /** Version of the running build (`tinyjs.base.json`'s `version`, injected by the build). */
+  /** Version of the running build (`app.json`'s `version`, injected by the build). */
   version: string;
   /** Runtime label for `info().runtime`, e.g. `Electrobun 2.0.4`. */
   runtime: string;
@@ -374,7 +374,7 @@ export async function createApp(deps: AppDeps): Promise<TinyApp> {
       set(spec: TinyTraySpec): void {
         if (!bindings.available.tray) return;
         try {
-          trayBindings.create(
+          const created = trayBindings.create(
             {
               title: spec.title ?? '',
               image: trayImage(spec.icon, deps.resources, (icon) =>
@@ -388,12 +388,16 @@ export async function createApp(deps: AppDeps): Promise<TinyApp> {
               try {
                 deps.hooks.onTray?.(id);
               } catch {
-                // Tray clicks are fire-and-forget, as in tinyjs.
+                // Tray clicks are fire-and-forget.
               }
             },
           );
+          // A tray that could not be created must not look like one: `setTray` would otherwise arm
+          // hide-on-close and a Linux desktop without AppIndicator would have no way back. The
+          // backend catches this and keeps closing = quitting (RF-15).
+          if (!created) throw new Error('system tray is unavailable');
         } catch {
-          // No tray on this machine; the backend falls back to closing = quitting (RF-15).
+          throw new Error('system tray is unavailable');
         }
       },
       remove(): void {

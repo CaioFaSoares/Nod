@@ -95,7 +95,6 @@ import { sha256Hex, toBase64url } from '../../shared/encoding';
 import {
   appDataDir as dataDir,
   freePort,
-  generateDevConfig,
   generateElectrobunDevConfig,
   issueSetupCode,
   launchSmokeApp,
@@ -108,7 +107,7 @@ import {
 } from './tools';
 import type { HostControl, SmokeLaunch, Tools } from './tools';
 
-/** Which target this run measures: `--runtime=electrobun` or `NOD_RUNTIME=electrobun` (default tinyjs). */
+/** The one runtime: Electrobun. */
 const RUNTIME = smokeRuntime();
 
 /** The two app ids of the smoke: the real installation is never touched. */
@@ -154,7 +153,6 @@ const CONNECTED_DIR = join(GENERATED_DIR, 'connected');
 const CONNECTED_TEMPLATE = join(import.meta.dir, 'connected.html');
 const SEED = join(ROOT, 'resources', 'seed.json');
 const SEED_BACKUP = join(GENERATED_DIR, 'seed.json.bak');
-const TINYJS_JSON = join(ROOT, 'tinyjs.json');
 
 /**
  * The PNG the admin uploads as the guild icon (SP05 §6): a small, real, versioned PNG of the
@@ -245,7 +243,7 @@ const PERSON_TOOL_A_ID = 'tool-a-old';
 
 /**
  * Temporary seed of one app, the same shape `test/smoke/run.ts` writes: it exists only so
- * `gen-config` builds the runtime origin gate (`docs/arquitetura.md` §2) — every entry origin gets
+ * `gen-electrobun-config` builds the runtime origin gate (`docs/arquitetura.md` §2) — every entry origin gets
  * `login.report`, which is what the adapter script calls when the tool enters the page — and so each
  * app id applies a local catalog on first boot.
  *
@@ -413,15 +411,9 @@ async function runPhase(
   icon: GuildIconFixture,
 ): Promise<{ ok: boolean; error: string | null; steps: Step[] }> {
   const nonce = crypto.randomUUID();
-  // The seed of this app id: `gen-config` reads it here (the runtime gate of `login.report`) and the
+  // The seed of this app id: `gen-electrobun-config` reads it here (the runtime gate of `login.report`) and the
   // app reads it at boot (its local catalog, applied on the first one). Two machines, two seeds.
   writeFileSync(SEED, temporarySeed(tools, phase.appId));
-  if (RUNTIME === 'tinyjs') {
-    const gen = generateDevConfig(ROOT, phase.appId, devPort);
-    if (gen.code !== 0) {
-      return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
-    }
-  }
   const page = generatePage(phase, nonce, tools, address, deskOrigin, methods, icon);
 
   let app: SmokeLaunch;
@@ -901,7 +893,6 @@ async function main(): Promise<number> {
   }
 
   mkdirSync(CONNECTED_DIR, { recursive: true });
-  const previousTinyjsJson = existsSync(TINYJS_JSON) ? readFileSync(TINYJS_JSON, 'utf8') : null;
 
   let tools: Tools | null = null;
   let desk: Desk | null = null;
@@ -927,26 +918,11 @@ async function main(): Promise<number> {
       renameSync(SEED_BACKUP, SEED);
       console.log('private seed restored');
     }
-    if (RUNTIME === 'tinyjs') {
-      const finalGen = generateDevConfig(ROOT, null, null);
-      if (finalGen.code !== 0) {
-        console.error(`final gen-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
-        if (previousTinyjsJson !== null) {
-          writeFileSync(TINYJS_JSON, previousTinyjsJson);
-          console.error('tinyjs.json restored to its previous content');
-        } else {
-          rmSync(TINYJS_JSON, { force: true });
-        }
-      } else {
-        console.log('tinyjs.json regenerated in dev');
-      }
+    const finalGen = generateElectrobunDevConfig(ROOT, null, null);
+    if (finalGen.code !== 0) {
+      console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
     } else {
-      const finalGen = generateElectrobunDevConfig(ROOT, null, null);
-      if (finalGen.code !== 0) {
-        console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
-      } else {
-        console.log('electrobun.config.ts regenerated in dev');
-      }
+      console.log('electrobun.config.ts regenerated in dev');
     }
     // The four app data dirs and the host's temp data dir go with it; the owner's install is
     // untouchable (different app ids).
@@ -982,7 +958,7 @@ async function main(): Promise<number> {
       `local tools: A=${tools.originA} B=${tools.originB} C=${tools.originC} (fake servers, loopback only)`,
     );
 
-    // Every phase writes the temporary seed of its own app id before `gen-config` runs: the admin's
+    // Every phase writes the temporary seed of its own app id before `gen-electrobun-config` runs: the admin's
     // machine and the person's are not the same installation, and the person's has no local row for
     // the tool the admin grants (see `temporarySeed`).
     mkdirSync(join(ROOT, 'resources'), { recursive: true });

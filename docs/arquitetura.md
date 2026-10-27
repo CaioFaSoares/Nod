@@ -1,7 +1,7 @@
 # Arquitetura do Nod — contrato de implementação (v2)
 
 Contrato entre as fatias de implementação. O **porquê** está em `docs/canonico.md`; os fatos do
-runtime, em `docs/tinyjs.md`; os tipos, em `shared/types.ts`. Aqui mora o **onde** e o **como**.
+runtime, em `docs/electrobun.md`; os tipos, em `shared/types.ts`. Aqui mora o **onde** e o **como**.
 Mudar uma assinatura daqui é decisão do coordenador.
 
 **v2 (2026-10-15), por decisão do dono:** (1) uma janela só para gerenciar e usar o Nod — o rail de
@@ -10,22 +10,24 @@ janelas próprias a partir dela; (2) **todo o app em inglês** — interface, me
 nomes de método, tipos, testes e comentários. From 2026-10-16, project documents are written in
 English too; the pt-BR ↔ identifier vocabulary is in `CONTEXT.md`.
 
-Runtime: tinyjs `v0.57.2` (txiki.js `26.6.0`), template `vanilla-ts` com Vite e bun. API exata do
-runtime: `backend/tiny.d.ts` (backend) e `src/tiny.d.ts` (página). Não invente API.
+Runtime: Electrobun 2.0.5 (Bun 1.4.4 empacotado), com Vite para a página. API exata do runtime:
+`backend/tiny.d.ts` (backend) e `src/tiny.d.ts` (página). Não invente API.
 
 ## 1. Pastas
 
 ```
-tinyjs.base.json      versioned config; tinyjs.json is GENERATED (gitignored) by scripts/gen-config.ts
+app.json              versioned app config (name, version, size, URL scheme, media usage strings)
+electrobun.config.ts  GENERATED (gitignored) from app.json by scripts/gen-electrobun-config.ts
 index.html            the single page (main window)
 src/                  frontend: api.ts (typed client), ui.ts (DOM helpers), app.ts, palette.ts, settings.ts, style.css
-shared/               pure logic — no tjs, no tiny, no DOM — tested with bun
-backend/              txiki.js backend (tjs, app, sqlite, keychain, windows, host client, sync)
+shared/               pure logic — no runtime, no DOM — tested with bun
+backend/              runtime-agnostic backend (app facade, sqlite, windows, host client, sync)
 host/                 the guild server (Bun + Elysia 2 beta): main.ts, app.ts, config.ts, repo.ts,
                       migrations.ts, auth.ts, snapshot.ts, keys.ts, backup.ts, routes/, cli/,
                       Dockerfile, compose.yaml — see host/context.md and docs/specs/SP07
 resources/            seed.example.json, tray.png (versioned); seed.json (private, gitignored)
-scripts/gen-config.ts builds tinyjs.json from tinyjs.base.json + resources/seed.json
+scripts/gen-electrobun-config.ts builds electrobun.config.ts from app.json + resources/seed.json
+scripts/eb-build.ts   release build (native helper/icon on macOS, page, config, electrobun build)
 test/                 bun test: test/*.test.ts; test/helpers/; test/smoke/ (real surface)
 ```
 
@@ -52,11 +54,11 @@ Imports sem extensão. Arquivos removidos na v2 (cada fatia apaga os seus): `adm
   `admin = true`): `catalog.get|probe|save|remove|exportToFile|importFromFile`,
   `roles.save|remove|grant`, `people.*`, `invites.issue`, `events.*`, `nod.installUpdate`. O resto
   exige sessão desbloqueada. Erro = `throw new Error('<English message>')`.
-- **Gate de origin do runtime** (`scripts/gen-config.ts`): `file://*` e (só em dev)
-  `http://127.0.0.1:<NOD_DEV_PORT ou 5173>` ganham `"all"`; cada origin exata de entrada do seed ganha
-  `["login.report", "media.camera", "media.microphone"]` (canonico §8). The build fails when
-  `tinyjs.base.json` lacks `permissions.camera`/`permissions.microphone`.
-  Nunca `*` em chave de ferramenta (o gerador lança se aparecer), nunca `"all"` para ferramenta.
+- **Gate de origin do runtime** (`electrobun/bun/facade/gate-core.ts` + `gate.ts`): a origem
+  observada de cada view decide; `main` tem a API toda só enquanto a origin é a do app (`views://mainview`
+  ou a URL de dev); uma view de ferramenta só alcança `login.report`; popup/link/embed não alcançam
+  nada. O backend confere de novo a origin da entrada (`backend/main.ts` `requireToolOrigin`). O build
+  falha quando `app.json` não declara `permissions.camera`/`permissions.microphone`.
 - **Eval só na origin da entrada e só no frame de cima**, conferido duas vezes: no backend antes de
   chamar `eval` (depois de qualquer `await`) e dentro do próprio script (`location.origin` igual à
   esperada e `window.top === window`, senão sai sem fazer nada).
@@ -740,40 +742,40 @@ export function createHostAdmin(connection: HostConnection): HostAdmin;
 
 ## 6. Build e dev
 
-- `bun run app:dev` → `bun scripts/gen-config.ts dev && tinyjs dev`.
-- `bun run app:build` → `bun scripts/gen-config.ts build && tinyjs build`.
-- `scripts/gen-config.ts <dev|build>`: lê `tinyjs.base.json` e `resources/seed.json` (validado). Em
-  `build`, seed ausente/inválido → sai 1 com `private seed missing: resources/seed.json (see resources/seed.example.json)`
-  (RF-26); grava `"resources": ["seed.json", "tray.png", …ícones relativos]`. Gate da §2;
-  `update` do seed → `{ url, auto: 'daily' }`; env `NOD_APP_ID` substitui `id`; env `NOD_DEV_PORT`
-  (padrão 5173) muda a porta do Vite, o `devUrl` e a origin de dev — o smoke usa 5199 para conviver com
-  um `app:dev` aberto.
-  Both modes also write `resources/build-mode` (`dev`/`build`, gitignored) — SP02 §9: the stamp
-  `backend/main.ts` reads at start-up to tell a dev run from a release. It is **not** in the
-  `"resources"` list above, so a release stages no stamp and answers `false`.
+- `bun run eb:dev` → native helper/icon (macOS), `gen-electrobun-config.ts dev`, vite and
+  `electrobun dev --env=dev` under `copland.nod.eb-dev`.
+- `bun run eb:build` → the same chain with `build`, `electrobun build --env=stable`, the macOS
+  plist/tar check and the ad-hoc signature (`scripts/eb-build.ts`).
+- `scripts/gen-electrobun-config.ts <dev|build>`: reads `app.json` and `resources/seed.json`
+  (validated). A missing/invalid seed is refused in `build` (RF-61 allows no seed, but a malformed one
+  is an error); it writes `resources`, the identifier (`NOD_APP_ID`, default `copland.nod` in a
+  release and `copland.nod.eb-dev` in dev), the URL scheme, the media usage strings and the
+  `release.baseUrl` derived from the seed's update URL. Both modes write `resources/build-mode`
+  (`dev`/`build`, gitignored) — SP02 §9: the stamp `backend/main.ts` reads at start-up to tell a dev
+  run from a release. It is **not** in the release's resources list.
 - Gates: `bun test test/`, `bunx tsc -p tsconfig.json`, `bunx tsc -p backend/tsconfig.json`,
-  `bun run app:build` com e sem seed, `bun test/smoke/run.ts`.
+  `bun run eb:build` com e sem seed, `bun test/smoke/run.ts` (Electrobun).
 
-## 7. Second runtime target — Electrobun (E06)
+## 7. The runtime — Electrobun
 
-Decided 2026-10-22 (`docs/canonico.md` §22 "Electrobun parity build"): the same Nod also runs on
-**Electrobun 2.0.4** (Bun main process + system webview, devkit projected into `.hutch/` by the
-`electrobun` CLI). `backend/`, `shared/` and `src/` are **unchanged by the target**; it is a runtime layer
+Electrobun 2.0.5 is the only desktop runtime since 0.8.0 (`docs/canonico.md` §22 "One runtime: Electrobun"). It runs a Bun main process + the system webview, with the devkit projected into `.hutch/` by the
+`electrobun` CLI. `backend/`, `shared/` and `src/` are **unchanged by the target**; it is a runtime layer
 in `electrobun/` plus its build scripts (`gen-electrobun-config.ts`, `build-nod-native.ts`, `eb-icon.ts`,
-`eb-postwrap.ts`, `eb-postbuild.ts`, `eb-plist.ts`, `eb-publish.ts`).
+`eb-postwrap.ts`, `eb-postbuild.ts`, `eb-plist.ts`, `eb-publish.ts`, `eb-build.ts`, `dialogs.ts`,
+`update-runtime.ts`).
 
 | Piece | Where | Contract |
 |---|---|---|
 | Entry | `electrobun/bun/index.ts` | `installTjs()`, main preload, RPC (`electrobun/shared-rpc.ts`), gate, downloads, update, native, then `createApp(...)` and `backend.init(app)` |
 | `TinyApp` / window facade | `electrobun/bun/facade/app.ts`, `windows.ts` | Implements the members `backend/main.ts`/`tool-windows.ts` actually call (inventory A–E); `win.open` keeps the page-box contract, docked tabs are native `BrowserView`s over the main window, `setChrome({frame})` detaches/docks without reload |
-| Gate, per view | `electrobun/bun/facade/gate-core.ts` + `gate.ts` | Electrobun's RPC handler receives no sender/origin, so the Nod owns the gate: one registry `viewId → { windowId, kind, committedOrigin }`, fed by `did-commit-navigation` and checked on every call. `main` = all methods only while the committed origin is the app's (`views://mainview` or the dev URL); `tool` = `login.report` only; `popup`/`link`/`embed` = none. Every non-main view is `sandbox: true`, so it has no RPC and only `host-message` (downloads, tool calls). Refusals use the byte-identical tinyjs sentence |
+| Gate, per view | `electrobun/bun/facade/gate-core.ts` + `gate.ts` | Electrobun's RPC handler receives no sender/origin, so the Nod owns the gate: one registry `viewId → { windowId, kind, committedOrigin }`, fed by `did-commit-navigation` and checked on every call. `main` = all methods only while the committed origin is the app's (`views://mainview` or the dev URL); `tool` = `login.report` only; `popup`/`link`/`embed` = none. Every non-main view is `sandbox: true`, so it has no RPC and only `host-message` (downloads, tool calls). Refusals use a stable sentence |
 | Page bridge | `electrobun/view/bridge.ts`, `electrobun/view/tool-bridge.ts` | Same `window.tiny` surface `src/` already uses; the tool bridge bakes `tiny.win.id` and settles each call through `executeJavascript` |
 | `tjs` / sqlite | `electrobun/bun/tjs-shim.ts`, `sqlite-shim.ts` | `tjs` over Bun file APIs; `tjs:sqlite` over `bun:sqlite` (`build.bun.alias` in the generated config) |
 | Native dylib | `electrobun/native/NodNative.swift` → `libNodNative.dylib`, `scripts/build-nod-native.ts`, `electrobun/bun/facade/native.ts` | In-process `bun:ffi`: Keychain, LocalAuthentication (begin/poll/cancel), app icon, save/open panels, `setWindowFrame`, `setContentMinSize`. A second binding in the same file reaches the core's view primitives (`resizeWebview`, `webviewSetHidden`, `listViews`, live top URL), which is what the docked tab and the re-parent use. AppKit work hops to the main queue; absent dylib or non-macOS degrades to `available: false` |
-| Update channel | `electrobun/bun/facade/update.ts`, `scripts/eb-publish.ts` | The release `manifest.json` itself (the seed's `update.url`, the tinyjs format every Nod reads): the facade takes `version`, `notes` and `mac.<arch> = { url, sha256 }` — a `ditto` zip of the Electrobun `Nod.app` — downloads, verifies the digest, matches the bundle identity/version, stages it and runs a swap helper with an `updates/rollback/` copy. `scripts/eb-publish.ts` produces that zip + half; `release.yml` merges it with the Windows/Linux tinyjs halves. Electrobun has no signature, so the sha256 is the integrity check, and the release fails unless `codesign --verify --strict --deep` accepts the bundle |
-| Config | `scripts/gen-electrobun-config.ts` (gitignored `electrobun.config.ts`) | From `tinyjs.base.json` + `resources/seed.json`: identifier (`NOD_APP_ID`, default `copland.nod.eb`, `copland.nod` refused), `views/mainview` page, `views/bridge` preload, `resources/`, native library, URL scheme, media usage strings (`scripts/eb-postwrap.ts` into the wrapper, `scripts/eb-postbuild.ts` as `scripts.postPackage`/`eb:verify` repairing and asserting the packed payload tar), app icon (RF-56): the same `iconForConfig` tinyjs uses, named as `build.mac.icons` (`.eb-icon.iconset` from `scripts/eb-icon.ts`, converted by hutch's `iconutil`), `build.win.icon` and `build.linux.icon` (the PNG) |
+| Update channel | `electrobun/bun/facade/update.ts`, `scripts/eb-publish.ts` | The release `manifest.json` itself (the seed's `update.url`, the tinyjs format every Nod reads): the facade takes `version`, `notes` and `mac.<arch> = { url, sha256 }` — a `ditto` zip of the Electrobun `Nod.app` — downloads, verifies the digest, matches the bundle identity/version, stages it and runs a swap helper with an `updates/rollback/` copy. `scripts/eb-publish.ts` produces that zip + half. `release.yml` merges the two macOS halves. Windows/Linux carry the runtime's `stable-<os>-<arch>-update.json`/`.tar.zst` and update through `facade/update-runtime.ts` (the Electrobun `Updater`). Electrobun has no signature, so the macOS path verifies the sha256 and the runtime path verifies its own archive metadata; the macOS release fails unless `codesign --verify --strict --deep` accepts the bundle |
+| Config | `scripts/gen-electrobun-config.ts` (gitignored `electrobun.config.ts`) | From `app.json` + `resources/seed.json`: identifier (`NOD_APP_ID`, default `copland.nod` in a release and `copland.nod.eb-dev` in dev), `views/mainview` page, `views/bridge` preload, `resources/`, native library, URL scheme, media usage strings (`scripts/eb-postwrap.ts` into the wrapper, `scripts/eb-postbuild.ts` as `scripts.postPackage`/`eb:verify` repairing and asserting the packed payload tar), app icon (RF-56): the shared `iconForConfig`, named as `build.mac.icons` (`.eb-icon.iconset` from `scripts/eb-icon.ts`, converted by hutch's `iconutil`), `build.win.icon` and `build.linux.icon` (the PNG) |
 
-Commands: `bun run eb:dev` / `bun run eb:build` (§6 covers the tinyjs commands). The tinyjs target
-remains the default and the release pipeline's runtime until §22's "Electrobun replaces tinyjs"
-row stops being `Proposto`. Parity evidence: `docs/handovers/e06-parity-matrix.md`; costs and
-solved problems: `docs/epics/E06-embedded-webview.md` §13.
+Commands: `bun run eb:dev` / `bun run eb:build`. Windows/Linux answer `canDock: false` and use the
+windows mode; the macOS-only native helper and the docked-tab gap are `docs/electrobun.md` §5, §7.
+Parity evidence (historical, macOS): `docs/handovers/e06-parity-matrix.md`; costs and solved
+problems: `docs/epics/E06-embedded-webview.md` §13.

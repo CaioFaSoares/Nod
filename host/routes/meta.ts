@@ -1,5 +1,5 @@
 // O2's route (SP03 §3): `GET /v1/meta/app`, the document a Nod reads to learn which version this host
-// serves and where the tinyjs update manifest lives (`update.check`, canonico §19 F5).
+// serves and where the release update manifest lives (`update.check`, canonico §19 F5).
 //
 // It is **public** for two reasons: a Nod too old to sign in still has to learn that it must update,
 // and neither value is a guild secret — `minAppVersion` is already in `GET /.well-known/nod`.

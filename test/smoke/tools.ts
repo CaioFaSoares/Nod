@@ -220,38 +220,34 @@ export function appDataDir(appId: string): string {
 }
 
 /**
- * Which runtime the smokes launch: the tinyjs target (the default, the one every handover before
- * E06 ran on) or the Electrobun target beside it (contract `local://e06-parity.md`). The same
- * pages, the same drivers and the same checks run on both — only the launch and the store file
- * change.
+ * The smokes launch the one desktop runtime: Electrobun. The type keeps `tinyjs` so the old
+ * handovers' explicit `--runtime=tinyjs` flag fails with a clear message instead of silently
+ * running something else.
  */
 export type SmokeRuntime = 'tinyjs' | 'electrobun';
 
 const RUNTIME_FLAG = '--runtime=';
 
 /**
- * The runtime of this run: `--runtime=electrobun` (or `--runtime=tinyjs`) wins over `NOD_RUNTIME`,
- * which wins over the default `tinyjs`. An unknown value throws instead of falling back: a typo that
- * silently launched the other target would make a red parity run look green.
+ * The runtime of this run: Electrobun, always. `--runtime=electrobun` is still accepted for the
+ * handovers that recorded it; `--runtime=tinyjs` fails loudly because that runtime was removed.
  */
 export function smokeRuntime(argv: readonly string[] = process.argv): SmokeRuntime {
   const flags = argv.filter((arg) => arg.startsWith(RUNTIME_FLAG));
   if (flags.length > 1) throw new Error(`only one ${RUNTIME_FLAG} flag is allowed`);
-  const raw = (flags[0]?.slice(RUNTIME_FLAG.length) ?? process.env.NOD_RUNTIME ?? 'tinyjs')
+  const raw = (flags[0]?.slice(RUNTIME_FLAG.length) ?? process.env.NOD_RUNTIME ?? 'electrobun')
     .trim()
     .toLowerCase();
-  if (raw === 'tinyjs' || raw === 'electrobun') return raw;
-  throw new Error(
-    `unknown runtime ${JSON.stringify(raw)}: use --runtime=tinyjs or --runtime=electrobun`,
-  );
+  if (raw === 'electrobun') return raw;
+  if (raw === 'tinyjs') {
+    throw new Error('tinyjs was removed in 0.8.0: the smokes run on Electrobun only');
+  }
+  throw new Error(`unknown runtime ${JSON.stringify(raw)}: use --runtime=electrobun`);
 }
 
-/**
- * App id of one launch. The Electrobun target gets its own suffix (`-eb`), so the two targets never
- * share `appDataDir` — a smoke that ran on both would otherwise wipe the data it is measuring.
- */
-export function smokeAppId(base: string, runtime: SmokeRuntime): string {
-  return runtime === 'electrobun' ? `${base}-eb` : base;
+/** App id of one launch; the `-eb` suffix keeps smoke data out of any real installation. */
+export function smokeAppId(base: string, _runtime: SmokeRuntime): string {
+  return `${base}-eb`;
 }
 
 /**
@@ -280,71 +276,9 @@ export function devPageUrl(root: string, devPort: number, page: string): string 
 }
 
 /**
- * `bun scripts/gen-config.ts dev`, with the smoke id and dev port; with `null` for both the child
- * gets neither key — which is how the final regeneration puts back the base id and default port.
- */
-export function generateDevConfig(
-  root: string,
-  appId: string | null,
-  devPort: number | null,
-): { code: number; output: string } {
-  const env: Record<string, string | undefined> = { ...process.env };
-  if (appId !== null && devPort !== null) {
-    env.NOD_APP_ID = appId;
-    env.NOD_DEV_PORT = String(devPort);
-  } else {
-    delete env.NOD_APP_ID;
-    delete env.NOD_DEV_PORT;
-  }
-  const result = Bun.spawnSync(['bun', 'scripts/gen-config.ts', 'dev'], {
-    cwd: root,
-    env,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  return {
-    code: result.exitCode ?? -1,
-    output: (result.stdout?.toString() ?? '') + (result.stderr?.toString() ?? ''),
-  };
-}
-
-/** Kills the app and its children (the process group catches the frontend server). */
-export async function killProcessTree(app: ChildProcess): Promise<void> {
-  const pid = app.pid;
-  if (pid === undefined) return;
-  const alive = (): boolean => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (alive()) {
-    try {
-      process.kill(-pid, 'SIGTERM');
-    } catch {
-      /* already dead */
-    }
-    const limit = Date.now() + 3000;
-    while (Date.now() < limit && alive()) await Bun.sleep(100);
-  }
-  if (alive()) {
-    Bun.spawnSync(['pkill', '-P', String(pid)], { stdout: 'ignore', stderr: 'ignore' });
-    try {
-      process.kill(-pid, 'SIGKILL');
-    } catch {
-      /* already dead */
-    }
-  }
-}
-
-// ---------------------------------------------------------------- the launch (both runtimes)
-
-/**
  * `bun scripts/gen-electrobun-config.ts dev` under the smoke's identifier and page override. With
  * `null` for both, the child gets neither variable: that is how the last launch of a run puts the
- * development config back (`NOD_APP_ID` -> `copland.nod.eb`, no `NOD_MAIN_URL`).
+ * development config back (`NOD_APP_ID` -> `copland.nod.eb-dev`, no `NOD_MAIN_URL`).
  *
  * `NOD_MAIN_URL` is read by `electrobun/bun/index.ts` in a dev run only (a packaged build always
  * loads `views://mainview/index.html`), and it is what points the main window at the generated
@@ -377,6 +311,44 @@ const DEV_SERVER_BOOT_TIMEOUT_MS = 30_000;
 interface DevServer {
   output(): string;
   stop(): Promise<void>;
+}
+
+/** Kills the app and its children (the process group catches the frontend server). */
+export async function killProcessTree(app: ChildProcess): Promise<void> {
+  const pid = app.pid;
+  if (pid === undefined) return;
+  if (process.platform === 'win32') {
+    Bun.spawnSync(['taskkill', '/T', '/F', '/PID', String(pid)], {
+      stdout: 'ignore',
+      stderr: 'ignore',
+    });
+    return;
+  }
+  const alive = (): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (alive()) {
+    try {
+      process.kill(-pid, 'SIGTERM');
+    } catch {
+      /* already dead */
+    }
+    const limit = Date.now() + 3000;
+    while (Date.now() < limit && alive()) await Bun.sleep(100);
+  }
+  if (alive()) {
+    Bun.spawnSync(['pkill', '-P', String(pid)], { stdout: 'ignore', stderr: 'ignore' });
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      /* already dead */
+    }
+  }
 }
 
 /**
@@ -445,21 +417,12 @@ export interface LaunchOptions {
   env?: Record<string, string | undefined>;
   /** Called with every output chunk; the tabs runner keeps its own buffer for the failure report. */
   onOutput?: (chunk: string) => void;
-  /**
-   * tinyjs only: how the main window gets the page. `html` (default) is `TINYJS_HTML`, a standalone
-   * page (`run.ts`, `connected.ts`). `dev-url` leaves the page to `frontend.devUrl`, which the
-   * runner has already pointed at it — the pages of `ui.ts` and `tabs.ts` import `/src/app.ts` as
-   * modules, and a `file://` page cannot resolve them. Electrobun always loads the page over http
-   * (`NOD_MAIN_URL`), so this changes nothing there.
-   */
-  tinyjsPage?: 'html' | 'dev-url';
 }
 
 /**
- * Starts the real app with its main window on the generated page. The tinyjs path is the one every
- * pre-E06 smoke used (`TINYJS_HTML` + `tinyjs dev`); the Electrobun path generates the dev config
- * with the smoke's identifier, starts vite (the page modules are TypeScript), and launches
- * `electrobun dev` with `NOD_MAIN_URL` pointing the window at the page.
+ * Starts the real app with its main window on the generated page: the dev config takes the smoke's
+ * identifier, vite serves the page modules, and `electrobun dev` launches with `NOD_MAIN_URL`
+ * pointing the window at the page.
  */
 export async function launchSmokeApp(options: LaunchOptions): Promise<SmokeLaunch> {
   const { root, runtime, appId, devPort, page } = options;
@@ -471,52 +434,29 @@ export async function launchSmokeApp(options: LaunchOptions): Promise<SmokeLaunc
   };
 
   let devServer: DevServer | null = null;
-  let env: Record<string, string | undefined>;
-  let label: string;
 
-  if (runtime === 'tinyjs') {
-    const viaHtml = (options.tinyjsPage ?? 'html') === 'html';
-    env = {
-      ...process.env,
-      ...options.env,
-      NOD_APP_ID: appId,
-      NOD_DEV_PORT: String(devPort),
-      ...(viaHtml ? { TINYJS_HTML: page } : {}),
-    };
-    if (!viaHtml) delete env.TINYJS_HTML;
-    label = viaHtml
-      ? `tinyjs dev (TINYJS_HTML=${page}, NOD_APP_ID=${appId}, NOD_DEV_PORT=${devPort})`
-      : `tinyjs dev (frontend.devUrl=${page}, NOD_APP_ID=${appId}, NOD_DEV_PORT=${devPort})`;
-  } else {
-    const mainUrl = devPageUrl(root, devPort, page);
-    const gen = generateElectrobunDevConfig(root, appId, mainUrl);
-    if (gen.code !== 0) {
-      throw new Error(`gen-electrobun-config failed (code ${gen.code}): ${gen.output.trim()}`);
-    }
-    devServer = await startDevServer(root, devPort);
-    output = devServer.output();
-    env = {
-      ...process.env,
-      ...options.env,
-      NOD_APP_ID: appId,
-      NOD_DEV_PORT: String(devPort),
-      NOD_MAIN_URL: mainUrl,
-    };
-    delete env.TINYJS_HTML;
-    delete env.TINYJS_DEBUG;
-    label =
-      `electrobun dev (NOD_MAIN_URL=${mainUrl}, NOD_APP_ID=${appId}, ` +
-      `store=${storeFilePath(appId, runtime)})`;
+  const mainUrl = devPageUrl(root, devPort, page);
+  const gen = generateElectrobunDevConfig(root, appId, mainUrl);
+  if (gen.code !== 0) {
+    throw new Error(`gen-electrobun-config failed (code ${gen.code}): ${gen.output.trim()}`);
   }
-
-  // The smoke never runs with the runtime trace (AGENTS.md): it prints the login adapter's EVAL and
-  // every call. No launch here gets `TINYJS_DEBUG`.
+  devServer = await startDevServer(root, devPort);
+  output = devServer.output();
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    ...options.env,
+    NOD_APP_ID: appId,
+    NOD_DEV_PORT: String(devPort),
+    NOD_MAIN_URL: mainUrl,
+  };
+  delete env.TINYJS_HTML;
   delete env.TINYJS_DEBUG;
+  const label =
+    `electrobun dev (NOD_MAIN_URL=${mainUrl}, NOD_APP_ID=${appId}, ` +
+    `store=${storeFilePath(appId, runtime)})`;
 
-  const app = spawn(
-    runtime === 'tinyjs' ? 'tinyjs' : 'npx',
-    runtime === 'tinyjs' ? ['dev'] : ['--yes', 'electrobun', 'dev', '--env=dev'],
-    {
+  const bun = Bun.which('bun') ?? process.execPath;
+  const app = spawn(bun, ['x', 'electrobun', 'dev', '--env=dev'], {
       cwd: root,
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],

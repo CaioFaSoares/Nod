@@ -499,7 +499,7 @@ export interface Discovery {
 /**
  * `GET /v1/meta/app` (SP03 §3, O2): the public document a Nod reads to learn which version this host
  * serves — the same value `Discovery.minAppVersion` carries, from the one configuration (SP07 §2) —
- * and where the tinyjs update manifest lives (`update.check`, canonico §19 F5). `update` is null
+ * and where the release update manifest lives (`update.check`, canonico §19 F5). `update` is null
  * while the deployment sets no manifest, and a Nod then has no newer build to offer.
  */
 export interface AppMeta {

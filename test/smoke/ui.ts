@@ -48,7 +48,6 @@ import type { HostControl, SmokeLaunch, Tools } from './tools';
 import {
   appDataDir as dataDir,
   freePort,
-  generateDevConfig,
   generateElectrobunDevConfig,
   issueSetupCode,
   launchSmokeApp,
@@ -59,7 +58,7 @@ import {
   waitForStoredResult,
 } from './tools';
 
-/** Which target this run measures: `--runtime=electrobun` or `NOD_RUNTIME=electrobun` (default tinyjs). */
+/** The one runtime: Electrobun. */
 const RUNTIME = smokeRuntime();
 
 const ADMIN_APP_ID = smokeAppId('copland.nod.ui-admin', RUNTIME);
@@ -105,7 +104,6 @@ const GENERATED_DIR = join(import.meta.dir, '.gerado');
 const UI_DIR = join(GENERATED_DIR, 'ui');
 const SEED = join(ROOT, 'resources', 'seed.json');
 const SEED_BACKUP = join(GENERATED_DIR, 'seed.json.bak');
-const TINYJS_JSON = join(ROOT, 'tinyjs.json');
 const UI_DRIVER_ROUTE = '/test/smoke/ui-driver.ts';
 const HOST_DATA = join(GENERATED_DIR, 'ui-smoke-host');
 /** #38's generated seed file, and #37's icon source (the tray icon of this very repo). */
@@ -264,7 +262,7 @@ function stages(desk: Desk, address: string): Stage[] {
 }
 
 /**
- * The temporary seed of one launch (the shape `test/smoke/run.ts` writes): `gen-config` reads it
+ * The temporary seed of one launch (the shape `test/smoke/run.ts` writes): `gen-electrobun-config` reads it
  * for the runtime's origin gate and the app applies it on first boot. The person's seed carries two
  * local tools the host does not serve — the leftovers of #25 — and the second member's seed carries
  * only the tool the guild has, so it has nothing to keep. #37 and #38 start the way a fresh install
@@ -352,19 +350,6 @@ function generatePage(
   writeFileSync(file, html);
   // The URL the window loads: the dev server serves the project root, and the page lives under it.
   return { url: `http://127.0.0.1:${devPort}/test/smoke/.gerado/ui/${file.slice(UI_DIR.length + 1)}`, file };
-}
-
-/** Points the dev window at this launch's page (the generated file, not the project's index.html). */
-function pointDevUrl(url: string): void {
-  const raw: unknown = JSON.parse(readFileSync(TINYJS_JSON, 'utf8'));
-  if (typeof raw !== 'object' || raw === null) throw new Error(`${TINYJS_JSON} is not an object`);
-  const config = raw as Record<string, unknown>;
-  const frontend = config.frontend;
-  if (typeof frontend !== 'object' || frontend === null) {
-    throw new Error(`${TINYJS_JSON} has no frontend object`);
-  }
-  (frontend as Record<string, unknown>).devUrl = url;
-  writeFileSync(TINYJS_JSON, JSON.stringify(config, null, 2) + '\n');
 }
 
 // ------------------------------------------------------------- the desk
@@ -497,16 +482,7 @@ async function runPhase(
 ): Promise<SmokeResult> {
   const devPort = freePort();
   writeFileSync(SEED, temporarySeed(tools, phase.appId));
-  if (RUNTIME === 'tinyjs') {
-    const gen = generateDevConfig(ROOT, phase.appId, devPort);
-    if (gen.code !== 0) {
-      return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
-    }
-  }
   const page = generatePage(phase, nonce, devPort, deskOrigin, address, tools.originC, extras);
-  // tinyjs takes the page through `frontend.devUrl`; Electrobun takes it through `NOD_MAIN_URL` (the
-  // launch helper generates the config with it and starts the dev server the page is served by).
-  if (RUNTIME === 'tinyjs') pointDevUrl(page.url);
 
   let app: SmokeLaunch;
   try {
@@ -516,7 +492,6 @@ async function runPhase(
       appId: phase.appId,
       devPort,
       page: page.file,
-      tinyjsPage: 'dev-url',
     });
   } catch (error) {
     rmSync(page.file, { force: true });
@@ -558,7 +533,6 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const previousTinyjsJson = existsSync(TINYJS_JSON) ? readFileSync(TINYJS_JSON, 'utf8') : null;
   let seedMoved = false;
   let tools: Tools | null = null;
   let host: ReturnType<typeof startHostControl> | null = null;
@@ -574,16 +548,12 @@ async function main(): Promise<number> {
     for (const appId of APP_IDS) rmSync(dataDir(appId), { recursive: true, force: true });
     rmSync(UI_DIR, { recursive: true, force: true });
     rmSync(HOST_DATA, { recursive: true, force: true });
-    if (RUNTIME === 'tinyjs') {
-      if (previousTinyjsJson !== null) writeFileSync(TINYJS_JSON, previousTinyjsJson);
+    // The generated config named this smoke's identifier and page: put the development one back.
+    const finalGen = generateElectrobunDevConfig(ROOT, null, null);
+    if (finalGen.code !== 0) {
+      console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
     } else {
-      // The generated config named this smoke's identifier and page: put the development one back.
-      const finalGen = generateElectrobunDevConfig(ROOT, null, null);
-      if (finalGen.code !== 0) {
-        console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
-      } else {
-        console.log('electrobun.config.ts regenerated in dev');
-      }
+      console.log('electrobun.config.ts regenerated in dev');
     }
     if (seedMoved) {
       if (existsSync(SEED)) rmSync(SEED, { force: true });

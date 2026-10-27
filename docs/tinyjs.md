@@ -1,3 +1,7 @@
+> **Historical.** tinyjs was removed in 0.8.0; Electrobun is the only runtime. The current facts
+> are in `docs/electrobun.md`. This file remains as the migration source (what 0.6/0.7 builds did)
+> and is cited by historical handovers.
+
 # tinyjs — o que o runtime faz, e o que ele proíbe
 
 Levantamento do runtime sobre o qual a casca do Nod é construída. Só fatos verificáveis: cada

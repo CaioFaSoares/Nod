@@ -9,11 +9,12 @@
 ```
 
 Nod is a desktop app that keeps your team's web tools in one place. Open it and every tool you have
-access to is a click (or a keyboard shortcut) away; each opens in its own window and stays signed in
-between sessions. You add the tools that are yours, an admin decides who sees what, and passwords sit
-in the system keychain behind a single local password — you never retype them into the app.
+access to is a click (or a keyboard shortcut) away; each opens as a tab or its own window and stays
+signed in between sessions. You add the tools that are yours, an admin decides who sees what, and
+passwords sit encrypted in the local vault behind a single local password — you never retype them
+into the app.
 
-It is small and self-contained: about 6 MB, no bundled browser engine, no server required. It works
+It is self-contained: no bundled browser engine, no server required. It works
 fully offline — the catalog, your credentials and the audit log all live on your own machine. When
 your team runs the optional host, tools, roles and access sync to everyone connected, so an admin
 adds a tool once and it shows up for the right people.
@@ -21,8 +22,8 @@ adds a tool once and it shows up for the right people.
 Tools are **data**, not code: addresses, names, icons and roles come from the catalog, never from the
 source. No tool or organization is built in.
 
-Under the hood Nod is thin TypeScript on [tinyjs](https://tinyjs.app): a txiki.js backend and the
-system's native webview.
+Under the hood Nod is thin TypeScript on [Electrobun](https://electrobun.dev): a Bun main process and
+the system's native webview. macOS, Windows and Linux are built and released from the same code.
 
 ## Name
 
@@ -37,11 +38,11 @@ every derived key. The rename decision and plan are in `docs/canonico.md` §22 a
 
 ## Features
 
-- One main window to manage and switch tools; each tool in its own native window, sessions kept
+- One main window to manage and switch tools; tools open as tabs on macOS (detachable into their own native window) and as one native window each on Windows/Linux; sessions kept
   across restarts.
 - Login cascade: existing session, form fill from the vault, or the site's own provider, with a
   visible manual fallback.
-- Vault in the system keychain, bound to the origin each credential was saved for.
+- Vault sealed in the local database, one password for the machine, bound to the origin each credential was saved for.
 - Roles, grants and a local, exportable audit log.
 - Private releases with a seed (catalog, roles, grants) kept out of git; from 0.5.0 the seed is an
   optional import at setup, so a release can start empty.
@@ -67,9 +68,9 @@ Nod is two halves inside one small app, plus an optional server:
 
 - **The page** is what you see: the entry screen, the sidebar, Home and Settings (`src/`). It never
   talks to the network and never keeps a password; it asks the backend for everything.
-- **The backend** runs beside it on your machine (`backend/`). It keeps the catalog, people and the
-  audit log in a local SQLite file, and keeps every password in the system keychain (Keychain,
-  Credential Manager, Secret Service), encrypted with a key that only your password unlocks.
+- **The backend** runs beside it on your machine (`backend/`). It keeps the catalog, people, the
+  audit log and the encrypted vault in a local SQLite file; the vault key is derived from your
+  password and lives only in memory after you unlock.
 - **The host** is optional (`host/`). One host is one guild: it stores people, roles, tools and
   invites, and every connected Nod syncs with it every few minutes. It only ever sees encrypted
   credentials — your password never leaves your machine.
@@ -77,8 +78,7 @@ Nod is two halves inside one small app, plus an optional server:
 ```mermaid
 flowchart LR
   page["Page<br/>(src/)"] -- "call / push" --> backend["Backend<br/>(backend/)"]
-  backend --> db[("SQLite<br/>catalog, people, log")]
-  backend --> keychain[("System keychain<br/>encrypted credentials")]
+  backend --> db[("SQLite<br/>catalog, people, log, sealed vault")]
   backend --> tools["Tool windows<br/>(each site in its own window)"]
   backend -. "only in a guild session" .-> host["Host (host/)<br/>one guild"]
 ```
@@ -145,7 +145,7 @@ Story status lives in the GitHub issues, not in the docs.
 | --- | --- |
 | `docs/canonico.md` | Requirements: scope, functional and non-functional requirements, data model, security, roadmap, decision log, open questions. |
 | `docs/arquitetura.md` | Modules, contracts and data shapes. |
-| `docs/tinyjs.md` | What the runtime does and forbids, with sources. |
+| `docs/electrobun.md` | What the runtime does and forbids, and the platform limits. |
 | `docs/specs/` | Exact contracts for the host and connected mode. |
 | `docs/epics/` | Epics and effort blocks. |
 | `docs/distribuicao.md` | Building, releasing and installing. |
@@ -156,11 +156,11 @@ Story status lives in the GitHub issues, not in the docs.
 
 ```
 bun install
-bun run app:dev         # development (runs without the private seed)
+bun run eb:dev          # development (runs without the private seed)
 bun test                # unit tests
 bun run typecheck       # tsc for frontend and backend
-bun run app:build       # release (the private seed is optional since 0.5.0)
-bun test/smoke/run.ts   # smoke test on the real app (opens it)
+bun run eb:build        # release for this OS/arch (the private seed is optional since 0.5.0)
+bun test/smoke/run.ts   # smoke test on the real app (Electrobun; opens it)
 ```
 
 The seed format is in `resources/seed.example.json`. Distribution steps are in

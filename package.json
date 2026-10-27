@@ -1,25 +1,25 @@
 {
   "name": "nod",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.8.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --strictPort",
     "build": "tsc && vite build --base=./",
-    "app:dev": "bun scripts/gen-config.ts dev && tinyjs dev",
-    "app:build": "bun scripts/gen-config.ts build && tinyjs build",
     "test": "bun test test/",
-    "typecheck": "bun run typecheck:app && if [ -f .hutch/devkit/tsconfig.json ]; then tsc -p electrobun/tsconfig.json --noEmit; elif [ -n \"${CI:-}\" ]; then echo 'error: .hutch/devkit/tsconfig.json is missing: in CI the Electrobun devkit must be projected before typechecking — run bun run eb:build in this job, then typecheck' >&2; exit 1; else echo 'skip electrobun typecheck: .hutch/devkit/tsconfig.json is missing (the Electrobun devkit is not projected; bun run eb:build projects it)'; fi",
+    "typecheck": "bun scripts/typecheck.ts",
     "typecheck:app": "tsc -p tsconfig.json && tsc -p backend/tsconfig.json && tsc -p host/tsconfig.json",
-    "eb:dev": "sh -c 'export NOD_APP_ID=${NOD_APP_ID:-copland.nod.eb-dev}; export NOD_DEV_PORT=${NOD_DEV_PORT:-5173}; bun scripts/build-nod-native.ts && bun scripts/eb-icon.ts && bun scripts/gen-electrobun-config.ts dev && { bun run dev & vite=$!; trap \"kill $vite 2>/dev/null\" EXIT INT TERM; electrobun dev --env=dev && bun scripts/eb-postbuild.ts --verify-only; }'",
-    "eb:build": "bun scripts/build-nod-native.ts && bun scripts/eb-icon.ts && bun run build && bun scripts/gen-electrobun-config.ts build && electrobun build --env=stable && bun scripts/eb-postbuild.ts --verify-only && bun scripts/eb-sign.ts",
+    "eb:dev": "bun scripts/eb-dev.ts",
+    "eb:build": "bun scripts/eb-build.ts",
     "eb:verify": "bun scripts/eb-postbuild.ts --verify-only",
-    "validate": "bun scripts/validate.ts"
+    "validate": "bun scripts/validate.ts",
+    "app:dev": "bun scripts/eb-dev.ts",
+    "app:build": "bun scripts/eb-build.ts"
   },
   "devDependencies": {
     "typescript": "~6.0.2",
     "vite": "^8.3.0",
     "@types/bun": "1.4.3",
-    "electrobun": "2.0.4"
+    "electrobun": "2.0.5"
   }
 }

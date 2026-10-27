@@ -3,11 +3,14 @@
 Out 15, 2026 · @Caio
 
 Base de requisitos da casca de ferramentas internas de um time. Este documento é a fonte única do
-escopo, dos requisitos e das decisões propostas. Fatos do runtime ficam em `docs/tinyjs.md`;
+escopo, dos requisitos e das decisões propostas. Fatos do runtime ficam em `docs/electrobun.md`;
 o corte da Carna fica em `docs/downscale-carna.md`. Nada aqui repete esses dois.
 
 Toda afirmação sobre o que existe carrega caminho ou URL, e toda afirmação sobre o que funciona diz
 como foi obtida. Nada aqui foi obtido por execução: é `leitura` de documentação e de código.
+
+**0.8.0 (2026-10-27):** Electrobun é o único runtime. Onde este documento cita `docs/tinyjs.md`, o
+fato equivalente está em `docs/electrobun.md`; o arquivo tinyjs fica como história da migração.
 
 ## 1. Visão e princípios
 
@@ -27,7 +30,7 @@ Princípios:
 4. **Segredo fica onde o sistema guarda segredo.** O padrão é o chaveiro do sistema operacional
    (Keychain, Credential Manager, Secret Service); o banco local e o `store.json` guardam índice e
    ponteiros, nunca valores. Autenticar uma vez abre a sessão inteira.
-5. **Um fato, uma casa.** O que é do runtime mora em `docs/tinyjs.md`; o que é da Carna mora em
+5. **Um fato, uma casa.** O que é do runtime mora em `docs/electrobun.md`; o que é da Carna mora em
    `docs/downscale-carna.md`.
 6. **Sem código de terceiros dentro.** O Nod não tem sistema de extensões: ele cadastra endereços.
 7. **Escopo fino.** Nada entra no v1 sem uma linha de requisito aqui. O que não está na lista é
@@ -60,7 +63,7 @@ Fora (não-objetivos do v1):
 - Hospedar código de terceiros: sem extensões, plugins ou scripts baixados.
 - Editar conteúdo: nenhum editor, nenhuma base de conhecimento, nenhum agente.
 - Isolar duas identidades da mesma ferramenta na mesma máquina: um app tem um perfil de cookies só
-  (`docs/tinyjs.md` §3).
+  (`docs/electrobun.md` §5).
 
 Adiado para a próxima sprint, por decisão do dono (2026-10-15): mapear `nod.example.com` e as
 abas por iframe. Só volta quando hospedar algo além das regras do sistema virar atrativo — e aí
@@ -96,10 +99,10 @@ caminho de cada peça citada.
 
 ## 6. O que o runtime permite e proíbe
 
-`docs/tinyjs.md` é a casa dos fatos. As quatro consequências que moldam este documento:
+`docs/electrobun.md` é a casa dos fatos. As quatro consequências que moldam este documento:
 
 1. **Não há abas nativas e não há como compor sites de terceiros numa página.** O modelo é
-   multi-janela; `win.open` abre `page` como URL `http(s)` ou página local (`docs/tinyjs.md` §2, §3).
+   multi-janela; `win.open` abre `page` como URL `http(s)` ou página local (`docs/electrobun.md` §5).
 2. **Não há servidor HTTP.** Um host Elixir só entra como serviço externo, consumido pelo backend do
    app (§18).
 3. **Um app tem um só perfil de cookies.** Duas identidades da mesma ferramenta exigiriam dois apps.
@@ -158,6 +161,10 @@ Regras:
   só as que a pessoa ainda pode ver.
 - **Fechar a janela principal** a esconde quando há bandeja (`Open Nod`, `Lock`, `Quit Nod`); as
   janelas de ferramenta continuam abertas. Sem bandeja (Linux sem AppIndicator), fechar encerra o app.
+- **Windows e Linux (0.8.0)**: o runtime não re-parenta uma view viva entre janelas, então não há
+  abas encaixadas nessas plataformas. O backend lê `canDock: false` em `win.getState()` e usa o
+  **modo janelas** (uma janela emoldurada por ferramenta, sem recarregar ao reabrir); a faixa de abas
+  fica vazia. macOS mantém o modo encaixado. Ver `docs/electrobun.md` §5.
 - **Bloquear** fecha todas as janelas de ferramenta e os popups que elas abriram.
 
 ## 8. Catálogo
@@ -200,7 +207,7 @@ também; o modelo exato está em `shared/types.ts`):
   origin). Any other origin keeps the engine's own prompt (macOS, Windows) or is denied (Linux),
   and the Nod warns when a link didn't come from the org. The release always declares the
   camera and microphone usage strings: macOS kills an app that captures without them, and the
-  build refuses a `tinyjs.base.json` without them (`scripts/gen-config.ts`).
+  build refuses an `app.json` without them (`scripts/gen-electrobun-config.ts`).
 - **Não existe escolha de auth por ferramenta.** Decisão do dono em 2026-10-15: "acredito que OIDC
   todos têm… quero não ter que ficar sabendo desses ou não". A casca faz sempre a mesma coisa, na
   ordem, e para no primeiro passo que resolver (**cascata de login**, §11):
@@ -220,14 +227,14 @@ também; o modelo exato está em `shared/types.ts`):
   saber se há formulário de login e se ela redireciona para um provedor. O que a sonda achou fica
   registrado na entrada; o administrador só confirma. Ícone enviado à mão continua possível. ICO fica
   de fora: não há decodificador de imagem no runtime.
-- **`popups` e `downloads` são chaves do app, não da entrada** (`docs/tinyjs.md` §2): o padrão vive
-  no `tinyjs.json` e o refino por ferramenta acontece nos hooks do backend — `onWindowOpen` decide
+- **`popups` e `downloads` são chaves do app, não da entrada** (`docs/electrobun.md` §5): o padrão vive
+  no `app.json` e o refino por ferramenta acontece nos hooks do backend — `onWindowOpen` decide
   por origin entre `window`, `external` e `deny`, e `onDownload` registra o que aconteceu. Isso
   importa para o webmail (anexo e "abrir em nova janela") e para o Discord (OAuth).
 - **Ícones** ficam no diretório de dados do app, com hash no nome; a página da casca recebe o ícone
   por RPC (data URI), para não depender de `readAccess`. No cadastro, o backend busca
   `apple-touch-icon`, os `<link rel=icon>` ou `og:image` da própria página (o backend não tem CORS —
-  `docs/tinyjs.md` §6) ou aceita um arquivo enviado pelo administrador. ICO fica de fora: não há
+  `docs/electrobun.md` §5) ou aceita um arquivo enviado pelo administrador. ICO fica de fora: não há
   decodificador de imagem no runtime.
 - **O catálogo nasce de um seed privado**, um arquivo que fica fora do git e é embutido na release
   (§19). O seed traz entradas, papéis e concessões; o banco local recebe isso no primeiro boot e
@@ -254,7 +261,7 @@ Herdado da Carna, reduzido ao que a casca precisa:
 - **Senha local existe no v1** (decisão do dono, 2026-10-15). É a senha padrão de um serviço: um
   hash no banco local, uma tela de entrada, e pronto. O desbloqueio é digitar essa senha, e a
   biometria é atalho onde existe (`app.authenticate` no macOS e no Windows; **no Linux a chamada
-  sempre devolve `false`** — `docs/tinyjs.md` §6 —, então lá o caminho é sempre a senha).
+  sempre devolve `false`** — `docs/electrobun.md` §7 —, então lá o caminho é sempre a senha).
   - Hash: PBKDF2-HMAC-SHA256, salt de 16 bytes por conta, parâmetros guardados junto do hash
     (iterações na casa de 600 000, ajustáveis por medição). PBKDF2 é nativo no runtime —
     `saghul/txiki.js:src/js/polyfills/crypto/kdf.js` —, então não há dependência externa.
@@ -298,7 +305,7 @@ guardar uma senha de um serviço. autenticar e pronto"):
 - Cada credencial vive no **chaveiro do sistema operacional** via `app.secrets` — macOS Keychain,
   Windows Credential Manager, Linux Secret Service —, com chave `nod.cred.<pessoa>.<ferramenta>`.
   É o armazenamento que a própria documentação do runtime recomenda para token, e o único que o
-  sistema operacional protege (`docs/tinyjs.md` §5).
+  sistema operacional protege (`docs/electrobun.md` §4).
 - O banco local guarda só o índice: ferramenta, rótulo, usuário, chave no chaveiro, datas. Nunca o
   valor.
 - **Autenticar e pronto**: a pessoa digita a senha local uma vez (ou usa biometria onde existe) e a
@@ -312,9 +319,13 @@ guardar uma senha de um serviço. autenticar e pronto"):
   under that `vaultKey`, kept in the `secret` table of `nod.db` under the same key. Outside the
   biometric item the Nod never reads, writes or deletes a keychain item in normal use; values an
   older Nod left there are copied once, read-only, after the first unlock, and the old items stay.
+- **0.7.0/0.8.0 (Electrobun)**: biometric unlock is off (`biometricUnlock: false`, §22 "No Touch ID
+  unlock on Electrobun"), so the `vaultKey` lives only in memory after the password unlock and the
+  app never touches the system keychain. Windows/Linux have no keychain helper; the sealed values in
+  `nod.db` are the vault there too.
 - **Limite honesto do chaveiro**: no macOS a ACL é por binário que gravou — um segredo salvo sob
-  `tinyjs dev` faz o app construído pedir permissão uma vez, e reassinar o app pede de novo
-  (`docs/tinyjs.md` §5). Qualquer processo rodando como o mesmo usuário consegue ler o item; o que a
+  `eb:dev` faz o app construído pedir permissão uma vez, e reassinar o app pede de novo
+  (`docs/electrobun.md` §4). Qualquer processo rodando como o mesmo usuário consegue ler o item; o que a
   senha local protege é o **uso** das credenciais pela casca, não o cofre contra a própria conta do
   sistema. Isso é o comportamento padrão de um app que guarda senha no chaveiro, e é aceito.
 - **Exportar é opcional, nunca o padrão** (RF-28): quem quiser levar as credenciais para outra
@@ -325,7 +336,7 @@ guardar uma senha de um serviço. autenticar e pronto"):
   cookie já válida, formulário de login preenchido do cofre, e o fluxo do provedor do próprio site;
   só o último caso mostra a tela de login com o botão de ver e copiar a credencial.
 - **Como a casca preenche**: dois mecanismos existem e são nossos — o script document-start
-  (`"inject"`, roda em qualquer origin) e `app.window(id).eval` em runtime (`docs/tinyjs.md` §2, §4).
+  (`"inject"`, roda em qualquer origin) e `app.window(id).eval` em runtime (`docs/electrobun.md` §5).
   O adaptador é código nosso, versionado, mínimo, e **nunca** avalia dado vindo da página. O
   adaptador genérico procura os campos de login; o `auth_override` da entrada troca o genérico por um
   específico quando a ferramenta foge do padrão — e nenhum dos dois é obrigatório para cadastrar.
@@ -333,7 +344,7 @@ guardar uma senha de um serviço. autenticar e pronto"):
   preenchido pelo adaptador, resolvido pelo provedor, ou manual) vira um **evento** (§13) e é o que a
   tela da entrada mostra como "como esta ferramenta costuma entrar".
 - **Entregar credenciais a alguém antes de existir o host**: selo para a chave pública X25519 da
-  pessoa (nativa no runtime, `saghul/txiki.js:src/js/polyfills/crypto/x25519.js`) ou digitação única
+  pessoa (WebCrypto do runtime) ou digitação única
   pelo administrador (questão 7). É o mesmo problema que o convite resolve para a conta.
 - **SSO/OIDC** não é um modo a escolher: quando o host existir, ele vira o provedor e as ferramentas
   apontam para ele — a cascata já segue o fluxo do provedor sem mudança do nosso lado. O que o v1 não
@@ -433,7 +444,7 @@ máquina.
 | RF-58 | A connected Nod shows who in the guild is online now. | With two people connected, each sees the other under "Online now" within one sync (≤ 6 min); a person who locked or quit drops off within 6 min; a revoked or disabled person never appears; local mode shows nothing. |
 | RF-59 | Guild invites. An admin creates an invite with roles, a max-use count (or unlimited) and an expiry (or never); the host answers a `nod://join?host=…&fp=…&code=…` link plus a code shown once, and the admin lists and revokes invites. Whoever opens the link sees the guild (name, icon, roles, fingerprint, uses left, expiry) and creates the account they choose (name, email, password); the host creates the person with the invite's roles and spends one use (`shared/host-api.ts`, `docs/specs/SP03-host-api.md`). | A used-up, expired or revoked invite answers `invalid invite`; an invite with roles `[team]` creates a person who sees exactly the `team` tools; redeeming with an email already held does not spend a use. |
 | RF-60 | Entry screen. The locked screen is a Discord-like rail of tiles — Offline (this machine's profile), the guild (its icon or initials) and `+` (join a guild / set one up) — and choosing a tile then giving the password enters that way. `offline` runs the local catalog with no sync and no host call (the same disconnect as RF-30/O2); `guild` connects as today. The last used tile is preselected (`shared/types.ts` `EntryProfiles`). | With no host the rail shows Offline and `+`; with a host the guild tile appears and the last used tile is preselected; entering Offline shows the local catalog and makes no host request. |
-| RF-61 | The seed is an optional import. `bun run app:build` no longer requires `resources/seed.json`, and a release without one starts empty; the first-run Offline tile offers "Import a seed file" (`session.importSeed`) only while no account exists. Embedded-seed releases keep working as before — gate origins, camera/mic and the update URL still come only from an embedded seed (`docs/canonico.md` §19). | A build without the seed produces a valid config with no `seed.json` in `resources`; a fresh install offers the import while it has no account and hides it after one exists. |
+| RF-61 | The seed is an optional import. `bun run eb:build` no longer requires `resources/seed.json`, and a release without one starts empty; the first-run Offline tile offers "Import a seed file" (`session.importSeed`) only while no account exists. Embedded-seed releases keep working as before — gate origins, camera/mic and the update URL still come only from an embedded seed (`docs/canonico.md` §19). | A build without the seed produces a valid config with no `seed.json` in `resources`; a fresh install offers the import while it has no account and hides it after one exists. |
 | RF-62 | Tool categories. A guild admin gives each org tool a display category — a free name of 1 to 40 characters, trimmed, control characters refused, empty meaning none — and the Nod shows the org tools grouped by category: a labelled divider per group in the sidebar, one section per category in Home with "Other tools" for the unfiled ones, and the same grouping in Settings → Tools, with the personal tools and favorites as they were. The category travels in the snapshot, in the seed and in the host's admin routes (`shared/types.ts` `Entry.category`, `shared/catalog.ts` `groupByCategory`, `entries.category`). | The sidebar draws one labelled divider per category and Home one section per category, the unfiled org tools read last as "Other tools", and ⌘1…⌘9 follow that visual order; a catalog with no category looks exactly as it did before, and the admin sets a category in Settings → Tools with the names already in use offered as suggestions. |
 | RF-63 | One fingerprint, one keychain access (built in 0.5.1; the storage it rests on is the Proposto row "One keychain access (0.5.1)" in §22, waiting for the owner's reading). The system keychain holds one item per person — `nod.bio.<person>`, the `vaultKey` biometrics unlocks (SP02 §9) — and nothing else of the Nod: the credentials, the E02 pair and the guild bearer are `bv1.` values under that `vaultKey` in the local `secret` table (`backend/secret-store.ts`). The entry screen and the password unlock never read the keychain (`biometric_people` in `store.json` answers whether the biometric button shows); a biometric unlock reads the item once, after `app.authenticate`; no other read, write or delete reaches the keychain. Items an older Nod left in the keychain are copied to the table once, read-only, after the first unlock (marked done in `meta`), and are never touched again. The fingerprint then covers the gated actions for 15 idle minutes (§22 "Gate once per session, with a timeout"). | On macOS with biometrics enabled, opening the app, unlocking with Touch ID, joining or signing in to a guild and opening tools that fill credentials asks for the fingerprint once and nothing else; the only keychain prompt left is, after a new unsigned build, the one for the biometric item; after the first unlock on 0.5.1 no other keychain item of the Nod is read again. |
 | RF-64 | Guild owner. The person the setup code created is the guild **owner** (host `meta.owner_id`, migration 7; `AdminPerson.owner` in `shared/host-api.ts`); only the owner renames a person or edits their email, and only the owner deletes people, never the owner (including themselves); roles and disable stay admin-level, but the owner never loses their admin role nor gets disabled — `roles` without an admin role and `disabled: true` aimed at the owner are `403 the owner keeps an admin role` / `403 the owner cannot be disabled` whoever asks, the owner included, and the same protects the owner's only admin role from a role demotion or delete — and a delete is a hard delete of the person with everything cascading, their events and shares included (`docs/specs/SP03-host-api.md`, `docs/specs/SP01-host-data-model.md`). An invite call to a host that predates 0.5.0 stops being reported as a missing role and says the host must be redeployed (`HOST_TOO_OLD`, `backend/host-admin.ts`). | The owner renames a person and edits their email and both reach the next sync; another admin renaming answers `403 owner only` or editing to an email already held answers `409 email taken`; nobody deletes the owner (`403 the owner cannot be deleted`) and a delete that would leave the guild with no admin answers the existing `409`; a write that would leave the owner without an admin role or disable them answers `403` whoever asks, the owner included; inviting on a pre-0.5.0 host says the host must be redeployed, never "the guild has no such role". |
@@ -448,7 +459,7 @@ máquina.
 
 | ID | Requisito |
 | --- | --- |
-| RNF-01 | Multiplataforma: macOS 15+, Windows 10/11 com WebView2, Linux glibc 2.35+ com `webkit2gtk-4.1`. Nenhuma função pode quebrar fora do macOS: testar `capabilities().x !== false` antes de usar (`docs/tinyjs.md` §6). |
+| RNF-01 | Multiplataforma: macOS 15+, Windows 10/11 com WebView2, Linux glibc 2.35+ com `webkit2gtk-4.1`. Nenhuma função pode quebrar fora do macOS: testar `capabilities().x !== false` antes de usar (`docs/electrobun.md` §5). |
 | RNF-02 | Pegada: binário na casa dos 6 MB, app ocioso abaixo de 100 MB, casca utilizável em menos de 1 s, janela de ferramenta sem flash de chrome errado (chrome declarado no `win.open`). |
 | RNF-03 | Offline: catálogo, papéis, concessões, cofre, auditoria, admin e restauração de janelas funcionam sem rede. |
 | RNF-04 | Segurança: gate `api.origins` por origin exata, nunca `"all"` nem `"wrapper"` para terceiros; segredo só no chaveiro (0.5.1, RF-63, Proposto: os valores ficam em `nod.db` selados com o `vaultKey`, que é derivado da senha local; o chaveiro guarda o `vaultKey` só quando a biometria está ligada); HTTPS obrigatório fora de loopback; adaptador de login é código nosso e mínimo; sem telemetria externa. |
@@ -457,7 +468,7 @@ máquina.
 | RNF-07 | Teclado: toda ação alcançável por teclado, com a paleta como caminho principal; atalhos globais opcionais. |
 | RNF-08 | Language: the app is entirely in English — interface, messages, identifiers, API, tests (owner, 2026-10-15). From 2026-10-16, project documents are written in English too (owner: "é pra tudo ser em ingles a partir de agora"); existing pt-BR text stays until it is rewritten. |
 | RNF-09 | Trazer para a frente uma ferramenta já aberta é perceptível como instantâneo: menos de 150 ms entre o clique e a janela à frente; nunca recarrega a página. |
-| RNF-10 | Criptografia: o armazenamento padrão de segredo é o chaveiro do sistema. A senha local é hash PBKDF2-HMAC-SHA256 (salt de 16 bytes, parâmetros versionados); o único uso de AES-256-GCM é o export opcional, com nonce por gravação. Senha e chave derivada nunca tocam o disco nem entram em evento, log ou `store.json`. (Já superado em parte pelo V1 — os valores do cofre são `bv1.` AES-256-GCM sob o `vaultKey`, SP02 §8 — e, se o dono aceitar a linha Proposta "One keychain access (0.5.1)" do §22, esses valores saem do chaveiro para `nod.db`; o `vaultKey` só toca o chaveiro com a biometria ligada, SP02 §9.) |
+| RNF-10 | Criptografia: a senha local é hash PBKDF2-HMAC-SHA256 (salt de 16 bytes, parâmetros versionados); os valores do cofre são `bv1.` AES-256-GCM sob o `vaultKey` (SP02 §8); o export opcional usa a mesma cifra, com nonce por gravação. No Electrobun o `vaultKey` vive só em memória e o chaveiro não é tocado (biometria desligada); senha e chave derivada nunca tocam o disco nem entram em evento, log ou `store.json`. |
 | RNF-11 | (Retirado na v2 junto com o RF-22.) |
 
 ## 16. Modelo de dados local
@@ -549,11 +560,11 @@ momento, isso passa a ser validado online e a se atualizar sozinho.
 - O catálogo inicial, os papéis, as concessões e os **hashes dos convites** vivem num **arquivo de
   seed** que **não entra no git** (`resources/seed.json`, com `seed.example.json` versionado no lugar
   dele). O runtime empacota `resources/` dentro do app e o backend lê por
-  `(await app.paths()).resources` (`docs/tinyjs.md` §1), então a release carrega as regras sem
-  servidor e sem rede. O `tinyjs.json` também é gerado (`scripts/gen-config.ts`, gitignored), porque
-  o gate de origins sai das entradas do seed e não pode vazar para o git.
+  `(await app.paths()).resources` (`docs/electrobun.md` §4), então a release carrega as regras sem
+  servidor e sem rede. O `electrobun.config.ts` também é gerado (`scripts/gen-electrobun-config.ts`,
+  gitignored), porque a origem e o canal de atualização saem do seed e não podem vazar para o git.
 - **Build sem seed falha de propósito** — **superseded pela "Seed as optional import" (0.5.0,
-  RF-61)**: desde 0.5.0 `bun run app:build` não exige mais `resources/seed.json`, uma release sem
+  RF-61)**: desde 0.5.0 `bun run eb:build` não exige mais `resources/seed.json`, uma release sem
   ele abre vazia e o tile Offline do primeiro uso oferece "Import a seed file" (`session.importSeed`)
   enquanto não houver conta. O gate de origins, camera/mic e a URL de atualização continuam vindo só
   de um seed embutido — a decisão e as citações do dono estão em §22, e o passo a passo em
@@ -565,18 +576,20 @@ momento, isso passa a ser validado online e a se atualizar sozinho.
 - **O seed não carrega segredo de ninguém**: nem senha de pessoa, nem credencial de ferramenta. Ele
   traz endereços, ícones, papéis e concessões — organização, não credencial. O que é secreto continua
   no cofre, cifrado pela senha local (§11).
-- **Env travada**: a release fixa `TINYJS_VERSION` e o `id` do app; não existe endpoint configurável
+- **Env travada**: a release fixa a versão do Electrobun/Hutch (`package.json`) e o `id` do app; não existe endpoint configurável
   em runtime que redirecione catálogo ou atualização. Isso é o que o dono chamou de "envs travadas".
   **Superseded for the catalog on 2026-10-16** (owner: "env travada era algo como uma versão mais
   simples inicial"): the host address is configurable at runtime and the host is the central core
-  (`docs/epics/E01-connected-mode.md` §2, §8). `TINYJS_VERSION` and the app `id` stay fixed per release.
+  (`docs/epics/E01-connected-mode.md` §2, §8). The Electrobun/Hutch version and the app `id` stay fixed per release.
 
 **Depois do seed, a página de build normal:**
 
-- `tinyjs build` por sistema; `tinyjs publish` gera zip + `manifest.json` com sha256; `update.auto`
-  em `daily`. A atualização verifica checksum e assinatura antes de trocar o app
-  (`docs/tinyjs.md` §8). É o passo seguinte do que o dono descreveu: hoje ele manda a release na mão,
-  amanhã a release se valida online e se atualiza sozinha (F5).
+- `bun run eb:build` por sistema (Electrobun 2.0.5 / Hutch 0.28.2); a release job publica o zip do
+  `.app` macOS + `manifest.json` (sha256) e, no Windows/Linux, o instalador e o
+  `stable-<os>-<arch>-update.json`/`.tar.zst` do runtime. O app atualiza pelo `manifest.json` no macOS
+  e pelo `Updater` do Electrobun no Windows/Linux (`docs/electrobun.md` §6,
+  `docs/distribuicao.md` §8). É o passo seguinte do que o dono descreveu: hoje ele manda a release na
+  mão, amanhã a release se valida online e se atualiza sozinha (F5).
 - **macOS**: distribuição sem atrito exige Developer ID + notarização (US$ 99/ano). Sem o
   certificado, o padrão ad-hoc obriga cada pessoa a liberar em Ajustes → Privacidade e Segurança →
   "Abrir assim mesmo" (no macOS 15+ o atalho de right-click não funciona mais) ou a remover a
@@ -595,10 +608,10 @@ momento, isso passa a ser validado online e a se atualizar sozinho.
 
 | Ameaça | Defesa |
 | --- | --- |
-| Site de terceiro (ou um subdomínio comprometido) chamando o backend da casca | Gate `api.origins` com a **origin exata** de cada ferramenta e lista explícita de métodos por entrada; nunca `https://*.example.com` nem `"all"`; o gate é imposto no backend e usa a origin real do frame (`docs/tinyjs.md` §2, §9). |
-| Segredo guardado em arquivo do app | Nenhum em claro: desde 0.5.1 (RF-63, Proposto) o banco local guarda só valores `bv1.` selados com o `vaultKey` (AES-256-GCM, AAD = a chave do item) e o índice; o `vaultKey` é derivado da senha local e só vai ao chaveiro com a biometria ligada; o `store.json` nada secreto. Valor nunca entra em evento ou em log (`docs/tinyjs.md` §5). |
-| Alguém na máquina sem a senha | A casca não abre, não lista catálogo, não injeta login; erro único e espera crescente depois de tentativas; no Linux não há biometria, então o portão é só a senha (falha fechado, `docs/tinyjs.md` §6). |
-| Credencial lida por outro processo do mesmo usuário | Comportamento padrão de quem usa o chaveiro do sistema: o item é do usuário, não do app. Aceito (2026-10-15). O que a senha local protege é o uso das credenciais pela casca; o export opcional (RF-28) é que fica cifrado sem a senha (`docs/tinyjs.md` §5). |
+| Site de terceiro (ou um subdomínio comprometido) chamando o backend da casca | Gate de origin observado pela view: `main` tem a API toda só na origin do app, uma ferramenta só alcança `login.report`, e o backend confere de novo a origin da entrada (`docs/electrobun.md` §5). |
+| Segredo guardado em arquivo do app | Nenhum em claro: desde 0.5.1 (RF-63, Proposto) o banco local guarda só valores `bv1.` selados com o `vaultKey` (AES-256-GCM, AAD = a chave do item) e o índice; o `vaultKey` é derivado da senha local e vive só em memória; o `store.json` nada secreto. Valor nunca entra em evento ou em log (`docs/electrobun.md` §4). |
+| Alguém na máquina sem a senha | A casca não abre, não lista catálogo, não injeta login; erro único e espera crescente depois de tentativas; no Electrobun não há biometria, então o portão é só a senha (falha fechado, `docs/electrobun.md` §5). |
+| Credencial lida por outro processo do mesmo usuário | O cofre é selado no `nod.db`; o que a senha local protege é o uso das credenciais pela casca, não o arquivo contra a própria conta do sistema. O export opcional (RF-28) fica cifrado sem a senha (`docs/electrobun.md` §4). |
 | Adaptador de login como superfície de ataque | Código nosso, versionado, sem `eval` de dado remoto; roda só na origin declarada daquela entrada. |
 | Cookies compartilhados entre subdomínios | As ferramentas são origins distintas, mas um cookie com `Domain=.example.com` vale em todas: política é não usar cookie de domínio amplo e preferir sessão por origin. |
 | Ferramenta que recusa webview embutida | UA override por sistema; se ainda recusar, `onNavigate` devolve `external` e a ferramenta abre no navegador do sistema, com evento registrado. |
@@ -641,7 +654,7 @@ Status: `Proposto` espera leitura do dono; `Aberto` espera pesquisa; só o dono 
 
 | Área | Decisão | Alternativas | Motivo | Status |
 | --- | --- | --- | --- | --- |
-| Runtime | TypeScript sobre tinyjs (txiki.js + webview nativa) | Electron; Tauri | Pedido do dono; ~6 MB; multiplataforma; sem servidor HTTP | Proposto |
+| Runtime | TypeScript sobre Electrobun (Bun + webview nativa) | Electron; Tauri; tinyjs | Pedido do dono; multiplataforma (macOS/Windows/Linux); sem servidor HTTP. **Superada em 0.8.0: Electrobun é o único runtime** (§22 "One runtime: Electrobun") | Superada (2026-10-27) |
 | Janela única de gerenciar/usar | Uma janela principal com sidebar, Home, paleta e Settings; cada ferramenta em janela própria aberta a partir dela | rail ancorado + palcos encostados; janelas separadas para admin, paleta e carregando | Dono em 2026-10-15: "tudo em uma janela só para o lado de gerenciar/usar, aí abrimos as janelas a partir daí" | Decidido (2026-10-15) |
 | Idioma do app | Todo o app em inglês: interface, mensagens, identificadores, API, tipos, testes; docs de projeto em pt-BR | só a interface em inglês | Dono em 2026-10-15: "tudo deve estar em inglês" (escopo escolhido: o app inteiro) | Decidido (2026-10-15); docs part superseded by "Project docs language" |
 | Project docs language | Everything written from 2026-10-16 on is in English, project documents included; existing pt-BR text is not translated in bulk | keep project docs in pt-BR | Owner on 2026-10-16: "é pra tudo ser em ingles a partir de agora" | Decidido (2026-10-16) |
@@ -708,7 +721,7 @@ Status: `Proposto` espera leitura do dono; `Aberto` espera pesquisa; só o dono 
 | How a too-old Nod stays disconnected | Built in 0.4.0: only discovery and `GET /v1/meta/app` go out; join and sign-in are refused before any credential leaves; nothing from the cached snapshot is shown (the local catalog runs) while the host row and the cache stay on disk; a banner asks for the update | keep showing the cached guild catalog without syncing | The orchestrator's reading of the decision above (`docs/handovers/o1-o2-nod.md`, "Owner decision 2026-10-17"); hiding the cached catalog was not in the owner's words | Proposto |
 | Guild invites | An admin creates an invite with roles, a max-use count (or unlimited) and an expiry (or never), gets a `nod://join?…` link plus a code shown once, and lists and revokes invites; whoever opens the link sees the guild and creates the account they choose, with the invite's roles — and an invite **never grants an admin role**, because the code is pasted into chats: a role carrying `admin = 1` is refused at creation (`400 an invite cannot grant an admin role`) and re-checked when the link is redeemed, so a role promoted to admin after the invite was made makes it `invalid invite` with no use spent (`shared/host-api.ts`, `shared/join-link.ts`, `docs/specs/SP03-host-api.md`, `docs/specs/SP02-auth-and-keys.md` §3) | email-bound access code per person (`POST /v1/admin/people`); magic link | Owner on 2026-10-17: "sendo gerado um com código e enviado para a pessoa para entrar no servidor com as permissoes e cargos corretos por exemplo a partir da conta que a pessoa decidir usar pra criar"; the invite is a "Link with roles, uses and expiry". The no-admin rule is the orchestrator's reading of the same fork (a bearer link must not mint admins); promoting a person stays `PATCH /v1/admin/people/:id` | Decidido (2026-10-17) |
 | Entry screen with Offline and guild tiles | The locked screen is a Discord-like rail of tiles — Offline, the guild, and `+` (join a guild / set one up); choosing a tile then giving the password enters that way (`shared/types.ts` `EntryProfiles`, `shared/types.ts` `EntryTarget`) | the single unlock form with a mode toggle | Owner on 2026-10-17: "selecionar se quer entrar como offline ou host na tela inicial, depois de dar uma senha para dar login com os icones das guilds" | Decidido (2026-10-17) |
-| Seed as optional import | The seed is an optional import at setup: `bun run app:build` no longer requires `resources/seed.json`, a release without one starts empty, and the first-run Offline tile offers "Import a seed file" (`session.importSeed`) while no account exists (`shared/types.ts` `session.importSeed`; `docs/canonico.md` §19). Supersedes "Seed embutido em `resources/`" and the §19 build-fails rule | keep the seed mandatory in every release | Owner on 2026-10-17: "podemos manter o sistema de entrar como seed mais como um import possivel ao configurar o sistema"; the fork answer "Optional import at setup" | Decidido (2026-10-17) |
+| Seed as optional import | The seed is an optional import at setup: `bun run eb:build` no longer requires `resources/seed.json`, a release without one starts empty, and the first-run Offline tile offers "Import a seed file" (`session.importSeed`) while no account exists (`shared/types.ts` `session.importSeed`; `docs/canonico.md` §19). Supersedes "Seed embutido em `resources/`" and the §19 build-fails rule | keep the seed mandatory in every release | Owner on 2026-10-17: "podemos manter o sistema de entrar como seed mais como um import possivel ao configurar o sistema"; the fork answer "Optional import at setup" | Decidido (2026-10-17) |
 | Invite link details | The invite code is 15 random bytes shown as 24 Crockford base32 characters (`XXXX-…` ×6); `maxUses` 1..1000 or unlimited; expiry 1 minute..30 days or never; no admin role — a role with `admin = 1` is refused at creation and re-checked at the join (the rule is in "Guild invites"); `POST /v1/auth/invite` shows the guild icon to whoever holds the link, before any account is typed (`shared/host-api.ts`) | shorter code; hide the icon from non-members; a lower expiry cap | Design chosen for 0.5.0; the owner stated roles, uses and expiry but not these numbers | Proposto |
 | Offline session | Entering Offline reuses the O2 disconnect: the local catalog with no sync and no host call, host reads/writes refused (`OFFLINE_SESSION_ERROR`); one predicate `disconnected() = requiresUpdate() or mode === 'offline'` (`backend/session.ts`) | a separate offline code path | Owner asked for an offline entry; the equivalence to the built O2 disconnect is the orchestrator's reading | Proposto |
 | New person by email-bound code | The admin created a person with an access code bound to that email (`POST /v1/admin/people`); superseded by "Guild invites" (0.5.0, RF-59) | — | Anyone who holds the invite link now creates the account they choose; the reissue route for an existing person (`POST /v1/admin/people/:id/code`) stays | Superada |
@@ -745,6 +758,7 @@ Status: `Proposto` espera leitura do dono; `Aberto` espera pesquisa; só o dono 
 | No Touch ID unlock on Electrobun (0.7.0) | On the Electrobun build the vault key is never stored in the keychain: unlock is by password only, the biometric button is not offered, and a Mac that migrated from 0.6.0c has its `nod.bio.<person>` item deleted at first boot. The gate keeps the system prompt (`app.authenticate`, no keychain). tinyjs builds keep biometric unlock | keep the item (any Electrobun app on the machine reads it without a prompt, because the item trusts Bun's Developer ID); hold 0.7.0 until the Nod has its own Developer ID | Measured in `docs/handovers/e07-migration.md` §5; owner on 2026-10-23 chose "Ship without Touch ID". The way back is §23's risk row: sign the Nod with its own Developer ID | Decidido (2026-10-23) |
 | Tool sessions after the 0.7.0 update | The update does not import tinyjs's cookie store: each tool asks for sign-in once after the update (the vault fills it where a credential is saved) | import `~/Library/HTTPStorages/<id>.binarycookies` into the Electrobun store at first boot | Owner on 2026-10-23 chose "Accept: sign in again once" | Decidido (2026-10-23) |
 | Homebrew install | macOS installs through a Homebrew cask kept in this repository (`Casks/nod.rb`, the repo is the tap): pinned version and sha256 per architecture from the release manifest, rewritten on `main` by `release.yml` after each release; the cask clears the quarantine flag after installing (`docs/distribuicao.md` §3.1) | a separate `homebrew-nod` tap repo (needs a cross-repo token); `version :latest` with no checksum | Owner on 2026-10-27: "configure para o nod uma forma de baixar ele pelo brew no macos", then chose "Inside the Nod repo" and "Pinned version + sha256, updated per release" | Decidido (2026-10-27) |
+| One runtime: Electrobun (0.8.0) | **Electrobun 2.0.5 is the only desktop runtime; tinyjs is removed.** Every release builds macOS arm64/x86_64, Linux x86_64/arm64 and Windows x64/arm64 with Electrobun (`docs/electrobun.md` §2, `docs/distribuicao.md` §8). macOS keeps docked tabs; Windows/Linux report `canDock: false` and use the windows mode (no view re-parent in 2.0.5). macOS updates from `manifest.json` (sha256 + `codesign`), Windows/Linux through the runtime `Updater`. A Windows/Linux installation on 0.7.0c installs 0.8.0 once; macOS migrates itself. | keep tinyjs for Intel Macs/Windows/Linux; wait for Electrobun 2.0.4 | Owner on 2026-10-27: "electrobun agora é o unico runtime do projeto deprecando tinyjs"; Electrobun 2.0.5 adds `macos-x64`, which removes the 0.7.0 blocker | Decidido (2026-10-27) |
 
 ## 23. Questões abertas e riscos
 
@@ -762,7 +776,7 @@ Questões:
    `saghul/txiki.js:src/js/polyfills/crypto/{kdf,ed,x25519,aes}.js`).
    **Answered by measurement (2026-10-16):** one PBKDF2 at 600 000 iterations takes ~0.4 s in the
    Nod runtime (383–427 ms, median 390 ms; ~43 ms in Bun), and AES-256-GCM, X25519, Ed25519 and
-   HKDF are all native in both runtimes, with per-operation costs in `docs/tinyjs.md` §5 (stories H3
+   HKDF are all native in the runtime, with per-operation costs in `docs/electrobun.md` §4 (stories H3
    and S0).
 7. Entregar as credenciais das ferramentas a uma pessoa **antes** de existir o host: usar o selo
    X25519 na chave pública da pessoa, digitação única pelo administrador, ou esperar o host?
@@ -795,7 +809,7 @@ Riscos:
 | Seed embutido lido por quem recebe a release | Endereços, papéis e concessões deixam de ser privados do dono | Aceito: o seed não tem segredo; o que é secreto é a senha local e o cofre. Release por grupo, não por pessoa, enquanto isso não incomodar |
 | Public releases carry the seed | Anyone can read the addresses, roles, grants and invite hashes of the release seed | The seed holds no secret (RF-27); with a host, org data comes from the host and the seed can shrink |
 | Release que devia trazer seed sai sem ele | App abre vazio para quem recebe | Desde 0.5.0 a release sem seed é válida (RF-61): o tile Offline do primeiro uso oferece "Import a seed file", e o gate/camera/update só existem com seed embutido (`docs/canonico.md` §19) |
-| Runtime jovem (0.x) | Mudança de API entre versões | `minTinyjsVersion` no `tinyjs.json`; docs do runtime lidas antes de codar; TINYJS_VERSION fixado no CI |
+| Runtime jovem (0.x) | Mudança de API entre versões | versão do Electrobun/Hutch fixada em `package.json`; docs do runtime lidas antes de codar |
 | Keychain identity on Electrobun | Every Electrobun app shares the Developer ID of Bun's `bun` binary, so a keychain item the Nod writes is readable by any other Electrobun app without a prompt (`docs/handovers/e07-migration.md` §5) | 0.7.0 stores no vault key in the keychain on macOS (§22). Durable fix: sign the Nod — the outer bundle and the embedded `bun` — with the team's own Developer ID (Electrobun `build.mac.codesign`/`notarize`), so the item trusts only the Nod's team; then Touch ID unlock can return, optionally with an access-controlled item (`.biometryCurrentSet`) in the data-protection keychain |
 | Janela ocluída é throttled | Trabalho de fundo na página para | Todo trabalho contínuo no backend |
 

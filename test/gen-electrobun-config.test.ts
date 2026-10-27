@@ -2,8 +2,8 @@
 // Run with `bun test test/`.
 //
 // The pure core is tested here: identifiers, the media-permission refusal, the resource/copy lists
-// and the generated module. I/O (reading `tinyjs.base.json`, `validateSeed`, writing the file) is
-// the `import.meta.main` block and is exercised by `eb:dev` / `eb:build`, like `gen-config.ts`.
+// and the generated module. I/O (reading `app.json`, `validateSeed`, writing the file) is
+// the `import.meta.main` block and is exercised by `eb:dev` / `eb:build`, like `gen-electrobun-config.ts`.
 
 import { describe, expect, test } from 'bun:test';
 import {
@@ -15,7 +15,8 @@ import {
   EB_NATIVE_TARGET,
   EB_POSTPACKAGE,
   ICONSET_IMAGES,
-  TINY_IDENTIFIER,
+  RELEASE_IDENTIFIER,
+  DEV_IDENTIFIER,
   USAGE_KEYS,
   appIdentifier,
   electrobunResources,
@@ -26,7 +27,7 @@ import {
   usageGaps,
 } from '../scripts/gen-electrobun-config';
 import { plistGaps, tarPlistEntry } from '../scripts/eb-plist';
-import { MIN_ICON_SIZE } from '../scripts/gen-config';
+import { MIN_ICON_SIZE } from '../scripts/app-config';
 import type { Entry, Seed } from '../shared/types';
 
 const BASE: Record<string, unknown> = {
@@ -90,20 +91,21 @@ function asShape(config: Record<string, unknown>): Shape {
 }
 
 describe('appIdentifier', () => {
-  test('defaults to the Electrobun identifier, never the tinyjs one', () => {
-    expect(appIdentifier(undefined)).toBe(EB_IDENTIFIER);
-    expect(appIdentifier('  ')).toBe(EB_IDENTIFIER);
-    expect(EB_IDENTIFIER).toBe('copland.nod.eb');
+  test('defaults to the device identifier outside a release build', () => {
+    expect(appIdentifier(undefined)).toBe(DEV_IDENTIFIER);
+    expect(appIdentifier('  ')).toBe(DEV_IDENTIFIER);
+    expect(appIdentifier(undefined, 'build')).toBe(EB_IDENTIFIER);
+    expect(EB_IDENTIFIER).toBe('copland.nod');
   });
 
   test('accepts an override (a smoke gets its own app data)', () => {
     expect(appIdentifier('copland.nod.eb-dev')).toBe('copland.nod.eb-dev');
   });
 
-  test('refuses the tinyjs id in dev and accepts it in a release build', () => {
-    expect(() => appIdentifier(TINY_IDENTIFIER)).toThrow(/must not be copland\.nod/);
-    expect(() => appIdentifier(TINY_IDENTIFIER, 'dev')).toThrow(/must not be copland\.nod/);
-    expect(appIdentifier(TINY_IDENTIFIER, 'build')).toBe(TINY_IDENTIFIER);
+  test('refuses the release id in dev and accepts it in a release build', () => {
+    expect(() => appIdentifier(RELEASE_IDENTIFIER)).toThrow(/must not be copland\.nod/);
+    expect(() => appIdentifier(RELEASE_IDENTIFIER, 'dev')).toThrow(/must not be copland\.nod/);
+    expect(appIdentifier(RELEASE_IDENTIFIER, 'build')).toBe(RELEASE_IDENTIFIER);
   });
 });
 
@@ -246,7 +248,7 @@ describe('generateElectrobunConfig', () => {
     );
 
     expect(config.app.name).toBe('Nod');
-    expect(config.app.identifier).toBe('copland.nod.eb');
+    expect(config.app.identifier).toBe('copland.nod');
     expect(config.app.version).toBe('0.6.0c');
     expect(config.app.urlSchemes).toEqual(['nod']);
     expect(config.build.mainProcess).toBe('bun');
@@ -317,7 +319,10 @@ describe('generateElectrobunConfig', () => {
         { sqliteShim: SHIM },
       ),
     );
-    expect(withUpdate.release).toEqual({ baseUrl: 'https://dl.example.com/nod/' });
+    expect(withUpdate.release).toEqual({
+      baseUrl: 'https://dl.example.com/nod/',
+      generatePatch: false,
+    });
 
     const without = asShape(
       generateElectrobunConfig(BASE, null, 'build', { sqliteShim: SHIM }),
@@ -342,7 +347,7 @@ describe('generateElectrobunConfig', () => {
     expect(source).toBe(renderElectrobunConfig(config));
     expect(source).toContain('import type { ElectrobunConfig } from "electrobun";');
     expect(source).toContain('satisfies ElectrobunConfig');
-    expect(source).toContain('"identifier": "copland.nod.eb"');
+    expect(source).toContain('"identifier": "copland.nod"');
     expect(source).toContain('"urlSchemes": [\n      "nod"\n    ]');
   });
 });
@@ -384,7 +389,7 @@ describe('usage descriptions in the plist (E06 §13)', () => {
     expect(
       plistGaps(
         {
-          CFBundleIdentifier: 'copland.nod.eb',
+          CFBundleIdentifier: 'copland.nod.eb-dev',
           [USAGE_KEYS.camera]: CAMERA,
           [USAGE_KEYS.microphone]: MICROPHONE,
         },

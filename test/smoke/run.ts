@@ -23,7 +23,7 @@
 // the smoke fails. The same binary seals and opens the SP06 §3 vectors (`SEAL_VECTORS`) and must
 // refuse a flipped bit in the body, in the signature or in the AAD.
 //
-// The run takes a free dev port per launch (`freePort`, `test/smoke/tools.ts`) for `gen-config` and
+// The run takes a free dev port per launch (`freePort`, `test/smoke/tools.ts`) for `gen-electrobun-config` and
 // for the `tinyjs dev` child, so the smoke never takes the port a developer's `bun run app:dev` is
 // already using, nor one a process a previous smoke left behind still holds; the page is written
 // under a per-launch nonce name for the same reason. The last regeneration drops `NOD_DEV_PORT` and
@@ -32,19 +32,16 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir, platform } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import type { SealPayload } from '../../shared/seal';
 import type { SmokeLaunch, Tools } from './tools';
 import {
   appDataDir as dataDir,
   freePort,
-  generateDevConfig,
   generateElectrobunDevConfig,
   launchSmokeApp,
   smokeAppId,
@@ -53,7 +50,7 @@ import {
   waitForStoredResult,
 } from './tools';
 
-/** Which target this run measures: `--runtime=electrobun` or `NOD_RUNTIME=electrobun` (default tinyjs). */
+/** The one runtime: Electrobun. */
 const RUNTIME = smokeRuntime();
 
 /** Smoke id: the real app runs under it so it never touches the owner's data. */
@@ -64,7 +61,6 @@ const GENERATED_DIR = join(import.meta.dir, '.gerado');
 const SMOKE_TEMPLATE = join(import.meta.dir, 'smoke.html');
 const SEED = join(ROOT, 'resources', 'seed.json');
 const SEED_BACKUP = join(GENERATED_DIR, 'seed.json.bak');
-const TINYJS_JSON = join(ROOT, 'tinyjs.json');
 const EXPORT_PATH = join(GENERATED_DIR, 'events.jsonl');
 
 /** The key-vector driver and its bundle, both generated (test/smoke/.gerado/ is gitignored). */
@@ -87,7 +83,7 @@ const FORBIDDEN_IN_EXPORT = ['secret-a', 'wrong'];
 /** Data directory per app id comes from `./tools` (`appDataDir`), the launches' one home. */
 
 /**
- * Temporary seed. It exists only so `gen-config` builds the origin gate: every entry origin gets
+ * Temporary seed. It exists only so `gen-electrobun-config` builds the origin gate: every entry origin gets
  * `login.report`, which is what the adapter script calls when the tool enters the page. The smoke
  * registers both entries again through the API — hence the minimal entries here. The provider and
  * tool C stay out: the cascade never injects outside the entry origin, and C's origin must NOT be
@@ -148,7 +144,7 @@ function generatePage(tools: Tools, nonce: string): string {
 }
 
 /**
- * The `gen-config` regeneration, the store-file wait and the process tree kill come from `./tools`,
+ * The `gen-electrobun-config` regeneration, the store-file wait and the process tree kill come from `./tools`,
  * the one home of the smoke's process plumbing.
  */
 
@@ -222,22 +218,6 @@ interface DerivedVectors {
 }
 
 /**
- * The Nod runtime: `<tinyjs home>/bin/tjs`, the txiki.js binary the tinyjs launcher execs
- * (`~/.tinyjs/tinyjs` is `exec "$DIR/bin/tjs" run "$DIR/cli.js"`). `TINYJS_HOME` and the launcher on
- * PATH come first, so no install path is hardcoded.
- */
-function runtimeBinary(): string | null {
-  const name = platform() === 'win32' ? 'tjs.exe' : 'tjs';
-  const launcher = Bun.which('tinyjs');
-  const candidates = [
-    ...(process.env.TINYJS_HOME ? [join(process.env.TINYJS_HOME, 'bin', name)] : []),
-    ...(launcher === null ? [] : [join(dirname(realpathSync(launcher)), 'bin', name)]),
-    join(homedir(), '.tinyjs', 'bin', name),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-}
-
-/**
  * The Bun binary the Electrobun dev app ships (`build/dev-macos-<arch>/Nod-dev.app`), which is the
  * runtime the app's backend process runs on. Absent (no Electrobun build yet), the runner's own Bun
  * is used and says so — the same vectors are pinned in Bun by `bun test`.
@@ -250,31 +230,19 @@ function electrobunBun(): string | null {
 }
 
 /**
- * How one vector bundle is executed, per runtime: `tjs run <bundle>` on tinyjs (the txiki.js binary
- * the app's backend runs on) and the bundle's Bun on Electrobun (the backend is Bun there). Both
- * must reproduce the pinned hex — a vector that differs between runtimes blocks the story
- * (`shared/context.md`).
+ * How one vector bundle is executed: the Bun the Electrobun dev app ships, which is the runtime the
+ * backend runs on. Absent (no dev build yet), the runner's own Bun is used and says so — the same
+ * vectors are pinned in Bun by `bun test`.
  */
-function vectorCommand(
-  bundle: string,
-): { argv: string[]; label: string } | { error: string } {
-  if (RUNTIME === 'electrobun') {
-    const bundled = electrobunBun();
-    if (bundled !== null) {
-      return { argv: [bundled, bundle], label: `${bundled} (the Electrobun bundle's Bun)` };
-    }
-    return {
-      argv: [process.execPath, bundle],
-      label: `${process.execPath} (Bun ${Bun.version}; the dev bundle's Bun is not built yet)`,
-    };
+function vectorCommand(bundle: string): { argv: string[]; label: string } {
+  const bundled = electrobunBun();
+  if (bundled !== null) {
+    return { argv: [bundled, bundle], label: `${bundled} (the Electrobun bundle's Bun)` };
   }
-  const binary = runtimeBinary();
-  if (binary === null) {
-    return {
-      error: 'the tinyjs runtime binary was not found (TINYJS_HOME, tinyjs on PATH or ~/.tinyjs/bin/tjs)',
-    };
-  }
-  return { argv: [binary, 'run', bundle], label: binary };
+  return {
+    argv: [process.execPath, bundle],
+    label: `${process.execPath} (Bun ${Bun.version}; the dev bundle's Bun is not built yet)`,
+  };
 }
 
 /**
@@ -717,7 +685,6 @@ async function main(): Promise<number> {
 
   mkdirSync(GENERATED_DIR, { recursive: true });
   rmSync(EXPORT_PATH, { force: true });
-  const previousTinyjsJson = existsSync(TINYJS_JSON) ? readFileSync(TINYJS_JSON, 'utf8') : null;
 
   let tools: Tools | null = null;
   let app: SmokeLaunch | null = null;
@@ -736,28 +703,13 @@ async function main(): Promise<number> {
       renameSync(SEED_BACKUP, SEED);
       console.log('private seed restored');
     }
-    if (RUNTIME === 'tinyjs') {
-      const finalGen = generateDevConfig(ROOT, null, null);
-      if (finalGen.code !== 0) {
-        console.error(`final gen-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
-        if (previousTinyjsJson !== null) {
-          writeFileSync(TINYJS_JSON, previousTinyjsJson);
-          console.error('tinyjs.json restored to its previous content');
-        } else {
-          rmSync(TINYJS_JSON, { force: true });
-        }
-      } else {
-        console.log('tinyjs.json regenerated in dev');
-      }
+    // The config was generated for this smoke's identifier; leave the development one behind
+    // rather than the throwaway.
+    const finalGen = generateElectrobunDevConfig(ROOT, null, null);
+    if (finalGen.code !== 0) {
+      console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
     } else {
-      // The Electrobun config was generated for this smoke's identifier; the next launch regenerates
-      // it, but leave the development one behind rather than the throwaway.
-      const finalGen = generateElectrobunDevConfig(ROOT, null, null);
-      if (finalGen.code !== 0) {
-        console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
-      } else {
-        console.log('electrobun.config.ts regenerated in dev');
-      }
+      console.log('electrobun.config.ts regenerated in dev');
     }
   };
   // A Ctrl-C in the middle of the run cannot leave the app up or the owner's seed out of place.
@@ -792,15 +744,6 @@ async function main(): Promise<number> {
 
     const devPort = freePort();
     const nonce = crypto.randomUUID();
-    if (RUNTIME === 'tinyjs') {
-      const gen = generateDevConfig(ROOT, APP_ID, devPort);
-      if (gen.code !== 0) {
-        console.error(`gen-config failed (code ${gen.code}):\n${gen.output.trim()}`);
-        return 3;
-      }
-      console.log('tinyjs.json generated in dev with the temporary seed');
-    }
-
     rmSync(dataDir(APP_ID), { recursive: true, force: true });
     console.log(`smoke app data wiped: ${dataDir(APP_ID)}`);
 

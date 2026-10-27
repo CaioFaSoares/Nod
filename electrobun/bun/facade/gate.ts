@@ -310,10 +310,10 @@ export function createViewGate(callbacks: ViewGateCallbacks): ViewGate {
 
 /**
  * The gate index.ts talks to: the main view's RPC calls plus the tool-view path Windows feeds.
- * `call` throws the tinyjs sentence, so `src/api.ts` sees the same error it always did.
+ * `call` throws the gate sentence, so `src/api.ts` sees the same error it always did.
  */
 export interface Gate extends ViewGate {
-  /** Dispatch a main-window call; refuses with `"<method>" is disabled by tinyjs.json "api"`. */
+  /** Dispatch a main-window call; refuses with `"<method>" is not allowed from this window`. */
   call(method: string, params: unknown, meta: TinyApiMeta): Promise<unknown>;
   /** The main view committed a navigation; `origin` null (or opaque) disables the api. */
   committed(origin: string | null, href: string): void;

@@ -2,17 +2,17 @@
 // config type has no field for (`NSCameraUsageDescription`, `NSMicrophoneUsageDescription`).
 //
 // Without them macOS kills a packaged app whose page captures camera or microphone — the same rule
-// `scripts/gen-config.ts` enforces for tinyjs. `gen-electrobun-config.ts build` already refuses to
+// `scripts/gen-electrobun-config.ts` enforces. `gen-electrobun-config.ts build` already refuses to
 // generate a config without the strings; this hook is the second half, applying them to the wrapped
 // `.app` (`ELECTROBUN_WRAPPER_BUNDLE_PATH`, measured on hutch 0.28.1). A dev run only warns: it is
-// not a release, and the generator mirrors gen-config's build-only refusal.
+// not a release, and the generator mirrors `gen-electrobun-config.ts`'s build-only refusal.
 //
 // Measured ordering caveat (E06 §13): hutch packs the payload tar before this hook runs, and dev
 // builds do not run it at all. `scripts/eb-postbuild.ts` repairs/asserts both after packaging; this
 // hook still runs first so a release is signed with the strings in place.
 //
 // Nothing here reads or writes a secret: only the two public usage sentences from
-// `tinyjs.base.json`.
+// `app.json`.
 
 import { join } from 'node:path';
 import {
@@ -80,7 +80,7 @@ const plist = join(bundle, 'Contents', 'Info.plist');
 
 let permissions: UsageDescriptions;
 try {
-  const base = (await Bun.file(join(import.meta.dir, '..', 'tinyjs.base.json')).json()) as Record<
+  const base = (await Bun.file(join(import.meta.dir, '..', 'app.json')).json()) as Record<
     string,
     unknown
   >;

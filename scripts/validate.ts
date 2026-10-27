@@ -1,7 +1,7 @@
 // One command for every gate the Nod has (`package.json` "validate"):
 //
 //   bun run validate            # fast half: typecheck, unit tests, build
-//   bun run validate --smoke    # + the real-surface smokes on BOTH runtimes
+//   bun run validate --smoke    # + the real-surface smokes (Electrobun)
 //
 // Why: the checks lived in four package scripts and four smoke runners, and running them one by
 // one (or forgetting one) cost more than the work. This script is only orchestration: every step
@@ -9,8 +9,8 @@
 // exit if anything failed. Nothing here is a test of its own.
 //
 // `--smoke` opens real windows on the machine for ~4 minutes (the smokes drive the real app) and
-// moves `resources/seed.json` aside (each runner restores it); the Electrobun half is skipped,
-// with a line saying so, when the devkit is not installed (`.hutch/devkit/tsconfig.json`).
+// moves `resources/seed.json` aside (each runner restores it); the smoke half is skipped, with a
+// line saying so, when the devkit is not installed (`.hutch/devkit/tsconfig.json`).
 // The smokes run sequentially on purpose: they share loopback ports, the screen and the seed.
 
 import { spawnSync } from 'node:child_process';
@@ -38,18 +38,11 @@ const fast: Step[] = [
 
 const smokeSuites = ['run', 'ui', 'connected', 'tabs'] as const;
 const smoke: Step[] = [];
-for (const suite of smokeSuites) {
-  smoke.push({
-    name: `smoke ${suite} (tinyjs)`,
-    command: ['bun', `test/smoke/${suite}.ts`, '--force'],
-    note: 'the real app under tinyjs',
-  });
-}
 if (devkit) {
   for (const suite of smokeSuites) {
     smoke.push({
       name: `smoke ${suite} (electrobun)`,
-      command: ['bun', `test/smoke/${suite}.ts`, '--force', '--runtime=electrobun'],
+      command: ['bun', `test/smoke/${suite}.ts`, '--force'],
       note: 'the real app under Electrobun',
     });
   }
@@ -60,8 +53,8 @@ const steps = smokes ? [...fast, ...smoke] : fast;
 // A smoke cannot run beside another launch: `electrobun dev` waits on the project build lock and
 // the runners share loopback ports. A launch left behind by an interrupted run (or a developer's
 // own `eb:dev`/`app:dev`) used to surface as minutes of timeouts; here it stops the run at once.
-if (smokes) {
-  const busy = spawnSync('pgrep', ['-fl', 'electrobun dev|hutch-engine|Nod-dev.app/Contents/MacOS|tinyjs dev'], {
+if (smokes && process.platform !== 'win32') {
+  const busy = spawnSync('pgrep', ['-fl', 'electrobun dev|hutch-engine|Nod-dev.app/Contents/MacOS'], {
     encoding: 'utf8',
   });
   const lines = (busy.stdout ?? '').split('\n').filter((line) => line.trim() !== '');
@@ -93,7 +86,7 @@ for (const step of steps) {
 }
 
 if (smokes && !devkit) {
-  process.stdout.write('skip  the Electrobun smokes: .hutch/devkit is not installed (bun run eb:dev installs it)\n\n');
+  process.stdout.write('skip  the smokes: .hutch/devkit is not installed (bun run eb:dev installs it)\n\n');
 }
 
 process.stdout.write('summary\n');

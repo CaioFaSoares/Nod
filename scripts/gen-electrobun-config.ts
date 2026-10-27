@@ -1,15 +1,15 @@
-// Builds `electrobun.config.ts` from `tinyjs.base.json` + `resources/seed.json`, for the Electrobun
-// runtime target (E06). The tinyjs config (`scripts/gen-config.ts` -> `tinyjs.json`) is untouched:
-// this file only writes the second target's config, which is gitignored and regenerated.
+// Builds `electrobun.config.ts` from `app.json` + `resources/seed.json`. Electrobun is the only
+// desktop runtime: this file writes the config the release and dev launches read, which is
+// gitignored and regenerated.
 //
 // `generateElectrobunConfig` is pure: it neither reads nor writes a file and never exits the process.
 // The I/O lives in the `import.meta.main` block, run with
 // `bun scripts/gen-electrobun-config.ts <dev|build>`.
 //
 // `NOD_APP_ID` overrides the Electrobun identifier (a smoke or a developer launch gets its own app
-// data and keychain namespace). A `dev` run refuses the tinyjs id `copland.nod`: the two targets
+// data and keychain namespace). A `dev` run refuses the release id `copland.nod`: the two targets
 // never share an app data directory in development. A `build` accepts it (the 0.7.0 release uses
-// it), and the runtime resolves the tinyjs data directory so an updated installation keeps its
+// it), and the runtime resolves the legacy data directory so an installation updated from tinyjs keeps its
 // account. Absent, the identifier is `copland.nod.eb`.
 //
 // Parity notes (probed on Electrobun 2.0.4 / hutch 0.28.1):
@@ -19,23 +19,26 @@
 // - `scripts.postWrap` is a Bun module path (not a command line) run after the `.app` is wrapped,
 //   with `ELECTROBUN_WRAPPER_BUNDLE_PATH` in the environment.
 // - `ElectrobunConfig` has no camera/microphone plist field, so `scripts/eb-postwrap.ts` patches
-//   `Info.plist`; the build refuses to start without the two usage strings (same rule as tinyjs).
+//   `Info.plist`; the build refuses to start without the two usage strings.
 // - The app icon is not a single PNG field either: macOS takes `build.mac.icons`, a `.iconset`
 //   *folder* (hutch runs `iconutil` on it), and Windows/Linux take `build.win.icon` /
-//   `build.linux.icon` as PNG. `scripts/eb-icon.ts` writes the iconset from the very PNG tinyjs
+//   `build.linux.icon` as PNG. `scripts/eb-icon.ts` writes the iconset from the very PNG the release
 //   wears (`iconForConfig`, same `NOD_ICON`/private/default precedence and same 1024 check).
 
 import { resolve } from 'node:path';
 import type { Seed } from '../shared/types';
 import { BUILD_MODE_STAMP } from '../shared/build-mode';
 import { validateSeed } from '../shared/catalog';
-import { iconForConfig } from './gen-config';
+import { iconForConfig } from './app-config';
 
-/** Identifier of a release build; never the tinyjs one (`copland.nod`). */
-export const EB_IDENTIFIER = 'copland.nod.eb';
+/** Identifier a release always wears (the 0.7.0 migration kept the tinyjs identity). */
+export const RELEASE_IDENTIFIER = 'copland.nod';
 
-/** Data/keychain namespace of the tinyjs target: refused as an Electrobun identifier. */
-export const TINY_IDENTIFIER = 'copland.nod';
+/** Identifier a release uses when `NOD_APP_ID` is absent. */
+export const EB_IDENTIFIER = RELEASE_IDENTIFIER;
+
+/** Development identifier: a build that never touches a release installation. */
+export const DEV_IDENTIFIER = 'copland.nod.eb-dev';
 
 /** Bun entrypoint of the main process (`electrobun/bun/index.ts`). */
 export const EB_ENTRYPOINT = 'electrobun/bun/index.ts';
@@ -73,7 +76,7 @@ export const EB_ICON_ICONSET = '.eb-icon.iconset';
 
 /**
  * Images the icon set holds — the ten entries `iconutil` requires, every one downscaled from the
- * single ≥1024 PNG the tinyjs build wears. Pure data, so the generator and `scripts/eb-icon.ts`
+ * single ≥1024 PNG the release build wears. Pure data, so the generator and `scripts/eb-icon.ts`
  * agree on the names and the test proves the 1024 source lands in `icon_512x512@2x.png`.
  */
 export const ICONSET_IMAGES: readonly { file: string; size: number }[] = [
@@ -90,18 +93,18 @@ export const ICONSET_IMAGES: readonly { file: string; size: number }[] = [
 ];
 
 const MISSING_PERMISSIONS_MESSAGE =
-  'tinyjs.base.json must declare "permissions": { "camera": "...", "microphone": "..." }';
+  'app.json must declare "permissions": { "camera": "...", "microphone": "..." }';
 
 /** Files the release always ships from `resources/`, before the seed and the relative entry icons. */
 const BUNDLED = ['tray.png'];
 
-/** The identifier for an `NOD_APP_ID` value; refuses the tinyjs namespace outside a release build. */
+/** The identifier for an `NOD_APP_ID` value; the release id is refused outside a release build. */
 export function appIdentifier(value: string | undefined, mode: 'dev' | 'build' = 'dev'): string {
   const id = (value ?? '').trim();
-  if (id === '') return EB_IDENTIFIER;
-  if (id === TINY_IDENTIFIER && mode !== 'build') {
+  if (id === '') return mode === 'dev' ? DEV_IDENTIFIER : EB_IDENTIFIER;
+  if (id === RELEASE_IDENTIFIER && mode !== 'build') {
     throw new Error(
-      `NOD_APP_ID must not be ${TINY_IDENTIFIER} outside a release build: the Electrobun target ` +
+      `NOD_APP_ID must not be ${RELEASE_IDENTIFIER} outside a release build: the Electrobun target ` +
         'keeps its own app data in development',
     );
   }
@@ -126,7 +129,7 @@ export interface UsageDescriptions {
 }
 
 /**
- * Keys whose Info.plist value is absent or different from the sentence `tinyjs.base.json`
+ * Keys whose Info.plist value is absent or different from the sentence `app.json`
  * declares. Pure: the caller reads the plist and decides what to do with the gap. The empty array
  * is the only acceptable state for a bundle the app runs.
  */
@@ -157,7 +160,7 @@ export function mediaPermissions(base: Record<string, unknown>): UsageDescriptio
 
 /**
  * Icon path of an entry, relative to `resources/`: no data URI, no `..`, no absolute path;
- * `null` when the icon does not travel as a file. Same rule as `scripts/gen-config.ts`.
+ * `null` when the icon does not travel as a file. Pure and testable.
  */
 function relativeIconPath(icon: string | null): string | null {
   if (icon === null || /^data:/i.test(icon)) return null;
@@ -170,7 +173,7 @@ function relativeIconPath(icon: string | null): string | null {
  * Files the Electrobun bundle stages from `resources/`: the seed it was built with, the tray icon
  * and the relative entry icons. A dev run also stages the build-mode stamp — it is what tells the
  * backend this is a dev run, and the copy step is the only way the stamp reaches the bundle; a
- * release never ships it (the exact rule `scripts/gen-config.ts` keeps for tinyjs).
+ * release never ships it (the same rule for the release build).
  */
 export function electrobunResources(seed: Seed | null, mode: 'dev' | 'build'): string[] {
   const bundled = seed === null ? [...BUNDLED] : ['seed.json', ...BUNDLED];
@@ -198,17 +201,19 @@ export interface ElectrobunOptions {
   sqliteShim: string;
   /** The native helper was built: stage it under `Resources/app/native/`. */
   nativeLibrary?: boolean;
+  /** Host being built; macOS alone takes an `.iconset`, the others take the PNG. */
+  platform?: NodeJS.Platform;
   /**
    * App icon the build wears (RF-56 parity), project-relative and already resolved and checked by
    * `iconForConfig` — `.nod-icon.png`, `resources/icon.png` or `assets/icon.png`. macOS gets the
    * `.iconset` `scripts/eb-icon.ts` writes from it, Windows/Linux the PNG itself. `null`/absent
-   * leaves the icon to Electrobun's own default, exactly the way `null` does for tinyjs.
+   * leaves the icon to Electrobun's own default.
    */
   icon?: string | null;
 }
 
 /**
- * Directory of the update channel from the seed's URL: tinyjs publishes one merged
+ * Directory of the update channel from the seed's URL: the legacy channel publishes one merged
  * `manifest.json`, while Electrobun reads per-platform files next to the artifacts. A seed URL that
  * names `manifest.json` therefore contributes its directory; anything else is kept verbatim.
  */
@@ -221,9 +226,9 @@ export function releaseBaseUrl(url: string): string {
  *
  * The main window is the vite `dist/` copied to `views/mainview` (build) or the dev server URL
  * (dev, chosen by the entrypoint from the build channel). `resources/` files are copied so
- * `app.paths().resources` answers the same paths the tinyjs build ships. macOS usage strings are
+ * `app.paths().resources` answers the same paths the release build ships. macOS usage strings are
  * enforced here for `build` and applied by `scripts/eb-postwrap.ts`, because the config type has no
- * plist field. `options.icon` is the same app icon the tinyjs build wears: macOS names the iconset
+ * plist field. `options.icon` is the same app icon the release build wears: macOS names the iconset
  * `scripts/eb-icon.ts` writes from it, Windows and Linux name the PNG.
  */
 export function generateElectrobunConfig(
@@ -252,15 +257,16 @@ export function generateElectrobunConfig(
   }
   if (options.nativeLibrary === true) copy[EB_NATIVE_LIBRARY] = EB_NATIVE_TARGET;
 
-  // RF-56 parity: the same PNG tinyjs wears. macOS takes the iconset folder (hutch runs iconutil on
+  // RF-56 parity: the same PNG the release build wears. macOS takes the iconset folder (hutch runs iconutil on
   // it — a PNG path here would be ignored), Windows and Linux take the PNG itself. No icon resolved
-  // leaves all three keys out, the way tinyjs leaves its `icon` out and keeps the template icon.
+  // leaves all three keys out, so Electrobun keeps its template icon.
   const icon = options.icon ?? null;
+  const platform = options.platform ?? 'darwin';
   const mac: Record<string, unknown> = { bundleCEF: false, createDmg: false };
   const win: Record<string, unknown> = { bundleCEF: false };
   const linux: Record<string, unknown> = { bundleCEF: false };
   if (icon !== null) {
-    mac.icons = EB_ICON_ICONSET;
+    if (platform === 'darwin') mac.icons = EB_ICON_ICONSET;
     win.icon = icon;
     linux.icon = icon;
   }
@@ -302,7 +308,9 @@ export function generateElectrobunConfig(
   };
 
   if (seed !== null && seed.update !== null) {
-    config.release = { baseUrl: releaseBaseUrl(seed.update.url) };
+    // No delta patches: a release's full archive is small enough, and the release job never has
+    // the previous channel in place to compute one.
+    config.release = { baseUrl: releaseBaseUrl(seed.update.url), generatePatch: false };
   }
 
   return config;
@@ -325,11 +333,11 @@ if (import.meta.main) {
   }
 
   const root = `${import.meta.dir}/..`;
-  const baseFile = Bun.file(`${root}/tinyjs.base.json`);
+  const baseFile = Bun.file(`${root}/app.json`);
   const seedFile = Bun.file(`${root}/resources/seed.json`);
 
   if (!(await baseFile.exists())) {
-    console.error('tinyjs.base.json is missing');
+    console.error('app.json is missing');
     process.exit(1);
   }
   const base = JSON.parse(await baseFile.text()) as Record<string, unknown>;
@@ -357,8 +365,9 @@ if (import.meta.main) {
       appId: process.env.NOD_APP_ID,
       sqliteShim: resolve(root, EB_SQLITE_SHIM),
       nativeLibrary: await Bun.file(`${root}/${EB_NATIVE_LIBRARY}`).exists(),
-      // Same resolution, same PNG check and same `NOD_ICON` staging `gen-config.ts` runs for tinyjs,
-      // so the two targets cannot wear different icons. `scripts/eb-icon.ts` reads it again to write
+      platform: process.platform,
+      // Same resolution, same PNG check and same `NOD_ICON` staging the icon helper runs,
+      // so every target wears the same icon. `scripts/eb-icon.ts` reads it again to write
       // the macOS iconset; a file that is not there is refused here, before either build starts.
       icon: await iconForConfig(root),
     });
@@ -369,6 +378,6 @@ if (import.meta.main) {
 
   await Bun.write(`${root}/electrobun.config.ts`, renderElectrobunConfig(config));
   // SP02 §9: the stamp `backend/main.ts` reads to tell a dev run from a release. Written in both
-  // modes like `gen-config.ts`; only the dev copy above stages it into the bundle.
+  // modes; only the dev copy above stages it into the bundle.
   await Bun.write(`${root}/resources/${BUILD_MODE_STAMP}`, `${mode}\n`);
 }

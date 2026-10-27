@@ -89,10 +89,11 @@ usa mais.
 _Evite_: aba iframe, webview, aba interna
 
 **Modo Docked / modo Windows** — Docked / Windows:
-*Removido como ajuste em 2026-10-22.* Não há escolha de modo: onde o runtime posiciona janelas
-(`canPosition !== false`) a ferramenta abre como aba sobre o painel central; só onde não posiciona
-(Wayland) o Nod cai no modo Windows, uma janela própria por ferramenta — o fallback do runtime, sem
-ajuste em Settings (`docs/canonico.md` §22 "Seamless tabs: always inside, detach on demand").
+*Removido como ajuste em 2026-10-22.* Não há escolha de modo: onde o runtime posiciona janelas e
+re-parenta uma view viva (`canDock !== false`) a ferramenta abre como aba sobre o painel central; no
+Windows, no Linux e no Wayland o Nod cai no modo Windows, uma janela própria por ferramenta — o
+fallback do runtime, sem ajuste em Settings (`docs/canonico.md` §22 "Seamless tabs: always inside,
+detach on demand" e "One runtime: Electrobun").
 _Evite_: modo aba, modo janela
 
 ## Pessoas e acesso
@@ -158,10 +159,11 @@ _Evite_: modo local, desconectado (como sinônimo)
 **Chaveiro** — keychain (`SecretStore`, `app.secrets`):
 O armazenamento de credenciais do sistema operacional — Keychain, Credential Manager, Secret Service.
 Desde 0.5.1 (RF-63) guarda só o item de biometria `nod.bio.<pessoa>`; os demais segredos são valores
-`bv1.` na tabela `secret` do `nod.db`, atrás do mesmo `SecretStore` (`backend/secret-store.ts`).
+`bv1.` na tabela `secret` do `nod.db`, atrás do mesmo `SecretStore` (`backend/secret-store.ts`). No
+Electrobun a biometria está desligada, então o chaveiro não é tocado: a `vaultKey` vive só em memória.
 
 **Cofre** — vault (`VaultItem`):
-As credenciais das ferramentas de uma pessoa, guardadas no chaveiro; o banco guarda só o índice.
+As credenciais das ferramentas de uma pessoa, seladas em `bv1.` na tabela `secret` do `nod.db`; a `vaultKey` vem da senha local e só existe em memória.
 Cada ferramenta pode ter **várias** credenciais, cada uma endereçada pelo próprio `id` (RF-65).
 _Evite_: arquivo de senhas, cofre cifrado
 

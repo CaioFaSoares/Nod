@@ -10,8 +10,8 @@
 //   bun scripts/build-nod-native.ts --arch=universal
 //
 // The dylib is macOS-only by construction (AppKit/LocalAuthentication/Security). On another host
-// this exits 0 with a warning: the tinyjs target never invokes it, and Electrobun's macOS artifacts
-// are built on macOS.
+// this exits 0 with a warning: Windows/Linux builds have no helper to compile, and the macOS artifact
+// is built on macOS.
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
