@@ -2,9 +2,9 @@
 cask "nod" do
   arch arm: "arm64", intel: "x86_64"
 
-  version "0.7.0c"
-  sha256 arm:   "ed20b913f10071459ac1cd3009299418c2b43d0704c03825b149c181d73dab02",
-         intel: "b750ecbf1754d6322cb381a371353054d35a71289f56670f8c45a54eb3138262"
+  version "0.8.0"
+  sha256 arm:   "e81c4d59c6d281c1e72855cabf39f6436dd0d09ae3d68a1740ae791f33b4ad28",
+         intel: "e2fc8b0a61ec17ec063e5165919047db89e5243a1ce5cbd05b0d9035e85a38c3"
 
   url "https://github.com/CaioFaSoares/Nod/releases/download/release-#{version}/nod-#{version}-macos-#{arch}.zip"
   name "Nod"
