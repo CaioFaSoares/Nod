@@ -47,7 +47,7 @@ describe('main view', () => {
   test('navigation to a remote origin revokes access', () => {
     expect(decide(main(REMOTE))).toEqual({
       allowed: false,
-      error: '"session.state" is disabled by tinyjs.json "api"',
+      error: '"session.state" is not allowed from this window',
     });
   });
 
@@ -59,9 +59,9 @@ describe('main view', () => {
     const denied = decide(main(REMOTE, 'win.getState'));
     expect(denied).toEqual({
       allowed: false,
-      error: '"win.getState" is disabled by tinyjs.json "api"',
+      error: '"win.getState" is not allowed from this window',
     });
-    expect(disabledMessage('win.getState')).toBe('"win.getState" is disabled by tinyjs.json "api"');
+    expect(disabledMessage('win.getState')).toBe('"win.getState" is not allowed from this window');
   });
 
   test('trailing slashes and a full URL in the allow-list compare by origin', () => {
@@ -235,11 +235,11 @@ describe('createGate (the main RPC path)', () => {
       appOrigins: () => OWN,
     });
     await expect(gate.call('session.state', {}, { window: 'main' })).rejects.toThrow(
-      '"session.state" is disabled by tinyjs.json "api"',
+      '"session.state" is not allowed from this window',
     );
     gate.committed(null, 'https://evil.example/');
     await expect(gate.call('session.state', {}, { window: 'main' })).rejects.toThrow(
-      '"session.state" is disabled by tinyjs.json "api"',
+      '"session.state" is not allowed from this window',
     );
   });
 
@@ -265,7 +265,7 @@ describe('createGate (the main RPC path)', () => {
     // A remote commit revokes the api (the race, at the RPC boundary).
     gate.committed('https://evil.example', 'https://evil.example/login');
     await expect(gate.call('session.state', {}, { window: 'main' })).rejects.toThrow(
-      '"session.state" is disabled by tinyjs.json "api"',
+      '"session.state" is not allowed from this window',
     );
   });
 
@@ -374,7 +374,7 @@ describe('the sandboxed page bridge (tool-bridge)', () => {
     }
     const page = runBridge(source);
     await expect(page.tiny.win.getState()).rejects.toThrow(
-      '"win.getState" is disabled by tinyjs.json "api"',
+      '"win.getState" is not allowed from this window',
     );
   });
 
@@ -388,8 +388,8 @@ describe('the sandboxed page bridge (tool-bridge)', () => {
 
     const second = page.tiny.api.call('login.report');
     expect(page.sent[1]).toEqual({ id: 2, method: 'login.report', params: undefined });
-    page.__nodToolReply(2, false, '"login.report" is disabled by tinyjs.json "api"');
-    await expect(second).rejects.toThrow('"login.report" is disabled by tinyjs.json "api"');
+    page.__nodToolReply(2, false, '"login.report" is not allowed from this window');
+    await expect(second).rejects.toThrow('"login.report" is not allowed from this window');
   });
 
   test('a reply for an id the page never issued is ignored', async () => {
@@ -408,7 +408,7 @@ describe('replySource', () => {
       'window.__nodToolReply(7, true, {"state":"form"})',
     );
     expect(replySource(12, { ok: false, error: disabledMessage('login.report') })).toBe(
-      'window.__nodToolReply(12, false, "\\"login.report\\" is disabled by tinyjs.json \\"api\\"")',
+      'window.__nodToolReply(12, false, "\\"login.report\\" is not allowed from this window")',
     );
     expect(replySource(1, { ok: true, result: undefined })).toBe(
       'window.__nodToolReply(1, true, null)',
@@ -486,7 +486,7 @@ describe('hostRequest (one sandboxed page call, answered)', () => {
         expect(request.decision).toEqual({ allowed: false, error: disabledMessage(method) });
         await expect(answered(request)).resolves.toEqual({
           ok: false,
-          error: `"${method}" is disabled by tinyjs.json "api"`,
+          error: `"${method}" is not allowed from this window`,
         });
       }
     }
@@ -504,7 +504,7 @@ describe('hostRequest (one sandboxed page call, answered)', () => {
     );
     await expect(answered(request)).resolves.toEqual({
       ok: false,
-      error: '"win.getState" is disabled by tinyjs.json "api"',
+      error: '"win.getState" is not allowed from this window',
     });
   });
 

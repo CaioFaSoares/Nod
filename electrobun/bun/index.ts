@@ -1,4 +1,4 @@
-// Bun entrypoint of the Electrobun target (E06). It wires the same pieces the tinyjs launcher wires:
+// Bun entrypoint of the Electrobun target. It wires the facade, the backend and the runtime hooks:
 // a `TinyApp` facade, the backend (`backend/main.ts`, unchanged), the runtime hooks and the main
 // window's page bridge.
 //
@@ -9,21 +9,22 @@
 //    exist first, so the window can load the moment it is opened.
 // 3. `createApp` composes the facade from the windows/native/update instances; `init(app)` boots the
 //    backend, and only then `windows.win.open('main')` shows the page — the same order the tinyjs
-//    launcher takes (backend ready, then the window).
+//    runtime always took (backend ready, then the window).
 //
-// `NOD_APP_ID` selects the identifier (and the keychain namespace). A release build may use the
-// tinyjs id `copland.nod` (the 0.7.0 cutover); a dev launch refuses it, and `eb:dev` sets
-// `copland.nod.eb-dev`, so development never touches either real installation. The backend's data
-// directory is the tinyjs one even when the identifier differs (facade/data-dir.ts).
+// `NOD_APP_ID` selects the identifier (and the keychain namespace). A release build uses
+// `copland.nod` (the identity the tinyjs releases wore, so an update keeps its data); a dev launch
+// refuses it, and `eb:dev` sets `copland.nod.eb-dev`, so development never touches a real
+// installation. The backend's data directory is the legacy one even when the identifier differs
+// (facade/data-dir.ts).
 //
 // No secret enters this file: the keychain lives in the native helper (Native's slice), and the
 // update URL comes from the bundled seed only when it shipped.
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { BrowserView, BuildConfig, Session, Utils } from 'electrobun/main';
+import { BrowserView, BuildConfig, Session, Updater, Utils } from 'electrobun/main';
 import { RESOURCES_FOLDER } from 'electrobun/main/paths';
-import baseConfig from '../../tinyjs.base.json';
+import appConfig from '../../app.json';
 import * as backend from '../../backend/main';
 import { installTjs } from './tjs-shim';
 import { createApp } from './facade/app';
@@ -31,20 +32,24 @@ import { bundledIdentifier, resolveDataDir } from './facade/data-dir';
 import { createDownloads, DOWNLOAD_PARTITION } from './facade/downloads';
 import { createGate } from './facade/gate';
 import { createNative } from './facade/native';
+import { createPlatformDialogs } from './facade/dialogs';
 import { createUpdate } from './facade/update';
+import { createRuntimeUpdate } from './facade/update-runtime';
 import { createWindows } from './facade/windows';
 import type { NodBridgeSchema } from '../shared-rpc';
 
 installTjs();
 
-const base = baseConfig as Record<string, unknown>;
+const base = appConfig as Record<string, unknown>;
 const build = BuildConfig.getSync();
 const isDev = build.channel === 'dev';
 
 const rawIdentifier = (process.env.NOD_APP_ID ?? '').trim();
 
 const identifier =
-  rawIdentifier === '' ? bundledIdentifier(process.execPath, 'copland.nod.eb') : rawIdentifier;
+  rawIdentifier === ''
+    ? bundledIdentifier(process.execPath, isDev ? 'copland.nod.eb-dev' : 'copland.nod')
+    : rawIdentifier;
 if (isDev && identifier === 'copland.nod') {
   throw new Error('NOD_APP_ID must not be copland.nod in a dev run: use copland.nod.eb-dev');
 }
@@ -64,7 +69,7 @@ const dataDir = resolveDataDir({
   env: process.env,
 }).dir;
 
-/** Main window page box from `tinyjs.base.json` (`WxH`), the same size tinyjs opens. */
+/** Main window page box from `app.json` (`WxH`). */
 function mainFrame(): { width: number; height: number } {
   const text = typeof base.size === 'string' ? base.size.trim() : '';
   const match = /^([0-9]+)x([0-9]+)$/.exec(text);
@@ -72,7 +77,7 @@ function mainFrame(): { width: number; height: number } {
   return { width: Number(match[1]), height: Number(match[2]) };
 }
 
-/** `NOD_DEV_PORT` with the same validation as `scripts/gen-config.ts`. */
+/** `NOD_DEV_PORT` validation shared with the dev launcher. */
 function devPort(): number {
   const raw = process.env.NOD_DEV_PORT;
   if (raw === undefined) return 5173;
@@ -146,7 +151,14 @@ function messageOf(error: unknown): string {
 
 const preload = await bridgePreload();
 if (isDev) console.log(`[eb] main ${identifier} ${mainUrl} preload=${preload.length}b`);
-const native = createNative({ identifier });
+const native = createNative({
+  identifier,
+  // The macOS helper owns the panels; on Windows/Linux the runtime's native chooser does.
+  dialogs:
+    process.platform === 'darwin'
+      ? undefined
+      : createPlatformDialogs({ openFileDialog: Utils.openFileDialog }),
+});
 let app: TinyApp | null = null;
 
 /** The facade after `createApp`; a call that arrives before it is a boot bug, not a page call. */
@@ -160,7 +172,7 @@ function requireApp(method: string): TinyApp {
  * write `~/Downloads` from a packaged Nod (`sandbox_extension_issue_file … Operation not
  * permitted`), so the preload hands a `<a download>` click to the gate under `nod.download` and this
  * service saves it: same-origin fetch with the view's session cookies, or the page's own
- * `blob:`/`data:` bytes, into `Utils.paths.downloads` with the de-dup naming tinyjs uses. Every
+ * `blob:`/`data:` bytes, into `Utils.paths.downloads` with the de-dup naming the engine uses. Every
  * `done`/`failed` goes through the backend's `onDownload`, which writes the audit row.
  */
 const downloads = createDownloads({
@@ -192,12 +204,13 @@ const quit = (): void => {
   void Utils.quit();
 };
 
-const update = createUpdate({
-  updateUrl: await updateUrlFromSeed(),
-  version,
-  dataDir,
-  quit,
-});
+const updateUrl = await updateUrlFromSeed();
+// macOS swaps the `.app` itself (sha256 + rollback helper); Windows and Linux use the runtime's
+// update channel, which owns replacing an installed directory.
+const update =
+  process.platform === 'darwin'
+    ? createUpdate({ updateUrl, version, dataDir, quit })
+    : createRuntimeUpdate({ updateUrl, version, updater: Updater });
 
 const send = (event: string, data: unknown): void => {
   try {
@@ -289,6 +302,7 @@ const mainRpc = BrowserView.defineRPC<NodBridgeSchema>({
 
 const windows = createWindows({
   mainUrl,
+  quit,
   mainRpc,
   mainPreload: preload,
   mainSize: mainFrame(),

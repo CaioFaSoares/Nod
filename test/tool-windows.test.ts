@@ -123,6 +123,8 @@ interface FakeState {
   focused: boolean;
   /** Wayland answers false; there the backend runs in windows mode (RF-49, RF-52) */
   canPosition: boolean;
+  /** false on Windows/Linux and Wayland: no live view re-parent, so windows mode (0.8.0) */
+  canDock: boolean;
   credential: { username: string; secret: string } | null;
   /** The vault index: the origin the credential was saved for. It decides the fill, and it is
    *  independent of `credential` (the keychain) — the desync case is a real one. */
@@ -171,6 +173,7 @@ function fakeEnvironment(): FakeEnvironment {
     minimized: false,
     focused: false,
     canPosition: false,
+    canDock: false,
     credential: { username: 'ana', secret: 's3cret' },
     vaultOrigin: 'https://kanban.example',
     failEval: false,
@@ -205,6 +208,7 @@ function fakeEnvironment(): FakeEnvironment {
       minimized: state.minimized,
       focused: state.focused,
       canPosition: state.canPosition,
+      canDock: state.canDock,
     };
   }
 
@@ -433,6 +437,7 @@ function winState(win: string, over: Record<string, unknown> = {}): Record<strin
 function dockedEnvironment(): FakeEnvironment {
   const env = fakeEnvironment();
   env.state.canPosition = true;
+  env.state.canDock = true;
   return env;
 }
 
@@ -1385,6 +1390,17 @@ describe('the warning of a tool that did not come from the org (canonico §22)',
 // ---------------------------------------------------------------- tabs and docked mode (E03)
 
 describe('tabs — docked mode (RF-49…RF-52, RF-66…RF-68)', () => {
+  test('without a live-view re-parent the windows mode wins even when windows can be positioned', async () => {
+    const env = dockedEnvironment();
+    env.state.canDock = false;
+    const toolWindows = makeToolWindows(env);
+    const state = await toolWindows.open('kanban');
+
+    expect(state.mode).toBe('windows');
+    expect(env.opened[0]?.options.chrome).toBeUndefined();
+    expect(state.active).toBeNull();
+  });
+
   test('a new tab opens frameless exactly on the slot, and the panel shows it', async () => {
     const env = dockedEnvironment();
     const toolWindows = makeToolWindows(env);

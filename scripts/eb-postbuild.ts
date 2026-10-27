@@ -19,7 +19,7 @@
 // runs at module top level: an `import.meta.main` guard would make the hook a no-op. The pure
 // decisions live in `scripts/eb-plist.ts`, which is what the tests import.
 //
-// Nothing here reads or writes a secret: only the two public sentences from `tinyjs.base.json`.
+// Nothing here reads or writes a secret: only the two public sentences from `app.json`.
 
 import {
   existsSync,
@@ -212,7 +212,7 @@ async function postbuild(): Promise<void> {
 
   let expected: UsageDescriptions;
   try {
-    const base = (await Bun.file(join(root, 'tinyjs.base.json')).json()) as Record<
+    const base = (await Bun.file(join(root, 'app.json')).json()) as Record<
       string,
       unknown
     >;

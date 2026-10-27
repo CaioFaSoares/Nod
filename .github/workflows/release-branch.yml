@@ -1,5 +1,5 @@
 # When a pull request from `dev` is merged into `main`, creates the branch `release-<version>` at the
-# merge commit (the version is `tinyjs.base.json`'s) and starts `release.yml` on it.
+# merge commit (the version is `app.json`'s) and starts `release.yml` on it.
 #
 # A branch pushed with GITHUB_TOKEN does not start other workflows (GitHub's rule against loops),
 # so the `push` trigger of release.yml would not fire; this job dispatches it explicitly instead,
@@ -32,10 +32,10 @@ jobs:
       - id: version
         name: read version
         run: |
-          version=$(jq -r '.version' tinyjs.base.json)
+          version=$(jq -r '.version' app.json)
           # semver, plus hotfix letters right after the patch: 0.5.5a, 0.5.5b (docs/distribuicao.md §8).
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+[a-z]*([-+].*)?$ ]]; then
-            echo "::error file=tinyjs.base.json::version '$version' is not X.Y.Z or X.Y.Z<letters> (a hotfix, as in 0.5.5a)"
+            echo "::error file=app.json::version '$version' is not X.Y.Z or X.Y.Z<letters> (a hotfix, as in 0.5.5a)"
             exit 1
           fi
           echo "branch=release-$version" >> "$GITHUB_OUTPUT"
@@ -48,7 +48,7 @@ jobs:
           BRANCH: ${{ steps.version.outputs.branch }}
         run: |
           if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
-            echo "::error::$BRANCH already exists — bump version in tinyjs.base.json, or push $BRANCH by hand to republish"
+            echo "::error::$BRANCH already exists — bump version in app.json, or push $BRANCH by hand to republish"
             exit 1
           fi
           git push origin "HEAD:refs/heads/$BRANCH"

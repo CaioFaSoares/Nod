@@ -1,19 +1,19 @@
 // The one build fact `backend/main.ts` misses: whether this process is a **non-release dev run**.
 //
-// `scripts/gen-config.ts <dev|build>` writes the stamp below into the project's `resources/` with
+// `scripts/gen-electrobun-config.ts <dev|build>` writes the stamp below into the project's `resources/` with
 // the mode it was asked for, and the backend reads it back at start-up. It is the same word the
 // rest of the pipeline uses for the distinction (`app:dev` vs `app:build`, `docs/arquitetura.md`
 // §6), read at runtime instead of compile time, which is what lets SP02 §9's dev exception exist
 // without a knob a release build would honour.
 //
 // A release never carries it. The build stages the files its `"resources"` list names — the list
-// `scripts/gen-config.ts build` writes — and this stamp is not in it, so a built app finds no stamp
+// `scripts/gen-electrobun-config.ts build` writes — and this stamp is not in it, so a built app finds no stamp
 // at all. Anything but the exact `dev` text is a release: the question fails closed.
 
 /** File name of the stamp inside the app's resources folder (`docs/arquitetura.md` §6). */
 export const BUILD_MODE_STAMP = 'build-mode';
 
-/** The two modes `scripts/gen-config.ts` is run with; the stamp carries the same word. */
+/** The two modes `scripts/gen-electrobun-config.ts` is run with; the stamp carries the same word. */
 export type BuildMode = 'dev' | 'build';
 
 /**

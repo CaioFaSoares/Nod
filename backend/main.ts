@@ -167,7 +167,7 @@ let biometrics = false;
 /**
  * SP02 §9/`docs/canonico.md` §22: whether this is a non-release dev run (`tinyjs dev`) — the one
  * place a typed password is still a factor on a machine that also has `app.authenticate`. Read once
- * in `init` from the build-mode stamp `scripts/gen-config.ts` leaves in the project's `resources/`
+ * in `init` from the build-mode stamp `scripts/gen-electrobun-config.ts` leaves in the project's `resources/`
  * (`shared/build-mode.ts`): a release build stages no stamp, so this is `false` there whatever the
  * environment, the seed or the page say.
  */
@@ -243,7 +243,7 @@ export async function init(app: TinyApp): Promise<void> {
   // unlocks by password only.
   ({ systemPrompt, biometricUnlock: biometrics } = authenticateFactors(system, capabilities));
   // SP02 §9/`docs/canonico.md` §22: the dev exception of the gate. The stamp is written by
-  // `scripts/gen-config.ts <mode>` beside the seed and is not part of a release's resources, so a
+  // `scripts/gen-electrobun-config.ts <mode>` beside the seed and is not part of a release's resources, so a
   // built app reads none and answers a plain `false` — see `shared/build-mode.ts`.
   devRun = await readDevRun(paths.resources);
   // O2: the same version the page shows (`nod.info`), read once because the sync's gate is asked
@@ -805,7 +805,7 @@ async function readBundledSeed(resourcesDir: string | null): Promise<Seed | null
 
 /**
  * SP02 §9/`docs/canonico.md` §22: whether this run is a non-release dev run, from the stamp
- * `scripts/gen-config.ts <mode>` leaves in the resources folder (`shared/build-mode.ts`). A release
+ * `scripts/gen-electrobun-config.ts <mode>` leaves in the resources folder (`shared/build-mode.ts`). A release
  * stages no stamp — it is not in the `"resources"` list — so its read throws and answers `false`;
  * a stamp that names anything but `dev` is a release too (fail closed).
  */

@@ -1,5 +1,5 @@
 // Comparing the version strings two independent sides produce: the app's own version
-// (`app.info().version`, the `version` key of `tinyjs.base.json`) and the oldest version a host
+// (`app.info().version`, the `version` key of `app.json`) and the oldest version a host
 // serves (`Discovery.minAppVersion` / `AppMeta.minAppVersion`, SP04 §1, SP03 §3).
 //
 // Pure, like every module of `shared/`: no `tjs`, no `tiny`, no DOM, no `bun:*` and no import.

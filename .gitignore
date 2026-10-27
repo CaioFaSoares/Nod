@@ -26,10 +26,9 @@ dist-ssr
 # Nod: privado ou gerado
 resources/seed.json
 resources/icon.png
-# build-mode stamp: `dev` or `build`, written by `scripts/gen-config.ts` (SP02 §9)
+# build-mode stamp: `dev` or `build`, written by `scripts/gen-electrobun-config.ts` (SP02 §9)
 resources/build-mode
 .nod-icon.png
-tinyjs.json
 .build
 
 # host: dados locais, segredos e backups (SP01 §1, SP07 §2/§4)
@@ -38,7 +37,7 @@ host/.env
 host/data/
 backups/
 
-# smoke: página gerada (fora de .build, que o tinyjs dev recria)
+# smoke: generated page
 test/smoke/.gerado/
 
 # omp: roster do _Aleph, symlink local (ln -s <_Aleph>/.aleph/agents .omp/agents)
@@ -51,5 +50,5 @@ electrobun.config.ts
 build/
 artifacts/
 
-# macOS icon set `scripts/eb-icon.ts` writes from the PNG the tinyjs build wears
+# macOS icon set `scripts/eb-icon.ts` writes from the app icon
 .eb-icon.iconset/

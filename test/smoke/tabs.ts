@@ -32,7 +32,6 @@ import type { SmokeLaunch, TabTools } from './tools';
 import {
   appDataDir as dataDir,
   freePort,
-  generateDevConfig,
   generateElectrobunDevConfig,
   launchSmokeApp,
   smokeAppId,
@@ -41,7 +40,7 @@ import {
   waitForStoredResult,
 } from './tools';
 
-/** Which target this run measures: `--runtime=electrobun` or `NOD_RUNTIME=electrobun` (default tinyjs). */
+/** The one runtime: Electrobun. */
 const RUNTIME = smokeRuntime();
 
 /** A throwaway app id: its own data dir, never the owner's `copland.nod`. */
@@ -55,7 +54,6 @@ const GENERATED_DIR = join(import.meta.dir, '.gerado');
 const TABS_DIR = join(GENERATED_DIR, 'tabs');
 const SEED = join(ROOT, 'resources', 'seed.json');
 const SEED_BACKUP = join(GENERATED_DIR, 'seed.json.bak');
-const TINYJS_JSON = join(ROOT, 'tinyjs.json');
 const DRIVER_ROUTE = '/test/smoke/tabs-driver.ts';
 
 const FINISH_TIMEOUT_MS = 240_000;
@@ -108,9 +106,9 @@ interface SmokeResult {
 // ------------------------------------------------------------- the temporary seed
 
 /**
- * The seed of this launch (`gen-config dev` reads it for the runtime's origin gate, the app applies
+ * The seed of this launch (`gen-electrobun-config dev` reads it for the runtime's origin gate, the app applies
  * it on first boot): two org tools on two reporting servers, one admin role, no invite. Both origins
- * end up in `api.origins` with the three tool methods (`scripts/gen-config.ts`), which is what lets
+ * reach the tool view through the origin gate, which is what lets
  * a tool tab report a login and keeps the third origin — the one RF-67's "new tool" branch saves —
  * without any method at all.
  */
@@ -487,19 +485,6 @@ function generatePage(
   };
 }
 
-/** Points the dev window at this launch's page (the generated file, not the project's index.html). */
-function pointDevUrl(url: string): void {
-  const raw: unknown = JSON.parse(readFileSync(TINYJS_JSON, 'utf8'));
-  if (typeof raw !== 'object' || raw === null) throw new Error(`${TINYJS_JSON} is not an object`);
-  const config = raw as Record<string, unknown>;
-  const frontend = config.frontend;
-  if (typeof frontend !== 'object' || frontend === null) {
-    throw new Error(`${TINYJS_JSON} has no frontend object`);
-  }
-  (frontend as Record<string, unknown>).devUrl = url;
-  writeFileSync(TINYJS_JSON, JSON.stringify(config, null, 2) + '\n');
-}
-
 // ------------------------------------------------------------- the desk
 
 interface Desk {
@@ -622,15 +607,7 @@ async function runPhase(
 ): Promise<SmokeResult> {
   const devPort = freePort();
   writeFileSync(SEED, temporarySeed(tools));
-  if (RUNTIME === 'tinyjs') {
-    const gen = generateDevConfig(ROOT, APP_ID, devPort);
-    if (gen.code !== 0) {
-      return { ok: false, error: `gen-config failed (code ${gen.code}): ${gen.output.trim()}`, steps: [] };
-    }
-  }
   const page = generatePage(nonce, devPort, deskOrigin, tools);
-  // tinyjs takes the page through `frontend.devUrl`; Electrobun takes it through `NOD_MAIN_URL`.
-  if (RUNTIME === 'tinyjs') pointDevUrl(page.url);
 
   let app: SmokeLaunch;
   try {
@@ -640,7 +617,6 @@ async function runPhase(
       appId: APP_ID,
       devPort,
       page: page.file,
-      tinyjsPage: 'dev-url',
     });
   } catch (error) {
     rmSync(page.file, { force: true });
@@ -766,7 +742,6 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const previousTinyjsJson = existsSync(TINYJS_JSON) ? readFileSync(TINYJS_JSON, 'utf8') : null;
   let seedMoved = false;
   let tools: TabTools | null = null;
   let desk: Desk | null = null;
@@ -779,16 +754,12 @@ async function main(): Promise<number> {
     tools = null;
     rmSync(dataDir(APP_ID), { recursive: true, force: true });
     rmSync(TABS_DIR, { recursive: true, force: true });
-    if (RUNTIME === 'tinyjs') {
-      if (previousTinyjsJson !== null) writeFileSync(TINYJS_JSON, previousTinyjsJson);
+    // The generated config named this smoke's identifier and page: put the development one back.
+    const finalGen = generateElectrobunDevConfig(ROOT, null, null);
+    if (finalGen.code !== 0) {
+      console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
     } else {
-      // The generated config named this smoke's identifier and page: put the development one back.
-      const finalGen = generateElectrobunDevConfig(ROOT, null, null);
-      if (finalGen.code !== 0) {
-        console.error(`final gen-electrobun-config failed (code ${finalGen.code}):\n${finalGen.output.trim()}`);
-      } else {
-        console.log('electrobun.config.ts regenerated in dev');
-      }
+      console.log('electrobun.config.ts regenerated in dev');
     }
     if (seedMoved) {
       if (existsSync(SEED)) rmSync(SEED, { force: true });

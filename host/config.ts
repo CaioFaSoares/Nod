@@ -73,7 +73,7 @@ export const GUILD_NAME_ENV = 'NOD_GUILD_NAME';
 /** SP07 §2: the semver the discovery and `/v1/meta/app` serve. */
 export const MIN_APP_VERSION_ENV = 'NOD_MIN_APP_VERSION';
 
-/** SP03 §3: the `https` address of the tinyjs update manifest; unset means the host offers none. */
+/** SP03 §3: the `https` address of the release update manifest; unset means the host offers none. */
 export const UPDATE_URL_ENV = 'NOD_UPDATE_URL';
 
 /**
@@ -108,7 +108,7 @@ function parseUpdateUrl(raw: string | undefined): { url: string } | null {
   } catch {
     throw new ConfigError(`invalid NOD_UPDATE_URL: ${value}`);
   }
-  // The manifest is what the tinyjs updater fetches (canonico §19 F5); no deployment of ours serves
+  // The manifest is what the updater fetches (canonico §19 F5); no deployment of ours serves
   // it over plain http, so only https is accepted, exactly as SP07 §2 refuses a non-https address.
   if (parsed.protocol !== 'https:') {
     throw new ConfigError(`NOD_UPDATE_URL must be https://: ${value}`);

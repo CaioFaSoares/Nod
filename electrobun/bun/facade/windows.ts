@@ -187,7 +187,7 @@ export interface WindowsDeps {
   native?: WindowsNative;
   /** `win.open`'s `page` → URL. Default: with a scheme as is, otherwise `views://<page>`. */
   resolvePage?(page: string): string;
-  /** `tinyjs.json` "popups": 'external' | 'window' | 'deny' (default 'window'). */
+  /** `app.json` "popups": 'external' | 'window' | 'deny' (default 'window'). */
   popupMode?(): 'window' | 'external' | 'deny';
   /** Extra chrome primitives, overriding the native helper (a test or another host). */
   chrome?: {
@@ -196,6 +196,8 @@ export interface WindowsDeps {
   };
   /** Start with `setHideOnClose(true)`; `win.setHideOnClose` changes it at runtime. */
   hideOnClose?: boolean;
+  /** End the app when main closes without a tray (RF-15; the runtime does not quit by itself). */
+  quit?: () => void;
 }
 
 /** What `facade/app.ts` composes into `TinyApp`. */
@@ -628,8 +630,13 @@ export function createWindows(deps: WindowsDeps = {}): WindowFacade {
     };
   }
 
-  /** Whether this launch can host a docked tab: the re-parent plus the core's frame/hide symbols. */
+  /**
+   * Whether this launch can host a docked tab: the AppKit re-parent plus the core's frame/hide
+   * symbols. The methods exist on every platform, but only the macOS helper can move a live view
+   * between windows; Windows/Linux keep the windows mode (`docs/electrobun.md` §5).
+   */
   function canEmbed(): boolean {
+    if (process.platform !== 'darwin') return false;
     const ops = nativeOps();
     return (
       ops.attachView !== undefined &&
@@ -1196,7 +1203,15 @@ export function createWindows(deps: WindowsDeps = {}): WindowFacade {
     });
     events.on('will-close', (event: unknown) => {
       if (!current()) return;
-      if (managed.id !== MAIN || !hideOnClose || quitting) return;
+      if (managed.id !== MAIN || !hideOnClose || quitting) {
+        // No tray: closing main ends the app, as it always did (RF-15). The runtime keeps the
+        // process alive for the tray case, so this side has to ask for the quit.
+        if (managed.id === MAIN && !hideOnClose && !quitting && deps.quit !== undefined) {
+          quitting = true;
+          deps.quit();
+        }
+        return;
+      }
       // The devkit hands a mutable ElectrobunEvent; `allow:false` vetoes the close (measured in
       // `proc/native.ts`: `responseWasSet && response.allow === false`).
       const closeEvent = event as CloseEvent | null;
@@ -1685,6 +1700,7 @@ export function createWindows(deps: WindowsDeps = {}): WindowFacade {
       },
       screen: { width: display?.width ?? 0, height: display?.height ?? 0, scale: display?.scale ?? 1 },
       canPosition: true,
+      canDock: true,
     };
   }
 
@@ -1739,6 +1755,7 @@ export function createWindows(deps: WindowsDeps = {}): WindowFacade {
       },
       screen: { width: display?.width ?? 0, height: display?.height ?? 0, scale: display?.scale ?? 1 },
       canPosition: true,
+      canDock: canEmbed(),
     };
   }
 

@@ -1,7 +1,8 @@
 # Distribuição do Nod
 
 Como montar, publicar e liberar uma release do Nod. O **porquê** e as decisões do dono estão em
-`docs/canonico.md` §19; os fatos do runtime, em `docs/tinyjs.md` §1 e §8. Aqui só o passo a passo.
+`docs/canonico.md` §19 e §22; os fatos do runtime, em `docs/electrobun.md`. Aqui só o passo a passo.
+Electrobun é o único runtime: não existe mais build tinyjs.
 
 ## 1. Montar o seed privado
 
@@ -15,43 +16,48 @@ Duas origens para o arquivo:
 - copiar `resources/seed.example.json` para `resources/seed.json` e preencher à mão; ou
 - usar o **export seed** de **Settings → Catalog** numa instalação já configurada (RF-13): o arquivo
   sai pelo diálogo do sistema e vai para `resources/seed.json`. O caminho de volta, **importar seed**
-  na mesma tela (modo `merge` ou `overwrite`), serve para aplicar um seed novo sem recompilar.
+  na mesma tela (modo `merge` ou `overwrite`), aplica um seed novo sem recompilar.
 
-Os ícones referenciados pelas entradas ficam em `resources/` (caminho relativo, sem `..`); o
-`scripts/gen-config.ts` os lista no `tinyjs.json` e o build os empacota junto com o seed e com o
-`tray.png`, o ícone da bandeja no Linux. O **ícone do app** (o do Dock/taskbar, outro assunto) tem
-a sua própria seção: §9.
+Os ícones referenciados pelas entradas ficam em `resources/` (caminho relativo, sem `..`);
+`scripts/gen-electrobun-config.ts` os lista no `electrobun.config.ts` gerado e o build os empacota
+junto com o seed e com o `tray.png`, o ícone da bandeja no Windows/Linux. O **ícone do app** (o do
+Dock/taskbar) tem a sua própria seção: §9.
 
-**From 0.5.0 o seed é opcional** (RF-61, `docs/canonico.md` §22 "Seed as optional import"): uma
-release pode sair sem `resources/seed.json`, e o app sai vazio; o tile Offline do primeiro uso
-oferece "Import a seed file" (`session.importSeed`) enquanto não houver conta. O gate de origins,
-camera/mic e a URL de atualização continuam vindo só de um seed embutido — uma release sem seed não
-tem esses extras.
+Desde 0.5.0 o seed é opcional (RF-61): uma release pode sair sem `resources/seed.json`, e o app sai
+vazio; o tile Offline do primeiro uso oferece "Import a seed file" (`session.importSeed`) enquanto
+não houver conta. O gate de origins, camera/mic e a URL de atualização continuam vindo só de um seed
+embutido — uma release sem seed não tem esses extras.
 
 ## 2. Gerar o artefato
 
 ```
 bun install
-bun run app:build
+bun run eb:build
 ```
 
-`app:build` roda `scripts/gen-config.ts build` (grava `tinyjs.json` com o gate de origin das
-entradas e a lista `resources`) e em seguida `tinyjs build`. Desde 0.5.0 o build **não exige** mais
-`resources/seed.json` (RF-61): sem ele o `tinyjs.json` sai válido, sem `seed.json` na lista
-`resources`, e o app instalado abre vazio; com um seed que não valida, falha com
-`invalid seed: <motivo>`. O `tinyjs.json` é gerado e **gitignored**: o gate de origins sai do seed e
-não pode vazar.
+`scripts/eb-build.ts` roda a cadeia do host:
 
-No desenvolvimento do app a partir do código (`bun run app:dev`), **não** rode com `TINYJS_DEBUG=1`
-usando credenciais reais: o trace do runtime imprime o EVAL do adaptador de login e cada chamada de
-API. A lista do que não pode está em `AGENTS.md`.
+| Host | Passos |
+| --- | --- |
+| macOS | compila `electrobun/native/NodNative.swift` (`swiftc`), escreve `.eb-icon.iconset` (`sips`), `bun run build`, `gen-electrobun-config.ts build`, `electrobun build --env=stable`, repara/valida as usage strings (`eb-postbuild.ts`) e assina ad hoc (`eb-sign.ts`) |
+| Windows/Linux | `bun run build`, `gen-electrobun-config.ts build`, `electrobun build --env=stable`; o PNG do ícone é embutido como está e não há assinatura |
 
-O artefato sai em `dist/`, por sistema (`docs/tinyjs.md` §8):
+O `electrobun.config.ts` é gerado e **gitignored**: a origem do gate, a URL de atualização e a lista
+de resources saem do seed e não podem vazar. A versão do app está em `app.json`; a release job recusa
+`release-<v>` que não bata com ela.
 
-- **macOS**: binário + `Nod.app` codesigned em modo ad-hoc (`--dmg` para o instalador,
-  `--arch`/`--universal` para as CPUs).
-- **Windows**: pasta `dist/` portátil.
-- **Linux**: pasta portátil, empacotada como tarball por arquitetura.
+Artefatos (por host, em `build/` e `artifacts/`):
+
+- **macOS**: `Nod.app` em `build/stable-macos-<arm64|x64>/`, mais `artifacts/stable-macos-<arch>-Nod.app.tar.zst`
+  e `stable-macos-<arch>-update.json` (o updater do runtime). A release publica também
+  `nod-<v>-macos-<arch>.zip` (`ditto -c -k --keepParent`) para o cask e para o updater macOS do Nod.
+- **Windows**: `artifacts/stable-win-<x64|arm64>-Nod.tar.zst` + `update.json` + o instalador
+  `win-<arch>-Nod-Setup.zip`.
+- **Linux**: `artifacts/stable-linux-<x64|arm64>-Nod.tar.zst` + `update.json` + o instalador
+  `linux-<arch>-Nod-Setup.tar.gz`.
+
+Não rode um build com credenciais reais e trace de runtime ligado: o trace pode imprimir o EVAL do
+adaptador de login e chamadas de API. Use contas e segredos descartáveis (`AGENTS.md`).
 
 ## 3. Liberar no macOS
 
@@ -65,60 +71,55 @@ Na máquina de destino, com o `Nod.app` em `/Applications`:
    right-click não funciona mais); ou, no terminal,
 3. `xattr -d com.apple.quarantine /Applications/Nod.app`.
 
-**Move it to `/Applications` before the first launch, and always launch it from there.** A
-quarantined app opened from Downloads or straight from the `.dmg` runs from a new random path on
-every launch (macOS "App Translocation", `/private/var/folders/…/AppTranslocation/<UUID>/d/Nod.app`),
-and the keychain treats each of those paths as a different app: the Touch ID item (`nod.bio.*`, RF-63)
-asks for the login password again every time. Seen on 2026-10-17 in the item's access list, which
-named `Nod 2.app`, `Nod 3.app` and `Nod 4.app` under three translocation folders. Clearing the
-quarantine (step 3) on the copy in `/Applications` is what stops it; an update installed by the app
-itself is not quarantined. One prompt per new unsigned build remains until releases are signed with a
-fixed certificate (`signIdentity`/`TINYJS_SIGN_IDENTITY`).
+**Mova para `/Applications` antes do primeiro launch, e sempre abra de lá.** Um app em quarentena
+aberto de Downloads ou do `.dmg` roda de um caminho aleatório a cada launch (App Translocation), e o
+chaveiro trata cada caminho como um app diferente. Limpar a quarentena na cópia em `/Applications` é
+o que evita isso; uma atualização instalada pelo próprio app não é colocada em quarentena.
 
 Distribuição sem esse passo exige **Developer ID Application + notarização** (Apple Developer
 Program) — melhoria opcional, ver `docs/canonico.md` §19.
 
 ### 3.1 Homebrew
 
-This repository is also a Homebrew tap: `Casks/nod.rb` installs the macOS zip of the latest release,
-the Electrobun build on Apple silicon and the tinyjs one on Intel, each checked against the sha256
-the release's `manifest.json` carries.
+O repositório é também um tap: `Casks/nod.rb` instala o zip macOS da última release, com o sha256 que
+o `manifest.json` carrega para cada arquitetura.
 
 ```sh
-brew tap caiofasoares/nod https://github.com/CaioFaSoares/Nod   # once per machine
+brew tap caiofasoares/nod https://github.com/CaioFaSoares/Nod   # uma vez por máquina
 brew install --cask nod
 ```
 
-- The cask clears the quarantine flag of `/Applications/Nod.app` after installing (`postflight_steps`),
-  which is step 3 above done for the person: the ad-hoc build opens without the Settings detour and
-  is never translocated.
-- `auto_updates true`: Nod installs its own updates (§8), so `brew upgrade` leaves it alone unless
-  asked with `--greedy`. `brew uninstall --cask nod` removes the app; `--zap` also removes this
-  machine's data (`~/Library/Application Support/copland.nod` and the caches) — the keychain items
-  stay.
-- The first launch after an install is Electrobun's self-extractor: the zip carries a small wrapper
-  that unpacks the real app in place ("Installing application files…") and opens it. Later launches
-  open the app directly. A Nod that cannot boot cannot update itself either: then
-  `brew upgrade --cask --greedy nod` (or `brew reinstall --cask nod`) brings the newer cask.
-- `depends_on macos: :sonoma` mirrors the bundle's own `LSMinimumSystemVersion`, which `brew audit`
-  requires; the supported floor is still macOS 15 (`docs/canonico.md` RNF-01).
-- The cask is written by `scripts/brew-cask.ts` from a manifest, never by hand. The `cask` job of
-  `release.yml` runs it after publishing and commits the result to `main`, the branch `brew tap`
-  clones; re-running an older release leaves a newer cask alone. By hand:
-  `bun scripts/brew-cask.ts manifest.json --repo=CaioFaSoares/Nod`.
+- O cask limpa a quarentena de `/Applications/Nod.app` depois de instalar (`postflight_steps`): o
+  build ad-hoc abre sem o desvio em Ajustes e nunca é translocado.
+- `auto_updates true`: o Nod instala as próprias atualizações (§6), então `brew upgrade` não o toca
+  sem `--greedy`. `brew uninstall --cask nod` remove o app; `--zap` também remove os dados desta
+  máquina (`~/Library/Application Support/copland.nod` e os caches) — os itens do chaveiro ficam.
+- O primeiro launch depois do install é o auto-extrator do Electrobun: o zip carrega um wrapper
+  pequeno que descompacta o app no lugar ("Installing application files…") e o abre. Launches
+  seguintes abrem direto. Um Nod que não inicia também não se atualiza: use
+  `brew upgrade --cask --greedy nod` (ou `brew reinstall --cask nod`).
+- `depends_on macos: :sonoma` espelha o `LSMinimumSystemVersion` do bundle, que o `brew audit` exige;
+  o piso suportado continua macOS 15 (`docs/canonico.md` RNF-01).
+- O cask é escrito por `scripts/brew-cask.ts` a partir do manifesto, nunca à mão. O job `cask` do
+  `release.yml` o roda depois de publicar e commita o resultado em `main`, o branch que o `brew tap`
+  clona; rodar uma release antiga de novo não faz o cask voltar.
 
 ## 4. Windows e Linux
 
-Não há estratégia de assinatura documentada pelo runtime. O caminho é a **pasta portátil** do build
-(Windows) e o **tarball por arquitetura** (Linux); no Linux o `.desktop` se registra na primeira
-execução. Requisitos de sistema por SO (macOS 15+, Windows 10/11 com WebView2, Linux glibc 2.35+ com
-`webkit2gtk-4.1`): `docs/tinyjs.md` §1.
+Não há assinatura de código. O caminho é o **instalador** que o Hutch gera:
 
-**Bandeja** (`docs/canonico.md` §7): o ícone do Linux é o `resources/tray.png` empacotado; lá a
-bandeja depende de um **AppIndicator** instalado no ambiente (`libayatana-appindicator`). Com
-bandeja, fechar a janela principal apenas a **esconde** — as janelas de ferramenta continuam abertas
-e o menu da bandeja traz `Open Nod`, `Lock` e `Quit Nod`. Sem bandeja (Linux sem AppIndicator),
-fechar a janela principal **encerra** o Nod.
+- **Windows**: `win-<arch>-Nod-Setup.zip` — um setup com o payload ao lado. O app instalado é um
+  executável GUI; o launch de desenvolvimento anexa o console.
+- **Linux**: `linux-<arch>-Nod-Setup.tar.gz` — setup auto-extraível + README. O `.desktop` se
+  registra na primeira execução.
+
+Requisitos: Windows 10/11 com WebView2; Linux glibc 2.35+ com `libwebkit2gtk-4.1-0`. Para a bandeja,
+um AppIndicator (`libayatana-appindicator3-1`): sem ele o app roda, e fechar a janela principal
+**encerra** o Nod (`docs/canonico.md` §7).
+
+Uma instalação tinyjs 0.7.0c em Windows/Linux **não** se converte sozinha: a 0.8.0 é um reinstall
+único com o instalador acima (o updater tinyjs não é mais publicado). macOS se converte pelo próprio
+updater da 0.7.0 (§6).
 
 ## 5. Convites entre máquinas
 
@@ -131,315 +132,135 @@ Sem host, o convite viaja pelo seed (`docs/canonico.md` §9):
 
 ## 6. Atualização
 
-Com `update.url` no seed, o `scripts/gen-config.ts` grava
-`"update": { "url": …, "auto": "daily" }` no `tinyjs.json`. O `tinyjs publish` gera o zip e o
-`manifest.json` (versão, url, **sha256**, notas) — `docs/tinyjs.md` §8. O manifesto é hospedado onde
-o dono quiser; o app verifica checksum e assinatura antes de trocar a release.
+Um endereço, dois leitores:
 
-From 0.7.0 macOS does not ship the tinyjs build: the same `manifest.json` carries the Electrobun
-`Nod.app` zips, and both runtimes read it the same way (§8 "How an installed Nod updates", §10).
+- **macOS**: o manifesto da release (`<release>/download/manifest.json`) com `version`, `notes` e
+  `mac.<arch>` (url + sha256). O Nod baixa o zip, confere o sha256, extrai com `ditto`, exige
+  `codesign --verify --strict --deep` e troca o `.app` com rollback
+  (`electrobun/bun/facade/update.ts`).
+- **Windows/Linux**: o `Updater` do Electrobun, sobre
+  `stable-<os>-<arch>-update.json` + `.tar.zst`, que o Hutch escreve e a release job publica sem
+  renomear (`electrobun/bun/facade/update-runtime.ts`). O runtime faz a troca da instalação
+  (helper agendado no Windows, swap no Linux). Não há assinatura: o transporte é HTTPS e o arquivo
+  leva o hash de metadados do runtime.
+
+O seed aponta `update.url` para
+`https://github.com/CaioFaSoares/Nod/releases/latest/download/manifest.json`; o
+`gen-electrobun-config.ts` deriva a pasta (`release.baseUrl`) e o `Updater` monta as URLs a partir
+dela. A checagem diária e o aviso de atualização são do backend (`RF-55`); a decisão de versão é de
+`shared/version.ts`, inclusive letras de hotfix.
+
+O que **não** acontece: uma instalação 0.7.0c em Windows/Linux não vê a 0.8.0 (o manifesto deixa de
+trazer `win`/`linux`); reinstale uma vez. Os cookies de ferramenta não migram entre runtimes
+(`docs/electrobun.md` §4): cada ferramenta pede login uma vez.
 
 ## 7. O que nunca vai para o git
 
 - `resources/seed.json` — o seed privado;
 - `resources/icon.png` — o ícone privado de uma build customizada (RF-56, §9);
 - `.nod-icon.png` — cópia gerada de um ícone dado por `NOD_ICON` (§9);
-- `.eb-icon.iconset/` — the macOS icon set `scripts/eb-icon.ts` renders from that same icon (§10);
-- `tinyjs.json` — gerado, e o gate de origins sai do seed;
-- `resources/build-mode` — written by `scripts/gen-config.ts` with the mode it ran in (`dev`/`build`);
-  it is the stamp `backend/main.ts` reads to tell a dev run from a release (SP02 §9), and it is **not**
-  in the release's `"resources"` list, so a built app never carries one.
+- `.eb-icon.iconset/` — o conjunto de ícones macOS que `scripts/eb-icon.ts` gera;
+- `electrobun.config.ts` — gerado, e o gate de origem/canal sai do seed;
+- `resources/build-mode` — escrito por `gen-electrobun-config.ts` com o modo (`dev`/`build`); é o
+  selo que `backend/main.ts` lê para distinguir um dev run de uma release (SP02 §9), e **não** entra
+  na lista de resources de uma release.
 
 Todos já estão no `.gitignore`. O versionado no lugar deles é só `resources/seed.example.json`, com
 dados falsos (e o ícone versionado é o `assets/icon.png`).
 
-## 8. Automated release (GitHub Actions)
+## 8. Release automatizada (GitHub Actions)
 
-`.github/workflows/release.yml` builds and publishes on every push to a branch named `release-*`
-(and on demand with "Run workflow").
+`.github/workflows/release.yml` compila e publica em todo push para um branch `release-*` (e sob
+demanda com "Run workflow").
 
-**From 0.5.0 the branch is created for you.** `.github/workflows/release-branch.yml` runs when a
-pull request from `dev` is merged into `main`: it reads `version` from `tinyjs.base.json`, pushes
-`release-<version>` at the merge commit and dispatches `release.yml` on it (a branch pushed with
-`GITHUB_TOKEN` does not start the `push` trigger by itself, GitHub's rule against loops). If
-`release-<version>` already exists the job fails on purpose: the version was not bumped, and
-republishing the same version is a decision for a person (push the branch by hand).
+**O branch é criado para você** desde 0.5.0: `.github/workflows/release-branch.yml` roda quando um
+pull request de `dev` é mesclado em `main`, lê `version` de `app.json`, empurra `release-<version>`
+no commit do merge e dispara `release.yml` (um branch empurrado com `GITHUB_TOKEN` não inicia o
+trigger `push`). Se `release-<version>` já existe o job falha de propósito: a versão não subiu, e
+republicar a mesma versão é decisão de uma pessoa.
 
-The release text is the body of the `Release <version>:` commit (found by `git log --grep`, with
-GitHub's `Merge pull request #…` header removed); it is what an installed Nod shows in the update
-notice. Write it as patch notes for the people using Nod.
+O texto da release é o corpo do commit `Release <version>:` (encontrado por `git log --grep`, com o
+cabeçalho `Merge pull request #…` do GitHub removido); é o que um Nod instalado mostra no aviso de
+atualização.
 
-1. **Check** (`prepare`, ubuntu): reads `version` from `tinyjs.base.json`. A branch named
-   `release-X.Y.Z` must match it; other `release-*` names skip this check. Then
-   `bun run typecheck:app` and `bun test test/`. The full `bun run typecheck` also checks the
-   Electrobun project, which needs the Hutch devkit projected; under CI (`CI=true`) it refuses
-   instead of skipping, so it runs on the macOS legs right after `eb:build` has projected the
-   devkit — never on a machine that has no devkit at all.
-2. **Build**, one job per target, with tinyjs and bun pinned (`TINYJS_VERSION`, `BUN_VERSION` at the
-   top of the workflow):
+1. **Check** (`prepare`, ubuntu): lê `version` de `app.json`, confere o nome do branch, roda
+   `bun run typecheck:app` e `bun test test/`.
+2. **Build**, um job por alvo, com Bun preso (`BUN_VERSION` no topo do workflow):
 
-   | Target | Runner | Runtime | Output |
-   | --- | --- | --- | --- |
-   | macOS arm64 | `macos-15` | Electrobun | `nod-<v>-macos-arm64.zip` |
-   | macOS x86_64 (Intel) | `macos-15` | tinyjs | `nod-<v>-macos-x86_64.zip` |
-   | Linux x86_64 | `ubuntu-24.04` | tinyjs | `nod-<v>-linux-x86_64.tar.gz` |
-   | Linux arm64 | `ubuntu-24.04-arm` | tinyjs | `nod-<v>-linux-arm64.tar.gz` |
-   | Windows | `windows-2025` | tinyjs | `nod-<v>-win.zip` |
+   | Alvo | Runner | Saída |
+   | --- | --- | --- |
+   | macOS arm64 | `macos-15` | `nod-<v>-macos-arm64.zip` + `stable-macos-arm64-update.json` |
+   | macOS x86_64 | `macos-15-intel` | `nod-<v>-macos-x86_64.zip` + `stable-macos-x64-update.json` |
+   | Linux x86_64 | `ubuntu-24.04` | `linux-x64-Nod-Setup.tar.gz` + `stable-linux-x64-update.json` |
+   | Linux arm64 | `ubuntu-24.04-arm` | `linux-arm64-Nod-Setup.tar.gz` + `stable-linux-arm64-update.json` |
+   | Windows x64 | `windows-2025` | `win-x64-Nod-Setup.zip` + `stable-win-x64-update.json` |
+   | Windows arm64 | `windows-11-arm` | `win-arm64-Nod-Setup.zip` + `stable-win-arm64-update.json` |
 
-   The Apple silicon leg never runs `tinyjs publish`. It restores the private resources, refuses
-   a build that would wear the wrong icon (§9), runs `NOD_APP_ID=copland.nod bun run eb:build` (which
-   ends by re-signing the bundle ad hoc, §10), `bun run typecheck` (the Electrobun project, now that
-   the devkit exists), `bun run eb:verify`, fails the job when `codesign --verify --strict --deep`
-   rejects the bundle, and finally `bun scripts/eb-publish.ts build`: the `Nod.app` zipped with
-   `ditto -c -k --keepParent` under the name `tinyjs publish` uses for the same architecture, its
-   **sha256**, and the `mac.arm64` half of the manifest (§10). Intel Macs stay on tinyjs
-   (`tinyjs publish --arch x86_64`): Electrobun 2.0.4 publishes no `darwin-x64` core or Hutch (the
-   assets of its v2.0.4 release; the first 0.7.0 run failed with "release manifest is incomplete
-   for macos-x64"). The Linux and Windows legs are the tinyjs publish they always were.
+   Cada perna restaura os resources privados do secret `NOD_PRIVATE_RESOURCES`, confere o ícone,
+   roda `NOD_APP_ID=copland.nod bun run eb:build`, tipa o projeto Electrobun com o devkit projetado
+   e (no macOS) valida as usage strings e `codesign --verify --strict --deep`. Depois:
+   `bun scripts/eb-publish.ts build --platform … --arch … --version … --base-url … --notes-file …`.
+   macOS escreve o zip e a metade do `manifest.json`; Windows/Linux copiam os artefatos do Hutch.
+3. **Release**: baixa todas as pernas, junta as metades macOS num `manifest.json` (exige arm64 e
+   x86_64), copia os demais artefatos e cria/atualiza a release `release-<version>` com tudo,
+   marcada como latest.
 
-3. **Release**: merges the halves into the one `manifest.json` — `mac.arm64` from the Electrobun
-   leg, `mac.x86_64`, `linux.<arch>` and `win` from the tinyjs ones — sets the top-level `url`/
-   `sha256` to the arm64 zip (all a reader from before the `mac` block looks at), refuses a
-   disagreement on `version` or a missing macOS architecture, and then creates release
-   `release-<version>` — the `prepare` job prints the tag, the prefix included (`docs/canonico.md`
-   §19) — with every archive and the merged manifest, marked as latest.
+**Setup único:**
 
-### How an installed Nod updates
-
-One file, one address: `<release>/download/manifest.json`, which is the seed's `update.url`
-(`https://github.com/CaioFaSoares/Nod/releases/latest/download/manifest.json`). Who reads what:
-
-- **tinyjs readers** — every Nod on 0.6.0c or older, and every Windows/Linux Nod today: `win`,
-  `linux.<arch>`, `mac.<arch>`, and the top-level `url`/`sha256` when the reader predates the
-  blocks (`~/.tinyjs/runtime/update.js` `checkForUpdate`/`installUpdate`).
-- **the Electrobun target** (§10): the same address and the same file. It reads `version`, `notes`
-  and `mac.<arch>` and ignores the rest (`electrobun/bun/facade/update.ts`).
-
-**A 0.6.0c Mac becomes an Electrobun Nod.** That build runs the tinyjs runtime, and from 0.7.0 the
-macOS entries of the manifest point at a zip of the **Electrobun** `Nod.app`. Its daily check finds a
-newer version, takes `mac.<arch>` (the tinyjs runtime probes the hardware, so a Rosetta install
-still gets the native arm64 build), downloads the zip, verifies the sha256, extracts it with `ditto`,
-requires `codesign --verify --strict --deep` to pass and swaps the single `.app` into place — which
-is why the release job fails when that check fails on the runner. The identifier of the Electrobun
-build is `copland.nod`, the same one the tinyjs releases wear, so the app data directory, the
-keychain namespace and the URL scheme carry over. From the next launch, `install()`/`check()` are the
-Electrobun facade's. **Windows and Linux stay tinyjs** and keep updating exactly as before.
-
-**One-time setup:**
-
-- Secret `NOD_PRIVATE_RESOURCES`: the private files of `resources/` (§1, §7) as base64 of a
-  tar.gz, with paths relative to `resources/`. With `seed.json` plus any icons it references:
+- Secret `NOD_PRIVATE_RESOURCES`: os arquivos privados de `resources/` (§1, §7) como base64 de um
+  tar.gz, com caminhos relativos a `resources/`:
 
   ```
   tar -czf - -C resources seed.json icons | base64 | gh secret set NOD_PRIVATE_RESOURCES
   ```
 
-  A custom app icon rides in the same secret (RF-56, §9) — add `resources/icon.png` to the archive
-  and the release wears it, no other step:
-
-  ```
-  tar -czf - -C resources seed.json icon.png | base64 | gh secret set NOD_PRIVATE_RESOURCES
-  ```
-
-  GitHub caps a secret at 48 KB. If the icons don't fit, put them in the seed as data URIs.
-- Auto-update from GitHub Releases: the seed's `update.url` must be
-  `https://github.com/CaioFaSoares/Nod/releases/latest/download/manifest.json`. Every macOS entry is
-  derived from that address by `scripts/eb-publish.ts` and every Windows/Linux entry by `tinyjs
-  publish`; the release job warns when they don't point at the release repository. With the channel
-  set, an installed Nod that finds a newer release shows the notice by itself (RF-55,
-  `docs/canonico.md` §14): no step in the app and no release by hand.
+  Um ícone customizado viaja no mesmo secret (RF-56, §9) — inclua `resources/icon.png` no arquivo.
+  O GitHub limita um secret a 48 KB; se os ícones não couberem, coloque-os no seed como data URIs.
+- Auto-update pelo GitHub Releases: `update.url` do seed precisa ser
+  `https://github.com/CaioFaSoares/Nod/releases/latest/download/manifest.json`. O job `release`
+  avisa quando as URLs não apontam para o repositório da release.
 
 **Caveats:**
 
-- **Version bump.** Pushing again with the same `version` replaces the release's files. Installed
-  apps only update when `version` in `tinyjs.base.json` goes up.
-- **Hotfix versions (0.5.5a).** A hotfix keeps the release's three numbers and adds lowercase
-  letters right after the patch: `0.5.5a`, then `0.5.5b`, `…z`, `aa`. The order is `0.5.5` <
-  `0.5.5a` < `0.5.5b` < `0.5.6` (`shared/version.ts`). The release gate accepts the form, and the
-  branch, tag and notes commit carry it as is: `release-0.5.5a`, `Release 0.5.5a: …`. The tinyjs
-  runtime's own update check reads only the three numbers, so it would never offer `0.5.5a` to a
-  Nod on `0.5.5`; the backend decides the offer with `shared/version.ts` instead
-  (`backend/main.ts` `withHotfixes`), and the install itself does not compare versions. The same
-  form is a valid `NOD_MIN_APP_VERSION` on the host (SP07 §2). macOS shows the letters in the
-  bundle's version string as written.
-  - **A build older than 0.5.5a never sees a letter.** `withHotfixes` ships inside the app, so a
-    Nod on `0.5.5` or older only has the runtime's three-number check (`update.js` `parseVer`)
-    and reads `0.5.5a`, `0.5.5b`… as `0.5.5`. A fix those installs must receive automatically
-    goes out as a patch bump instead — that is why 0.5.6 exists (`docs/canonico.md` §22).
-- **Public repository: auto-update works.** The repository is public, so release files download
-  without authentication and an installed Nod fetches its manifest and its archives straight from
-  GitHub Releases. The release repository is this one — `RELEASE_REPO` already defaults to
-  `github.repository`. `NOD_RELEASE_REPO` plus a `NOD_RELEASE_TOKEN` with `contents: write` are
-  only for putting the release in *another* repository, which then has to be public too.
-- **Public repository: the seed becomes public.** Every archive carries the seed (§1): addresses,
-  roles, grants and invite hashes. With a public repository anyone who downloads a release reads
-  them, not just the people who received it. `docs/canonico.md` §19 accepts that; what keeps it
-  acceptable is RF-27 — the seed carries organization, never a password, a credential or a token.
-- **Unsigned.** macOS builds (tinyjs and Electrobun alike) are signed ad hoc, so the release step in
-  §3 still applies. Windows builds are unsigned (§4).
-- **macOS runner cost.** On a private repository, macOS runner minutes cost more than Linux ones
+- **Bump de versão.** Empurrar de novo a mesma `version` substitui os arquivos da release. Apps
+  instalados só atualizam quando a `version` em `app.json` sobe.
+- **Hotfix (0.5.5a).** Mantém os três números e adiciona letras após o patch: `0.5.5a`, `0.5.5b`, …,
+  `aa`. A ordem é `0.5.5` < `0.5.5a` < `0.5.5b` < `0.5.6` (`shared/version.ts`). O gate da release
+  aceita a forma, e o branch, a tag e as notas a carregam como está: `release-0.5.5a`,
+  `Release 0.5.5a: …`.
+- **Repositório público: o seed fica público.** Todo instalador carrega o seed (§1): endereços,
+  papéis, concessões e hashes de convite. O `docs/canonico.md` §19 aceita isso; o que mantém
+  aceitável é a RF-27 — o seed carrega organização, nunca senha, credencial ou token.
+- **Sem assinatura.** macOS é ad hoc (o passo de §3 continua); Windows/Linux não são assinados.
+- **Custo de runner macOS.** Em repositório privado, minutos macOS custam mais que Linux
   (`https://docs.github.com/en/billing/reference/actions-runner-pricing`).
 
-## 9. Custom builds (app icon)
+## 9. Builds customizadas (ícone do app)
 
-Written in English, like everything from 2026-10-16 on; the rest of this file is the pt-BR text of
-before. Requirement: RF-56 (`docs/canonico.md` §14).
+A release veste o `assets/icon.png` versionado — 1024×1024. Uma build customizada veste outro ícone
+sem editar um arquivo versionado:
 
-A release wears the tracked `assets/icon.png` — 1024×1024, the size tinyjs documents
-(`.agents/skills/tinyjs/SKILL.md` §"Project layout"). A custom build wears another icon without
-editing one tracked file:
-
-| Source | How |
+| Origem | Como |
 | --- | --- |
-| `resources/icon.png` | drop the PNG there; private and gitignored, like the seed — this is the flow to keep |
-| `NOD_ICON=/path/to.png` | `NOD_ICON=/path/to.png bun run app:build`; a one-off, the file stays where it is |
-| neither | `assets/icon.png`, exactly as before |
+| `resources/icon.png` | coloque o PNG ali; privado e gitignored, como o seed — é o fluxo a manter |
+| `NOD_ICON=/caminho/para.png` | `NOD_ICON=/caminho/para.png bun run eb:build`; uso único, o arquivo fica onde está |
+| nenhum | `assets/icon.png`, como antes |
 
-`scripts/gen-config.ts` resolves the source in that order (`NOD_ICON` wins, then
-`resources/icon.png`, then `assets/icon.png`) and writes the winner into the generated `tinyjs.json`
-`"icon"` key — the key tinyjs reads instead of its own default (`cfg.icon || 'icon.png'`). One PNG
-serves every OS: sips turns it into the macOS `.icns` (16…1024), Linux copies it to
-`dist/icon.png` and Windows embeds it (`~/.tinyjs/cli.js`, `tinyjs build`; release facts in
-`.agents/skills/tinyjs/references/release.md`).
+`scripts/app-config.ts` resolve nesta ordem (`NOD_ICON` vence, depois `resources/icon.png`, depois
+`assets/icon.png`), recusa qualquer coisa menor que 1024×1024, e escreve o vencedor no
+`electrobun.config.ts`: macOS recebe o `.iconset` gerado por `scripts/eb-icon.ts`; Windows e Linux
+recebem o PNG.
 
-- The file must be a PNG of at least 1024×1024. Anything else fails the build with the path and the
-  real size in the message (`scripts/gen-config.ts`, `assertIconPng`) — a smaller image would only
-  ship upscaled, and a non-PNG would fall back to the default icon silently.
-- A PNG passed through `NOD_ICON` is copied to `.nod-icon.png` (generated, gitignored) because
-  tinyjs resolves `icon` from the project root and hands that same path to sips, to
-  `dist/icon.png` and to the Windows icon embedder. The tracked `assets/icon.png` is never written,
-  so `git status` stays clean either way.
-- `bun run app:dev` wears the same icon in the dev window; the seeded `resources/` list of the
-  release does not ship it — the icon is a build input, not app data.
-- **The app title stays Nod.** `title`/`name` in `tinyjs.base.json` are outside this flow: a release
-  with another name is a different decision, not a knob of the icon.
-- In CI (§8) the icon travels inside `NOD_PRIVATE_RESOURCES`; the workflow prints which icon the
-  build will wear and refuses the release when the secret carries `icon.png` and `tinyjs.json` says
-  otherwise.
-- The Electrobun target (§10) wears the same file through the same `iconForConfig`: its config
-  names the PNG for Windows/Linux and the `.iconset` rendered from it for macOS.
+## 10. Verificação manual antes de publicar
 
-Everything else of a custom build is the normal step (§2): the seed is still the private one, and from
-0.5.0 a build without it is valid — it just starts empty (RF-61, §1).
-
-## 10. Electrobun target build and publish (E06)
-
-Written in English, 2026-10-22; rewritten 2026-10-23 for 0.7.0. From 0.7.0 the **macOS artifacts of
-every release are the Electrobun target**: `release.yml` builds them on its two macOS legs and they
-ship in the same `manifest.json` as the tinyjs Windows/Linux builds (§8). Windows and Linux stay
-tinyjs. The runtime switch in `docs/canonico.md` §22 is what moved.
-
-### Build
-
-```sh
-bun run eb:build
+```
+bun run validate          # typecheck, unit tests, page build
+bun run eb:build          # o bundle do host
+bun run eb:verify         # macOS: usage strings no app e no tar
+bun test/smoke/run.ts --force
 ```
 
-The script builds the native helper (`scripts/build-nod-native.ts` →
-`electrobun/native/build/libNodNative.dylib`), writes the macOS icon set
-(`scripts/eb-icon.ts` → `.eb-icon.iconset`, generated and gitignored), generates the gitignored
-`electrobun.config.ts` (`scripts/gen-electrobun-config.ts build`), runs the page build
-(`tsc && vite build --base=./`) and then `electrobun build --env=stable`. Output:
-`build/stable-macos-<arch>/Nod.app` — measured at **21 MB** for macos-arm64 — and Electrobun's own
-artifacts under `artifacts/`. `bun run eb:dev` is the development counterpart (identifier
-`copland.nod.eb-dev`, port 5173); neither touches `copland.nod` data or `/Applications/Nod.app`.
-
-**Release identity and signature (E07).** A release build may set `NOD_APP_ID=copland.nod`
-(`gen-electrobun-config.ts` accepts it for `build`; `dev` still refuses it), so 0.7.0 replaces the
-tinyjs installation under the same identifier and scheme. The packaged app reads its identifier
-from `Resources/version.json`, not the environment. The backend's data directory is the tinyjs one
-(`~/Library/Application Support/<id>`), so `nod.db`, `store.json` and the icons survive the update
-(`electrobun/bun/facade/data-dir.ts`). `eb:build` ends with `scripts/eb-sign.ts`, which re-signs the
-bundle ad hoc **after** `eb-postbuild.ts` patched `Info.plist` and verifies it with the exact
-`codesign --verify --strict --deep` the tinyjs updater runs — without it, the wrapper keeps hutch's
-pre-patch signature and the update is refused. Cookies and WebKit storage are **not** migrated: the
-Electrobun target uses a `persist:default` partition, while tinyjs used the default WebKit store
-(`docs/handovers/e07-migration.md` §3). The 0.7.0 release sets `NOD_APP_ID=copland.nod`, the
-identifier the tinyjs releases wear, so an update keeps the same app data, keychain namespace and
-URL scheme (§8).
-
-The bundle carries `Resources/app/views/mainview` (the page), `views/bridge` (the document-start
-preload), `resources/` (seed, tray, entry icons, `build-mode` in dev) and
-`native/libNodNative.dylib`. Camera/microphone usage strings are written into the wrapped plist by
-`scripts/eb-postwrap.ts`, because the Electrobun config type has no field for them; the build is
-refused earlier if `tinyjs.base.json` lacks the two sentences. hutch packs the self-extracting
-payload *before* `postWrap` and skips the hook in `--env=dev`, so `scripts/eb-postbuild.ts` also
-runs as `scripts.postPackage` (and as the last step of `eb:build`): it repairs the payload tar and
-then refuses the build if any bundle or `artifacts/*.tar.zst` still lacks either string
-(handover `e06-surface-check.md` §13). `eb:build` builds the page before generating the config,
-since `gen-electrobun-config.ts build` requires `dist/index.html`.
-
-The last step of `eb:build` is `scripts/eb-sign.ts`. `postbuild` patches the bundle's `Info.plist`
-*after* hutch signed it, so macOS rejects the bundle as shipped (`code has no resources but
-signature indicates they must be present`); the script re-signs every `build/stable-macos-*/Nod.app`
-ad hoc (`codesign --force --deep --sign -`) and then requires `codesign --verify --strict --deep` to
-pass. That is the same check the tinyjs updater runs on the bundle it is about to swap in, and
-`release.yml` runs it again on the bundle it publishes (§8).
-
-**App icon (RF-56).** The Electrobun target wears the same PNG the tinyjs release wears:
-`gen-electrobun-config.ts` imports `iconForConfig` from `scripts/gen-config.ts`, so the precedence
-(`NOD_ICON` → `resources/icon.png` → `assets/icon.png`), the ≥1024 PNG check and the
-`.nod-icon.png` staging are one implementation, never a second copy. macOS takes a `.iconset`
-folder rather than a PNG, so `scripts/eb-icon.ts` renders the ten `iconutil` images with `sips` and
-the config names the folder as `build.mac.icons`; hutch converts it to the bundle's `.icns`.
-Windows and Linux name the PNG itself as `build.win.icon` / `build.linux.icon`. With no icon
-resolved, all three keys stay out and Electrobun keeps its default — the same outcome as tinyjs
-with `icon: null` (§9).
-
-### The macOS artifact
-
-```sh
-bun scripts/eb-publish.ts build \
-  --arch arm64 \
-  --version 0.7.0 \
-  --base-url https://github.com/<owner>/<repo>/releases/latest/download \
-  --notes-file notes.md \
-  --out dist/publish
-```
-
-Run by the macOS runner after the build and the signature gate. It zips
-`build/stable-macos-<arch>/Nod.app` with `ditto -c -k --keepParent` as
-`nod-<version>-macos-<arch>.zip` — the name, and the shape, `tinyjs publish` uses for the same
-architecture — refuses a bundle whose `Resources/version.json` (or plist) does not already say
-`--version`, refuses a zip without `Contents/Info.plist`, computes the **sha256**, and writes one
-half of the release manifest to `dist/publish/manifest.json`: `version`, `notes` and
-`mac.<arch> = { url, sha256 }`. The other macOS runner writes the other half; the release job merges
-both with the `linux.<arch>`/`win` halves the tinyjs legs published, refuses a disagreement on
-`version` or a missing macOS architecture, and sets the top-level `url`/`sha256` to the arm64 zip.
-
-Why not Electrobun's own `artifacts/*-update.json`: it has a 13-character content hash (not a digest
-of the bytes), no notes, and an updater that cannot apply a verified local file
-(`docs/handovers/e06-electrobun-spike.md` §5). And why a `.zip` and not `artifacts/*.tar.zst`: the
-tinyjs updater on 0.6.0c Macs only knows `ditto -x -k` of a zip, and it is the installer that
-performs the migration (§8).
-
-### The channel the app reads
-
-`electrobun/bun/facade/update.ts` reads the seed's `update.url` itself — the same
-`…/releases/latest/download/manifest.json` the tinyjs runtime reads, with a cache-busting nonce
-appended. It parses the tinyjs format, taking `version`, `notes` and `mac.<arch>` and ignoring
-`win`, `linux` and the top-level `url`/`sha256`; Electrobun's `x64` is the manifest's `x86_64`.
-`check()` never applies anything. `install()` requires a newer version (`shared/version.ts`, hotfix
-letters included), downloads the zip with the sha256 verified while streaming, extracts it with
-`ditto -x -k`, requires the staged bundle to carry the same identifier and version as the running
-one, then arms a swap helper that waits for the app to exit, moves the bundle aside and keeps the
-previous one under `updates/rollback/`. Every attempt — refusals included — lands in
-`updates/install.log`, and the helper's own trace in `updates/swap.log`. The install is not signed
-(the manifest carries no signature); the sha256 rules out corruption, a CDN mix-up and a swapped
-asset.
-
-### CI
-
-There is no separate Electrobun workflow: `.github/workflows/electrobun.yml` is gone. The two
-macOS legs of `release.yml` (§8) restore the private resources, check the app icon against the
-generated `electrobun.config.ts`, run `NOD_APP_ID=copland.nod bun run eb:build`, typecheck the
-Electrobun project (the root script refuses to skip it under `CI=true`; `eb:build` has just
-projected `.hutch/devkit`), run `bun run eb:verify`, fail the job when `codesign --verify --strict
---deep` rejects `build/stable-macos-<arch>/Nod.app`, and publish the zip + manifest half. The
-release job merges and uploads them with the rest of the release.
-
-**State.** The pipeline and the migration are `leitura` in CI until a 0.7.0 release runs them. What
-was exercised by hand is the channel itself: a local HTTP server, a 0.6.0d artifact, the
-tampered-sha refusal, the install/relaunch and one rollback
-(`docs/handovers/e06-surface-check.md` §9). There is no signing/notarization beyond the ad-hoc
-signature.
+Os smokes abrem janelas reais e usam os quatro runners (`run`, `connected`, `ui`, `tabs`). Um smoke
+que falha por a janela estar oculta/atrás de outro app não é uma falha do produto: traga a janela do
+Nod para a frente e rode de novo. Em Windows/Linux, rode os smokes na máquina alvo; os primeiros
+runners verdes da release são a prova de execução dessas plataformas.

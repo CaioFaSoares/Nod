@@ -19,6 +19,7 @@ import { dlopen, FFIType } from 'bun:ffi';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { TrayIconSpec } from './tray-icon';
+import type { PlatformDialogs } from './dialogs';
 
 // MARK: - Errors
 
@@ -407,6 +408,11 @@ export interface NativeOptions {
   identifier?: string;
   /** Explicit dylib path; by default it is resolved beside the executable and in the repo. */
   libraryPath?: string;
+  /**
+   * File dialogs for a platform without the macOS helper. Electrobun's own chooser is native on
+   * Windows and Linux; macOS keeps the NSOpenPanel/NSSavePanel in `NodNative.swift`.
+   */
+  dialogs?: PlatformDialogs;
 }
 
 /** The sheet is system UI; a person may take a while, but not forever. */
@@ -445,6 +451,7 @@ function parseAuthPoll(value: unknown): { status: 'pending' | 'done'; result: bo
 
 export function createNative(options: NativeOptions = {}): NativeFacade {
   const bridge = process.platform === 'darwin' ? loadBridge(options.libraryPath) : null;
+  const fallbackDialogs = bridge === null ? (options.dialogs ?? null) : null;
   let counter = 0;
   const prefix = Math.random().toString(36).slice(2, 8);
 
@@ -490,7 +497,7 @@ export function createNative(options: NativeOptions = {}): NativeFacade {
 
   let availability: NativeAvailability;
   if (!bridge) {
-    availability = UNAVAILABLE;
+    availability = fallbackDialogs === null ? UNAVAILABLE : Object.freeze({ ...UNAVAILABLE, dialogs: true });
   } else {
     availability = Object.freeze({
       secrets: true,
@@ -539,7 +546,9 @@ export function createNative(options: NativeOptions = {}): NativeFacade {
       }
     },
     async openFile(opts = {}) {
-      if (!bridge) return null;
+      if (!bridge) {
+        return fallbackDialogs === null ? null : await fallbackDialogs.openFile(opts);
+      }
       const types = normalizeDialogTypes(opts.types);
       const result = call({
         op: 'openFile',
@@ -549,7 +558,9 @@ export function createNative(options: NativeOptions = {}): NativeFacade {
       return typeof result === 'string' ? result : null;
     },
     async saveFile(opts = {}) {
-      if (!bridge) return null;
+      if (!bridge) {
+        return fallbackDialogs === null ? null : await fallbackDialogs.saveFile(opts);
+      }
       const types = normalizeDialogTypes(opts.types);
       const result = call({
         op: 'saveFile',

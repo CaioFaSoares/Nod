@@ -92,7 +92,7 @@ const WARNING_BANNER_ID = 'nod-not-from-org';
  * gets it: it is not a tool of anybody's catalog.
  *
  * The camera/microphone half is not a runtime call: `tinyjs.json`'s origin gate opens `media.camera`
- * and `media.microphone` for the origins of the release seed's entries alone (`scripts/gen-config.ts`)
+ * and `media.microphone` for the origins of the release seed's entries alone (`scripts/gen-electrobun-config.ts`)
  * and a personal tool is not one of them, so its window keeps the engine's own prompt. This banner is
  * what the person sees beside it.
  */
@@ -483,7 +483,9 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     if (capabilitiesLoaded !== null) return await capabilitiesLoaded;
     capabilitiesLoaded = (async (): Promise<void> => {
       const state = await mainState();
-      if (state !== null) dockable = state.canPosition !== false;
+      // Dock only where the runtime can re-parent a live view (macOS); Windows/Linux keep the
+      // windows mode even though they can position windows.
+      if (state !== null) dockable = (state.canDock ?? state.canPosition) !== false;
     })();
     return await capabilitiesLoaded;
   }

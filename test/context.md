@@ -2,8 +2,8 @@
 
 **All of it at once:** `bun run validate` runs typecheck (every tsconfig), the unit tests of `test/`
 and `host/`, and the page build, then prints one summary and exits non-zero on any failure;
-`bun run validate --smoke` adds the four real-surface smokes below on tinyjs and on Electrobun
-(skipped, with a line saying so, when `.hutch/devkit` is missing). The smokes open real windows for
+`bun run validate --smoke` adds the four real-surface smokes below on Electrobun (skipped, with a
+line saying so, when `.hutch/devkit` is missing). The smokes open real windows for
 a few minutes and each moves `resources/seed.json` aside and restores it (`scripts/validate.ts`).
 
 Two kinds of proof, matching `AGENTS.md`'s rule that nothing is "verified" without execution:
@@ -11,15 +11,14 @@ Two kinds of proof, matching `AGENTS.md`'s rule that nothing is "verified" witho
 | Kind | Where | Runs | Proves |
 | --- | --- | --- | --- |
 | Unit | `test/*.test.ts`, `host/**/*.test.ts` (block 1 on) | `bun test` | Pure logic in `shared/` and the host against a real temp SQLite |
-| Smoke, local | `test/smoke/` (`run.ts`, `smoke.html`, `tools.ts`) | `bun test/smoke/run.ts` | The real Nod app under tinyjs, with local fake tools, a throwaway app id (`NOD_APP_ID`), a free dev port and a page file named after the launch's nonce (so a `tinyjs dev` a previous smoke left behind can neither serve nor reload this launch's page), and its own data dir |
+| Smoke, local | `test/smoke/` (`run.ts`, `smoke.html`, `tools.ts`) | `bun test/smoke/run.ts` | The real Nod app under Electrobun, with local fake tools, a throwaway app id (`NOD_APP_ID`), a free dev port and a page file named after the launch's nonce, and its own data dir |
 | Smoke, connected | `test/smoke/` (`connected.ts`, `connected.html`, `tools.ts`) | `bun test/smoke/connected.ts [--force]` | The real Nod under four app ids beside a real host process: SP05 §5 steps 2–5 and block 2's sharing (SP06 §4–§6, B7, K1–K9), no external network, no container |
-| Smoke, real page | `test/smoke/` (`ui.ts`, `ui-driver.ts`, `tools.ts`) | `bun test/smoke/ui.ts [--force]` | The real `index.html` entry (`src/app.ts` + `src/settings.ts`) inside tinyjs, driven through its own DOM: block 2's screens (#24, #25, #27–#35), beside a real host process, no external network, no container. The generated page points `frontend.devUrl` at the dev server's copy of itself (`test/smoke/.gerado/ui/`), so the window is the real `http://` page with the runtime bridge — not a re-written test page |
+| Smoke, real page | `test/smoke/` (`ui.ts`, `ui-driver.ts`, `tools.ts`) | `bun test/smoke/ui.ts [--force]` | The real `index.html` entry (`src/app.ts` + `src/settings.ts`) inside Electrobun, driven through its own DOM: block 2's screens (#24, #25, #27–#35), beside a real host process, no external network, no container. The runner points `NOD_MAIN_URL` at the dev server's copy of itself (`test/smoke/.gerado/ui/`), so the window is the real `http://` page with the runtime bridge — not a re-written test page |
 | Smoke, docked tabs | `test/smoke/` (`tabs.ts`, `tabs-driver.ts`, `tools.ts`, `winlist.swift`) | `bun test/smoke/tabs.ts [--force]` | E03 on the real surface (RF-49…RF-52, RF-66…RF-68, T6): a local account, two org tools and real tool windows per tab, with three reporting tool pages (`startTabTools`) that measure themselves. No host process. The real frame of every window comes from `CGWindowListCopyWindowInfo` (`winlist.swift`), because a webview reports `window.screenX/screenY` as `0,1490` and `window.outerWidth/outerHeight` as `0x0`, and a tool page cannot call `tiny.win.getState()` (api-gated). A step whose subject needs the panel's slot is reported **blocked** — never passed — when the page is hidden (a locked screen), which `src/tabs.ts` answers with an empty slot by design |
 
-Every smoke runner also takes `--runtime=electrobun` (or `NOD_RUNTIME=electrobun`): the same page,
-drivers and checks launch the Electrobun target instead of tinyjs (`test/smoke/tools.ts`;
-`docs/handovers/e06-parity-smoke.md` carries both rounds). Without the flag the target is tinyjs,
-unchanged.
+Every smoke runner launches Electrobun (`test/smoke/tools.ts`). `--runtime=tinyjs` fails loudly:
+the runtime was removed in 0.8.0. `docs/handovers/e06-parity-smoke.md` and `e06-parity-matrix.md`
+carry the historical parity rounds.
 
 `test/helpers/sqlite-bun.ts` adapts `bun:sqlite` to the backend's `SqlDb`, so `backend/repo.ts` runs
 under Bun.
@@ -28,7 +27,7 @@ under Bun.
 
 - **Behavior, not wording.** Tests assert outcomes, boundaries and errors, not message text or
   source shape.
-- **Smoke never uses real credentials**, and never runs with `TINYJS_DEBUG=1` and a real account
+- **Smoke never uses real credentials**, and never runs with a runtime trace and a real account
   (`AGENTS.md`).
 - **The smoke refuses to run when `resources/seed.json` exists**, unless given `--force` (it writes
   its own seed).
@@ -60,7 +59,7 @@ What it starts, all on loopback, with no external network and no container:
 | Host | `bun host/main.ts` on a free loopback port: `NOD_DATA` in `test/smoke/.gerado/connected/host-data`, `NOD_DEV=1`, `NOD_PUBLIC_URL=http://127.0.0.1:<port>`, `NOD_GUILD_NAME=Smoke Guild` (SP04 §1 allows plain `http://` only in dev) |
 | Setup code | `bun host/cli/setup-code.ts` over the same environment; it stays in the runner's memory (never printed, never written to a file) |
 | Tools | `test/smoke/tools.ts` (A, B and C), the same fake servers the local smoke uses; Tool C's origin is the personal tool's address (it is not in any seed) |
-| Nods | four app ids — `copland.nod.smoke-admin`, `...smoke-person`, `...smoke-person2` and `...smoke-admin2` — launched one at a time the way `run.ts` launches one: temporary seed, `gen-config` with that app id, **a free dev port of its own per launch**, a page file named after the launch's nonce, `TINYJS_HTML=connected.html` and the result channel through `<app data>/store.json` |
+| Nods | four app ids — `copland.nod.smoke-admin`, `...smoke-person`, `...smoke-person2` and `...smoke-admin2` — launched one at a time the way `run.ts` launches one: temporary seed, `gen-electrobun-config` with that app id, **a free dev port of its own per launch**, a page file named after the launch's nonce loaded through `NOD_MAIN_URL`, and the result channel through `<app data>/store.json` |
 
 The page drives SP05 §5 and block 2's sharing in fourteen phases, in this order — the two icon
 phases need P's syncs, the sharing needs both members before `people.revoke`, and the revocation of
@@ -101,7 +100,7 @@ a sealed blob — step names, statuses, counts and public digests only.
 
 The two smokes above drive the API from a purpose-written page. This one renders the product: the
 generated page imports `/src/app.ts` exactly as `index.html` does and then `test/smoke/ui-driver.ts`;
-the runner points `frontend.devUrl` at that file, so `tinyjs dev` loads the real `http://` page (the
+the runner points `NOD_MAIN_URL` at that file, so the Electrobun main window loads the real `http://` page (the
 real entry, the real stylesheet, the injected `tiny` bridge) instead of a test page. The driver sets
 the world up over `src/api.ts` and then asserts what the screens show, clicking and typing on the
 real DOM of `src/app.ts` and `src/settings.ts`.
@@ -148,7 +147,7 @@ What makes the geometry checkable at all, all measured on this machine:
 | Fact | What it means for the smoke |
 | --- | --- |
 | `window.screenX/screenY` are `0,1490` and `window.outerWidth/outerHeight` are `0x0` in a WKWebView (`backend/tiny.d.ts`, `TinyWinState.outer`) | a page cannot report where its own window is |
-| a tool page's `tiny.win.getState()` is refused — `"win.getState" is disabled by tinyjs.json "api"` (`scripts/gen-config.ts` gives a tool origin only `login.report`/`media.*`) | the reported page box (`innerWidth/innerHeight`), `performance.timeOrigin` and its draft are what a tool page brings |
+| a tool page's `tiny.win.getState()` is refused — `"win.getState" is not allowed from this window` (the runtime gate gives a tool view only `login.report`) | the reported page box (`innerWidth/innerHeight`), `performance.timeOrigin` and its draft are what a tool page brings |
 | `CGWindowListCopyWindowInfo` (`test/smoke/winlist.swift`) gives the real frame of every window | the on-screen truth, and the runner hands it to the driver over the desk |
 | that list is in the window server's units, not the app's points (a 1100 pt window is `990` of them, with an offset) | the map is read at every measurement from the main window itself — its real frame against its own `getState()` — and applied to the tool window |
 | a hidden page reports no slot (`src/tabs.ts` `currentRect`), and a **locked screen** hides every window | the placement steps say **blocked** with their numbers instead of pretending |

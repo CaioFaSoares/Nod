@@ -1,14 +1,14 @@
 # backend/ — Nod's system side
 
-The txiki.js process behind every Nod window: SQLite, keychain, tool windows, the login cascade,
+The Bun process behind every Nod window: SQLite, keychain, tool windows, the login cascade,
 and (from block 1) the host client and sync. Module by module, with signatures:
-`docs/arquitetura.md` §4. Runtime facts: `docs/tinyjs.md`.
+`docs/arquitetura.md` §4. Runtime facts: `docs/electrobun.md`.
 
 ## What it owns
 
 - The local database (`repo.ts`, `tjs:sqlite`), and the only path to the OS keychain (`vault.ts`,
   `session.ts`).
-- Every network call the Nod makes. The page never talks to the network (`docs/tinyjs.md` §10).
+- Every network call the Nod makes. The page never talks to the network (`docs/electrobun.md` §1).
 - The RPC gate in `main.ts`: which window and which session may call which method
   (`docs/arquitetura.md` §2).
 - Tool windows, popups, shortcuts, the login adapter and the canonico §22 warning of a tool that
@@ -58,9 +58,9 @@ Contracts: `docs/specs/SP02-auth-and-keys.md`, `SP04-sync.md`, `SP05-nod-connect
 - Many RPC params carry a password, a code or a secret (the list is in `AGENTS.md`, "Não pode"), so
   `TINYJS_DEBUG=1` must never run with real credentials; a new method of that kind joins that list.
 - Backend timers, not page timers, for anything periodic. The page is throttled when hidden
-  (`docs/tinyjs.md` §3).
+  (`docs/electrobun.md` §5).
 - Check capabilities with `!== false` before using biometrics, tray or global shortcuts
-  (`docs/tinyjs.md` §6).
+  (`docs/electrobun.md` §5).
 - Tests: pure parts go to `shared/` and run under `bun test`; runtime-bound parts are proved by
   the smoke (`test/smoke/`).
 - **O2**: while the host's `minAppVersion` is above the running app the guild is **disconnected**
@@ -144,7 +144,7 @@ row (`shared/join-link.ts`, which also replaced `main.ts`'s private `parseJoinLi
 in boot mode through `backend/seed.ts`'s `applySeedFile` — the same core `applyBundledSeed` uses —
 recording `catalog_imported` with `result: 'seed'`; the runtime origin gate stays the embedded
 seed's (it is built, never read at runtime), so an imported seed fills the catalog and never widens
-what a tool may call. `scripts/gen-config.ts` no longer requires `resources/seed.json` in `build`,
+what a tool may call. `scripts/gen-electrobun-config.ts` no longer requires `resources/seed.json` in `build`,
 and a release without one ships no `seed.json` at all. `POST /v1/admin/people` is gone with 0.5.0
 (its client, `backend/host-admin.ts`'s `createPerson`, with it): a person who does not exist yet
 joins through a guild invite, and `invites.issue`'s connected path is only the reissue for an
