@@ -64,7 +64,7 @@ cask "nod" do
 
   url "https://github.com/${input.repo}/releases/download/release-#{version}/nod-#{version}-macos-#{arch}.zip"
   name "Nod"
-  desc "Team's internal tools in one window, logins kept in the system keychain"
+  desc "Team's internal tools in one window, logins kept in the local vault"
   homepage "https://github.com/${input.repo}"
 
   # Nod installs its own updates (docs/distribuicao.md §8).
