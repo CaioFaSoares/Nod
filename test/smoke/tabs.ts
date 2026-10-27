@@ -16,8 +16,9 @@
 // The tool pages are the reporting servers of `test/smoke/tools.ts` (`startTabTools`): each page
 // measures its own `window.screenX/screenY`, outer and inner box, `performance.timeOrigin` and the
 // value of its `<input id=draft>`, and posts them to its own origin. The driver reads those reports
-// through this runner's desk and drives the real screens with DOM events; the runner only starts the
-// world, forwards commands to the pages and reads the app store.
+// through this runner's desk and drives the real screens with DOM events — and, where AppKit's hit
+// test is the subject (0.7.0a), with real mouse clicks through `/desk/click`; the runner only starts
+// the world, forwards commands to the pages and reads the app store.
 //
 // This machine runs OmniWM, a tiling window manager (`docs/handovers/e03-spikes.md` B05/§1): it
 // arranges the app's windows, which is why the requested rects do not survive on their own. The
@@ -368,6 +369,28 @@ async function onScreenWindows(rootPid: number | null): Promise<ScreenReading> {
   return { windows, others, why: '', locked, frontmost };
 }
 
+const CLICK_SWIFT = join(import.meta.dir, 'click.swift');
+const CLICK_BIN = join(GENERATED_DIR, 'click');
+
+/**
+ * One real left click (`test/smoke/click.swift`) at a point of the window server's space, only on a
+ * window of this run. The DOM's `el.click()` the driver uses elsewhere never reaches AppKit's hit
+ * test, so a native view over the page (a docked tab, hidden or detached) is invisible to it.
+ */
+async function realClick(rootPid: number | null, x: number, y: number): Promise<{ ok: boolean; why: string }> {
+  if (rootPid === null) return { ok: false, why: 'the app is not running' };
+  const compiler = Bun.which('swiftc');
+  if (compiler === null) return { ok: false, why: 'no swiftc on this machine' };
+  if (!existsSync(CLICK_BIN) || statSync(CLICK_BIN).mtimeMs < statSync(CLICK_SWIFT).mtimeMs) {
+    mkdirSync(GENERATED_DIR, { recursive: true });
+    const built = await runTool([compiler, '-O', '-o', CLICK_BIN, CLICK_SWIFT]);
+    if (built.code !== 0) return { ok: false, why: `swiftc exited ${built.code}: ${built.out.trim().slice(-200)}` };
+  }
+  const pids = [...(await descendantPids(rootPid))].join(',');
+  const run = await runTool([CLICK_BIN, String(x), String(y), pids]);
+  return { ok: run.code === 0, why: run.out.trim() };
+}
+
 /**
  * Floats every **visible**, tiled window of this run: the WM owns a tiled frame, so the rect the Nod
  * asks for does not survive it, and a floating window keeps it. Only visible windows are touched —
@@ -532,6 +555,15 @@ function startDesk(deps: { tools: TabTools; pid: PidRef }): Desk {
       }
       if (url.pathname === '/desk/float' && req.method === 'POST') {
         return deskJson({ ok: true, ...(await floatOwnWindows(deps.pid.value)) });
+      }
+      if (url.pathname === '/desk/click' && req.method === 'POST') {
+        const body: unknown = await req.json().catch(() => null);
+        const { x, y } = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+        if (typeof x !== 'number' || typeof y !== 'number') {
+          return deskJson({ ok: false, error: 'bad point' }, 400);
+        }
+        const clicked = await realClick(deps.pid.value, x, y);
+        return deskJson({ ok: true, clicked: clicked.ok, why: clicked.why });
       }
       if (url.pathname === '/desk/onscreen') {
         const screen = await onScreenWindows(deps.pid.value);

@@ -1235,6 +1235,147 @@ async function checkSwitchKeepsDraft(): Promise<string> {
   );
 }
 
+// ------------------------------------------------------------- 0.7.0a: real mouse clicks
+//
+// Every other step clicks with `el.click()`, which dispatches straight into the DOM and never goes
+// through AppKit's hit test — so it cannot see a native view laid over the page. On Electrobun a
+// docked tab is such a view, and its core moved the page's own webview off-screen whenever the
+// mouse crossed a hidden or detached tab (`ContainerView updateActiveWebviewForMousePosition:`),
+// which left every control under the slot dead to a real click. These steps click with the mouse.
+
+/** The real clicks the page received (`isTrusted`), newest last. */
+const trustedClicks: EventTarget[] = [];
+document.addEventListener(
+  'click',
+  (event) => {
+    if (event.isTrusted && event.target !== null) trustedClicks.push(event.target);
+  },
+  true,
+);
+/** Every real mouse-down the page saw, at the page point it landed on (a failure says where). */
+const trustedDowns: string[] = [];
+document.addEventListener(
+  'mousedown',
+  (event) => {
+    if (!event.isTrusted) return;
+    const target = event.target instanceof Element ? event.target.className || event.target.tagName : '?';
+    trustedDowns.push(`${Math.round(event.clientX)},${Math.round(event.clientY)} on ${String(target)}`);
+  },
+  true,
+);
+
+/** Where an element's point is, in the window server's space (`/desk/click` takes it there). */
+async function serverPoint(el: Element, at?: { x: number; y: number }): Promise<{ x: number; y: number; app: { x: number; y: number } } | string> {
+  const main = await mainState();
+  if (main === null) return 'the main window reported no state';
+  const screen = await onScreen();
+  const mainWindow = screen.windows.find((window) => window.title === MAIN_TITLE);
+  if (mainWindow === undefined) return `the window server shows no main window (${screen.why || 'not on screen'})`;
+  const space = spaceFrom(main, mainWindow);
+  if (space === null) return 'no map between the app and the window server';
+  const box = el.getBoundingClientRect();
+  const app = {
+    x: main.x + (main.outer.width - main.width) / 2 + box.x + (at?.x ?? box.width / 2),
+    y: main.y + (main.outer.height - main.height) + box.y + (at?.y ?? box.height / 2),
+  };
+  return { x: app.x * space.scaleX + space.offsetX, y: app.y * space.scaleY + space.offsetY, app };
+}
+
+/**
+ * One real click on what `find` answers, retried once: the first click on a window that is not key
+ * may only make it key. The element is looked up again on every attempt, and a click counts on the
+ * element it landed on or on its re-rendered successor (the sidebar and the strip are redrawn on
+ * every push). Answers the point it clicked (app points) or the reason it could not click at all.
+ */
+async function realClick(find: () => Element | null, what: string): Promise<{ x: number; y: number } | Blocked> {
+  let last = 'the element was never on the page';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const el = await waitForValue(what, find);
+    const point = await serverPoint(el);
+    if (typeof point === 'string') return blocked(`${what}: ${point}`);
+    last = `page box ${rectText(el.getBoundingClientRect())}, server point ${Math.round(point.x)},${Math.round(point.y)}`;
+    const before = trustedClicks.length;
+    const answer = await desk('/desk/click', { x: point.x, y: point.y });
+    if (answer.clicked !== true) return blocked(`${what}: ${String(answer.why ?? 'not clicked')}`);
+    for (let tick = 0; tick < 15; tick += 1) {
+      await sleep(40);
+      const now = find();
+      const hit = trustedClicks
+        .slice(before)
+        .some((target) => target instanceof Node && (el.contains(target) || (now !== null && now.contains(target))));
+      if (hit) return point.app;
+    }
+  }
+  throw new Error(
+    `${what}: two real clicks on it never reached it (${last}); the page's real mouse-downs: ` +
+      `${trustedDowns.slice(-4).join('; ') || 'none'}`,
+  );
+}
+
+function inside(point: { x: number; y: number }, rect: Rect): boolean {
+  return point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= rect.y && point.y <= rect.y + rect.height;
+}
+
+/** Two docked tabs: real clicks on the strip switch between them. */
+async function checkRealStripClicks(): Promise<Outcome> {
+  const state = await stateOf();
+  expect(state.tabs.length >= 2, `${state.tabs.length} tab(s) open`);
+  const hidden = await hiddenNow();
+  if (hidden !== null) return blocked(hidden);
+  const done: string[] = [];
+  for (const id of ['tool_tool-a_t2', 'tool_tool-a']) {
+    const at = rowIndex(await stateOf(), id);
+    const clicked = await realClick(() => all<HTMLElement>('.tab-strip .tab-item')[at] ?? null, `the strip row of ${id}`);
+    if ('blocked' in clicked) return clicked;
+    await waitForState(`${id} to be active after a real click`, (next) => next.active === id);
+    done.push(`${id} at ${Math.round(clicked.x)},${Math.round(clicked.y)}`);
+  }
+  return `real mouse clicks on the strip activated ${done.join(', then ')}`;
+}
+
+/**
+ * The reported bug: with a tab open, Home is on the panel and the tab is hidden over the slot. A
+ * real click on Home's own button inside that rect must reach the page and bring the tab back.
+ */
+async function checkRealClickOverHiddenTab(): Promise<Outcome> {
+  const hidden = await hiddenNow();
+  if (hidden !== null) return blocked(hidden);
+  const slot = await slotScreenRect();
+  const home = await realClick(() => document.querySelector('.sidebar .mark:not(.mark-tabs)'), 'the Home mark');
+  if ('blocked' in home) return home;
+  await waitForValue('Home on the panel', () => document.querySelector('.home'));
+  await sleep(300); // the slot report reaches the backend, which hides the tab
+  const toolACard = (): HTMLElement | null =>
+    all<HTMLElement>('.home .tool-card').find((node) => node.querySelector('.tool-title')?.textContent === 'Tool A') ?? null;
+  const clicked = await realClick(() => {
+    const card = toolACard();
+    return card === null ? null : controlByText('Bring to front', card);
+  }, 'Tool A "Bring to front" on Home');
+  if ('blocked' in clicked) return clicked;
+  const state = await waitForState('the tab back on the panel', (next) => next.active === 'tool_tool-a');
+  await waitForValue('the tab strip', () => document.querySelector('.tab-strip'));
+  return (
+    `real clicks: the Home mark at ${Math.round(home.x)},${Math.round(home.y)}, then Home's ` +
+    `"Bring to front" at ${Math.round(clicked.x)},${Math.round(clicked.y)} — ` +
+    `${inside(clicked, slot) ? 'inside' : 'outside'} the hidden tab's slot ${rectText(slot)} — ` +
+    `reached the page; active = ${state.active}`
+  );
+}
+
+/** A tab detached into its own window must not take the main window's clicks either. */
+async function checkRealClickWhileDetached(): Promise<Outcome> {
+  const hidden = await hiddenNow();
+  if (hidden !== null) return blocked(hidden);
+  const state = await stateOf();
+  expect(state.tabs.some((tab) => !tab.docked), 'no tab is detached');
+  const clicked = await realClick(() => controlByText('Open link…', document), 'the toolbar "Open link…"');
+  if ('blocked' in clicked) return clicked;
+  await waitForValue('the Open link dialog', () => document.getElementById('open-link-dialog'));
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await waitForValue('the dialog to close', () => (document.getElementById('open-link-dialog') === null ? true : null));
+  return `with a tab detached, a real click on "Open link…" at ${Math.round(clicked.x)},${Math.round(clicked.y)} opened the dialog`;
+}
+
 // ------------------------------------------------------------- RF-51: detach and dock
 
 async function checkDetach(): Promise<string> {
@@ -1709,7 +1850,10 @@ const CHECKS: Checks = [
   ['RF-50 + opens a second tab of the tool', checkSecondTab],
   ['RF-50 the second tab takes the slot', checkSecondOnSlot],
   ['RF-50 switching tabs keeps the draft', checkSwitchKeepsDraft],
+  ['0.7.0a real clicks on the strip switch tabs', checkRealStripClicks],
+  ['0.7.0a a real click on Home reaches the page over a hidden tab', checkRealClickOverHiddenTab],
   ['RF-51 detach brings the frame back without reloading', checkDetach],
+  ['0.7.0a a real click reaches the main window while a tab is detached', checkRealClickWhileDetached],
   ['RF-51 the strip docks it back without reloading', checkDockBack],
   ['RF-66 a tool popup becomes a tab beside its opener', checkPopupAdoption],
   ['RF-66 Open link… opens one by hand', checkOpenLinkByHand],

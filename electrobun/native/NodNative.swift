@@ -54,6 +54,7 @@
 
 import AppKit
 import LocalAuthentication
+import ObjectiveC.runtime
 import Security
 import UniformTypeIdentifiers
 import WebKit
@@ -555,6 +556,44 @@ private func setContentMinSizeChrome(target: String, width: Double, height: Doub
 /// Keeps a moved view alive across `removeFromSuperview` (Electrobun's map is not ours to assume).
 private var retainedViews: [NSView] = []
 
+/// Electrobun's `ContainerView` (`-[ContainerView updateActiveWebviewForMousePosition:]`) walks
+/// `abstractViews` on every mouse move and resize without checking `isHidden` or `superview`, and
+/// calls `[view toggleMirrorMode:YES]` on every view after the first hit — moving `nsView.frame` to
+/// `(-10000, -10000)` while leaving `layer.position` in place. A hidden or detached tab therefore
+/// parks the main window's webview (or an earlier tab's webview) off-screen, making every control
+/// under the slot rect unclickable. `AbstractView` and `WKWebViewImpl` consult
+/// `shouldSuppressMirrorMode` before flipping (`enable = NO` when true); answering `true` keeps
+/// every webview at its real frame so AppKit's `hitTest:` (which already skips `isHidden` views)
+/// routes clicks to whichever view is actually visible.
+private var mirrorModeSuppressed = false
+private let suppressMirrorModeImp: @convention(c) (AnyObject, Selector) -> Bool = { _, _ in true }
+
+private func ensureMirrorModeSuppressed() {
+    if mirrorModeSuppressed { return }
+    mirrorModeSuppressed = true
+    let selector = sel_registerName("shouldSuppressMirrorMode")
+    let imp = unsafeBitCast(suppressMirrorModeImp, to: IMP.self)
+    for name in ["AbstractView", "WKWebViewImpl"] {
+        guard let cls = objc_getClass(name) as? AnyClass else { continue }
+        _ = class_replaceMethod(cls, selector, imp, "B@:")
+    }
+    let toggleSel = sel_registerName("toggleMirrorMode:")
+    DispatchQueue.main.async {
+        for window in NSApplication.shared.windows {
+            guard let content = window.contentView as NSObject?,
+                  content.responds(to: sel_registerName("abstractViews")),
+                  let views = content.value(forKey: "abstractViews") as? [AnyObject] else { continue }
+            for view in views {
+                guard let cls = object_getClass(view),
+                      let method = class_getInstanceMethod(cls, toggleSel) else { continue }
+                typealias ToggleFn = @convention(c) (AnyObject, Selector, Bool) -> Void
+                let fn = unsafeBitCast(method_getImplementation(method), to: ToggleFn.self)
+                fn(view, toggleSel, false)
+            }
+        }
+    }
+}
+
 private func pointerString(_ view: NSView) -> String {
     String(UInt64(UInt(bitPattern: Unmanaged.passUnretained(view).toOpaque())))
 }
@@ -791,6 +830,7 @@ private func dispatchRequest(_ raw: UnsafePointer<CChar>?) -> (id: Any, json: St
 public func nodnative_request(_ request: UnsafePointer<CChar>?) -> UnsafePointer<CChar>? {
     requestLock.lock()
     defer { requestLock.unlock() }
+    ensureMirrorModeSuppressed()
 
     let (_, json) = dispatchRequest(request)
 
