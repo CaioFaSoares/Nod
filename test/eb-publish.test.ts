@@ -411,11 +411,17 @@ describe('the install log', () => {
       fetch: channel('{"version":"latest"}'),
     });
     expect(await update.install()).toBe(false);
-    // `bun test` runs from the Bun binary, not from a bundle: there is nothing to swap.
-    expect(update.refusal()).toContain('.app');
+    // The first refusal depends on the machine running the suite: on macOS `bun test` runs from the
+    // Bun binary, not from a bundle, so there is nothing to swap; elsewhere (the release job's
+    // ubuntu runner) there is no macOS artifact for this machine at all. Either way it is logged.
+    const reason =
+      process.platform === 'darwin'
+        ? 'this run is not inside an .app'
+        : `this machine (${process.platform}/${process.arch}) has no macOS artifact`;
+    expect(update.refusal()).toContain(reason);
     const log = readFileSync(join(data, 'updates', INSTALL_LOG_NAME), 'utf8');
     expect(log).toContain('install 0.6.0c from http://127.0.0.1:1/manifest.json');
-    expect(log).toContain('refused: this run is not inside an .app');
+    expect(log).toContain(`refused: ${reason}`);
   });
 
   test('a missing channel is refused with its own reason', async () => {

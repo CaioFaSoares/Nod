@@ -152,22 +152,24 @@ notice. Write it as patch notes for the people using Nod.
    | Target | Runner | Runtime | Output |
    | --- | --- | --- | --- |
    | macOS arm64 | `macos-15` | Electrobun | `nod-<v>-macos-arm64.zip` |
-   | macOS x86_64 | `macos-15-intel` | Electrobun | `nod-<v>-macos-x86_64.zip` |
+   | macOS x86_64 (Intel) | `macos-15` | tinyjs | `nod-<v>-macos-x86_64.zip` |
    | Linux x86_64 | `ubuntu-24.04` | tinyjs | `nod-<v>-linux-x86_64.tar.gz` |
    | Linux arm64 | `ubuntu-24.04-arm` | tinyjs | `nod-<v>-linux-arm64.tar.gz` |
    | Windows | `windows-2025` | tinyjs | `nod-<v>-win.zip` |
 
-   The two macOS legs never run `tinyjs publish`. Each one restores the private resources, refuses
+   The Apple silicon leg never runs `tinyjs publish`. It restores the private resources, refuses
    a build that would wear the wrong icon (§9), runs `NOD_APP_ID=copland.nod bun run eb:build` (which
    ends by re-signing the bundle ad hoc, §10), `bun run typecheck` (the Electrobun project, now that
    the devkit exists), `bun run eb:verify`, fails the job when `codesign --verify --strict --deep`
    rejects the bundle, and finally `bun scripts/eb-publish.ts build`: the `Nod.app` zipped with
    `ditto -c -k --keepParent` under the name `tinyjs publish` uses for the same architecture, its
-   **sha256**, and one `mac.<arch>` half of the manifest (§10). The Linux and Windows legs are the
-   tinyjs publish they always were.
+   **sha256**, and the `mac.arm64` half of the manifest (§10). Intel Macs stay on tinyjs
+   (`tinyjs publish --arch x86_64`): Electrobun 2.0.4 publishes no `darwin-x64` core or Hutch (the
+   assets of its v2.0.4 release; the first 0.7.0 run failed with "release manifest is incomplete
+   for macos-x64"). The Linux and Windows legs are the tinyjs publish they always were.
 
-3. **Release**: merges the halves into the one `manifest.json` — the macOS blocks from the
-   Electrobun legs, `linux.<arch>` and `win` from the tinyjs ones — sets the top-level `url`/
+3. **Release**: merges the halves into the one `manifest.json` — `mac.arm64` from the Electrobun
+   leg, `mac.x86_64`, `linux.<arch>` and `win` from the tinyjs ones — sets the top-level `url`/
    `sha256` to the arm64 zip (all a reader from before the `mac` block looks at), refuses a
    disagreement on `version` or a missing macOS architecture, and then creates release
    `release-<version>` — the `prepare` job prints the tag, the prefix included (`docs/canonico.md`

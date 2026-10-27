@@ -514,3 +514,39 @@ tray Lock and Quit.
 4. The tinyjs `tabs.ts` geometry steps are still judged against OmniWM at check time (`blocked`,
    with numbers, when a *tool/carrier* window is tiled): 4 of 16 in this round. The main window may
    be tiled without blocking a docked view. That is the kept rule, not a failure.
+
+## 8. 0.7.0a — real mouse clicks with a tab open (2026-10-27, `execução`)
+
+Owner report: with a tab open, buttons of the Nod window did not respond. The DOM-driven smokes
+never saw it: `el.click()` skips AppKit's hit test.
+
+**Cause (`leitura` of `libNativeWrapper.dylib`, Electrobun 2.0.4).**
+`-[ContainerView updateActiveWebviewForMousePosition:]` runs on every mouse move and every
+`resizeWebview`. It walks `abstractViews`, skips only views with `isMousePassthroughEnabled`, takes the
+first whose `layer.frame` holds the point — never checking `isHidden` or whether the view still
+lives in that window — and calls `toggleMirrorMode:YES` on every later view, which sets
+`nsView.frame` to `(-10000, -10000)`. A hidden docked tab (Home, Settings, a dialog, another tab
+active) or a tab detached into its carrier therefore parked the main window's own webview
+off-screen while the mouse was over the slot, and its clicks went nowhere. A second, smaller defect:
+`createEmbedded` handed the slot's top-left rect to `new BrowserView`, whose `initWithFrame:` reads
+it bottom-left, so a new docked view sat on the wrong rows until the first `resizeWebview`.
+
+**Fix.** `electrobun/native/NodNative.swift` replaces `shouldSuppressMirrorMode` on `AbstractView`
+and `WKWebViewImpl` with one answering `true` (at the first native request, which also clears any
+mirror already on), so no webview ever leaves its real frame and AppKit's own `hitTest:` — which
+skips hidden views — routes the click. `electrobun/bun/facade/native.ts` sets
+`webviewSetPassthrough(id, hidden)` beside `webviewSetHidden`. `electrobun/bun/facade/windows.ts`
+creates a docked view at 1×1 and places it through `placeView`, as the carrier path already did.
+
+**Proof.** `test/smoke/tabs.ts` gained `/desk/click` (`test/smoke/click.swift`: one `CGEvent`
+left click, only when the topmost window at the point is this run's) and three driver steps:
+
+| Step | Without the fix (Electrobun) | With the fix (Electrobun) | tinyjs |
+| --- | --- | --- | --- |
+| real clicks on the strip switch tabs | ok | ok | ok |
+| a real click on Home reaches the page over a hidden tab | **FAILED**: "Bring to front" (page box 105,179 130x31, inside the slot) got no click; the page's last real mouse-downs were the Home mark | ok, the click inside the slot reached the page | ok |
+| a real click reaches the main window while a tab is detached | not run (stops at the failure) | ok | ok |
+
+Final runs: `bun run validate --smoke` 12/12 in 362.5 s (the two Electrobun real-click steps came
+out `blocked` there — another app was frontmost); then `bun test/smoke/tabs.ts --runtime=electrobun
+--force` alone: 19/19, 0 blocked, 24.9 s. Seed restored (299 B), no process left.

@@ -1454,7 +1454,9 @@ export function createWindows(deps: WindowsDeps = {}): WindowFacade {
       view = new BrowserView({
         windowId: host.win.id,
         url,
-        frame: local,
+        // `new BrowserView` hands `frame` to `initWithFrame:` (AppKit bottom-left); `placeView`
+        // below applies the top-left slot rect through `resizeWebview`.
+        frame: { x: 0, y: 0, width: 1, height: 1 },
         autoResize: false,
         renderer: 'native',
         // Contract invariant: every tool, link and popup view is sandboxed (no RPC, no bridge).
@@ -1482,6 +1484,7 @@ export function createWindows(deps: WindowsDeps = {}): WindowFacade {
       focused: false,
       title: options.title ?? 'Nod',
     });
+    placeView(managed, local);
     return finishManaged(managed, false);
   }
 

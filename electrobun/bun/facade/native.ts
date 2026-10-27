@@ -292,11 +292,19 @@ function loadCoreViews(): CoreViewBridge | null {
           args: [FFIType.u32, FFIType.bool],
           returns: FFIType.void,
         },
+        webviewSetPassthrough: {
+          args: [FFIType.u32, FFIType.bool],
+          returns: FFIType.void,
+        },
       });
       const resize = library.symbols.resizeWebview as unknown as CoreResizeFn;
       const setHidden = library.symbols.webviewSetHidden as unknown as (
         id: number,
         hidden: boolean,
+      ) => void;
+      const setPassthrough = library.symbols.webviewSetPassthrough as unknown as (
+        id: number,
+        passthrough: boolean,
       ) => void;
       cachedCore = {
         path,
@@ -311,6 +319,9 @@ function loadCoreViews(): CoreViewBridge | null {
         setHidden(viewId, hidden) {
           try {
             setHidden(viewId, hidden);
+            // `ContainerView` skips a view in `updateActiveWebviewForMousePosition:` only when
+            // `isMousePassthroughEnabled` is set; it does not check `nsView.isHidden`.
+            setPassthrough(viewId, hidden);
             return true;
           } catch {
             return false;
