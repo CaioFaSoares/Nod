@@ -852,12 +852,22 @@ export function createSession(deps: SessionDeps): Session {
    * from tinyjs 0.6.0c still has the item: it goes here, before the entry screen is drawn, and the
    * flag with it so no fingerprint is offered. The value is never read — deletion only — and the
    * sweep is idempotent: a person whose item is already gone still has the stale flag cleared.
+   *
+   * 0.7.0b: the keychain may refuse the deletion — an item an older tinyjs build wrote answers
+   * "Invalid attempt to change the owner of this item" (`errSecInvalidOwnerEdit`, measured on the
+   * owner's Mac) — and that refusal used to end `init`, so the app quit at every launch. A refused
+   * item now stays where it is (this build never reads it), its flag is still cleared, and the boot
+   * goes on.
    */
   async function purgeBiometricItems(): Promise<void> {
     if (deps.biometricAvailable) return;
     const people = await biometricPeople();
     for (const personId of Object.keys(people)) {
-      await deps.keychain.delete(biometricKey(personId));
+      try {
+        await deps.keychain.delete(biometricKey(personId));
+      } catch {
+        // The keychain keeps an item it will not let this binary delete; nothing here reads it.
+      }
       await markBiometric(personId, false);
     }
     // A pending rewrite belongs to a biometric item that no longer can exist; without this the

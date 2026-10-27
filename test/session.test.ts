@@ -952,6 +952,39 @@ describe('the 0.7.0 sweep of biometric items (Electrobun unlocks by password onl
     expect(s.saved.get('biometric_people')).toEqual({ [id]: false });
   });
 
+  test('a keychain that refuses the deletion does not stop the boot; the flag is still cleared', async () => {
+    const s = scene({ biometricAvailable: false });
+    const id = await firstAccount(s);
+    const { store, items: saved } = memoryStore();
+    saved.set('biometric_people', { [id]: true });
+    s.secrets.set(`nod.bio.${id}`, 'base64url-vault-key');
+    const real = s.keychain;
+    // 0.7.0b: what the owner's Mac answered for an item an older tinyjs build wrote.
+    const refusing: SecretStore = {
+      get: (key) => real.get(key),
+      set: (key, value) => real.set(key, value),
+      delete: async () => {
+        throw new Error('keychain delete: Invalid attempt to change the owner of this item.');
+      },
+    };
+    const session = createSession({
+      repo: s.repo,
+      keychain: refusing,
+      store,
+      authenticate: async () => true,
+      biometricAvailable: false,
+      iterations: ITERATIONS,
+      now: s.clock.now,
+    });
+
+    await session.purgeBiometricItems();
+
+    expect(saved.get('biometric_people')).toEqual({ [id]: false });
+    expect((await session.state()).biometric).toBe(false);
+    await session.unlock({ email: EMAIL, password: PASSWORD });
+    expect((await session.state()).unlocked).toBe(true);
+  });
+
   test('with the capability absent, the sweep is a no-op: the item and the flag stay', async () => {
     const s = scene({ biometricAvailable: true });
     const id = await firstAccount(s);
