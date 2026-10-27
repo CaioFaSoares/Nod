@@ -1043,6 +1043,8 @@ export interface ApiContract {
   'tabs.activate': [{ id: string }, ToolsState];
   /** E03: closes one tab (⌘W); an ad-hoc tab is forgotten. */
   'tabs.close': [{ id: string }, ToolsState];
+  /** 0.7.0c: closes every tab of the strip, docked or detached; none reopens at the next unlock. */
+  'tabs.closeAll': [void, ToolsState];
   /** E03: the next (1) or previous (-1) tab of the strip, wrapping (⌃Tab / ⌃⇧Tab). */
   'tabs.next': [{ step: 1 | -1 }, ToolsState];
   /** E03 (RF-51): the tab leaves the panel into its own framed window — the same page, no reload. */

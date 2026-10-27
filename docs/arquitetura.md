@@ -489,6 +489,7 @@ onHotkey(id: string): void                    // 'digit-1'..'digit-9' → open; 
 newTab(toolId): Promise<ToolsState>           // 'tabs.new' (⌘T): one more tab of the tool
 activate(id): ToolsState                      // 'tabs.activate': a docked tab takes the slot, a detached one comes forward
 closeTab(id): ToolsState                      // 'tabs.close' (⌘W)
+closeAllTabs(): ToolsState                    // 'tabs.closeAll' (0.7.0c): every tab, docked or detached; open_tools emptied
 next(step: 1 | -1): ToolsState                // 'tabs.next' (⌃Tab/⌃⇧Tab), wrapping
 detach(id) / dock(id): ToolsState             // 'tabs.detach'/'tabs.dock' (⌘⇧D) — same window, no reload (RF-51)
 setSlot(rect: SlotRect | null): true          // 'tabs.slot' (RF-49): the center panel as the page sees it

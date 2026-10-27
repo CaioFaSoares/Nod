@@ -623,8 +623,9 @@ button {
   color: var(--accent);
 }
 
-/* ⌘T: another tab of the tool the active tab shows. */
-.tab-new {
+/* ⌘T: another tab of the tool the active tab shows; 0.7.0c: the "close all" that opens the strip. */
+.tab-new,
+.tab-close-all {
   flex: none;
   align-self: center;
   width: 24px;
@@ -640,13 +641,25 @@ button {
   cursor: pointer;
 }
 
-.tab-new:hover:not(:disabled) {
+.tab-close-all {
+  margin-right: 4px;
+  margin-left: 0;
+}
+
+.tab-new:hover:not(:disabled),
+.tab-close-all:hover:not(:disabled) {
   color: var(--fg);
   background: var(--bg-hover);
   border-color: var(--line-strong);
 }
 
-.tab-new:disabled {
+.tab-close-all:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.tab-new:disabled,
+.tab-close-all:disabled {
   opacity: 0.45;
   cursor: default;
 }

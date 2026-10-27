@@ -181,6 +181,8 @@ export interface ToolWindows {
   activate(id: string): Promise<ToolsState>;
   /** `tabs.close` (⌘W): closes one tab; an ad-hoc one is forgotten (RF-66) */
   closeTab(id: string): ToolsState;
+  /** `tabs.closeAll` (0.7.0c): closes every tab of the strip, docked or detached */
+  closeAllTabs(): ToolsState;
   /** `tabs.next` (⌃Tab / ⌃⇧Tab): the next or previous tab of the strip, wrapping */
   next(step: 1 | -1): ToolsState;
   /** `tabs.detach` (RF-51): the tab leaves the panel into its own framed window, same page */
@@ -1755,6 +1757,24 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
   }
 
   /**
+   * 0.7.0c (`tabs.closeAll`, the strip's "close all"): every tab goes, docked or detached, and the
+   * list the next unlock reopens is emptied with them — unlike `closeAll`, the lock's, which keeps
+   * it. Tracked popups are not tabs and stay.
+   */
+  function closeAllTabs(): ToolsState {
+    for (const windowId of [...order]) {
+      if (dropTab(windowId) !== null) closeWindow(windowId);
+    }
+    active = null;
+    updateHotkeys();
+    syncDocked();
+    updatePoll();
+    persist();
+    publish();
+    return state();
+  }
+
+  /**
    * E03 (⌃Tab, `tabs.next`): the tab `step` away, wrapping; answers its id. It steps from the tab
    * the person used last — `focusTab` on a detached tab does not change `active`, so stepping from
    * the slot alone would land on the same detached tab for ever.
@@ -2068,6 +2088,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     close,
     reload,
     closeAll,
+    closeAllTabs,
     restore,
     reconcile,
     onNavigate,

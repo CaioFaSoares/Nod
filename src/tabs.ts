@@ -31,6 +31,8 @@ export interface TabsApi {
   newTab: (toolId: Id) => void;
   activate: (id: string) => void;
   close: (id: string) => void;
+  /** 0.7.0c: every tab of the strip, docked or detached. */
+  closeAll: () => void;
   detach: (id: string) => void;
   dock: (id: string) => void;
   next: (step: 1 | -1) => void;
@@ -55,6 +57,8 @@ export function tabsApi(deps: TabsDeps): TabsApi {
     activate: (id) => deps.run(() => call('tabs.activate', { id })),
     // RF-50 (⌘W): an ad-hoc tab is forgotten with it (RF-66).
     close: (id) => deps.run(() => call('tabs.close', { id })),
+    // 0.7.0c: the strip's "close all" — every tab goes and none comes back at the next unlock.
+    closeAll: () => deps.run(() => call('tabs.closeAll')),
     // RF-51 (⌘⇧D): out into its own framed window — the same window, the same page.
     detach: (id) => deps.run(() => call('tabs.detach', { id })),
     // RF-51 (⌘⇧D): back onto the slot — the same window, the same page.
@@ -158,6 +162,7 @@ export function mountTabs(root: HTMLElement, ctx: TabsViewCtx): TabsHandle {
   function draw(): void {
     const active = activeTab(state);
     strip.replaceChildren(
+      closeAllButton(state.tabs.length, ctx.actions),
       ...state.tabs.map((tab) => tabNode(tab, tab.id === state.active, state.tools, ctx.actions)),
       newTabButton(active, ctx.actions),
     );
@@ -302,6 +307,26 @@ function closeButton(tab: TabState, actions: TabsApi): HTMLButtonElement {
     event.stopPropagation();
     actions.close(tab.id);
   });
+  return node;
+}
+
+/**
+ * 0.7.0c: the "close all" that opens the strip, before the first tab — every tab goes, docked or
+ * detached, and the panel goes back to Home (`src/app.ts` `applyTools`). Disabled with no tab.
+ */
+function closeAllButton(count: number, actions: TabsApi): HTMLButtonElement {
+  const label = count === 0 ? 'No tabs to close' : `Close all ${count} ${count === 1 ? 'tab' : 'tabs'}`;
+  const node = el(
+    'button',
+    {
+      class: 'tab-close-all',
+      title: label,
+      aria: { label },
+      attrs: { type: 'button', ...(count === 0 ? { disabled: 'true' } : {}) },
+    },
+    '×',
+  );
+  if (count > 0) node.addEventListener('click', () => actions.closeAll());
   return node;
 }
 

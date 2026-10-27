@@ -151,6 +151,11 @@ export function openPalette(ctx: {
         items.push({ label: dock, key: matchKey(dock), run: () => tabs.dock(tab.id) });
       }
     }
+    // 0.7.0c: the strip's "close all", one row away from the keyboard too (RNF-07).
+    if (tabs.open.length > 0) {
+      const closeAll = 'Close all tabs';
+      items.push({ label: closeAll, key: matchKey(closeAll), run: () => tabs.closeAll() });
+    }
     const active = tabs.active;
     if (active !== null) {
       const toolId = active.toolId;
