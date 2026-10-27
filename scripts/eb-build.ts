@@ -47,8 +47,8 @@ function run(command: string[], label: string): void {
 const steps: Array<{ label: string; command: string[] }> = [];
 if (isMac) {
   steps.push({ label: 'native helper', command: [bun(), 'scripts/build-nod-native.ts'] });
-  steps.push({ label: 'macOS icon set', command: [bun(), 'scripts/eb-icon.ts'] });
 }
+steps.push({ label: 'icon files', command: [bun(), 'scripts/eb-icon.ts'] });
 steps.push({ label: 'page bundle', command: [bun(), 'run', 'build'] });
 steps.push({
   label: 'electrobun config',

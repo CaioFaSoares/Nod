@@ -40,7 +40,7 @@ bun run eb:build
 | Host | Passos |
 | --- | --- |
 | macOS | compila `electrobun/native/NodNative.swift` (`swiftc`), escreve `.eb-icon.iconset` (`sips`), `bun run build`, `gen-electrobun-config.ts build`, `electrobun build --env=stable`, repara/valida as usage strings (`eb-postbuild.ts`) e assina ad hoc (`eb-sign.ts`) |
-| Windows/Linux | `bun run build`, `gen-electrobun-config.ts build`, `electrobun build --env=stable`; o PNG do ícone é embutido como está e não há assinatura |
+| Windows/Linux | `eb-icon.ts` (o PNG de 256 px que o Hutch do Windows aceita), `bun run build`, `gen-electrobun-config.ts build`, `electrobun build --env=stable`; não há assinatura |
 
 O `electrobun.config.ts` é gerado e **gitignored**: a origem do gate, a URL de atualização e a lista
 de resources saem do seed e não podem vazar. A versão do app está em `app.json`; a release job recusa
@@ -113,7 +113,7 @@ Não há assinatura de código. O caminho é o **instalador** que o Hutch gera:
 - **Linux**: `linux-<arch>-Nod-Setup.tar.gz` — setup auto-extraível + README. O `.desktop` se
   registra na primeira execução.
 
-Requisitos: Windows 10/11 com WebView2; Linux glibc 2.35+ com `libwebkit2gtk-4.1-0`. Para a bandeja,
+Requisitos: Windows 10/11 com WebView2; Linux glibc 2.35+ com `libwebkit2gtk-4.1-0`. O build Linux precisa de ImageMagick (`convert`) ou ffmpeg para gerar o ícone de 256 px; o Windows usa `System.Drawing`. Para a bandeja,
 um AppIndicator (`libayatana-appindicator3-1`): sem ele o app roda, e fechar a janela principal
 **encerra** o Nod (`docs/canonico.md` §7).
 
@@ -247,9 +247,9 @@ sem editar um arquivo versionado:
 | nenhum | `assets/icon.png`, como antes |
 
 `scripts/app-config.ts` resolve nesta ordem (`NOD_ICON` vence, depois `resources/icon.png`, depois
-`assets/icon.png`), recusa qualquer coisa menor que 1024×1024, e escreve o vencedor no
-`electrobun.config.ts`: macOS recebe o `.iconset` gerado por `scripts/eb-icon.ts`; Windows e Linux
-recebem o PNG.
+`assets/icon.png`) e recusa qualquer coisa menor que 1024×1024. `scripts/eb-icon.ts` deriva
+`.eb-icon-256.png` (Windows/Linux) e, no macOS, o `.iconset`; o `electrobun.config.ts` aponta para
+eles.
 
 ## 10. Verificação manual antes de publicar
 

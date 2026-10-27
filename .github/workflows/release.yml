@@ -99,7 +99,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+          sudo apt-get install -y libwebkit2gtk-4.1-0 libayatana-appindicator3-1 imagemagick
 
       - run: bun install --frozen-lockfile
 

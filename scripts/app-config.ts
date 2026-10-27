@@ -16,6 +16,9 @@ export const PRIVATE_ICON = 'resources/icon.png';
 /** Generated copy of a `NOD_ICON` PNG, read from inside the project by every OS build. */
 export const STAGED_ICON = '.nod-icon.png';
 
+/** 256×256 PNG Windows needs (Hutch's `icoFromPng` refuses a PNG larger than 256). */
+export const WINDOWS_ICON = '.eb-icon-256.png';
+
 /** Smallest icon the pipeline is built around: the macOS `.icns` and the Windows/Linux PNG top out at 1024. */
 export const MIN_ICON_SIZE = 1024;
 

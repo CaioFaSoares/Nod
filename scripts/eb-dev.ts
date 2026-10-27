@@ -49,8 +49,8 @@ function run(command: string[], label: string): void {
 
 if (isMac) {
   run([bun(), 'scripts/build-nod-native.ts'], 'native helper');
-  run([bun(), 'scripts/eb-icon.ts'], 'macOS icon set');
 }
+run([bun(), 'scripts/eb-icon.ts'], 'icon files');
 run([bun(), 'scripts/gen-electrobun-config.ts', 'dev'], 'electrobun config');
 
 const vite = Bun.spawn([bun(), 'run', 'dev'], {
