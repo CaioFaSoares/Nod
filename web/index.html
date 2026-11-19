@@ -1,0 +1,16 @@
+<!doctype html>
+<!-- E04 M1 / RF-73: the guild's portal, served by the host behind WEB_UI on the same port the app
+     syncs through. The page is CSP-strict (script-src 'self'), so this file carries no script and
+     no style of its own — `/main.ts` and `/style.css` are the two files the host answers. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nod</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

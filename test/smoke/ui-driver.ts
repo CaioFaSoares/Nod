@@ -763,25 +763,26 @@ async function checkToolCategories(): Promise<string> {
     );
   }
 
-  // Home: the same categories, one section each, its tool's card under it.
+  // Home: the same categories, one library group each (RF-79's `.lb-group`), its tool's card in it.
+  // The title lives inside the group's collapse button, so the group is read whole, not `:scope >`.
   await openHome();
-  const sections = await waitForValue('both category sections in Home', () => {
-    const found = all<HTMLElement>('.home-section');
-    const names = found.map((section) => text(section.querySelector(':scope > .home-section-title')));
+  const sections = await waitForValue('both category groups in Home', () => {
+    const found = all<HTMLElement>('.home .lb-group');
+    const names = found.map((group) => text(group.querySelector('.lb-group-title')));
     return names.includes(CATEGORY_A) && names.includes(CATEGORY_B) ? found : null;
   });
   for (const [category, title] of [
     [CATEGORY_A, CATEGORIZED_A_TITLE],
     [CATEGORY_B, CATEGORIZED_B_TITLE],
   ] as const) {
-    const section = sections.find(
-      (node) => text(node.querySelector(':scope > .home-section-title')) === category,
+    const group = sections.find(
+      (node) => text(node.querySelector('.lb-group-title')) === category,
     );
-    expect(section !== undefined, `Home has no section for ${category}`);
-    const cards = all<HTMLElement>('.tool-card', section);
+    expect(group !== undefined, `Home has no group for ${category}`);
+    const cards = all<HTMLElement>('.tool-card', group);
     expect(
       cards.some((card) => text(card.querySelector('.tool-title')) === title),
-      `Home's ${category} section does not hold ${title}`,
+      `Home's ${category} group does not hold ${title}`,
     );
   }
   return `Tools and Home group ${CATEGORY_A} and ${CATEGORY_B} with their tools`;
@@ -1678,6 +1679,12 @@ async function updateRequiredBanner(): Promise<string> {
 }
 
 async function adminFinal(): Promise<void> {
+  // RF-72: the stage before this one left this machine in Nod Sober with a fixed dark theme, and
+  // the locked entry screen this launch opened on was dressed in it before the first render.
+  await waitForValue('the locked entry screen to wear the stored skin', () =>
+    document.documentElement.dataset.skin === 'sober' && document.documentElement.dataset.theme === 'dark'
+      ? true
+      : null);
   await unlock(CONFIG.adminEmail);
   await synced();
   // O2/#28: one org tool this machine has never had locally, so the sidebar can show the guild's
@@ -1718,6 +1725,124 @@ async function sidebarMenu(node: HTMLElement, label: string): Promise<void> {
     all<HTMLButtonElement>('.menu-item').find((button) => text(button.querySelector('.menu-label')) === label) ?? null,
   );
   action.click();
+}
+
+/**
+ * RF-79's real-surface half: the library on Home — the search filters what is drawn, a category
+ * collapses and stays collapsed (the machine's own choice), and the four views answer the same
+ * catalog. The cards keep the app's own acts (open, close, favorite), so what this stage proves is
+ * the library's own half: the toolbar, the groups, the views.
+ */
+async function checkLibrary(): Promise<string> {
+  await openHome();
+  const search = await waitForValue('the library search', () =>
+    document.querySelector<HTMLInputElement>('.lb-search-input'));
+  const groups = (): HTMLElement[] => all<HTMLElement>('.home .lb-group');
+
+  // The search reads the title, the category, the tags and the account (the model's one rule).
+  const before = groups().length;
+  expect(before > 0, 'the library draws no group at all');
+  search.value = PERSONAL_TITLE;
+  search.dispatchEvent(new Event('input', { bubbles: true }));
+  await waitForValue('the search to filter the groups', () => {
+    const drawn = all<HTMLElement>('.home .lb-group-cards .tool-title').map(text);
+    return drawn.length > 0 && drawn.every((name) => name.includes(PERSONAL_TITLE)) ? true : null;
+  });
+  search.value = 'zzz-nothing-matches-this';
+  search.dispatchEvent(new Event('input', { bubbles: true }));
+  await waitForValue('the empty answer', () =>
+    document.querySelector('.home .lb-empty') !== null ? true : null);
+  search.value = '';
+  search.dispatchEvent(new Event('input', { bubbles: true }));
+  await waitForValue('the groups back', () => (groups().length === before ? true : null));
+
+  // A category collapses through its own head and stays collapsed — the machine's own state.
+  const first = groups()[0];
+  const key = first.querySelector<HTMLElement>('.lb-group-title')?.textContent ?? '';
+  expect(key !== '', 'the first group has no name');
+  first.querySelector<HTMLButtonElement>('.lb-group-head')?.click();
+  await waitForValue('the group collapsed', () => first.dataset.collapsed === 'true' ? true : null);
+
+  // The four views answer the same catalog: list rows, org nodes (the roster), isometric stacks.
+  const pick = async (label: string, area: () => HTMLElement | null): Promise<void> => {
+    const view = await waitForValue(`the ${label} view button`, () =>
+      all<HTMLButtonElement>('.content-header .lb-view').find((node) => text(node) === label) ?? null);
+    view.click();
+    await waitForValue(`the ${label} view drawn`, () => (area() !== null ? true : null));
+  };
+  await pick('List', () => document.querySelector('.home .lb-list-row'));
+  await pick('Org chart', () => document.querySelector('.home .lb-org-node'));
+  await pick('Blocks', () => document.querySelector('.home .lb-stack'));
+  await pick('Cards', () => document.querySelector('.home .lb-group'));
+  // And the collapse survived the round trip.
+  await openHome();
+  await waitForValue('the group still collapsed', () =>
+    (groups()[0]?.dataset.collapsed ?? '') === 'true' ? true : null);
+
+  return (
+    `the search filtered (down to "${PERSONAL_TITLE}", then the empty answer) and came back; ` +
+    `"${key}" collapsed and stayed collapsed through the four views`
+  );
+}
+
+/**
+ * RF-72's real-surface half: the Style card on Settings → Account → Appearance drives the window
+ * itself — the skin, a fixed theme, a custom accent that repaints the solid button, and the reset
+ * that returns the skin's own colour. The machine is left in Sober/dark on purpose: the next launch
+ * of this same app id must open its LOCKED entry screen already dressed in it (the preference is
+ * applied before the first render), which `admin-final` reads before it unlocks.
+ */
+async function checkAppearance(): Promise<string> {
+  const styleBox = async (): Promise<HTMLDetailsElement> => {
+    await openSettingsTab('Account');
+    return await openDisclosure('appearance');
+  };
+
+  const pick = async (name: string, value: string): Promise<void> => {
+    const box = await styleBox();
+    const select = await waitForValue(`the ${name} select`, () =>
+      box.querySelector<HTMLSelectElement>(`select[name="${name}"]`));
+    select.value = value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  await pick('skin', 'sober');
+  await waitForValue('the window to wear Nod Sober', () =>
+    document.documentElement.dataset.skin === 'sober' ? true : null);
+  await pick('theme', 'dark');
+  await waitForValue('the window to wear the dark theme', () =>
+    document.documentElement.dataset.theme === 'dark' ? true : null);
+
+  // A custom accent on the theme in force: Sober's accent token is its solid button's own.
+  let box = await styleBox();
+  const accent = await waitForValue('the accent picker', () =>
+    box.querySelector<HTMLInputElement>('input[type="color"][name="accent"]'));
+  accent.value = '#13579b';
+  accent.dispatchEvent(new Event('change', { bubbles: true }));
+  await waitForValue('the custom accent token', () =>
+    document.documentElement.style.getPropertyValue('--solid-bg').trim().toLowerCase() === '#13579b'
+      ? true
+      : null);
+  const solid = document.querySelector<HTMLElement>('.button-primary');
+  expect(solid !== null, 'no primary button to read the repaint from');
+  const painted = getComputedStyle(solid as HTMLElement).backgroundColor;
+  expect(
+    painted === 'rgb(19, 87, 155)',
+    `the solid button paints ${painted}, not the custom accent rgb(19, 87, 155)`,
+  );
+
+  // The reset returns the skin's own colour — the inline token clears, the cascade answers again.
+  box = await styleBox();
+  const reset = await waitForControl('Reset colours', box);
+  expect(!reset.disabled, 'the reset is disabled with a custom colour in force');
+  reset.click();
+  await waitForValue('the accent token cleared', () =>
+    document.documentElement.style.getPropertyValue('--solid-bg').trim() === '' ? true : null);
+
+  return (
+    'the window wears Nod Sober and a fixed dark theme; a custom accent repainted the solid button ' +
+    '(rgb(19, 87, 155)) and the reset returned the skin\'s own colour'
+  );
 }
 
 async function checkCustomSidebar(): Promise<string> {
@@ -1804,6 +1929,8 @@ const PHASES: Record<string, { setup?: () => Promise<void>; checks: Steps }> = {
       ['RF-65 second credential and the default chip', checkSecondCredential],
       ['RF-62 tools grouped by category', checkToolCategories],
       ['Atrius personal sidebar', checkCustomSidebar],
+      ['RF-79 the library on the real window', checkLibrary],
+      ['RF-72 the style toggle on the real window', checkAppearance],
     ],
   },
   'person-inbox': {

@@ -422,7 +422,7 @@ function harness(): Harness {
       }
     },
     setRoster: (people: unknown[]): void => {
-      repo.saveHostSnapshot({
+      repo.saveHostSnapshot((repo.hostRecords()[0] ?? null)?.address ?? '', {
         snapshot: JSON.stringify({ api: 1, people }),
         version: 'v1',
         issuedAt: '2026-10-17T10:00:00.000Z',
@@ -1110,7 +1110,7 @@ describe('the pin table (K2)', () => {
 
   test('a snapshot of an older host without `people` pins nothing and lists nothing', async () => {
     const h = harness();
-    h.repo.saveHostSnapshot({
+    h.repo.saveHostSnapshot((h.repo.hostRecords()[0] ?? null)?.address ?? '', {
       snapshot: JSON.stringify({ api: 1, roles: [], orgTools: [] }),
       version: 'v1',
       issuedAt: '2026-10-17T10:00:00.000Z',

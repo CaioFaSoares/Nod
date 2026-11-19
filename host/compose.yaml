@@ -1,10 +1,11 @@
 # The host's one service (SP07 §2): one compose, one replica, one volume. TLS ends at the proxy, so
-# the container serves plain HTTP on 8080.
+# the container serves plain HTTP on NOD_PORT (8080 by default).
 #
 # `NOD_PUBLIC_URL` is required and has no default: it is the address the Nod pins, and the host
-# refuses to start without it (SP07 §2). Local smoke from the repo root:
+# refuses to start without it (SP07 §2). `NOD_PORT` is the port the process binds — the same value
+# is published on the host — and `NOD_BIND` picks the interface. Local smoke from the repo root:
 #
-#   NOD_PUBLIC_URL=https://nod.example docker compose -f host/compose.yaml up -d --build
+#   NOD_PUBLIC_URL=https://nod.example NOD_PORT=8443 docker compose -f host/compose.yaml up -d --build
 
 services:
   host:
@@ -18,17 +19,24 @@ services:
       # SP07 §4: a `VACUUM INTO` pass every N hours into `/data/backups`, keeping the newest N.
       NOD_BACKUP_EVERY_HOURS: ${NOD_BACKUP_EVERY_HOURS:-24}
       NOD_BACKUP_KEEP: ${NOD_BACKUP_KEEP:-14}
+      # The port the process binds (`host/config.ts` reads `PORT`); the healthcheck below reads it
+      # back from the container's own environment, so it follows whichever value a deploy gives.
+      PORT: ${NOD_PORT:-8080}
+      # E04/RF-73: the web portal this deployment serves on that same port. The code stays API-only
+      # until the flag is set; the compose turns it on, and a deployment that wants the host
+      # API-only sets `WEB_UI=false`.
+      WEB_UI: ${WEB_UI:-true}
     ports:
-      # The deploy picks the interface: loopback by default, `NOD_BIND=0.0.0.0` where the proxy
-      # lives outside the compose network. No address is written here.
-      - "${NOD_BIND:-127.0.0.1}:8080:8080"
+      # The deploy picks the interface and the port: loopback and 8080 by default, `NOD_BIND` and
+      # `NOD_PORT` where the proxy expects another. No address is written here.
+      - "${NOD_BIND:-127.0.0.1}:${NOD_PORT:-8080}:${NOD_PORT:-8080}"
     volumes:
       # One volume holds `host.db`, both key files and `backups/` (SP01 §1, SP07 §4). A restore into a
       # fresh volume copies `host.db` plus the backup's key files: the same people sign in and a
       # pinned Nod still accepts the host.
       - nod-data:/data
     healthcheck:
-      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1))"]
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT ?? '8080') + '/health').then(r => process.exit(r.ok ? 0 : 1))"]
       interval: 30s
     restart: unless-stopped
 

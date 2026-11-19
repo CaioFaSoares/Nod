@@ -1,19 +1,110 @@
+/*
+ * RF-79: the library's views — the same stylesheet the web portal imports, so a group, a card, a
+ * node and an isometric stack read the same way on both surfaces. The `--lb-*` variables below
+ * dress them in each skin's own tokens.
+ */
+@import '../shared/library.css';
+
 /* Nod — the single stylesheet of the main window (docs/arquitetura.md §5).
-   Skin: the Atrius design system (tokens and rules mirrored from the Atrius project:
-   tokens.css, README "Diretrizes", components.md). Black floor, white ink, ANSI states, 1px strokes,
-   square corners, monospace everywhere, sizes counted in 4px steps and 24px cells.
+   Skins: the window wears one of two design systems, chosen in Settings → Account → Style and set
+   on <html> by src/appearance.ts — data-skin with data-theme picks one of the four token blocks
+   below, and a custom colour of the style toggle overrides a block's token inline.
+   · Atrius (2026-11-19): ink scale, `brand`, `state-*`, 4px spaces, 24px cells, square corners,
+     1px rules, hard shadows on floating layers only, monospace everywhere, state as glyph + word.
+   · Nod Sober (2026-11-19, the quiet skin): warm zinc surfaces, one green accent, 1px rings, soft
+     radii, floating shadows only, Rubik for the interface and the system mono for keys and ids.
+   The structure is shared: every rule below the blocks reads the same internal tokens, so both
+   skins dress the same DOM (the sober reference's per-component classes were folded into them).
    Consumed by index.html, src/app.ts, src/palette.ts, src/settings.ts and src/tabs.ts.
    Classes required by src/ui.ts: .button .button-primary .button-danger .button-ghost .field
    .field-label .field-hint .input .message .message-error .message-ok .message-info.
    Generic classes any view may use: .tabs .tab .tab-active .table .muted .chip .row .stack
    .card .grid .empty. */
 
+/* Rubik, Sober's interface face, ships in the bundle (`src/fonts/`, SIL OFL 1.1 —
+   `OFL-Rubik.txt` beside the files): the app works offline, so no network font is ever fetched.
+   Four static instances (400/500/600/700) of the two Latin subsets, the weights the interface uses;
+   Vite copies the files beside the built stylesheet and rewrites these URLs. */
+
+@font-face {
+  font-family: 'Rubik';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/rubik-400-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Rubik';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/rubik-400-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Rubik';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/rubik-500-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Rubik';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/rubik-500-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Rubik';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./fonts/rubik-600-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Rubik';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./fonts/rubik-600-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Rubik';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/rubik-700-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Rubik';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/rubik-700-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 /* ------------------------------------------------------------------ tokens */
 
-/* Atrius colour tokens. `noite` is the default; `papel` keeps the same names with values darkened to
-   pass contrast on white, for a light context (set data-theme="papel" on <html>). */
+/* Atrius, noite: the default look before any script runs (`:root`), and the palette the window
+   wears whenever data-skin='atrius' resolves to dark. Derived tokens read the scale through
+   `var(...)`, so the style toggle's inline overrides move everything that follows them. */
 :root,
-[data-theme='noite'] {
+[data-skin='atrius'][data-theme='dark'] {
   --ink-100: #000000; /* floor: the window */
   --ink-200: #0c0c0c; /* surface: panels, rows, cards */
   --ink-300: #161616; /* sunken: selected row, field, hover */
@@ -30,15 +121,37 @@
   --state-run: #55ffff; /* running, open */
   --state-ok: #55ff55; /* verified, connected */
   --on-state: #000000;
-  --selection: var(--ink-1000);
+  --state-error: var(--brand); /* Atrius fails in its brand until the style toggle splits them */
+  --selection: var(--ink-1000); /* the rail item's pressed outline */
+  --selection-bg: var(--ink-1000); /* inverted-ink text selection */
+  --selection-ink: var(--ink-100);
   --focus-ring: var(--ink-1000);
+  --tick-bg: var(--ink-1000); /* the rail's left-edge tick: open tool, current item */
+  --hover-bg: var(--ink-300);
+  --field-bg: var(--ink-300);
+  --rail-bg: var(--ink-100);
+  --strip-bg: var(--ink-100);
+  --toolbar-bg: var(--ink-200);
+  --solid-bg: var(--ink-1000); /* the one solid: primary button, inverted hovers */
+  --solid-ink: var(--ink-100);
+  --solid-hover-bg: var(--ink-800);
+  --tab-active-bg: var(--ink-1000); /* the settings tab bar's inverted active tab */
+  --tab-active-ink: var(--ink-100);
+  --menu-active-bg: var(--ink-1000); /* the inverted active line of menus and the palette */
+  --menu-active-ink: var(--ink-100);
+  --layer-border: var(--ink-1000); /* the strong rule of floating layers */
+  --band-bg: var(--ink-200); /* an open folder's band on the rail */
+  --native-accent: var(--ink-1000); /* accent-color of native checkboxes and radios */
+  --mark-bg: transparent; /* the guild's or person's mark: a bordered box in Atrius */
+  --mark-ink: currentcolor;
   --atmos-dot: #2a2a2a;
   --overlay: rgb(0 0 0 / 82%);
   --shadow-float: 4px 4px 0 0 #333333;
   color-scheme: dark;
 }
 
-[data-theme='papel'] {
+/* Atrius, papel: the same names darkened to pass contrast on white (the light palette). */
+[data-skin='atrius'][data-theme='light'] {
   --ink-100: #ffffff;
   --ink-200: #f7f7f7;
   --ink-300: #efefef;
@@ -55,12 +168,211 @@
   --state-run: #00727a;
   --state-ok: #1e7a1e;
   --on-state: #ffffff;
+  --state-error: var(--brand);
+  --selection: var(--ink-1000);
+  --selection-bg: var(--ink-1000);
+  --selection-ink: var(--ink-100);
+  --focus-ring: var(--ink-1000);
+  --tick-bg: var(--ink-1000);
+  --hover-bg: var(--ink-300);
+  --field-bg: var(--ink-300);
+  --rail-bg: var(--ink-100);
+  --strip-bg: var(--ink-100);
+  --toolbar-bg: var(--ink-200);
+  --solid-bg: var(--ink-1000);
+  --solid-ink: var(--ink-100);
+  --solid-hover-bg: var(--ink-800);
+  --tab-active-bg: var(--ink-1000);
+  --tab-active-ink: var(--ink-100);
+  --menu-active-bg: var(--ink-1000);
+  --menu-active-ink: var(--ink-100);
+  --layer-border: var(--ink-1000);
+  --band-bg: var(--ink-200);
+  --native-accent: var(--ink-1000);
+  --mark-bg: transparent;
+  --mark-ink: currentcolor;
   --atmos-dot: #d9d9d9;
   --overlay: rgb(255 255 255 / 86%);
   --shadow-float: 4px 4px 0 0 #000000;
   color-scheme: light;
 }
 
+/* Nod Sober, Light: warm zinc surfaces, one green accent (`primary`), rings instead of shadows on
+   the floor, soft radii. The scale answers the same internal names, so every shared rule below
+   dresses itself; derived tokens read `var(--solid-bg)` so a custom accent moves the solid
+   button, the focus ring, the open tool's tick and success with it (success is the accent by
+   Sober's own rule). */
+[data-skin='sober'][data-theme='light'] {
+  --ink-100: #f8f8f6; /* bg: the window floor */
+  --ink-200: #ffffff; /* bg-card: panels, list rows, cards, dialogs, menus */
+  --ink-300: #ebebe7; /* bg-elevated: hover of a row, a rail item, a ghost button */
+  --ink-400: #e2e2dd; /* border: the 1px ring of every panel */
+  --ink-500: oklch(55.2% 0.016 285.938); /* text-dimmed: disabled and placeholders, with a word */
+  --ink-600: #d4d4ce; /* border-accented: control rings */
+  --ink-700: oklch(44.2% 0.017 285.786); /* text-muted: metadata, labels, icons at rest */
+  --ink-800: oklch(37% 0.013 285.805); /* text-toned: secondary body */
+  --ink-900: oklch(27.4% 0.006 286.033); /* text */
+  --ink-1000: oklch(14.1% 0.005 285.823); /* text-highlighted: titles, names */
+  --brand: oklch(50.5% 0.213 27.518); /* Sober's error: failures, and the acts that remove */
+  --on-brand: #ffffff;
+  --state-wait: oklch(55.5% 0.163 48.998); /* warning: waits for you */
+  --state-run: oklch(54.6% 0.245 262.881); /* info: loading, queued */
+  --state-ok: var(--solid-bg); /* success: the accent's own value, by Sober's rule */
+  --on-state: #ffffff;
+  --state-error: var(--brand);
+  --selection: transparent; /* Sober marks the current item with a surface and a ring, not ink */
+  --selection-bg: #e4e4e0; /* bg-accented */
+  --selection-ink: var(--ink-1000);
+  --focus-ring: var(--solid-bg); /* focus is the accent (2px, visible on its own) */
+  --tick-bg: var(--solid-bg); /* the current rail item's bar, the open tool's tick */
+  --hover-bg: #ebebe7;
+  --field-bg: var(--ink-200);
+  --rail-bg: #f1f1ee;
+  --strip-bg: #f1f1ee;
+  --toolbar-bg: var(--ink-200);
+  --solid-bg: #007f45; /* primary: the one solid, rare by rule */
+  --solid-ink: #ffffff;
+  --solid-hover-bg: color-mix(in oklab, var(--solid-bg) 90%, #111112);
+  --tab-active-bg: var(--ink-200); /* the active tab is a card with a ring, never inverted */
+  --tab-active-ink: var(--ink-1000);
+  --menu-active-bg: var(--hover-bg); /* the selected line of menus and the palette is elevated */
+  --menu-active-ink: var(--ink-1000);
+  --layer-border: var(--ink-400);
+  --band-bg: #e4e4e0; /* bg-accented: an open folder's band */
+  --native-accent: var(--solid-bg);
+  --mark-bg: #00c16a; /* the mark's block: Sober's brand, never text on a card */
+  --mark-ink: #052e16;
+  --atmos-dot: #d4d4ce;
+  --overlay: rgba(17, 17, 18, 0.32);
+  --shadow-float: 0 8px 24px rgba(17, 17, 18, 0.12), 0 1px 2px rgba(17, 17, 18, 0.08);
+  color-scheme: light;
+}
+
+/* Nod Sober, Dark: the same names on the dark floor. */
+[data-skin='sober'][data-theme='dark'] {
+  --ink-100: #111112;
+  --ink-200: #18181a;
+  --ink-300: #232327;
+  --ink-400: #2a2a2e;
+  --ink-500: oklch(55.2% 0.016 285.938);
+  --ink-600: #3a3a3f;
+  --ink-700: oklch(70.5% 0.015 286.067);
+  --ink-800: oklch(87.1% 0.006 286.286);
+  --ink-900: oklch(92% 0.004 286.32);
+  --ink-1000: #ffffff;
+  --brand: oklch(70.4% 0.191 22.216);
+  --on-brand: oklch(21% 0.006 285.885);
+  --state-wait: oklch(82.8% 0.189 84.429);
+  --state-run: oklch(70.7% 0.165 254.624);
+  --state-ok: var(--solid-bg);
+  --on-state: oklch(21% 0.006 285.885);
+  --state-error: var(--brand);
+  --selection: transparent;
+  --selection-bg: #2c2c30;
+  --selection-ink: var(--ink-1000);
+  --focus-ring: var(--solid-bg);
+  --tick-bg: var(--solid-bg);
+  --hover-bg: #232327;
+  --field-bg: var(--ink-200);
+  --rail-bg: #1c1c1f;
+  --strip-bg: #1c1c1f;
+  --toolbar-bg: var(--ink-200);
+  --solid-bg: #00dc82;
+  --solid-ink: oklch(21% 0.006 285.885);
+  --solid-hover-bg: color-mix(in oklab, var(--solid-bg) 90%, #111112);
+  --tab-active-bg: var(--ink-200);
+  --tab-active-ink: var(--ink-1000);
+  --menu-active-bg: var(--hover-bg);
+  --menu-active-ink: var(--ink-1000);
+  --layer-border: var(--ink-400);
+  --band-bg: #2c2c30;
+  --native-accent: var(--solid-bg);
+  --mark-bg: #00c16a;
+  --mark-ink: #052e16;
+  --atmos-dot: #3a3a3f;
+  --overlay: rgba(0, 0, 0, 0.6);
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
+
+/* The faces and the geometry of each skin. Type: Atrius is monospace everywhere; Sober sets the
+   interface in Rubik and keeps the system mono for keys, ids, fingerprints and shortcuts. Radii:
+   Atrius is square; Sober rounds controls (radius-md), glyphs (radius-sm) and panels (radius-lg).
+   Geometry: Atrius counts in 24px cells; Sober takes nul_ui's control heights and Nod's rail
+   geometry (56px rail, 40px items, 24px glyphs, 44px rows, 160/176/188px fixed columns). */
+:root,
+[data-skin='atrius'],
+[data-skin='atrius'][data-theme='light'],
+[data-skin='atrius'][data-theme='dark'] {
+  --font-ui: 'Obel Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-mono: 'Obel Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --text-title: 700 14px/20px var(--font-ui);
+  --text-node-title: 700 13px/18px var(--font-ui);
+  --text-body: 400 13px/20px var(--font-ui);
+  --text-label: 500 12px/16px var(--font-ui);
+  --text-state: 700 11.5px/16px var(--font-ui);
+  --text-meta: 400 11px/16px var(--font-ui);
+  --text-display-m: 800 17px/1.25 var(--font-ui);
+  --text-overline: 400 11px/16px var(--font-ui);
+  --overline-spacing: 0.12em;
+  --radius-control: 0;
+  --radius-glyph: 0;
+  --radius-panel: 0;
+  --sidebar-width: 48px;
+  --rail-item: 48px;
+  --rail-glyph: 24px;
+  --rail-gap: 0px;
+  --rail-pad: 0px;
+  --control: 28px;
+  --control-tight: 24px;
+  --row-height: 40px;
+  --header-height: 32px;
+  --strip-height: var(--cell);
+  --act-slot: var(--cell);
+  --col-state: 168px; /* 7 cells */
+  --col-login: 168px; /* 7 cells */
+  --col-acts: calc(var(--cell) * 6 + var(--space-1) * 5); /* six icon slots */
+  --col-acts3: calc(var(--act-slot) * 3 + var(--space-1) * 2);
+  --dur-4f: 67ms; /* hover, press, state change */
+  --dur-8f: 133ms; /* opening a layer, toast */
+}
+
+[data-skin='sober'] {
+  --font-ui: 'Rubik', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --text-title: 600 20px/28px var(--font-ui);
+  --text-node-title: 600 16px/24px var(--font-ui);
+  --text-body: 400 14px/20px var(--font-ui);
+  --text-label: 500 14px/20px var(--font-ui);
+  --text-state: 500 12px/16px var(--font-ui);
+  --text-meta: 400 12px/16px var(--font-ui);
+  --text-display-m: 600 20px/28px var(--font-ui);
+  --text-overline: 500 11px/16px var(--font-ui);
+  --overline-spacing: 0.05em;
+  --radius-control: 6px;
+  --radius-glyph: 4px;
+  --radius-panel: 8px;
+  --sidebar-width: 56px;
+  --rail-item: 40px;
+  --rail-glyph: 24px;
+  --rail-gap: 4px;
+  --rail-pad: 8px 0;
+  --control: 32px;
+  --control-tight: 28px;
+  --row-height: 44px;
+  --header-height: 48px;
+  --strip-height: 28px;
+  --act-slot: 28px;
+  --col-state: 160px;
+  --col-login: 176px;
+  --col-acts: 188px; /* six 28px slots, 4px apart */
+  --col-acts3: calc(var(--act-slot) * 3 + var(--space-1) * 2);
+  --dur-4f: 120ms; /* quiet colour fades */
+  --dur-8f: 120ms;
+}
+
+/* Skin-independent constants: the 4px step, Atrius' cell (Sober's tool glyph is the 24px), stroke
+   weights, layers. */
 :root {
   --space-1: 4px;
   --space-2: 8px;
@@ -71,29 +383,10 @@
   --cell: 24px; /* grid-cell: every bar is one cell tall */
   --stroke-hair: 1px;
   --stroke-strong: 2px;
-  --dur-4f: 67ms; /* hover, press, state change */
-  --dur-8f: 133ms; /* opening a layer, toast */
   --z-chrome: 10;
   --z-popover: 20;
   --z-modal: 30;
   --z-toast: 40;
-  --font-mono: 'Obel Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  --text-title: 700 14px/20px var(--font-mono);
-  --text-node-title: 700 13px/18px var(--font-mono);
-  --text-body: 400 13px/20px var(--font-mono);
-  --text-label: 500 12px/16px var(--font-mono);
-  --text-state: 700 11.5px/16px var(--font-mono);
-  --text-meta: 400 11px/16px var(--font-mono);
-  --text-display-m: 800 17px/1.25 var(--font-mono);
-
-  /* Nod's own geometry, in Atrius cells. The rail is `shell-rail` (48px, two cells): every item of
-     both rails — the entry screen's tiles, the sidebar's mark, tools and actions — is one 2×2 cell
-     square, its glyph one cell. */
-  --sidebar-width: 48px;
-  --rail-item: 48px;
-  --rail-glyph: 24px;
-  --control: 28px; /* buttons and fields in a form */
-  --control-tight: 24px; /* buttons in a bar or a row: one cell */
   --page-pad: var(--space-5);
 }
 
@@ -135,8 +428,8 @@ body {
 }
 
 ::selection {
-  color: var(--ink-100);
-  background: var(--ink-1000);
+  color: var(--selection-ink);
+  background: var(--selection-bg);
 }
 
 h1,
@@ -209,7 +502,7 @@ select {
   white-space: nowrap;
   background: transparent;
   border: var(--stroke-hair) solid var(--ink-600);
-  border-radius: 0;
+  border-radius: var(--radius-control);
   cursor: pointer;
   transition:
     background-color var(--dur-4f) linear,
@@ -219,7 +512,7 @@ select {
 
 .button:hover:not(:disabled) {
   color: var(--ink-1000);
-  background: var(--ink-300);
+  background: var(--hover-bg);
   border-color: var(--ink-1000);
 }
 
@@ -235,21 +528,21 @@ select {
 }
 
 .button-primary {
-  color: var(--ink-100);
+  color: var(--solid-ink);
   font-weight: 700;
-  background: var(--ink-1000);
-  border-color: var(--ink-1000);
+  background: var(--solid-bg);
+  border-color: var(--solid-bg);
 }
 
 .button-primary:hover:not(:disabled) {
-  color: var(--ink-100);
-  background: var(--ink-800);
-  border-color: var(--ink-800);
+  color: var(--solid-ink);
+  background: var(--solid-hover-bg);
+  border-color: var(--solid-hover-bg);
 }
 
 .button-danger {
-  color: var(--brand);
-  border-color: var(--brand);
+  color: var(--state-error);
+  border-color: var(--state-error);
 }
 
 .button-danger::before {
@@ -258,8 +551,8 @@ select {
 
 .button-danger:hover:not(:disabled) {
   color: var(--on-brand);
-  background: var(--brand);
-  border-color: var(--brand);
+  background: var(--state-error);
+  border-color: var(--state-error);
 }
 
 .button-ghost {
@@ -280,7 +573,7 @@ select {
 
 .button-ghost:hover:not(:disabled) {
   color: var(--ink-1000);
-  background: var(--ink-300);
+  background: var(--hover-bg);
   border-color: transparent;
 }
 
@@ -298,8 +591,8 @@ select {
 
 .field-label {
   color: var(--ink-700);
-  font: var(--text-meta);
-  letter-spacing: 0.12em;
+  font: var(--text-overline);
+  letter-spacing: var(--overline-spacing);
   text-transform: uppercase;
 }
 
@@ -314,9 +607,9 @@ select {
   padding: 0 var(--space-3);
   color: var(--ink-900);
   font: var(--text-body);
-  background: var(--ink-300);
+  background: var(--field-bg);
   border: var(--stroke-hair) solid var(--ink-600);
-  border-radius: 0;
+  border-radius: var(--radius-control);
   outline: none;
   transition: border-color var(--dur-4f) linear;
 }
@@ -346,8 +639,8 @@ select.input {
 
 .input:focus-visible,
 .input:focus {
-  border-color: var(--ink-1000);
-  box-shadow: 0 0 0 1px var(--ink-1000);
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 1px var(--focus-ring);
 }
 
 .input::placeholder {
@@ -360,7 +653,7 @@ select.input {
 }
 
 .input[aria-invalid='true'] {
-  border-color: var(--brand);
+  border-color: var(--state-error);
 }
 
 input[type='checkbox'],
@@ -368,7 +661,7 @@ input[type='radio'] {
   width: 14px;
   height: 14px;
   margin: 0;
-  accent-color: var(--ink-1000);
+  accent-color: var(--native-accent);
 }
 
 /* A status line: glyph + word, never colour alone. × failed (brand), ✓ done (ok), ! note (wait). */
@@ -389,16 +682,18 @@ input[type='radio'] {
 }
 
 .message-error {
-  border-color: var(--brand);
+  border-color: var(--state-error);
+  --tint: var(--state-error);
 }
 
 .message-error::before {
   content: '×';
-  color: var(--brand);
+  color: var(--state-error);
 }
 
 .message-ok {
   border-color: var(--state-ok);
+  --tint: var(--state-ok);
 }
 
 .message-ok::before {
@@ -408,6 +703,7 @@ input[type='radio'] {
 
 .message-info {
   border-color: var(--state-wait);
+  --tint: var(--state-wait);
 }
 
 .message-info::before {
@@ -433,6 +729,7 @@ input[type='radio'] {
   padding: var(--space-2) var(--space-3);
   cursor: pointer;
   background: var(--ink-200);
+  border-radius: var(--radius-panel);
   box-shadow: var(--shadow-float);
   animation: nod-layer-in var(--dur-8f) steps(2, end);
 }
@@ -472,13 +769,21 @@ input[type='radio'] {
 }
 
 /* Atrius panel: ink-200 on the floor, a 1px ink-400 rule around it, square. Nod's cards keep it
-   tighter than a canvas panel (space-4, not space-5): they are forms and lists, not documents. */
+   tighter than a canvas panel (space-4, not space-5): they are forms and lists, not documents.
+   Sober: bg-card with a 1px ring and radius-lg. */
 .card {
   min-width: 0;
   padding: var(--space-4);
   background: var(--ink-200);
   border: var(--stroke-hair) solid var(--ink-400);
+  border-radius: var(--radius-panel);
   overflow-wrap: anywhere;
+}
+
+/* A row inside a list is not a floating panel: the list owns the corners and the ring. */
+.home .grid > .tool-card,
+.settings-view .tool-group > .tool-item {
+  border-radius: 0;
 }
 
 /* Inside a card the lines of one record sit closer than the blocks of a page. */
@@ -494,8 +799,8 @@ input[type='radio'] {
 
 .card h3 {
   color: var(--ink-700);
-  font: var(--text-meta);
-  letter-spacing: 0.12em;
+  font: var(--text-overline);
+  letter-spacing: var(--overline-spacing);
   text-transform: uppercase;
 }
 
@@ -551,6 +856,7 @@ span.empty {
   white-space: nowrap;
   background: transparent;
   border: var(--stroke-hair) solid var(--ink-400);
+  border-radius: var(--radius-glyph);
 }
 
 .mono {
@@ -568,8 +874,8 @@ span.empty {
 .table th {
   padding: var(--space-1) var(--space-2);
   color: var(--ink-700);
-  font: var(--text-meta);
-  letter-spacing: 0.12em;
+  font: var(--text-overline);
+  letter-spacing: var(--overline-spacing);
   text-align: left;
   text-transform: uppercase;
   white-space: nowrap;
@@ -584,7 +890,7 @@ span.empty {
 }
 
 .table tbody tr:hover td {
-  background: var(--ink-300);
+  background: var(--hover-bg);
 }
 
 /* Atrius Tabs: one cell tall, the active tab in inverted ink. */
@@ -603,19 +909,20 @@ span.empty {
   font: var(--text-label);
   background: transparent;
   border: 0;
+  border-radius: var(--radius-control);
   cursor: pointer;
 }
 
 .tab:hover {
   color: var(--ink-1000);
-  background: var(--ink-300);
+  background: var(--hover-bg);
 }
 
 .tab-active,
 .tab-active:hover {
-  color: var(--ink-100);
+  color: var(--tab-active-ink);
   font-weight: 700;
-  background: var(--ink-1000);
+  background: var(--tab-active-bg);
 }
 
 /* ------------------------------------------------------------------ layout */
@@ -700,7 +1007,7 @@ span.empty {
 
 .notice-dismiss:hover {
   color: var(--ink-1000);
-  background: var(--ink-300);
+  background: var(--hover-bg);
 }
 
 .banner {
@@ -724,12 +1031,13 @@ span.empty {
   grid-row: 3;
 }
 
-/* Atrius SectionHeader at the top of a screen: label in `meta`, its acts beside it, a rule under. */
+/* Atrius SectionHeader at the top of a screen: label in `meta`, its acts beside it, a rule under.
+   The bar is the skin's header height (Atrius 32px, Sober 48px). */
 .content-header {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  min-height: 32px;
+  min-height: var(--header-height);
   padding-bottom: var(--space-1);
   border-bottom: var(--stroke-hair) solid var(--ink-400);
 }
@@ -740,8 +1048,8 @@ span.empty {
 
 .content-title {
   color: var(--ink-700);
-  font: var(--text-meta);
-  letter-spacing: 0.12em;
+  font: var(--text-overline);
+  letter-spacing: var(--overline-spacing);
   text-transform: uppercase;
 }
 
@@ -767,9 +1075,9 @@ span.empty {
 .settings-navigation .tab { text-align: left; height: auto; min-height: var(--cell); padding: var(--space-1) var(--space-2); }
 .settings-group-title { padding: var(--space-1) var(--space-2); color: var(--ink-700); font: var(--text-meta); }
 .settings-panel { min-width: 0; }
-.disclosure { border: var(--stroke-hair) solid var(--ink-400); }
+.disclosure { border: var(--stroke-hair) solid var(--ink-400); border-radius: var(--radius-panel); }
 .disclosure > summary { padding: var(--space-2) var(--space-3); cursor: pointer; font: var(--text-label); }
-.disclosure > summary:hover { background: var(--ink-300); }
+.disclosure > summary:hover { background: var(--hover-bg); }
 .disclosure > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .disclosure-body { padding: var(--space-3); border-top: var(--stroke-hair) solid var(--ink-400); }
 .settings-navigation .disclosure { border: 0; }
@@ -810,10 +1118,10 @@ span.empty {
   flex: none;
   flex-wrap: wrap;
   align-items: stretch;
-  min-height: var(--cell);
+  min-height: var(--strip-height);
   padding: 0;
   font: var(--text-label);
-  background: var(--ink-100);
+  background: var(--strip-bg);
   border-bottom: var(--stroke-hair) solid var(--ink-400);
 }
 
@@ -824,7 +1132,7 @@ span.empty {
   align-items: center;
   gap: var(--space-2);
   max-width: 240px;
-  height: var(--cell);
+  height: var(--strip-height);
   padding: 0 var(--space-1) 0 var(--space-3);
   color: var(--ink-700);
   background: transparent;
@@ -836,7 +1144,7 @@ span.empty {
 
 .tab-item:hover {
   color: var(--ink-1000);
-  background: var(--ink-300);
+  background: var(--hover-bg);
 }
 
 /* The tab on the slot: the one the panel is showing. */
@@ -846,6 +1154,52 @@ span.empty {
   font-weight: 700;
   background: var(--ink-200);
   border-top-color: var(--ink-1000);
+}
+
+/*
+ * 1.0.0, nested tabs: a tab another one opened indents under its opener's row — the strip keeps its
+ * one flat order (the family follows the parent), and the indent is what says "this came from
+ * that". A nested row drags among its siblings, so the cursor says so, and the row being dragged
+ * is the live preview.
+ */
+.tab-item.tab-child {
+  padding-left: var(--space-6);
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
+  background: var(--ink-100);
+  color: var(--ink-600);
+}
+
+.tab-item.tab-child .tab-mark {
+  flex: none;
+  width: 1.1em;
+  text-align: center;
+}
+
+.tab-item.tab-child:hover,
+.tab-item.tab-child.tab-item-active,
+.tab-item.tab-child.tab-item-active:hover {
+  color: var(--ink-1000);
+}
+
+.tab-item.tab-child.tab-item-active,
+.tab-item.tab-child.tab-item-active:hover {
+  background: var(--ink-200);
+  font-weight: 600;
+}
+
+.tab-item.tab-child .tab-title {
+  font-style: italic;
+}
+
+.tab-item.tab-child .tab-dock,
+.tab-item.tab-child .tab-close {
+  visibility: visible;
+}
+
+.tab-item.tab-dragging {
+  cursor: grabbing;
+  background: var(--hover-bg);
+  color: var(--ink-1000);
 }
 
 .tab-title {
@@ -897,7 +1251,7 @@ span.empty {
 }
 
 .tab-failed {
-  color: var(--brand);
+  color: var(--state-error);
 }
 
 .tab-loading {
@@ -922,8 +1276,8 @@ span.empty {
 
 .tab-close:hover,
 .tab-dock:hover {
-  color: var(--ink-100);
-  background: var(--ink-1000);
+  color: var(--menu-active-ink);
+  background: var(--menu-active-bg);
 }
 
 .tab-dock {
@@ -934,8 +1288,8 @@ span.empty {
 .tab-new,
 .tab-close-all {
   flex: none;
-  width: var(--cell);
-  height: var(--cell);
+  width: var(--strip-height);
+  height: var(--strip-height);
   padding: 0;
   color: var(--ink-700);
   font: var(--text-body);
@@ -952,7 +1306,7 @@ span.empty {
 
 .tab-new:hover:not(:disabled) {
   color: var(--ink-1000);
-  background: var(--ink-300);
+  background: var(--hover-bg);
 }
 
 .tab-close-all:hover:not(:disabled) {
@@ -974,7 +1328,7 @@ span.empty {
   gap: var(--space-1);
   min-height: 32px;
   padding: var(--space-1) var(--space-2);
-  background: var(--ink-200);
+  background: var(--toolbar-bg);
   border-bottom: var(--stroke-hair) solid var(--ink-400);
 }
 
@@ -994,16 +1348,17 @@ span.empty {
 /* ------------------------------------------------------------------- rails */
 
 /* The sidebar of the unlocked window and the entry screen's rail are the same column — Atrius
-   ActivityRail: 48px wide, one 2×2-cell square per item, no gap, a 1px rule on the right. */
+   ActivityRail (48px, one 2×2-cell square per item, no gap, a 1px rule on the right); Sober's rail
+   is 56px wide with 40px items, 4px gaps and its own padding, all from the skin's tokens. */
 .sidebar,
 .entry-rail {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0;
+  gap: var(--rail-gap);
   min-height: 0;
-  padding: 0;
-  background: var(--ink-100);
+  padding: var(--rail-pad);
+  background: var(--rail-bg);
   border-right: var(--stroke-hair) solid var(--ink-400);
 }
 
@@ -1016,7 +1371,7 @@ span.empty {
   flex: 1 1 auto;
   flex-direction: column;
   align-items: stretch;
-  gap: 0;
+  gap: var(--rail-gap);
   width: 100%;
   min-height: 0;
   padding: 0;
@@ -1034,10 +1389,11 @@ span.empty {
   flex: none;
   flex-direction: column;
   align-items: stretch;
-  gap: 0;
+  gap: var(--rail-gap);
 }
 
-/* One rail item: a square cell, its glyph one cell in the middle. */
+/* One rail item: the skin's square (Atrius' cell-pair, Sober's 40px rounded square), its glyph
+   one cell in the middle. */
 .mark,
 .tile,
 .tool-icon,
@@ -1052,10 +1408,10 @@ span.empty {
   margin: 0;
   padding: 0;
   color: var(--ink-700);
-  font: 400 17px/1 var(--font-mono);
+  font: 400 17px/1 var(--font-ui);
   background: transparent;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--radius-control);
   cursor: pointer;
   transition:
     background-color var(--dur-4f) linear,
@@ -1068,7 +1424,7 @@ span.empty {
 .sidebar-action:hover,
 .sidebar-add:hover {
   color: var(--ink-1000);
-  background: var(--ink-300);
+  background: var(--hover-bg);
 }
 
 /* Where you are: the mark of the session is in strong ink. */
@@ -1095,7 +1451,8 @@ span.empty {
   outline-offset: -4px;
 }
 
-/* The tick on the rail's left edge, square: short for an open tool, one cell where you are. */
+/* The tick on the rail's left edge: short for an open tool, one cell where you are. Sober paints
+   the tick in its accent (the current item's bar, an open tool). */
 .mark::before,
 .tile::before,
 .tool-icon::before {
@@ -1105,7 +1462,7 @@ span.empty {
   left: 0;
   width: var(--stroke-strong);
   height: 0;
-  background: var(--ink-1000);
+  background: var(--tick-bg);
   transform: translateY(-50%);
 }
 
@@ -1126,11 +1483,11 @@ span.empty {
   width: var(--rail-glyph);
   height: var(--rail-glyph);
   object-fit: contain;
-  border-radius: 0;
+  border-radius: var(--radius-glyph);
   background: transparent;
 }
 
-/* Initials: a one-cell square in the control border. */
+/* Initials: the glyph's box in the control border. */
 .mark .chip,
 .tile-mark .chip,
 .tool-icon .chip {
@@ -1141,10 +1498,11 @@ span.empty {
   height: var(--rail-glyph);
   padding: 0;
   color: inherit;
-  font: 700 10px/1 var(--font-mono);
+  font: 700 10px/1 var(--font-ui);
   text-align: center;
   background: transparent;
   border: var(--stroke-hair) solid var(--ink-600);
+  border-radius: var(--radius-glyph);
 }
 
 .tool-icon:hover .chip,
@@ -1213,7 +1571,7 @@ span.empty {
   padding: 0 2px;
   overflow: hidden;
   color: var(--ink-700);
-  font: 400 9px/12px var(--font-mono);
+  font: 400 9px/12px var(--font-ui);
   letter-spacing: 0.08em;
   text-align: center;
   text-overflow: ellipsis;
@@ -1227,7 +1585,7 @@ span.empty {
   top: 3px;
   right: 4px;
   color: var(--ink-700);
-  font: 400 10px/12px var(--font-mono);
+  font: 400 10px/12px var(--font-ui);
   pointer-events: none;
 }
 
@@ -1248,7 +1606,7 @@ span.empty {
   position: absolute;
   right: 4px;
   bottom: 3px;
-  font: 700 11px/12px var(--font-mono);
+  font: 700 11px/12px var(--font-ui);
   pointer-events: none;
 }
 
@@ -1260,7 +1618,7 @@ span.empty {
 /* A failure is × in brand, and wins the corner over the personal mark. */
 .tool-icon.error::after {
   content: '×';
-  color: var(--brand);
+  color: var(--state-error);
 }
 
 /* Loading: a running bar under the glyph, in the running colour. */
@@ -1282,7 +1640,7 @@ span.empty {
 
 .sidebar-action .glyph,
 .sidebar-add .glyph {
-  font: 400 17px/1 var(--font-mono);
+  font: 400 17px/1 var(--font-ui);
 }
 
 /* The label stays for screen readers and the smoke; the title shows it on hover. */
@@ -1326,7 +1684,7 @@ span.empty {
 }
 
 .rail-folder-open {
-  background: var(--ink-200);
+  background: var(--band-bg);
   box-shadow:
     inset 0 var(--stroke-hair) 0 var(--ink-400),
     inset 0 calc(var(--stroke-hair) * -1) 0 var(--ink-400);
@@ -1350,7 +1708,7 @@ span.empty {
 
 .folder-head:hover {
   color: var(--ink-1000);
-  background: var(--ink-300);
+  background: var(--hover-bg);
 }
 
 .folder-head:focus-visible {
@@ -1371,7 +1729,7 @@ span.empty {
   left: 0;
   width: var(--stroke-strong);
   height: 0;
-  background: var(--ink-1000);
+  background: var(--tick-bg);
   transform: translateY(-50%);
 }
 
@@ -1418,7 +1776,7 @@ span.empty {
   padding: 0 2px;
   overflow: hidden;
   color: var(--ink-800);
-  font: 700 9px/12px var(--font-mono);
+  font: 700 9px/12px var(--font-ui);
   letter-spacing: 0.06em;
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -1454,14 +1812,14 @@ body.rail-dragging * {
   position: fixed;
   z-index: var(--z-popover);
   height: var(--stroke-strong);
-  background: var(--ink-1000);
+  background: var(--tick-bg);
   pointer-events: none;
 }
 
 .drop-into {
   outline: var(--stroke-hair) dashed var(--ink-1000) !important;
   outline-offset: -4px !important;
-  background: var(--ink-300) !important;
+  background: var(--hover-bg) !important;
 }
 
 /* ------------------------------------------------------------------- menu */
@@ -1482,6 +1840,7 @@ body.rail-dragging * {
   font: var(--text-label);
   background: var(--ink-200);
   border: var(--stroke-hair) solid var(--ink-600);
+  border-radius: var(--radius-panel);
   box-shadow: var(--shadow-float);
   animation: nod-layer-in var(--dur-8f) steps(2, end);
 }
@@ -1489,8 +1848,8 @@ body.rail-dragging * {
 .menu-group {
   padding: var(--space-2) var(--space-3) var(--space-1);
   color: var(--ink-700);
-  font: var(--text-meta);
-  letter-spacing: 0.12em;
+  font: var(--text-overline);
+  letter-spacing: var(--overline-spacing);
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -1514,8 +1873,8 @@ body.rail-dragging * {
 
 .menu-item:hover,
 .menu-item:focus {
-  color: var(--ink-100);
-  background: var(--ink-1000);
+  color: var(--menu-active-ink);
+  background: var(--menu-active-bg);
   outline: none;
 }
 
@@ -1526,13 +1885,13 @@ body.rail-dragging * {
 }
 
 .menu-item-danger {
-  color: var(--brand);
+  color: var(--state-error);
 }
 
 .menu-item-danger:hover,
 .menu-item-danger:focus {
   color: var(--on-brand);
-  background: var(--brand);
+  background: var(--state-error);
 }
 
 .menu-label {
@@ -1558,13 +1917,10 @@ body.rail-dragging * {
 
 /* -------------------------------------------------------------------- home */
 
-/* Space: Home is a list, not a grid of cards — one row per tool (the Atrius list: name, value
-   aligned, act per row). Every row of every block uses the same fixed columns, counted in cells, so
-   states, sign-ins and acts line up down the whole screen; only the name column flexes. */
+/* Space: Home is a list, not a grid of cards — one row per tool. Every row of every block uses
+   the skin's fixed columns (Atrius: 168/168 and six one-cell slots; Sober: 160/176 and six 28px
+   slots), so states, sign-ins and acts line up down the whole screen; only the name column flexes. */
 .home {
-  --col-state: 168px; /* 7 cells */
-  --col-login: 168px; /* 7 cells */
-  --col-acts: calc(var(--cell) * 6 + var(--space-1) * 5); /* six icon slots */
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -1578,6 +1934,8 @@ body.rail-dragging * {
   align-items: stretch;
   background: var(--ink-200);
   border: var(--stroke-hair) solid var(--ink-400);
+  border-radius: var(--radius-panel);
+  overflow: hidden;
 }
 
 /* RF-62: one category of Home — its name in `meta`, its count at the right, then its rows. */
@@ -1596,8 +1954,8 @@ body.rail-dragging * {
 .home-section-title {
   margin: 0;
   color: var(--ink-700);
-  font: var(--text-meta);
-  letter-spacing: 0.12em;
+  font: var(--text-overline);
+  letter-spacing: var(--overline-spacing);
   text-transform: uppercase;
 }
 
@@ -1613,7 +1971,7 @@ body.rail-dragging * {
   grid-template-columns: var(--cell) minmax(0, 1fr) var(--col-state) var(--col-login) var(--col-acts);
   align-items: center;
   column-gap: var(--space-3);
-  min-height: 40px;
+  min-height: var(--row-height);
   padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
   background: transparent;
   border: 0;
@@ -1625,7 +1983,7 @@ body.rail-dragging * {
 }
 
 .tool-card:hover {
-  background: var(--ink-300);
+  background: var(--hover-bg);
 }
 
 /* The head's pieces sit in the row's own columns. */
@@ -1663,7 +2021,7 @@ body.rail-dragging * {
   height: var(--cell);
   object-fit: contain;
   background: transparent;
-  border-radius: 0;
+  border-radius: var(--radius-glyph);
 }
 
 .tool-title {
@@ -1717,7 +2075,7 @@ body.rail-dragging * {
 }
 
 .tool-state[data-state='failed'] {
-  color: var(--brand);
+  color: var(--state-error);
 }
 
 .tool-state[data-state='failed']::before {
@@ -1765,7 +2123,7 @@ body.rail-dragging * {
 }
 
 .tool-login[data-login='failed'] {
-  color: var(--brand);
+  color: var(--state-error);
 }
 
 .tool-login[data-login='failed']::before {
@@ -1808,14 +2166,14 @@ body.rail-dragging * {
 .tool-actions {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: var(--cell);
+  grid-auto-columns: var(--act-slot);
   justify-content: end;
   gap: var(--space-1);
 }
 
 .icon-slot {
-  width: var(--cell);
-  height: var(--cell);
+  width: var(--act-slot);
+  height: var(--act-slot);
 }
 
 /* The glyph comes from `data-icon`; the button's words stay its text (read aloud, and the tooltip)
@@ -1824,8 +2182,8 @@ body.rail-dragging * {
   display: inline-grid;
   flex: none;
   place-items: center;
-  width: var(--cell);
-  height: var(--cell);
+  width: var(--act-slot);
+  height: var(--act-slot);
   padding: 0;
   color: var(--ink-800);
   font-size: 0;
@@ -1834,7 +2192,7 @@ body.rail-dragging * {
   overflow: hidden;
   background: transparent;
   border: var(--stroke-hair) solid transparent;
-  border-radius: 0;
+  border-radius: var(--radius-control);
   cursor: pointer;
   transition:
     background-color var(--dur-4f) linear,
@@ -1844,12 +2202,12 @@ body.rail-dragging * {
 
 .icon-button::before {
   content: attr(data-icon);
-  font: 400 14px/1 var(--font-mono);
+  font: 400 14px/1 var(--font-ui);
 }
 
 .icon-button:hover:not(:disabled) {
   color: var(--ink-1000);
-  background: var(--ink-300);
+  background: var(--hover-bg);
   border-color: var(--ink-600);
 }
 
@@ -1869,24 +2227,24 @@ body.rail-dragging * {
 }
 
 .icon-button-primary:hover:not(:disabled) {
-  color: var(--ink-100);
-  background: var(--ink-1000);
-  border-color: var(--ink-1000);
+  color: var(--solid-ink);
+  background: var(--solid-bg);
+  border-color: var(--solid-bg);
 }
 
 .icon-button-danger {
-  color: var(--brand);
+  color: var(--state-error);
 }
 
 .icon-button-danger:hover:not(:disabled) {
   color: var(--on-brand);
-  background: var(--brand);
-  border-color: var(--brand);
+  background: var(--state-error);
+  border-color: var(--state-error);
 }
 
 .icon-button[aria-expanded='true'] {
-  color: var(--ink-100);
-  background: var(--ink-1000);
+  color: var(--menu-active-ink);
+  background: var(--menu-active-bg);
 }
 
 /* --------------------------------------------------------- settings tools */
@@ -1894,7 +2252,6 @@ body.rail-dragging * {
 /* Settings → Tools in the same list language as Home: one panel per group, one row per tool, fixed
    columns — name, address, roles, views, then three icon acts. */
 .settings-view .tool-group {
-  --col-acts3: calc(var(--cell) * 3 + var(--space-1) * 2);
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -1921,7 +2278,7 @@ body.rail-dragging * {
 }
 
 .tool-item:hover {
-  background: var(--ink-300);
+  background: var(--hover-bg);
 }
 
 .tool-item > .row {
@@ -2006,7 +2363,7 @@ body.rail-dragging * {
 }
 
 .tile-dot-update {
-  background: var(--brand);
+  background: var(--state-error);
 }
 
 /* The `+` tile is an act, not a place. */
@@ -2068,9 +2425,10 @@ body.rail-dragging * {
   width: 40px;
   height: 40px;
   color: var(--ink-1000);
-  font: 700 15px/1 var(--font-mono);
+  font: 700 15px/1 var(--font-ui);
   background: transparent;
   border: var(--stroke-hair) solid var(--ink-600);
+  border-radius: var(--radius-glyph);
 }
 
 .entry-title {
@@ -2120,8 +2478,9 @@ body.rail-dragging * {
 /* Settings → People: the invite just created, and one row per open invite (RF-59). */
 .invite-created {
   padding: var(--space-3);
-  background: var(--ink-300);
+  background: var(--field-bg);
   border: var(--stroke-hair) solid var(--ink-1000);
+  border-radius: var(--radius-panel);
 }
 
 .invite-row {
@@ -2151,7 +2510,8 @@ body.rail-dragging * {
   max-height: 70vh;
   padding: 0;
   background: var(--ink-200);
-  border: var(--stroke-hair) solid var(--ink-1000);
+  border: var(--stroke-hair) solid var(--layer-border);
+  border-radius: var(--radius-panel);
   box-shadow: var(--shadow-float);
   animation: nod-layer-in var(--dur-8f) steps(2, end);
 }
@@ -2212,20 +2572,20 @@ body.rail-dragging * {
 .palette-item-hint {
   margin-left: auto;
   color: var(--ink-700);
-  font: var(--text-meta);
-  letter-spacing: 0.12em;
+  font: var(--text-overline);
+  letter-spacing: var(--overline-spacing);
   text-transform: uppercase;
   white-space: nowrap;
 }
 
 .palette-item:hover {
-  background: var(--ink-300);
+  background: var(--hover-bg);
 }
 
 .palette-item-active,
 .palette-item-active:hover {
-  color: var(--ink-100);
-  background: var(--ink-1000);
+  color: var(--menu-active-ink);
+  background: var(--menu-active-bg);
 }
 
 .palette-item-active .palette-item-hint {
@@ -2267,10 +2627,11 @@ body.rail-dragging * {
   height: 16px;
   padding: 0 3px;
   color: var(--ink-700);
-  font: 700 9px/16px var(--font-mono);
+  font: 700 9px/16px var(--font-ui);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   border: var(--stroke-hair) solid var(--ink-400);
+  border-radius: var(--radius-glyph);
 }
 
 .badge-offline {
@@ -2290,15 +2651,16 @@ body.rail-dragging * {
   height: 16px;
   padding: 0 3px;
   color: var(--on-state);
-  font: 700 10px/16px var(--font-mono);
+  font: 700 10px/16px var(--font-ui);
   background: var(--state-wait);
   border: 0;
+  border-radius: var(--radius-full);
 }
 
 /* E03: the count of open tabs is a count, not a request: it stays in ink. */
 .tabs-badge {
   color: var(--ink-1000);
-  background: var(--ink-300);
+  background: var(--field-bg);
   box-shadow: inset 0 0 0 1px var(--ink-600);
 }
 
@@ -2310,22 +2672,24 @@ body.rail-dragging * {
 
 .notice-warn {
   border-color: var(--state-wait);
+  --tint: var(--state-wait);
 }
 
 /* O2: the out-of-date Nod — a state, not a notice to dismiss, so it is the loudest of the three. */
 .notice-danger::before {
   content: '×';
-  color: var(--brand);
+  color: var(--state-error);
 }
 
 .notice-danger {
-  border-color: var(--brand);
+  border-color: var(--state-error);
+  --tint: var(--state-error);
 }
 
 /* K2/RF-45: a colleague's key changed — a tag that reads as a warning, not as a label. */
 .chip-warn {
-  color: var(--brand);
-  border-color: var(--brand);
+  color: var(--state-error);
+  border-color: var(--state-error);
 }
 
 /* SP05 §4: one labelled line of the host card. */
@@ -2336,8 +2700,8 @@ body.rail-dragging * {
 .host-label {
   min-width: 110px;
   color: var(--ink-700);
-  font: var(--text-meta);
-  letter-spacing: 0.12em;
+  font: var(--text-overline);
+  letter-spacing: var(--overline-spacing);
   text-transform: uppercase;
 }
 
@@ -2352,8 +2716,9 @@ body.rail-dragging * {
   width: 48px;
   height: 48px;
   object-fit: contain;
-  background: var(--ink-300);
+  background: var(--field-bg);
   border: var(--stroke-hair) solid var(--ink-400);
+  border-radius: var(--radius-glyph);
 }
 
 /* The join flow draws its own sections; inside the auth card they are sections, not cards. */
@@ -2374,8 +2739,9 @@ body.rail-dragging * {
   padding: 0 var(--space-2);
   color: var(--ink-1000);
   font-family: var(--font-mono);
-  background: var(--ink-300);
+  background: var(--field-bg);
   border: var(--stroke-hair) solid var(--ink-1000);
+  border-radius: var(--radius-glyph);
   user-select: all;
 }
 
@@ -2388,8 +2754,9 @@ body.rail-dragging * {
 .gate {
   gap: var(--space-2);
   padding: var(--space-2);
-  background: var(--ink-300);
+  background: var(--field-bg);
   border: var(--stroke-hair) solid var(--state-wait);
+  border-radius: var(--radius-panel);
 }
 
 /* K7/RF-54: the holders of one credential — 'Alice, Bob' with the date and the scope of each. */
@@ -2408,7 +2775,8 @@ body.rail-dragging * {
 .send-dialog,
 .assign-dialog {
   gap: var(--space-2);
-  background: var(--ink-300);
+  background: var(--field-bg);
+  border-radius: var(--radius-panel);
 }
 
 .send-dialog h3,
@@ -2457,8 +2825,8 @@ body.rail-dragging * {
 .presence-subtitle {
   margin: var(--space-3) 0 var(--space-1);
   color: var(--ink-700);
-  font: var(--text-meta);
-  letter-spacing: 0.12em;
+  font: var(--text-overline);
+  letter-spacing: var(--overline-spacing);
   text-transform: uppercase;
 }
 
@@ -2483,6 +2851,300 @@ body.rail-dragging * {
   height: 8px;
   background: var(--state-ok);
   border-radius: 50%;
+}
+
+
+
+/* 2026-11-19 style toggle: the colours of the palette on screen, one swatch per slot. */
+.color-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-3);
+}
+
+.color-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.color-input {
+  flex: none;
+  width: 48px;
+  height: var(--control);
+  padding: 2px;
+  background: var(--field-bg);
+  border: var(--stroke-hair) solid var(--ink-600);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+
+.color-input::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.color-input::-webkit-color-swatch {
+  border: 0;
+  border-radius: calc(var(--radius-control) - 2px);
+}
+
+/* ------------------------------------------------------------ the Sober skin */
+
+/* Nod Sober's vocabulary where it departs from Atrius' glyph habit. The structure is shared: the
+   same rail, the same rows, the same fixed columns and the same acts — only the dress changes. */
+
+/* Atrius draws a ghost in brackets and puts a × on a danger button; Sober's ghost is quiet text and
+   a danger act says its danger in its colour and its words. */
+[data-skin='sober'] .button-ghost::before,
+[data-skin='sober'] .button-ghost::after,
+[data-skin='sober'] .button-danger::before {
+  content: none;
+}
+
+/* Motion: 120ms colour fades, nothing slides or presses. */
+[data-skin='sober'] .button:active:not(:disabled),
+[data-skin='sober'] .icon-button:active:not(:disabled) {
+  transform: none;
+}
+
+[data-skin='sober'] .button,
+[data-skin='sober'] .icon-button {
+  transition-timing-function: ease;
+}
+
+/* A button at rest is a card with a ring; the primary is the one solid of a panel. */
+[data-skin='sober'] .button:not(.button-primary):not(.button-danger):not(.button-ghost) {
+  background: var(--ink-200);
+}
+
+[data-skin='sober'] .button:disabled {
+  background: transparent;
+}
+
+[data-skin='sober'] .button-primary {
+  font-weight: 500;
+}
+
+/* Labels in sentence case, buttons and names at 500 — Atrius' overline style stays for the rail's
+   group names and the table headers, which are overlines in both systems. */
+[data-skin='sober'] .field-label {
+  color: var(--ink-1000);
+  font: var(--text-label);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+[data-skin='sober'] .content-title {
+  color: var(--ink-1000);
+  font: var(--text-node-title);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+[data-skin='sober'] .card h3 {
+  color: var(--ink-1000);
+  font: var(--text-label);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* A panel's section header is a title with no rule under it — the panel's ring separates things. */
+[data-skin='sober'] .card > h2:first-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+[data-skin='sober'] .entry-title,
+[data-skin='sober'] .dialog-title {
+  font: var(--text-title);
+  text-transform: none;
+}
+
+/* The settings tab bar: the active tab is a card with a ring, not inverted ink. */
+[data-skin='sober'] .tab-active,
+[data-skin='sober'] .tab-active:hover {
+  font-weight: 500;
+  box-shadow: inset 0 0 0 1px var(--ink-600);
+}
+
+/* Colour means state, and never alone: the word keeps the state, a 10% tint and a 25% ring carry
+   the colour (StatusBadge). Closed and loading stay quiet — they are not states of alarm. */
+[data-skin='sober'] .tool-state,
+[data-skin='sober'] .tool-login {
+  justify-self: start;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-glyph);
+  background: color-mix(in oklab, var(--tint, transparent) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tint, transparent) 25%, transparent);
+}
+
+[data-skin='sober'] .tool-state[data-state='open'] { --tint: var(--state-run); }
+[data-skin='sober'] .tool-state[data-state='failed'] { --tint: var(--state-error); }
+[data-skin='sober'] .tool-login[data-login='session'],
+[data-skin='sober'] .tool-login[data-login='filled'],
+[data-skin='sober'] .tool-login[data-login='provider'] { --tint: var(--state-ok); }
+[data-skin='sober'] .tool-login[data-login='manual'] { --tint: var(--state-wait); }
+[data-skin='sober'] .tool-login[data-login='failed'] { --tint: var(--state-error); }
+
+/* An alert is a tinted block with a ring; the glyph in front of the words stays. */
+[data-skin='sober'] .message {
+  border-radius: var(--radius-panel);
+  border-color: color-mix(in oklab, var(--tint, var(--ink-400)) 25%, transparent);
+  background: color-mix(in oklab, var(--tint, transparent) 10%, var(--ink-200));
+}
+
+[data-skin='sober'] .notice {
+  border-radius: var(--radius-panel);
+  border-color: color-mix(in oklab, var(--tint, var(--ink-400)) 25%, transparent);
+  background: color-mix(in oklab, var(--tint, transparent) 10%, var(--ink-200));
+}
+
+/* The rail: items centred in a 56px column, the current one a card with a ring, the tick a bar in
+   the accent at the rail's own edge. */
+[data-skin='sober'] .sidebar,
+[data-skin='sober'] .entry-rail {
+  align-items: center;
+}
+
+[data-skin='sober'] .sidebar-tools,
+[data-skin='sober'] .sidebar-footer {
+  align-items: center;
+}
+
+[data-skin='sober'] .tool-icon::before,
+[data-skin='sober'] .tile::before,
+[data-skin='sober'] .mark::before,
+[data-skin='sober'] .folder-head::before {
+  left: -8px;
+  border-radius: 2px;
+}
+
+[data-skin='sober'] .tool-icon.current,
+[data-skin='sober'] .tile-active,
+[data-skin='sober'] .mark-tabs.current,
+[data-skin='sober'] .folder-head.current {
+  background: var(--ink-200);
+  box-shadow: inset 0 0 0 1px var(--ink-600);
+}
+
+[data-skin='sober'] .tool-icon.current::before,
+[data-skin='sober'] .tile-active::before,
+[data-skin='sober'] .mark-tabs.current::before,
+[data-skin='sober'] .folder-head.current::before {
+  height: 16px;
+  margin-top: 0;
+}
+
+/* The entry screen: one centred card on the floor, no dotted field and no ASCII banner (Sober
+   carries the guild's mark, not a text mark). */
+[data-skin='sober'] .entry-pane {
+  background-image: none;
+}
+
+[data-skin='sober'] .entry-banner {
+  display: none;
+}
+
+[data-skin='sober'] .entry-card {
+  box-shadow: none;
+}
+
+/* The mark is a filled block in Sober (the guild's letter on its brand square); a tool row's
+   initials sit on the muted surface inside the control ring, a rounded square. */
+[data-skin='sober'] .mark .chip,
+[data-skin='sober'] .tile-mark .chip {
+  width: 28px;
+  height: 28px;
+  color: var(--mark-ink);
+  font-size: 11px;
+  background: var(--mark-bg);
+  border-color: transparent;
+  border-radius: var(--radius-control);
+}
+
+[data-skin='sober'] .tool-head .chip {
+  color: var(--ink-700);
+  background: var(--rail-bg);
+  border-color: var(--ink-600);
+}
+
+[data-skin='sober'] .empty {
+  border-style: solid;
+  border-radius: var(--radius-panel);
+  background-color: var(--ink-200);
+  background-image: none;
+}
+
+[data-skin='sober'] .empty > * {
+  background: transparent;
+}
+
+/* The tab strip: a 40px band of 34px tabs, the active one on the panel's surface. */
+[data-skin='sober'] .tab-strip {
+  min-height: 40px;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 6px 8px 0;
+}
+
+[data-skin='sober'] .tab-item {
+  height: 34px;
+  border: 0;
+  border-radius: var(--radius-control) var(--radius-control) 0 0;
+}
+
+[data-skin='sober'] .tab-item-active,
+[data-skin='sober'] .tab-item-active:hover {
+  height: 35px;
+  margin-bottom: -1px;
+  font-weight: 500;
+  box-shadow:
+    inset 0 1px 0 var(--ink-400),
+    inset 1px 0 0 var(--ink-400),
+    inset -1px 0 0 var(--ink-400);
+}
+
+/*
+ * 1.0.0, nested tabs, Sober's own word: the opener's children read as chips under it — a soft
+ * pill instead of Atrius' indented row, the indent kept so the structure reads the same way.
+ */
+[data-skin='sober'] .tab-item.tab-child {
+  height: 28px;
+  align-self: flex-start;
+  margin-top: 3px;
+  padding-left: var(--space-4);
+  color: var(--ink-600);
+  background: var(--ink-200);
+  border-radius: var(--radius-control);
+  box-shadow: inset 0 0 0 1px var(--ink-300);
+  font-style: normal;
+}
+
+[data-skin='sober'] .tab-item.tab-child.tab-item-active,
+[data-skin='sober'] .tab-item.tab-child.tab-item-active:hover {
+  height: 28px;
+  margin-bottom: 0;
+  font-weight: 500;
+  box-shadow: inset 0 0 0 1px var(--solid-bg);
+}
+
+[data-skin='sober'] .tab-new,
+[data-skin='sober'] .tab-close-all {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: var(--radius-control);
+}
+
+/* The screen: a page title bar and space-6 padding. */
+[data-skin='sober'] .content {
+  gap: var(--space-5);
+  padding: var(--space-5);
+}
+
+[data-skin='sober'] .home .grid {
+  border-radius: var(--radius-panel);
 }
 
 /* ------------------------------------------------------------ small window */
@@ -2569,4 +3231,186 @@ body.rail-dragging * {
   .button:active:not(:disabled) {
     transform: none;
   }
+}
+
+/* ---------------------------------------------------------------- RF-79: the library */
+
+/* The library's view tokens (`shared/library.css`), each skin's own: Atrius' ink, Sober's zinc. */
+[data-skin='atrius'] {
+  --lb-ink: var(--ink-900);
+  --lb-muted: var(--ink-700);
+  --lb-accent: var(--brand);
+  --lb-panel: var(--ink-200);
+  --lb-field: var(--ink-300);
+  --lb-hover: var(--ink-300);
+  --lb-active: var(--ink-200);
+  --lb-line: var(--ink-400);
+  --lb-side: var(--ink-100);
+  --lb-shadow: 4px 4px 0 0 var(--ink-400);
+  --lb-tile: 8.5rem;
+}
+
+[data-skin='sober'] {
+  --lb-ink: var(--ink-900);
+  --lb-muted: var(--ink-700);
+  --lb-accent: var(--solid-bg);
+  --lb-panel: var(--ink-200);
+  --lb-field: var(--ink-100);
+  --lb-hover: var(--ink-200);
+  --lb-active: var(--ink-300);
+  --lb-line: var(--ink-300);
+  --lb-side: var(--ink-100);
+  --lb-shadow: 0 2px 6px rgb(0 0 0 / 25%);
+  --lb-tile: 8.5rem;
+}
+
+/* The library takes the panel: the search and the views fill the space the title leaves
+ * (RF-79's "aproveite bem o espaço da tela"). The bar never overflows its row: the search is the
+ * only thing that gives way, and the marks on either side keep their fixed cells — the Home header
+ * stays one row from the smallest window the app opens to the widest screen. */
+.content-header {
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.lb-toolbar {
+  flex: 1 1 18rem;
+  min-width: 0;
+  padding: 0;
+}
+
+.lb-search {
+  min-width: 0;
+}
+
+.lb-search-input {
+  min-width: 0;
+}
+
+/* The views as one strip of marks: the shared stylesheet keeps the strip's segmented shape, and
+ * the label only rides in the title and the button's own text (RF-79). */
+.lb-views .lb-view {
+  width: var(--act-slot);
+  height: var(--act-slot);
+  padding: 0;
+  color: var(--ink-700);
+  background: transparent;
+  border: var(--stroke-hair) solid var(--ink-500);
+  border-left-width: 0;
+  border-radius: 0;
+}
+
+.lb-views .lb-view:first-child {
+  border-left-width: var(--stroke-hair);
+}
+
+.lb-views .lb-view::before {
+  font: 400 16px/1 var(--font-ui);
+}
+
+.lb-views .lb-view[aria-pressed='true'] {
+  color: var(--tab-active-ink);
+  font-weight: 400;
+  background: var(--tab-active-bg);
+  border-color: var(--tab-active-bg);
+}
+
+/* The Home header's own acts: quiet marks after the view strip, the last cells of the row. */
+.header-acts {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.content-header .header-acts .icon-button::before {
+  font: 400 18px/1 var(--font-ui);
+}
+
+/* The magnifier's own em draws it smaller than the other marks; at the same size it would read as
+ * a speck beside them. */
+.content-header .header-acts .header-act-search::before {
+  font: 400 20px/1 var(--font-ui);
+}
+
+/* The app's card inside the library's grid: the same six acts, the guild's tags and account. */
+.tool-card[data-featured='true'] {
+  grid-column: span 2;
+}
+
+.tool-library {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.tool-library .lb-card-account {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-library .lb-tag {
+  font-family: inherit;
+}
+
+/* A list row is the app's own shape: the glyph and the acts sit in the row's fixed slots. */
+.lb-list-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-2);
+  background: var(--lb-panel);
+  border-bottom: 1px solid var(--lb-line);
+  cursor: pointer;
+}
+
+.lb-list-row .glyph {
+  flex: none;
+}
+
+.lb-list-row .lb-card-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.lb-list-row .lb-card-host {
+  flex: none;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lb-list-row .lb-card-tags {
+  display: flex;
+  flex: none;
+  gap: var(--space-1);
+}
+
+.lb-list-row .lb-card-account {
+  flex: none;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The isometric stage needs its ground inside the panel's scroll, not the window's. */
+.home {
+  overflow: auto;
+}
+
+.lb-blocks {
+  min-height: 60vh;
+}
+
+.lb-empty p {
+  margin: 0;
 }

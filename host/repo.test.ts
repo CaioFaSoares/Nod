@@ -2,7 +2,7 @@
 // (`host/context.md`, SP01 §5). What is proved here: the migrations hold every table of SP01 §2–§3
 // and every column they added — `person_keys.private_sealed` of migration 3,
 // `credential_holders.rotated_at` of migration 4, `entries.category` of migration 6 and the
-// `meta.owner_id` row of migration 7 — and report `schema_version = 7`, the rules
+// `meta.owner_id` row of migration 7 — and report `schema_version = 8`, the rules
 // SP01 §2 keeps out of SQL (grants, owners, favorites,
 // last admin), the atomic code redemption with its TTL and wrong tries, idempotent events, owner
 // filtering, and that no secret lands in the database.
@@ -114,7 +114,7 @@ function activatedAdmin(repo: Repo): HostPerson {
 }
 
 describe('schema', () => {
-  test('the migrations create every table and report schema_version = 7', () => {
+  test('the migrations create every table and report schema_version = 8', () => {
     const { db, repo } = newRepo();
 
     const tables = db
@@ -180,10 +180,10 @@ describe('schema', () => {
       .map((column) => column.name);
     expect(entryColumns).toContain('category');
 
-    expect(repo.meta('schema_version')).toBe('7');
+    expect(repo.meta('schema_version')).toBe('8');
   });
 
-  test('migrations 2 to 7 apply to a data dir that already holds block 1, keeping its rows', () => {
+  test('migrations 2 to 8 apply to a data dir that already holds block 1, keeping its rows', () => {
     const dir = mkdtempSync(join(tmpdir(), 'nod-host-migrate-'));
     const db = openDatabase(join(dir, 'host.db'));
     databases.push({ dir, close: () => db.close() });
@@ -199,12 +199,12 @@ describe('schema', () => {
     );
 
     // SP01 §4: the boot applies only what is missing, and the version lands on 7.
-    expect(applyMigrations(db)).toBe(7);
+    expect(applyMigrations(db)).toBe(8);
     expect(
       db
         .query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'schema_version'")
         .get()?.value,
-    ).toBe('7');
+    ).toBe('8');
     expect(db.query('SELECT id FROM people WHERE id = ?').get('p1')).not.toBeNull();
     expect(
       db
@@ -239,7 +239,7 @@ describe('schema', () => {
     addPerson.run('p2', 'bob@nod.test', 'Bob', '2026-10-17T00:00:00.000Z');
     addPerson.run('p1', 'ada@nod.test', 'Ada', '2026-10-16T00:00:00.000Z');
 
-    expect(applyMigrations(db)).toBe(7);
+    expect(applyMigrations(db)).toBe(8);
     const repo = createRepo(db);
     expect(repo.ownerId()).toBe('p1');
     // The flag every person read derives from the row (RF-64): the owner is true, the other false.
@@ -267,7 +267,7 @@ describe('schema', () => {
     ).run('p1', 'X'.repeat(43), 'E'.repeat(43), NOW);
 
     // Migrations 3 to 7 apply, and the database lands on the current version.
-    expect(applyMigrations(db)).toBe(7);
+    expect(applyMigrations(db)).toBe(8);
     // The published pair survives, with no blob: the owner's next unlock uploads one (`host/repo.ts`).
     const row = db
       .query<{ x25519: string; privateSealed: string | null }, []>(
@@ -298,7 +298,7 @@ describe('schema', () => {
     ).run(NOW);
 
     // The boot applies only migrations 6 and 7, and the tool it holds reads as uncategorized.
-    expect(applyMigrations(db)).toBe(7);
+    expect(applyMigrations(db)).toBe(8);
     const repo = createRepo(db);
     const saved = repo.listOrgTools()[0];
     expect(saved?.id).toBe('kanban');
@@ -1099,7 +1099,7 @@ describe('meta', () => {
     repo.setMeta('created_at', NOW);
     expect(repo.meta('created_at')).toBe(NOW);
     expect(() => repo.setMeta('schema_version', '9')).toThrow(ConflictError);
-    expect(repo.meta('schema_version')).toBe('7');
+    expect(repo.meta('schema_version')).toBe('8');
   });
 });
 

@@ -226,7 +226,7 @@ function installSnapshot(
 ): void {
   const me = nod.session.current();
   if (me === null) throw new Error('the test snapshot needs an unlocked session');
-  if (nod.repo.hostRecord() === null) {
+  if ((nod.repo.hostRecords()[0] ?? null) === null) {
     nod.repo.saveHost({
       address: 'https://host.example.test',
       guild: 'Guild',
@@ -260,7 +260,7 @@ function installSnapshot(
     holders: body.holders ?? {},
     rotationPending: body.rotationPending ?? [],
   };
-  nod.repo.saveHostSnapshot({
+  nod.repo.saveHostSnapshot((nod.repo.hostRecords()[0] ?? null)?.address ?? '', {
     snapshot: JSON.stringify(snapshot),
     version: snapshot.version,
     issuedAt: snapshot.issuedAt,
@@ -908,13 +908,13 @@ async function syncNod(nod: Nod): Promise<Snapshot> {
   if (connection === null) throw new Error('the Nod is not connected');
   const result = await connection.snapshot();
   if (result.notModified) throw new Error('the host answered 304 to a Nod with no cached version');
-  nod.repo.saveHostSnapshot({
+  nod.repo.saveHostSnapshot((nod.repo.hostRecords()[0] ?? null)?.address ?? '', {
     snapshot: result.raw,
     version: result.snapshot.version,
     issuedAt: result.snapshot.issuedAt,
     syncedAt: AT,
   });
-  nod.catalog.refresh(nod.repo.hostRecord());
+  nod.catalog.refresh((nod.repo.hostRecords()[0] ?? null));
   await nod.keys.observe();
   return result.snapshot;
 }

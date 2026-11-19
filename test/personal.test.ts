@@ -186,9 +186,10 @@ function harness(mode: 'local' | 'connected'): Harness {
   let writes = 0;
   const personal = createPersonal({
     repo,
+    guildAddress: () => (repo.hostRecords()[0] ?? null)?.address ?? '',
     entries: () => {
       if (!on) return repo.listEntries();
-      const half = applyOutbox({ personalTools: [], personalViews: [], favorites: [] }, repo.listOutbox());
+      const half = applyOutbox({ personalTools: [], personalViews: [], favorites: [] }, repo.listOutbox((repo.hostRecords()[0] ?? null)?.address ?? ''));
       return [...CONNECTED_BASE, ...half.personalTools];
     },
     personId: () => person.id,
@@ -214,7 +215,7 @@ describe('personal, local mode', () => {
     const row = h.repo.entry(saved.id);
     expect(row?.scope).toBe('personal');
     expect(row?.ownerId).toBe(h.person.id);
-    expect(h.repo.listOutbox()).toEqual([]);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toEqual([]);
     expect(h.queued()).toBe(1);
 
     // Another person's catalog never carries it (SP04 §2 says the rows are filtered by owner in SQL;
@@ -276,6 +277,7 @@ describe('personal, local mode', () => {
     const order: string[] = [];
     const personal = createPersonal({
       repo,
+      guildAddress: () => (repo.hostRecords()[0] ?? null)?.address ?? '',
       entries: () => repo.listEntries(),
       personId: () => person.id,
       connected: () => false,
@@ -325,7 +327,7 @@ describe('personal, connected mode', () => {
     h.connected(true);
     const saved = h.personal.saveTool({ title: 'Notes', url: 'https://notes.example.test/app' });
 
-    const rows = h.repo.listOutbox();
+    const rows = h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '');
     expect(rows).toHaveLength(1);
     expect(rows[0].method).toBe('PUT');
     expect(rows[0].path).toBe(HOST_ROUTES.personalTool.replace(':id', saved.id));
@@ -353,7 +355,7 @@ describe('personal, connected mode', () => {
     await h.personal.setFavorites([saved.id, 'jitsi']);
     h.personal.setFavorites(['jitsi', 'jitsi', '']);
 
-    const rows = h.repo.listOutbox();
+    const rows = h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '');
     expect(rows.map((row) => `${row.method} ${row.path}`)).toEqual([
       `PUT ${HOST_ROUTES.personalTool.replace(':id', saved.id)}`,
       `DELETE ${HOST_ROUTES.personalTool.replace(':id', saved.id)}`,
@@ -373,7 +375,7 @@ describe('personal, connected mode', () => {
     const h = harness('connected');
     h.connected(true);
     expect(() => h.personal.saveTool({ id: 'jitsi', title: 'x', url: 'https://x.example.test/app' })).toThrow();
-    expect(h.repo.listOutbox()).toEqual([]);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toEqual([]);
   });
 });
 
@@ -442,13 +444,13 @@ describe('adoptLocalTool (RF-40, B8b)', () => {
     expect(saved.id).toMatch(PERSONAL_TOOL_ID);
     expect(saved.scope).toBe('personal');
     expect(saved.ownerId).toBe(h.person.id);
-    const tool = h.repo.listOutbox().filter((o) => o.path.startsWith('/v1/personal/tools/'));
+    const tool = h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '').filter((o) => o.path.startsWith('/v1/personal/tools/'));
     expect(tool).toHaveLength(1);
     const body = JSON.parse(tool[0].body) as Entry & { updatedAt: string };
     expect(body.title).toBe(local.title);
     expect(body.url).toBe(local.url);
     expect(body.icon).toBe('data:image/png;base64,AAAA');
-    const views = h.repo.listOutbox().filter((o) => o.path.startsWith('/v1/personal/views/'));
+    const views = h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '').filter((o) => o.path.startsWith('/v1/personal/views/'));
     expect(views).toHaveLength(1);
     const view = JSON.parse(views[0].body) as { entryId: Id; label: string; url: string; mode: string };
     expect(view.entryId).toBe(saved.id);
@@ -506,7 +508,7 @@ describe('adoptLocalTool for a local personal row (RF-40 fix)', () => {
     h.connected(true);
     const adopted = h.personal.adoptLocalTool(h.repo.entry(saved.id)!, null);
     expect(adopted.id).toBe(saved.id);
-    const ops = h.repo.listOutbox();
+    const ops = h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '');
     expect(ops.filter((o) => o.path === HOST_ROUTES.personalTool.replace(':id', saved.id))).toHaveLength(1);
     expect(ops.filter((o) => o.path.startsWith('/v1/personal/views/'))).toHaveLength(1);
 
@@ -535,7 +537,7 @@ describe('adoptLocalTool for a local personal row (RF-40 fix)', () => {
     const adopted = h.personal.adoptLocalTool(local, null);
     expect(adopted.id).toMatch(PERSONAL_TOOL_ID);
     expect(adopted.id).not.toBe('mine-1');
-    const tool = h.repo.listOutbox().filter((o) => o.path.startsWith('/v1/personal/tools/'));
+    const tool = h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '').filter((o) => o.path.startsWith('/v1/personal/tools/'));
     expect(tool).toHaveLength(1);
     expect(tool[0].path).toBe(HOST_ROUTES.personalTool.replace(':id', adopted.id));
   });

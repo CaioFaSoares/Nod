@@ -221,7 +221,7 @@ function installSnapshot(
 ): void {
   const me = nod.session.current();
   if (me === null) throw new Error('the test snapshot needs an unlocked session');
-  if (nod.repo.hostRecord() === null) {
+  if ((nod.repo.hostRecords()[0] ?? null) === null) {
     nod.repo.saveHost({
       address: 'https://host.example.test',
       guild: 'Guild',
@@ -255,7 +255,7 @@ function installSnapshot(
     holders: body.holders ?? {},
     rotationPending: body.rotationPending ?? [],
   };
-  nod.repo.saveHostSnapshot({
+  nod.repo.saveHostSnapshot((nod.repo.hostRecords()[0] ?? null)?.address ?? '', {
     snapshot: JSON.stringify(snapshot),
     version: snapshot.version,
     issuedAt: snapshot.issuedAt,
@@ -1052,7 +1052,7 @@ describe('accept (SP06 §3–§4)', () => {
 
     // The `host` row no longer carries the sealed body of the settled share, and the share is gone
     // from the inbox (a `sealed` that is not a non-empty string is not a share).
-    const cached = fixture.nod.repo.hostRecord()?.snapshot ?? '';
+    const cached = (fixture.nod.repo.hostRecords()[0] ?? null)?.snapshot ?? '';
     const body = JSON.parse(cached) as { incomingShares: { sealed: string }[] };
     expect(body.incomingShares[0]?.sealed).toBe('');
     expect(shares.inbox()).toHaveLength(0);
@@ -1067,7 +1067,7 @@ describe('accept (SP06 §3–§4)', () => {
 
     await shares.decline('share-1');
 
-    const cached = fixture.nod.repo.hostRecord()?.snapshot ?? '';
+    const cached = (fixture.nod.repo.hostRecords()[0] ?? null)?.snapshot ?? '';
     const body = JSON.parse(cached) as { incomingShares: { sealed: string }[] };
     expect(body.incomingShares[0]?.sealed).toBe('');
     expect(shares.inbox()).toHaveLength(0);
@@ -2113,13 +2113,13 @@ async function syncNod(nod: Nod): Promise<Snapshot> {
   if (connection === null) throw new Error('the Nod is not connected');
   const result = await connection.snapshot();
   if (result.notModified) throw new Error('the host answered 304 to a Nod with no cached version');
-  nod.repo.saveHostSnapshot({
+  nod.repo.saveHostSnapshot((nod.repo.hostRecords()[0] ?? null)?.address ?? '', {
     snapshot: result.raw,
     version: result.snapshot.version,
     issuedAt: result.snapshot.issuedAt,
     syncedAt: AT,
   });
-  nod.catalog.refresh(nod.repo.hostRecord());
+  nod.catalog.refresh((nod.repo.hostRecords()[0] ?? null));
   await nod.keys.observe();
   return result.snapshot;
 }
@@ -2251,11 +2251,11 @@ describe('send and accept against the real host (K4, K6, K7)', () => {
     await aliceNod.shares.send(itemOf(aliceNod, 'figma').id, [bob.id]);
     await syncNod(bobNod);
     const open = bobNod.shares.inbox()[0];
-    const cached = JSON.parse(bobNod.repo.hostRecord()?.snapshot ?? '{}') as Snapshot;
+    const cached = JSON.parse((bobNod.repo.hostRecords()[0] ?? null)?.snapshot ?? '{}') as Snapshot;
     const tampered = cached.incomingShares?.[0];
     if (tampered === undefined) throw new Error('the second share did not reach the inbox');
     cached.incomingShares = [{ ...tampered, sealed: flipOne(tampered.sealed) }];
-    bobNod.repo.saveHostSnapshot({
+    bobNod.repo.saveHostSnapshot((bobNod.repo.hostRecords()[0] ?? null)?.address ?? '', {
       snapshot: JSON.stringify(cached),
       version: cached.version,
       issuedAt: cached.issuedAt,

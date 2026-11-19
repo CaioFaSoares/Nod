@@ -74,7 +74,7 @@ describe('boot', () => {
     // category (RF-62), migration 5's guild invites (RF-59), migration 4's rotation signal (RF-48),
     // migration 3's one-pair-per-person rule (`docs/canonico.md` §22) and migration 2's block 2 tables
     // (SP01 §3–§4): a fresh `/data` now reports 7.
-    expect(version?.value).toBe('7');
+    expect(version?.value).toBe('8');
 
     host.close();
   });
@@ -107,6 +107,8 @@ describe('environment', () => {
       publicUrl: 'https://nod.example',
       port: DEFAULT_PORT,
       dev: false,
+      // E04/RF-73: the portal stays off until the deployment turns it on.
+      webUi: false,
     });
   });
 

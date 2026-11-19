@@ -6,6 +6,7 @@
 // 0.5.0 (RF-60): the locked screen is the rail of tiles in `./entry`; the join flow it and
 // Settings → Hosts share is `./join`.
 import { call, errorMessage, on } from './api';
+import { applyAppearance } from './appearance';
 import { mountEntry, resetEntry, showEntryInvite } from './entry';
 import { openPalette } from './palette';
 import { mountSettings } from './settings';
@@ -37,6 +38,8 @@ import type {
   Id,
   JoinInvite,
   LoginResult,
+  Role,
+  RosterPerson,
   SaveTabResult,
   SessionState,
   SidebarFolder,
@@ -46,7 +49,18 @@ import type {
   ToolsState,
   UpdateInfo,
 } from '../shared/types';
-import { categoryOf, groupByCategory } from '../shared/catalog';
+import { categoryOf, orgAccountOf, tagsOf } from '../shared/catalog';
+import {
+  DEFAULT_LIBRARY_VIEW,
+  LIBRARY_VIEWS,
+  blockStacks,
+  libraryGroups,
+  libraryViewOf,
+  orgChart,
+  rosterOf,
+  type LibraryInput,
+  type LibraryView,
+} from '../shared/library';
 import type { PresenceEntry } from '../shared/host-api';
 
 /**
@@ -992,66 +1006,366 @@ function renderHome(content: HTMLElement): void {
       ),
     );
   } else {
-    appendCatalog(body);
+    body.append(libraryBody());
   }
   const card = presenceCard();
+  // RF-79's bar stays one row at the window's smallest width: the acts are marks, and their words
+  // — the button's own text, the tooltip and the name the screen reader reads — are the whole
+  // label. The palette also answers ⌘K / Ctrl+K.
+  const searchTools = iconButton('⌕', 'Search tools', () => openPaletteNow(), {
+    title: 'Search tools or actions (⌘K / Ctrl+K)',
+  });
+  // The magnifier is drawn smaller than the other marks in its own em box; the class gives it the
+  // size that reads beside them.
+  searchTools.classList.add('header-act-search');
   content.replaceChildren(
     el(
       'header',
       { class: 'content-header' },
       el('h1', { class: 'content-title' }, 'Tools'),
-      button('Search tools', () => openPaletteNow(), { kind: 'ghost', title: 'Search tools or actions (⌘K / Ctrl+K)' }),
-      // B7: anyone may add a personal tool; the dialog asks for a title and an address.
-      button('Add personal tool', () => openPersonalToolDialog(), {
-        kind: 'ghost',
-        title: 'Add a tool only you see',
-      }),
+      libraryToolbar(),
+      el(
+        'div',
+        { class: 'header-acts' },
+        searchTools,
+        // B7: anyone may add a personal tool; the dialog asks for a title and an address.
+        iconButton('+', 'Add personal tool', () => openPersonalToolDialog(), {
+          title: 'Add a tool only you see',
+        }),
+      ),
     ),
     body,
     ...(card === null ? [] : [card]),
   );
 }
 
+// ------------------------------------------------------------- RF-79: the library
+
 /**
- * RF-62: Home's cards in the sidebar's order — the favorites as one block, one section per category,
- * "Other tools" for the org tools the guild filed nowhere, then the personal tools. A guild that
- * files nothing keeps the single grid this screen always had.
+ * The library (RF-79): the Steam-like catalog of both surfaces. The models are `shared/library.ts`'s
+ * — what a group is, what the search reads, what the org chart and the isometric blocks draw — and
+ * the styles are `shared/library.css`'s, imported by `src/style.css`; what stays here is the app's
+ * own half: the search field, the view buttons, and the card with its six acts.
  */
-function appendCatalog(body: HTMLElement): void {
-  const favorite = new Set(favorites);
-  const org = catalog.filter((entry) => !isForeign(entry));
-  if (!org.some((entry) => categoryOf(entry) !== null)) {
-    body.append(toolGrid(catalog));
-    return;
+
+/** The machine's own choices, kept where the web portal keeps them: a page preference, never a guild call. */
+const LIBRARY_VIEW_KEY = 'nod-library-view';
+const LIBRARY_COLLAPSED_KEY = 'nod-library-collapsed';
+
+let libraryQuery = '';
+let libraryViewLoaded = false;
+let libraryView: LibraryView = DEFAULT_LIBRARY_VIEW;
+
+function currentLibraryView(): LibraryView {
+  if (!libraryViewLoaded) {
+    libraryView = libraryViewOf(window.localStorage.getItem(LIBRARY_VIEW_KEY));
+    libraryViewLoaded = true;
   }
-  const starred = catalog.filter((entry) => favorite.has(entry.id));
-  if (starred.length > 0) body.append(toolGrid(starred));
-  const rest = catalog.filter((entry) => !favorite.has(entry.id));
-  // `groupByCategory` puts the uncategorized group last, which is where "Other tools" reads.
-  for (const group of groupByCategory(rest.filter((entry) => !isForeign(entry)))) {
-    body.append(toolSection(group.category ?? 'Other tools', group.entries));
-  }
-  const personal = rest.filter((entry) => isForeign(entry));
-  if (personal.length > 0) body.append(toolGrid(personal));
+  return libraryView;
 }
 
-/** One grid of cards, the shape both Home's blocks and its sections use. */
-function toolGrid(entries: Entry[]): HTMLElement {
-  const grid = el('div', { class: 'grid' });
-  for (const entry of entries) grid.append(toolCard(entry));
-  return grid;
+function chooseLibraryView(next: LibraryView): void {
+  libraryView = next;
+  libraryViewLoaded = true;
+  try {
+    window.localStorage.setItem(LIBRARY_VIEW_KEY, next);
+  } catch {
+    /* a preference that cannot be stored is still in force for this window */
+  }
 }
 
-/** RF-62: one category of Home — the name the guild gave it, and the tools it files. */
-function toolSection(title: string, entries: Entry[]): HTMLElement {
-  return el(
-    'section',
-    { class: 'home-section', aria: { label: title } },
-    el('h2', { class: 'home-section-title' }, title),
-    // Atrius: a category carries its count, beside the title (the title's text stays the name).
-    el('span', { class: 'home-section-count', aria: { hidden: 'true' } }, String(entries.length)),
-    toolGrid(entries),
+function libraryCollapsed(): Set<string> {
+  try {
+    return new Set(JSON.parse(window.localStorage.getItem(LIBRARY_COLLAPSED_KEY) ?? '[]') as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+function storeLibraryCollapsed(set: Set<string>): void {
+  try {
+    window.localStorage.setItem(LIBRARY_COLLAPSED_KEY, JSON.stringify([...set]));
+  } catch {
+    /* same rule: the collapse is still in force while the window lives */
+  }
+}
+
+/** The library's input from the page's own state; the roster and the roles fill in when a view needs them. */
+function libraryInput(roles: Role[] = [], people: RosterPerson[] = []): LibraryInput {
+  return {
+    orgTools: catalog.filter((entry) => !isForeign(entry)),
+    personalTools: catalog.filter((entry) => isForeign(entry)),
+    favorites,
+    roles,
+    people: rosterOf(people, roles),
+  };
+}
+
+/**
+ * The mark each view takes in Home's strip. `iconButton` keeps the view's label as the button's
+ * own text — the tooltip, the name a screen reader reads and what the smoke matches — so the mark
+ * is the only thing the eye loses.
+ */
+const LIBRARY_VIEW_GLYPHS: Record<LibraryView, string> = {
+  cards: '▦',
+  list: '☰',
+  org: '┬',
+  blocks: '⬔',
+};
+
+/** The search field and the four views, beside the title (RF-79's "a busca e as categorias"). */
+function libraryToolbar(): HTMLElement {
+  const search = el(
+    'input',
+    {
+      class: 'input lb-search-input',
+      aria: { label: 'Search the library' },
+      attrs: { type: 'search', placeholder: 'Search title, category, tag, account…' },
+    },
   );
+  search.value = libraryQuery;
+  search.addEventListener('input', () => {
+    libraryQuery = search.value;
+    refreshLibrary();
+  });
+
+  const views = el('div', { class: 'lb-views', role: 'group', aria: { label: 'Library views' } });
+  for (const option of LIBRARY_VIEWS) {
+    const node = iconButton(LIBRARY_VIEW_GLYPHS[option.id], option.label, () => {
+      chooseLibraryView(option.id);
+      renderHomeNow();
+    }, {
+      title: `The library as ${option.label.toLowerCase()}`,
+      pressed: currentLibraryView() === option.id,
+    });
+    node.classList.add('lb-view');
+    views.append(node);
+  }
+
+  return el('div', { class: 'lb-toolbar' }, el('span', { class: 'lb-search' }, search), views);
+}
+
+/** Home is redrawn from the current answer, wherever the library asked for it. */
+function renderHomeNow(): void {
+  if (shell !== null && view === 'home') renderHome(shell.content);
+}
+
+/** The library's area redraw alone — the header and the presence card stay as they are. */
+function refreshLibrary(): void {
+  const area = document.querySelector('.home');
+  if (area === null) return;
+  const next = libraryBody();
+  area.replaceChildren(...next.childNodes);
+}
+
+/** The library's body for the view this machine chose (RF-79): cards, list, org chart or blocks. */
+function libraryBody(): HTMLElement {
+  const chosen = currentLibraryView();
+  const input = libraryInput();
+  if (chosen === 'list') return libraryList(input);
+  if (chosen === 'cards') return libraryCards(input);
+  // The two organization views read the roster too; they fill in when the answers arrive.
+  const area = chosen === 'org' ? el('div', { class: 'lb-org' }) : el('div', { class: 'lb-blocks' });
+  void fillOrganizationViews(area, chosen);
+  return area;
+}
+
+/** The roster and the roles of the two organization views, fetched once per draw. */
+async function fillOrganizationViews(area: HTMLElement, chosen: LibraryView): Promise<void> {
+  let roles: Role[] = [];
+  let people: RosterPerson[] = [];
+  try {
+    [roles, people] = await Promise.all([call('roles.list'), call('roster.list')]);
+  } catch {
+    /* a guild that cannot answer leaves the two views their empty drawing */
+  }
+  const input = libraryInput(roles, people);
+  const redraw = chosen === 'org' ? orgChartArea(input) : blocksArea(input);
+  area.replaceChildren(...redraw.childNodes);
+}
+
+/** RF-79's cards: the categories as collapsible groups, the guild's favorites kept inside them. */
+function libraryCards(input: LibraryInput): HTMLElement {
+  const groups = el('div', { class: 'lb-groups' });
+  const closed = libraryCollapsed();
+  libraryGroups(input, libraryQuery).forEach((group, index) => {
+    const label = group.category ?? (group.kind === 'personal' ? 'Your tools' : 'Other tools');
+    const cards = el('div', { class: 'lb-group-cards' });
+    group.cards.forEach((card, at) => {
+      const node = toolCard(card.entry);
+      // RF-79: the first group's first tools take the width — the featured row.
+      if (index === 0 && at < 2) node.dataset.featured = 'true';
+      cards.append(node);
+    });
+    const key = group.kind === 'personal' ? '\u0000personal' : group.category ?? '\u0000other';
+    const section = el(
+      'section',
+      { class: 'lb-group', aria: { label } },
+      el(
+        'button',
+        {
+          class: 'lb-group-head',
+          title: `Collapse ${label}`,
+          aria: { expanded: closed.has(key) ? 'false' : 'true' },
+        },
+        el('span', { class: 'lb-caret', aria: { hidden: 'true' } }, '▸'),
+        el('span', { class: 'lb-group-title' }, label),
+        el('span', { class: 'lb-group-count', aria: { hidden: 'true' } }, String(group.cards.length)),
+      ),
+      cards,
+    );
+    section.dataset.collapsed = closed.has(key) ? 'true' : 'false';
+    section.querySelector('.lb-group-head')?.addEventListener('click', () => {
+      const now = section.dataset.collapsed !== 'true';
+      section.dataset.collapsed = now ? 'true' : 'false';
+      const head = section.querySelector('.lb-group-head');
+      head?.setAttribute('aria-expanded', now ? 'false' : 'true');
+      const set = libraryCollapsed();
+      if (now) set.add(key);
+      else set.delete(key);
+      storeLibraryCollapsed(set);
+    });
+    groups.append(section);
+  });
+  if (groups.childElementCount === 0) {
+    return el('div', { class: 'lb-empty' }, el('p', { class: 'muted' }, 'Nothing matches.'));
+  }
+  return groups;
+}
+
+/** RF-79's list: one compact row per tool — the title, the host, the tags, the org account, the open. */
+function libraryList(input: LibraryInput): HTMLElement {
+  const rows = el('div', { class: 'lb-list' });
+  for (const group of libraryGroups(input, libraryQuery)) {
+    for (const card of group.cards) {
+      const open = iconButton('↗', 'Open', () => openTool(card.entry.id), {
+        kind: 'primary',
+        title: `Open ${card.entry.title}`,
+      });
+      const row = el(
+        'div',
+        {
+          class: 'lb-list-row',
+          role: 'button',
+          attrs: { tabindex: '0' },
+          aria: { label: `Open ${card.entry.title}` },
+        },
+        glyph(card.entry.title, entryIcon(card.entry, tools.find((tool) => tool.id === card.entry.id) ?? null)),
+        el('span', { class: 'lb-card-title' }, card.entry.title),
+        el('span', { class: 'lb-card-host muted' }, hostOfLibrary(card.entry.url)),
+        el(
+          'span',
+          { class: 'lb-card-tags' },
+          ...card.tags.map((tag) => el('span', { class: 'lb-tag' }, tag)),
+        ),
+        card.orgAccount === null
+          ? null
+          : el('span', { class: 'lb-card-account muted' }, card.orgAccount),
+        card.favorite ? el('span', { class: 'lb-card-star', aria: { hidden: 'true' } }, '★') : null,
+        open,
+      );
+      row.addEventListener('click', () => openTool(card.entry.id));
+      row.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        openTool(card.entry.id);
+      });
+      rows.append(row);
+    }
+  }
+  if (rows.childElementCount === 0) {
+    return el('div', { class: 'lb-empty' }, el('p', { class: 'muted' }, 'Nothing matches.'));
+  }
+  return rows;
+}
+
+/** The host of an address as the library prints it (`shared/library.ts`'s own reader). */
+function hostOfLibrary(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** RF-79's org chart: the guild's roles as nodes with their people, and who reaches what. */
+function orgChartArea(input: LibraryInput): HTMLElement {
+  const area = el('div', { class: 'lb-org' });
+  for (const node of orgChart(input, libraryQuery)) {
+    const people = el('div', { class: 'lb-org-people' });
+    for (const person of node.people) {
+      const chip = el('span', { class: 'lb-person' }, person.name);
+      chip.dataset.admin = person.admin ? 'true' : 'false';
+      people.append(chip);
+    }
+    const reach = el('div', { class: 'lb-org-categories' });
+    for (const name of node.categories) {
+      reach.append(el('span', { class: 'lb-reach' }, name === '' ? 'Other tools' : name));
+    }
+    area.append(
+      el(
+        'div',
+        { class: 'lb-org-node' },
+        el('h3', { class: 'lb-org-role' }, node.role?.name ?? 'No role'),
+        people,
+        reach,
+      ),
+    );
+  }
+  if (area.childElementCount === 0) {
+    return el('div', { class: 'lb-empty' }, el('p', { class: 'muted' }, 'Nothing matches.'));
+  }
+  return area;
+}
+
+/** RF-79's isometric blocks: a real projection — the rotated stage, the stacks, who stands where. */
+function blocksArea(input: LibraryInput): HTMLElement {
+  const stage = el('div', { class: 'lb-stage' });
+  for (const stack of blockStacks(input, libraryQuery)) {
+    const plate = el(
+      'div',
+      {
+        class: 'lb-plate',
+        title: stack.category ?? (stack.kind === 'personal' ? 'Your tools' : 'Other tools'),
+      },
+      el('div', { class: 'lb-plate-title' }, stack.category ?? (stack.kind === 'personal' ? 'Your tools' : 'Other tools')),
+      el('div', { class: 'lb-plate-tools' }),
+    );
+    const height = Math.min(6, stack.cards.length);
+    for (const style of [plate]) {
+      style.style.setProperty('--lb-height', String(height));
+    }
+    const standing = el('div', { class: 'lb-standing' });
+    standing.style.setProperty('--lb-height', String(height));
+    const toolsNode = plate.querySelector('.lb-plate-tools') as HTMLElement;
+    for (const card of stack.cards) {
+      const chip = el(
+        'span',
+        { class: 'lb-plate-tool', role: 'button', attrs: { tabindex: '0' } },
+        card.entry.title,
+      );
+      chip.addEventListener('click', () => openTool(card.entry.id));
+      chip.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        openTool(card.entry.id);
+      });
+      toolsNode.append(chip);
+    }
+    for (const person of stack.people) {
+      const chip = el('span', { class: 'lb-person' }, person.name);
+      chip.dataset.admin = person.admin ? 'true' : 'false';
+      standing.append(chip);
+    }
+    const tile = el('div', { class: 'lb-stack' });
+    tile.style.setProperty('--lb-height', String(height));
+    tile.append(plate, standing);
+    stage.append(tile);
+  }
+  if (stage.childElementCount === 0) {
+    return el('div', { class: 'lb-empty' }, el('p', { class: 'muted' }, 'Nothing matches.'));
+  }
+  return el('div', { class: 'lb-blocks' }, stage);
 }
 
 /** RF-58: how long ago, in words a person reads at a glance. */
@@ -1327,6 +1641,33 @@ function toolCard(entry: Entry): HTMLElement {
   const login = tool === null || tool.login === null ? null : LOGIN_TEXT[tool.login];
   if (login !== null && tool !== null && tool.login !== null) {
     card.append(el('p', { class: 'tool-login muted', data: { login: tool.login } }, login));
+  }
+
+  // RF-77: the tags the guild gave the tool — the library's search reads them, so the card wears
+  // them. RF-78: the org's default account, a plain label (the password stays in the vault).
+  const tags = tagsOf(entry);
+  if (tags.length > 0 || orgAccountOf(entry) !== null) {
+    card.append(
+      el(
+        'div',
+        { class: 'tool-library' },
+        tags.length > 0
+          ? el(
+              'div',
+              { class: 'lb-card-tags' },
+              ...tags.map((tag) => el('span', { class: 'lb-tag' }, tag)),
+            )
+          : null,
+        orgAccountOf(entry) === null
+          ? null
+          : el(
+              'p',
+              { class: 'lb-card-account muted', title: 'The account the whole guild uses for this tool' },
+              'Guild account: ',
+              el('b', {}, orgAccountOf(entry) as string),
+            ),
+      ),
+    );
   }
 
   // The row's acts are icons in fixed slots, the same six in every row — open or bring to front,
@@ -1984,6 +2325,9 @@ async function boot(): Promise<void> {
     const [state, appInfo] = await Promise.all([call('session.state'), call('nod.info')]);
     session = state;
     info = appInfo;
+    // 2026-11-19 style toggle: the window wears the stored skin before anything is drawn, so even
+    // the locked entry screen opens in it (src/appearance.ts owns the how).
+    applyAppearance(appInfo.appearance);
   } catch (e) {
     root.replaceChildren(
       el(

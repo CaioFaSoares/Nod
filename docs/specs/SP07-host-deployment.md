@@ -36,6 +36,8 @@ CMD ["bun", "host/main.ts"]
   (`docker manifest inspect`, `docs/handovers/h1.md`).
 - `/data` is created and owned by `bun`, the unprivileged user the container runs as: it writes
   `host.db`, the key files and `backups/` there (SP01 §1, §4).
+- The image's `PORT=8080` is the container's *default*: the compose files pass
+  `${NOD_PORT:-8080}` over it, and `host/config.ts` reads whatever `PORT` it is given (§2).
 
 ## 2. Compose
 
@@ -53,10 +55,13 @@ services:
       NOD_MIN_APP_VERSION: ${NOD_MIN_APP_VERSION:-0.3.0}
       NOD_BACKUP_EVERY_HOURS: ${NOD_BACKUP_EVERY_HOURS:-24}
       NOD_BACKUP_KEEP: ${NOD_BACKUP_KEEP:-14}
+      PORT: ${NOD_PORT:-8080}                  # the port the process binds and the one published
+    ports:
+      - "${NOD_BIND:-127.0.0.1}:${NOD_PORT:-8080}:${NOD_PORT:-8080}"
     volumes:
       - nod-data:/data
     healthcheck:
-      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1))"]
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT ?? '8080') + '/health').then(r => process.exit(r.ok ? 0 : 1))"]
       interval: 30s
     restart: unless-stopped
 volumes:
@@ -64,7 +69,15 @@ volumes:
 ```
 
 - One replica only: SQLite has a single writer (SP01).
-- TLS ends at Coolify's proxy; the container serves plain HTTP on 8080 inside its network.
+- TLS ends at Coolify's proxy; the container serves plain HTTP on `NOD_PORT` (8080 by default)
+  inside its network.
+- **The bind port is a deployment value** (owner, 2026-11-19: "configure o compose para ser lançado
+  em um servidor onde eu possa configurar a porta que ele binda"). `NOD_PORT` sets the port the
+  process binds (`host/config.ts` reads `PORT`, default `DEFAULT_PORT` 8080), the port published on
+  the host (`compose.yaml`) and the `expose` of `compose.coolify.yaml`; the healthcheck reads the
+  container's own `PORT` back, so it follows whichever value a deploy gives — nothing stays pinned
+  to 8080. `NOD_BIND` picks the interface of the published port: loopback by default,
+  `0.0.0.0` where the proxy lives outside the compose network.
 - The host refuses to start when `NOD_PUBLIC_URL` isn't `https://`, except in dev.
 - `GET /.well-known/nod` serves `guild` = `NOD_GUILD_NAME` (may be empty when the deployment
   leaves it unset) and `minAppVersion`; `GET /v1/meta/app` (SP03 §3) serves the same `minAppVersion`
@@ -118,9 +131,14 @@ written into a file (`AGENTS.md`; `docs/canonico.md` §14 "Host address").
    - `NOD_PUBLIC_URL=https://<the address the proxy exposes>` — required and without a default; the
      host refuses to start when it is missing, and refuses a non-`https://` value outside dev (§2).
    - `NOD_GUILD_NAME=<guild name>`, `NOD_MIN_APP_VERSION` (default `0.3.0`).
+   - `NOD_PORT=<port>` — the port the process binds and the compose publishes; default `8080` (§2).
+   - `WEB_UI=<true|false>` — 1.0.0 (RF-73, `docs/epics/E04-web-nod.md` §9): whether this deployment
+     serves the browser portal on that same port. The compose files default it to `true` — the
+     same address the app syncs through, one origin, the cookie first-party; a deployment that
+     wants the host API-only sets `false` and `GET /` answers the host's own 404.
    - `NOD_BACKUP_EVERY_HOURS` (default `24`) and `NOD_BACKUP_KEEP` (default `14`) — §4.
-   - `NOD_BIND=0.0.0.0` so the proxy, which is outside the compose network, reaches `8080`; the
-     service still runs one replica only (SP01 §1).
+   - `NOD_BIND=0.0.0.0` so the proxy, which is outside the compose network, reaches the published
+     port; the service still runs one replica only (SP01 §1).
 3. **Domain and TLS** — point the domain at the published port; TLS ends at Coolify's proxy and the
    container speaks plain HTTP (§2). The value of the domain is exactly `NOD_PUBLIC_URL`: it is what
    discovery returns and what the Nod pins (SP03 §3, SP04 §1).

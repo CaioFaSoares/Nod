@@ -23,6 +23,14 @@ The single page of the main window: the entry screen, sidebar, Home, the tab vie
 - **Row acts are icons (2026-11-19)**: a list row's acts (Home, Settings → Tools) are `iconButton`s in
   fixed slots (`ui.ts`); the words stay the button's text, label and tooltip, so a slot that does not
   apply is an `iconSlot` and every act keeps its column. Forms keep worded buttons.
+- **The style toggle (2026-11-19, RF-72)**: the window wears one of two skins — Atrius or Nod Sober —
+  in Automatic/Light/Dark, with custom colours per theme; Settings → Account → Appearance edits it
+  and `src/appearance.ts` applies it (RF-72 for the requirement, the decision row in `docs/canonico.md` §22, the tokens in `src/style.css`).
+  The page draws every screen from the same DOM: `style.css` keeps four token blocks and the rules
+  below them read only the internal tokens, so a skin change re-dresses the open window with no
+  re-render. The state lives in `store.json` (`nod.info` answers it, `nod.setAppearance` writes it);
+  nothing is read from or written to browser storage, and no colour or skin ever travels to a guild.
+  Rubik (Sober's face) ships in `src/fonts/` with its SIL OFL license — no network font.
 - **The person's own sidebar (2026-11-19)**: `sidebar.layout` (`shared/sidebar-layout.ts`) is drawn by
   `customRows`/`sidebarFolder` in `app.ts`; edits go through the pure helpers and `commitLayout`, which
   sends the whole layout back. Drag (pointer events, 4 px threshold), ⌥↑/⌥↓, the item's menu (right
@@ -72,6 +80,22 @@ implementation map, not an additional requirement or an execution report.
   a guild remain secondary actions. Trust preview, fingerprint, expiry and role checks stay unchanged.
 - Saved-password copy describes device encryption, not a per-secret OS-keychain item (RF-63). Personal
   tool copy distinguishes guild-device sync from this device's offline profile.
+
+## 1.0.0 (RF-79, the library and its two fields)
+
+- Home is the library: a search field and four view buttons ride the content header
+  (`libraryToolbar`, `src/app.ts`), the body draws from `shared/library.ts`'s models with
+  `shared/library.css`'s classes — the categories as collapsible groups (the machine's own choice,
+  kept in `localStorage`), the first group's first tools featured, one compact list row per tool,
+  the org chart of the guild's roles (`roster.list` and `roles.list`, fetched when the view needs
+  them) and the isometric stacks on a real CSS 3D projection. The card keeps its six acts and wears
+  the guild's tags and the org account (RF-77/RF-78).
+- The tool editor (Settings → Tools) carries Tags (comma-separated; the validator trims, drops
+  empties, keeps twelve) and the Guild account label beside the category — org tools only, exactly
+  like the category's own rule.
+- The tab strip nests: a tab another one opened renders indented under its opener
+  (`.tab-child`), drags among its siblings (the pointer preview, Alt/Option + ↑/↓ for the
+  keyboard) and commits through `tabs.move`; a parent's close takes its children with it.
 
 ## Screens (block 1 and block 2 landed)
 

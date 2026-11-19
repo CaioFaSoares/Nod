@@ -96,6 +96,21 @@ fallback do runtime, sem ajuste em Settings (`docs/canonico.md` §22 "Seamless t
 detach on demand" e "One runtime: Electrobun").
 _Evite_: modo aba, modo janela
 
+**Skin** — skin (`AppearanceState.skin`, `data-skin`):
+A linguagem visual da janela principal, escolhida em Settings → Account → Appearance: **Atrius** (a
+de 2026-11-19) ou **Nod Sober** (a skin quieta). Muda o desenho, não a estrutura nem o texto.
+_Evite_: tema (para a skin), design system (como nome da escolha), aparência no sentido de conta
+
+**Theme** — theme (`AppearanceState.theme`, `ThemeMode`, `data-theme`):
+Claro ou escuro; **Automatic** segue a aparência do sistema. Cada skin tem os dois. A palavra é
+"theme" e não "palette": a **Paleta** deste arquivo é a de comandos (⌘K).
+_Evite_: paleta (para claro/escuro), modo noturno
+
+**Cor customizada** — custom colour (`AppearanceState.colors`):
+Uma cor que a pessoa troca para um slot da skin em tela (acento, info, cautela, sucesso, falha); mora
+em `store.json` com a paleta a que pertence.
+_Evite_: tema customizado, paleta do usuário
+
 ## Pessoas e acesso
 
 **Pessoa** — `Person`:

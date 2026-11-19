@@ -1,0 +1,192 @@
+/*
+ * The portal's own chrome (E04 M1): the sign-in card, the header, the palette. The views' own
+ * styles live in `shared/library.css` — the same file the app's Home imports — and every colour
+ * they read is a `--lb-*` variable defined here, so the two surfaces share the drawing and keep
+ * their own skin.
+ */
+
+@import '../shared/library.css';
+
+:root {
+  color-scheme: dark;
+  /* The portal's palette: the Atrius ink the app wears, on its own terms. */
+  --lb-ink: #f2f2f0;
+  --lb-muted: #9aa0a6;
+  --lb-accent: #7ab8ff;
+  --lb-panel: #191b1e;
+  --lb-field: #121315;
+  --lb-hover: #202327;
+  --lb-active: #24272b;
+  --lb-line: #33373c;
+  --lb-side: #0d0e10;
+  --lb-shadow: 0 1px 0 #33373c;
+  background: #0e0f11;
+  font: 14px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--lb-ink);
+  background: #0e0f11;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ---------------------------------------------------------------- the header */
+
+.lb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--lb-line);
+}
+
+.lb-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.lb-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  color: #0e0f11;
+  background: var(--lb-accent);
+  border-radius: 2px;
+  font-weight: 800;
+}
+
+.lb-guild {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.lb-who {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.lb-signout {
+  padding: 0.3rem 0.7rem;
+  color: var(--lb-muted);
+  background: transparent;
+  border: 1px solid var(--lb-line);
+  border-radius: 2px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.lb-signout:hover {
+  color: var(--lb-ink);
+  border-color: var(--lb-accent);
+}
+
+/* ---------------------------------------------------------------- the body */
+
+.lb-toolbar {
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--lb-line);
+}
+
+.lb-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1rem;
+}
+
+/* ---------------------------------------------------------------- the sign-in card */
+
+.lb-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  width: min(22rem, calc(100vw - 2rem));
+  margin: 12vh auto 0;
+  padding: 1.4rem;
+  background: var(--lb-panel);
+  border: 1px solid var(--lb-line);
+  border-radius: 3px;
+}
+
+.lb-brand-entry {
+  justify-content: center;
+}
+
+.lb-entry-title {
+  margin: 0;
+  text-align: center;
+}
+
+.lb-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.lb-field-label {
+  color: var(--lb-muted);
+  font-size: 0.85em;
+}
+
+.lb-entry input {
+  padding: 0.45rem 0.6rem;
+  color: var(--lb-ink);
+  background: var(--lb-field);
+  border: 1px solid var(--lb-line);
+  border-radius: 2px;
+  font: inherit;
+}
+
+.lb-submit {
+  padding: 0.5rem;
+  color: #0e0f11;
+  background: var(--lb-accent);
+  border: 0;
+  border-radius: 2px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.lb-submit:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.lb-message {
+  min-height: 1.2em;
+  margin: 0;
+  color: #ff8f8f;
+  font-size: 0.9em;
+  text-align: center;
+}
+
+.lb-message:empty {
+  display: none;
+}
+
+.lb-note {
+  margin: 0;
+  color: var(--lb-muted);
+  font-size: 0.8em;
+  text-align: center;
+}

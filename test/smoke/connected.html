@@ -111,6 +111,9 @@
           setupCode: null,
           personCode: null,
           otherCode: null,
+          /** E07/RF-71: guild B's discovery and setup code, held the same way A's are. */
+          setupCodeB: null,
+          fingerprintB: null,
           toolId: null,
           personId: null,
           /** F1: the local account of the admin Nod before the join, and the credential it saved. */
@@ -560,6 +563,23 @@
           );
           shared.otherCode = answer.code;
           return method + " issued the second member's invite (role team, one use; not printed)";
+        }
+
+        /**
+         * RF-73: the web member's invite — an account that exists only for the portal half of this
+         * run. The runner redeems it headlessly and signs in on the browser side with the same
+         * derivation the page runs (RF-75), so the portal's proof starts from a real guild account.
+         */
+        async function stepCreateWeb() {
+          const method = CONFIG.methods.inviteCreate;
+          if (method === null) throw new Error('ApiContract declares no guild-invite method');
+          const answer = await call(method, { roles: ['team'], maxUses: 1, expiresInMinutes: 1440 });
+          expect(
+            !!answer && typeof answer.code === 'string' && answer.code.length > 0,
+            method + ' answered ' + summarize(answer),
+          );
+          await desk('/desk/handover', { code: answer.code, who: 'web' });
+          return method + " issued the web member's invite and handed it over (role team, one use)";
         }
 
         // The codes are handed over here, right after they exist: the person phases then fail for
@@ -1685,6 +1705,120 @@
           return 'P is still listed, disabledAt = ' + JSON.stringify(person.disabledAt);
         }
 
+        // ------------------------------------------------- E07/RF-71 — a second guild, held and left
+
+        /** The person's Nod holds guild A; this phase joins, enters and removes guild B. */
+        async function stepSecondDesk() {
+          const answer = await desk('/desk/guild-b');
+          expect(answer.address === CONFIG.addressB, 'guild B\'s address is ' + JSON.stringify(answer.address));
+          expect(answer.guild === CONFIG.guildB, 'guild B\'s name is ' + JSON.stringify(answer.guild));
+          shared.setupCodeB = answer.code;
+          return 'guild B at ' + CONFIG.addressB + ' (the setup code held in memory, never printed)';
+        }
+
+        async function stepSecondDiscover() {
+          const found = await call('host.discover', { address: CONFIG.addressB });
+          expect(found.guild === CONFIG.guildB, 'guild = ' + JSON.stringify(found.guild));
+          shared.fingerprintB = found.fingerprint;
+          return 'guild ' + found.guild + ', fingerprint ' + found.fingerprint.length + ' chars';
+        }
+
+        /**
+         * RF-71's acceptance, the join half: P is unlocked in A, and the join of B keeps A held —
+         * no F1 choice (A's account is a guild's, not a local one) and nothing of A's moves. The
+         * setup code creates B's first admin, so P is B's admin: the proof is about tiles, not roles.
+         */
+        async function stepSecondActivate() {
+          const answer = await call('host.activate', {
+            address: CONFIG.addressB,
+            fingerprint: shared.fingerprintB,
+            email: CONFIG.personEmail,
+            name: 'Smoke Person',
+            code: shared.setupCodeB,
+            password: ACCOUNT_PASSWORD,
+          });
+          shared.setupCodeB = null;
+          expect(answer && answer.kind === 'session', 'host.activate answered ' + summarize(answer));
+          const state = answer.session;
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          return 'joined B with A held — the session went straight out, and no choice was asked';
+        }
+
+        /** Both tiles on one entry screen: A's account and B's, each its own. */
+        async function stepBothTiles() {
+          const profiles = await call('session.profiles');
+          const ids = profiles.guilds.map(function (guild) { return guild.id; });
+          expect(ids.length === 2, 'the entry screen holds ' + ids.length + ' guild(s): ' + summarize(ids));
+          expect(ids.indexOf(CONFIG.address) !== -1, 'A\'s tile is missing: ' + summarize(ids));
+          expect(ids.indexOf(CONFIG.addressB) !== -1, 'B\'s tile is missing: ' + summarize(ids));
+          return 'two tiles: ' + ids.join(' and ');
+        }
+
+        /** Entering is the tile: A's account answers through A's tile, B held beside it. */
+        async function stepEnterA() {
+          await call('session.lock');
+          const state = await call('session.unlock', {
+            email: CONFIG.personEmail,
+            password: ACCOUNT_PASSWORD,
+            target: { kind: 'guild', id: CONFIG.address },
+          });
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          expect(state.mode === 'guild', 'mode = ' + JSON.stringify(state.mode));
+          const list = await call('host.list');
+          expect(list.length === 2, 'host.list answers ' + list.length + ' guild(s)');
+          expect(list[0].address === CONFIG.address, 'the entered guild is not first: ' + summarize(list));
+          return 'entered A with B held — the Hosts tab lists both, A first';
+        }
+
+        /** And B's tile opens B's account: one session, one guild at a time (E07 §2). */
+        async function stepEnterB() {
+          await call('session.lock');
+          const state = await call('session.unlock', {
+            email: CONFIG.personEmail,
+            password: ACCOUNT_PASSWORD,
+            target: { kind: 'guild', id: CONFIG.addressB },
+          });
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          const sync = await call('host.syncNow');
+          expect(sync.status === 'connected', 'B\'s sync answered ' + JSON.stringify(sync.status));
+          expect(sync.guild === CONFIG.guildB, 'B\'s sync named ' + JSON.stringify(sync.guild));
+          return 'entered B — its own account, its own sync';
+        }
+
+        /** The removal the Hosts tab offers: B leaves, entered in A, and A is what stays. */
+        async function stepRemoveB() {
+          await call('session.lock');
+          const entered = await call('session.unlock', {
+            email: CONFIG.personEmail,
+            password: ACCOUNT_PASSWORD,
+            target: { kind: 'guild', id: CONFIG.address },
+          });
+          expect(entered.unlocked === true, 'unlocked = ' + JSON.stringify(entered.unlocked));
+          const state = await call('host.remove', { address: CONFIG.addressB, keepPersonal: true });
+          expect(state.status === 'connected', 'after the removal the state is ' + JSON.stringify(state.status));
+          expect(state.address === CONFIG.address, 'the active guild is ' + JSON.stringify(state.address));
+          const list = await call('host.list');
+          expect(list.length === 1 && list[0].address === CONFIG.address,
+            'host.list answers ' + summarize(list.map(function (row) { return row.address; })));
+          return 'B removed while A entered — the Hosts tab lists A alone';
+        }
+
+        /** The acceptance's end: the tile that stayed opens, and the one that left answers nothing. */
+        async function stepAStillEnters() {
+          const profiles = await call('session.profiles');
+          const ids = profiles.guilds.map(function (guild) { return guild.id; });
+          expect(ids.length === 1 && ids[0] === CONFIG.address,
+            'the entry screen holds ' + summarize(ids) + ', expected A alone');
+          await call('session.lock');
+          const state = await call('session.unlock', {
+            email: CONFIG.personEmail,
+            password: ACCOUNT_PASSWORD,
+            target: { kind: 'guild', id: CONFIG.address },
+          });
+          expect(state.unlocked === true, 'unlocked = ' + JSON.stringify(state.unlocked));
+          return 'A still enters — a subject that left never took the one that stayed';
+        }
+
         // ------------------------------------------------------- SP05 §5.4 — the doomed sync
 
         async function stepPersonStateAgain() {
@@ -1735,6 +1869,7 @@
             ['2.8 roles.save (team)', stepSaveTeam],
             ['2.9 guildInvites.create (P, role team)', stepCreatePerson],
             ['2.9b guildInvites.create (Q, role team)', stepCreateOther],
+            ['2.9c guildInvites.create (the web member, role team)', stepCreateWeb],
             ['2.10 hand both codes over', stepHandOver],
             ['2.11 people.list (only the admin; the invite creates P at the join)', stepPersonListed],
             ['2.12 roles.grant (Tool A to team)', stepGrant],
@@ -1835,6 +1970,17 @@
             ['11.2 host.syncNow (the update applies, no gate, K9)', stepUpdateApplied],
             ['11.3 vault.reveal (the new value, K9)', stepUpdatedSecret],
             ['11.4 host.syncNow (the share is purged)', stepInboxEmpty],
+          ],
+          'person-second-guild': [
+            ['g.1 session.unlock (P, in A)', stepPersonUnlockAgain],
+            ['g.2 desk: guild B address and setup code', stepSecondDesk],
+            ['g.3 host.discover (B)', stepSecondDiscover],
+            ['g.4 host.activate (B, with A held)', stepSecondActivate],
+            ['g.5 session.profiles (both tiles)', stepBothTiles],
+            ['g.6 enter A, B held', stepEnterA],
+            ['g.7 enter B, A held', stepEnterB],
+            ['g.8 host.remove B, entered in A', stepRemoveB],
+            ['g.9 A still enters', stepAStillEnters],
           ],
           'admin-rotate': [
             ['12.1 session.unlock (admin)', stepAdminUnlock],

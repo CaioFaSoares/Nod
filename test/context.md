@@ -32,6 +32,10 @@ under Bun.
   over a docked native tool view and checks that it opens the folder prompt. A hidden screen remains
   a declared block, not a pass; any blocked step makes the release smoke exit non-zero.
 - `sidebar-layout.test.ts`: pure layout parsing, ordering, folder edits, moves and boundary cases.
+- `appearance.test.ts`: the style toggle's pure half (RF-72) — what `store.json` may hold as an
+  appearance, that unknown words and invalid colours read as the default, that only known slots and
+  `#rgb`/`#rrggbb` survive, and that the answer is a fresh object. It is pure-input proof, not DOM
+  execution: `src/appearance.ts` paints the window and is exercised in a browser, not here.
 - `settings-navigation.test.ts`: stable destinations, member/admin filtering, advanced separation,
   unique actions and old searchable aliases. This is pure metadata proof, not DOM execution.
 - Task-based UI regressions live in `ui-driver.ts`: navigation and explicit disclosure expansion are
@@ -68,6 +72,36 @@ under Bun.
 | Host route groups against a temp data dir | H4–H8 |
 | Two-instance smoke: a host process plus two Nod app ids (admin and person) | B11 |
 | The same smoke over four app ids: the personal half across machines, send/accept/assign/update/revoke and the no-plaintext dump of `host.db` | K10 |
+
+## 1.0.0's real-surface proofs
+
+- The tabs smoke's story runs functional-first and its **five real-mouse stages close the suite**
+  (the menu over a native tab, the strip clicks, the click through a hidden tab, the click while a
+  tab is detached, the close-all) — they need the Accessibility authorization the machine may not
+  have, and running them first used to hide every functional answer behind a blocked helper. Each
+  of the five builds its own state (`ensureToolTabs`, `ensureDetached`, the close-all's `twoTabs`),
+  and `checkParentCloseTakesChildren` empties the strip before building its family — a blocked
+  stage before it may have left every tab open.
+- `ask`'s failures carry the delivery evidence (`/desk/queues`): a pid whose queue grows is a page
+  that stopped polling; a pid absent is a command that never landed. A load report is matched from
+  a mark in time (`at >= since`), never by "a pid the smoke did not see before" — an earlier
+  phase's report already matches that and would send the ask to a dead page.
+- The tabs smoke proves the nesting: the popup carries its opener as `parentId`, the row renders
+  `tab-child`, `tabs.move` reorders the family (and refuses a parent and a foreign sibling), and
+  the parent's close takes its children.
+- The connected smoke boots a **second host** (`host-b-data`, its own port and setup code —
+  `startHostControl`'s `baseEnv` carries the deployment's own env, so the A host's `WEB_UI` survives
+  the desk's stop/start cycles) and its `person-second-guild` phase drives RF-71's acceptance:
+  join B with A held (no F1 choice — the page asserts it), both tiles, enter A, enter B, remove B
+  entered in A, A still enters. Its last check drives the **web portal** over the same loopback:
+  the page with its CSP, the derived-key cookie sign-in, the `web` device row through the member's
+  own bearer, the granted catalog, the refused foreign origin (with the live cookie, so the origin
+  check answers, not the caller guard) and the revoked sign-out.
+- The ui smoke's `admin-work` gains the library stage (the search filters and comes back, a group
+  collapses and stays collapsed through the four views) and the RF-72 stage (the Style card drives
+  the window; a custom accent repaints the solid button and the reset returns the skin's own colour;
+  the machine is left in Sober/dark so the next launch's **locked** entry screen must open dressed
+  in it — `admin-final` reads it before it unlocks).
 
 ## The connected smoke (`test/smoke/connected.ts`)
 

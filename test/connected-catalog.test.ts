@@ -121,7 +121,7 @@ function nodWithHost(now = NOW): Nod {
   });
   const clock = { at: now };
   const catalog = createConnectedCatalog({ now: () => clock.at });
-  const rederive = (): boolean => catalog.refresh(repo.hostRecord());
+  const rederive = (): boolean => catalog.refresh((repo.hostRecords()[0] ?? null));
   return {
     db,
     repo,
@@ -130,7 +130,7 @@ function nodWithHost(now = NOW): Nod {
     rederive,
     // SP04 §2: the body, its version and the instant of the success land in the row in one write.
     sync(raw, version = 'v1', syncedAt = SYNCED) {
-      repo.saveHostSnapshot({ snapshot: raw, version, issuedAt: ISSUED, syncedAt });
+      repo.saveHostSnapshot((repo.hostRecords()[0] ?? null)?.address ?? '', { snapshot: raw, version, issuedAt: ISSUED, syncedAt });
       return rederive();
     },
   };
@@ -294,7 +294,7 @@ describe('SP05 §2 — the catalog comes from the snapshot', () => {
     expect(nod.sync(body({ orgTools: [tool('jitsi')] }))).toBe(true);
     expect(idsOf(nod.catalog)).toEqual(['jitsi']);
 
-    nod.repo.clearHost();
+    nod.repo.removeHost((nod.repo.hostRecords()[0] ?? null)?.address ?? '');
     // Losing the host is news like any other: the catalog goes from the guild's entries to none.
     expect(nod.rederive()).toBe(true);
     expect(nod.catalog.current()).toBeNull();
@@ -405,7 +405,7 @@ describe('the verified bytes (SP04 §2, SP05 §2)', () => {
     signer.answer(tampered.replace('STEALER', 'STEALEN'), tampered);
     const refused = await refusalOf(connection.snapshot());
     expect(refused.failure).toBe('signature');
-    expect(nod.repo.hostRecord()?.snapshot).toBe(first);
+    expect((nod.repo.hostRecords()[0] ?? null)?.snapshot).toBe(first);
 
     expect(nod.rederive()).toBe(false);
     expect(idsOf(nod.catalog)).toEqual(['jitsi']);

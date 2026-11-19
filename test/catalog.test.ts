@@ -139,6 +139,9 @@ describe('validateEntry', () => {
       id: 'kanban',
       title: 'Kanban',
       category: null,
+      // RF-77/RF-78: the library's catalog fields default to none and to no label.
+      tags: [],
+      orgAccount: null,
       url: 'https://kanban.example.com',
       icon: null,
       order: 0,

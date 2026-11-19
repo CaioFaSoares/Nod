@@ -565,11 +565,17 @@ export interface HostControl {
   kill(): void;
 }
 
-/** The one host of a smoke: `bun host/main.ts` on a temp data dir, on a free loopback port. */
+/**
+ * The one host of a smoke: `bun host/main.ts` on a temp data dir, on a free loopback port.
+ * `baseEnv` is part of this host's own deployment — the connected smoke turns the web portal on
+ * this way, and every start of the control carries it: a stop/start cycle (SP05 §5.5) must not
+ * silently change what the host serves.
+ */
 export function startHostControl(
   root: string,
   dataDirPath: string,
   guildName: string,
+  baseEnv: Record<string, string> = {},
 ): HostControl {
   const port = freePort();
   const env: Record<string, string | undefined> = {
@@ -579,6 +585,7 @@ export function startHostControl(
     NOD_PUBLIC_URL: `http://127.0.0.1:${port}`,
     NOD_GUILD_NAME: guildName,
     PORT: String(port),
+    ...baseEnv,
   };
   let child: ChildProcess | null = null;
   let output = '';
@@ -725,6 +732,12 @@ export interface TabTools {
   reports(): TabReport[];
   /** Queues one command for the page of one load; that page's next poll answers it. */
   command(pid: string, cmd: string, arg?: string, tag?: string): void;
+  /**
+   * Diagnostics: the pids the pages poll under and how many commands wait in each — what tells an
+   * undelivered command (the pid is there, the count grows) from a page that never polls (the pid
+   * the smoke tracked is absent). The driver reads it through the desk's `/desk/queues`.
+   */
+  queues(): Record<string, number>;
   /** Forgets every report and every queued command. */
   reset(): void;
   stop(): void;
@@ -883,6 +896,11 @@ export function startTabTools(): TabTools {
       const queued = queues.get(pid) ?? [];
       queued.push({ cmd, ...(arg === undefined ? {} : { arg }), ...(tag === undefined ? {} : { tag }) });
       queues.set(pid, queued);
+    },
+    queues(): Record<string, number> {
+      const out: Record<string, number> = {};
+      for (const [pid, queued] of queues) out[pid] = queued.length;
+      return out;
     },
     reset(): void {
       reports.length = 0;

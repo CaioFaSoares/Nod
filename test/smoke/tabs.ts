@@ -553,6 +553,9 @@ function startDesk(deps: { tools: TabTools; pid: PidRef }): Desk {
       if (url.pathname === '/desk/reports') {
         return deskJson({ ok: true, reports: deps.tools.reports() });
       }
+      if (url.pathname === '/desk/queues') {
+        return deskJson({ ok: true, queues: deps.tools.queues() });
+      }
       if (url.pathname === '/desk/reset' && req.method === 'POST') {
         deps.tools.reset();
         return deskJson({ ok: true });

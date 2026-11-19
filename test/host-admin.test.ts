@@ -722,6 +722,7 @@ describe('B8a — the first admin publishes the local catalog once', () => {
     const client = createHostClient({ fetch, keychain });
     const sync = createSync({
       repo,
+      activeRow: () => repo.hostRecords()[0] ?? null,
       connection: () =>
         client.connect({
           address: running.address,
@@ -742,7 +743,7 @@ describe('B8a — the first admin publishes the local catalog once', () => {
     expect(state.status).toBe('connected');
 
     // The verified body landed in the row verbatim (SP04 §2): the published tool is in it.
-    const raw = repo.hostRecord()?.snapshot ?? '';
+    const raw = (repo.hostRecords()[0] ?? null)?.snapshot ?? '';
     expect(raw).not.toBe('');
     const landed = JSON.parse(raw) as Snapshot;
     expect(landed.me.id).toBe(ana.id);
@@ -952,13 +953,14 @@ async function syncNod(running: Running, nod: Nod, person: { id: string; token: 
   await connection().saveToken(person.token);
   const sync = createSync({
     repo: nod.repo,
+    activeRow: () => nod.repo.hostRecords()[0] ?? null,
     connection,
     now: () => Date.parse(AT),
     // O2's gate is not this test's subject: this fake build is above any minimum a test host sets.
     appVersion: () => '99.0.0',
     onState: () => {
       // `backend/main.ts`: the catalog follows the snapshot, and so does the connected person (F2).
-      catalog.refresh(nod.repo.hostRecord());
+      catalog.refresh((nod.repo.hostRecords()[0] ?? null));
       const me = catalog.current()?.me ?? null;
       if (me !== null) {
         nod.session.reconcileConnectedIdentity({ id: me.id, name: me.name, admin: me.admin });
@@ -1120,7 +1122,7 @@ describe('F1 — a join whose email is already an account of this Nod', () => {
     ).toBe('invalid code or password');
     expect(running.requests.at(-1)).toBe('POST /v1/auth/activate');
     // Neither a host row nor an account was written on the back of a refused join.
-    expect(nod.repo.hostRecord()).toBeNull();
+    expect((nod.repo.hostRecords()[0] ?? null)).toBeNull();
     expect((await nod.session.state()).hasAccount).toBe(false);
   });
 });

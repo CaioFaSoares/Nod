@@ -9,7 +9,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
   LINK_WINDOW_PREFIX,
+  childrenOf,
+  descendantsOf,
   insertAfter,
+  insertAsChild,
+  moveChild,
   linkWindowId,
   neighbourAfterClose,
   nextLinkNumber,
@@ -23,6 +27,7 @@ import {
   stepTab,
   tabWindowId,
 } from '../shared/tabs';
+import type { ParentOf } from '../shared/tabs';
 import type { SlotRect } from '../shared/types';
 
 describe('tab window ids', () => {
@@ -342,3 +347,91 @@ describe('saveTarget', () => {
   });
 });
 
+
+// ---------------------------------------------------------------- nested (1.0.0)
+
+describe('nested tabs', () => {
+  // A strip with one subject open: the tool, its adopted popup, and a popup the popup itself
+  // opened — plus a second tool beside them, the boundary of the block.
+  const order = ['tool_a', 'popup1', 'popup1_1', 'popup2', 'tool_b'];
+  const parentOf: ParentOf = new Map([
+    ['tool_a', null],
+    ['popup1', 'tool_a'],
+    ['popup1_1', 'popup1'],
+    ['popup2', 'tool_a'],
+    ['tool_b', null],
+  ]);
+
+  test('the first child lands right after its parent', () => {
+    expect(insertAsChild(['tool_a', 'tool_b'], parentOf, 'tool_a', 'popup1')).toEqual([
+      'tool_a',
+      'popup1',
+      'tool_b',
+    ]);
+  });
+
+  test('a second child lands after the whole family, grandchildren included', () => {
+    expect(insertAsChild(order, parentOf, 'tool_a', 'popup3')).toEqual([
+      'tool_a',
+      'popup1',
+      'popup1_1',
+      'popup2',
+      'popup3',
+      'tool_b',
+    ]);
+  });
+
+  test('a grandchild lands inside its own branch', () => {
+    expect(insertAsChild(order, parentOf, 'popup1', 'popup1_2')).toEqual([
+      'tool_a',
+      'popup1',
+      'popup1_1',
+      'popup1_2',
+      'popup2',
+      'tool_b',
+    ]);
+  });
+
+  test('childrenOf lists the direct children in strip order', () => {
+    expect(childrenOf(order, parentOf, 'tool_a')).toEqual(['popup1', 'popup2']);
+    expect(childrenOf(order, parentOf, 'popup1')).toEqual(['popup1_1']);
+    expect(childrenOf(order, parentOf, 'tool_b')).toEqual([]);
+  });
+
+  test('descendantsOf walks grandchildren too, in strip order', () => {
+    expect(descendantsOf(order, parentOf, 'tool_a')).toEqual(['popup1', 'popup1_1', 'popup2']);
+    expect(descendantsOf(order, parentOf, 'popup1')).toEqual(['popup1_1']);
+    expect(descendantsOf(order, parentOf, 'tool_b')).toEqual([]);
+  });
+
+  test('moveChild sends a child before a sibling of the same parent', () => {
+    expect(moveChild(order, parentOf, 'popup2', 'popup1')).toEqual([
+      'tool_a',
+      'popup2',
+      'popup1',
+      'popup1_1',
+      'tool_b',
+    ]);
+  });
+
+  test('moveChild to the end keeps the family contiguous, grandchildren following their branch', () => {
+    expect(moveChild(order, parentOf, 'popup1', null)).toEqual([
+      'tool_a',
+      'popup2',
+      'popup1',
+      'popup1_1',
+      'tool_b',
+    ]);
+  });
+
+  test('moveChild refuses what is not the same parent\'s child', () => {
+    expect(moveChild(order, parentOf, 'tool_a', 'popup1')).toBeNull();
+    expect(moveChild(order, parentOf, 'popup1', 'popup2_1')).toBeNull();
+    expect(moveChild(order, parentOf, 'nobody', null)).toBeNull();
+  });
+
+  test('a move that changes nothing answers the same order', () => {
+    expect(moveChild(order, parentOf, 'popup2', 'popup2')).toEqual(order);
+    expect(moveChild(order, parentOf, 'popup2', null)).toEqual(order);
+  });
+});

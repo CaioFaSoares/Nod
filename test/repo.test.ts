@@ -500,10 +500,15 @@ describe('invites', () => {
     const codeHash = 'b'.repeat(64);
     repo.saveInvite({ codeHash, roles: [], expiresAt: '2026-10-20T12:00:00.000Z', createdBy: null });
 
-    // The e-mail is already registered: the insert fails and the whole transaction goes back.
+    // The invite names a role the guild does not have: the `person_role` insert fails on its foreign
+    // key and the whole transaction goes back. (Before E07 a duplicate e-mail failed here; the email
+    // is no longer unique, because one person may have an account in each guild.)
+    const badCode = 'c'.repeat(64);
+    repo.saveInvite({ codeHash: badCode, roles: ['no-such-role'], expiresAt: '2026-10-20T12:00:00.000Z', createdBy: null });
     expect(() =>
-      repo.createPersonWithInvite({ email: 'taken@example.test', name: 'Duplicate', password: PASSWORD }, codeHash, now),
+      repo.createPersonWithInvite({ email: 'new@example.test', name: 'New', password: PASSWORD }, badCode, now),
     ).toThrow();
+    expect(repo.listInvites().find((invite) => invite.codeHash === badCode)?.usedAt).toBeNull();
 
     expect(repo.countPeople()).toBe(1);
     expect(repo.listInvites()[0]?.usedAt).toBeNull();
@@ -1047,7 +1052,7 @@ describe('meta', () => {
   });
 });
 
-/** The columns SP05 §2, block 2 and RF-65 add to tables that already existed in v2. */
+/** The columns SP05 §2, block 2, RF-65 and the library add to tables that already existed in v2. */
 const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['vault_item', 'origin'],
   ['vault_item', 'credential_id'],
@@ -1060,6 +1065,9 @@ const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   ['tool', 'owner_id'],
   // RF-62 (0.5.0): the display category of a local org tool.
   ['tool', 'category'],
+  // RF-77/RF-78 (1.0.0): the library's tags and the org's default-account label.
+  ['tool', 'tags'],
+  ['tool', 'org_account'],
   ['event', 'client_id'],
   ['event', 'sent_at'],
 ];
@@ -1074,13 +1082,13 @@ function dropVaultIndexes(db: SqlDb): void {
   db.exec('DROP INDEX IF EXISTS vault_item_default');
 }
 
-describe('schema version 8 — the sealed `secret` table (RF-63) over the connected and shared schema (SP05 §2, SP06)', () => {
-  test('a fresh database is v8, with the two host tables, `peer_keys`, `secret` and every column of SP05 §2 and K4', () => {
+describe('schema version 10 — several guilds (E07/RF-71) and the library fields (RF-77/RF-78) over the connected and shared schema (SP05 §2, SP06)', () => {
+  test('a fresh database is v10, with the two host tables, `peer_keys`, `secret` and every column of SP05 §2, K4 and the library', () => {
     const db = memorySqlite();
     createRepo(db).migrate();
 
-    expect(SCHEMA_VERSION).toBe(8);
-    expect(userVersion(db)).toBe(8);
+    expect(SCHEMA_VERSION).toBe(10);
+    expect(userVersion(db)).toBe(10);
     expect(tableNames(db)).toEqual([
       'event',
       'host',
@@ -1142,7 +1150,7 @@ describe('schema version 8 — the sealed `secret` table (RF-63) over the connec
     repo.migrate();
 
     // Stamped, completed, and every row of local mode still there, value for value.
-    expect(userVersion(db)).toBe(8);
+    expect(userVersion(db)).toBe(10);
     expect(tableNames(db)).toContain('host');
     expect(tableNames(db)).toContain('host_outbox');
     expect(repo.listPeople().map((p) => p.email)).toEqual(['ana@example.test']);
@@ -1153,7 +1161,7 @@ describe('schema version 8 — the sealed `secret` table (RF-63) over the connec
     expect(repo.vaultOrigin(person.id, 'alpha')).toBe('https://alpha.example.test');
     expect(repo.listEvents({}).map((e) => e.type)).toEqual(['tool_opened']);
     expect(repo.meta('seed_version')).toBe('2');
-    expect(repo.hostRecord()).toBeNull();
+    expect(repo.hostRecords()).toEqual([]);
 
     // The new defaults took on the rows that were already there, and nothing invented an owner.
     expect(db.all('SELECT scope, owner_id FROM tool')).toEqual([{ scope: 'org', owner_id: null }]);
@@ -1169,8 +1177,96 @@ describe('schema version 8 — the sealed `secret` table (RF-63) over the connec
 
     // And migrate stays idempotent on the migrated database.
     repo.migrate();
-    expect(userVersion(db)).toBe(8);
+    expect(userVersion(db)).toBe(10);
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
+  });
+
+  test('a v8 database keeps its one guild, its people and its outbox and gains the per-guild shape (E07)', () => {
+    const db = memorySqlite();
+    const repo = createRepo(db);
+    repo.migrate();
+    repo.saveRole({ id: 'admin', name: 'Administrator', admin: true });
+    // The local account the email uniqueness used to guarantee.
+    repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: ['admin'] });
+
+    // Back to the shape a `8` build left: `host` as one row with `CHECK (id = 1)`, `person.email`
+    // UNIQUE, an outbox without `address` — and the rows those tables held.
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec('DROP TABLE host');
+    db.exec(`CREATE TABLE host (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      address TEXT NOT NULL, guild TEXT NOT NULL, kid TEXT NOT NULL, public_key TEXT NOT NULL,
+      person_id TEXT NOT NULL, salt TEXT NOT NULL, snapshot TEXT, version TEXT, issued_at TEXT,
+      last_sync_at TEXT, last_error TEXT, added_at TEXT NOT NULL);`);
+    db.exec(`INSERT INTO host VALUES (1, 'https://guild.example.test', 'Guild', 'kid-a', 'cHVibGlj',
+      'uuid-host-person', 'c2FsdA', '{"api":1}', 'v1', '2026-10-16T10:00:00.000Z',
+      '2026-10-16T10:00:01.000Z', NULL, '2026-10-16T09:00:00.000Z')`);
+    db.exec('DROP TABLE person');
+    db.exec(`CREATE TABLE person (
+      id TEXT PRIMARY KEY, email TEXT NOT NULL COLLATE NOCASE UNIQUE, name TEXT NOT NULL,
+      password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, password_iterations INTEGER NOT NULL,
+      created_at TEXT NOT NULL, revoked_at TEXT, password_check TEXT,
+      password_algorithm TEXT NOT NULL DEFAULT 'PBKDF2-SHA256');`);
+    db.exec(`INSERT INTO person (id, email, name, password_hash, password_salt, password_iterations,
+      created_at, revoked_at, password_check, password_algorithm)
+      VALUES ('p-ana', 'ana@example.test', 'Ana', 'aGFzaA', 'c2FsdA', 1000, '2026-10-16T09:00:00.000Z',
+              NULL, NULL, 'PBKDF2-SHA256');`);
+    db.exec('DROP TABLE host_outbox');
+    db.exec(`CREATE TABLE host_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, method TEXT NOT NULL, path TEXT NOT NULL,
+      body TEXT NOT NULL, created_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT);`);
+    db.exec(`INSERT INTO host_outbox (method, path, body, created_at, attempts, last_error)
+      VALUES ('PUT', '/v1/personal/tools/p-a', '{"title":"A"}', '2026-10-16T09:30:00.000Z', 1, 'retry')`);
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('PRAGMA user_version = 8');
+
+    createRepo(db).migrate();
+
+    // The one guild is the one row it keeps — same address, same pin, same cache.
+    const record = repo.hostRecordByAddress('https://guild.example.test');
+    expect(record).toMatchObject({
+      guild: 'Guild',
+      kid: 'kid-a',
+      personId: 'uuid-host-person',
+      snapshot: '{"api":1}',
+      version: 'v1',
+      lastSyncAt: '2026-10-16T10:00:01.000Z',
+    });
+    // The single-row constraint is gone: another guild is another row (RF-71).
+    expect(repo.hostRecords()).toHaveLength(1);
+    repo.saveHost({
+      address: 'https://other.example.test',
+      guild: 'Other Guild',
+      kid: 'kid-b',
+      publicKey: 'b3RoZXIta2V5',
+      personId: 'uuid-person-2',
+      salt: 'b3RoZXItc2FsdA',
+      addedAt: '2026-10-16T12:00:00.000Z',
+    });
+    expect(repo.hostRecords()).toHaveLength(2);
+
+    // The email is no longer unique: a second account may hold it (one per guild, 2026-11-19).
+    expect(() =>
+      repo.createPerson({ email: 'ANA@example.test', name: 'Ana again', password: PASSWORD, roles: [] }),
+    ).not.toThrow();
+    expect(repo.personsAuthByEmail('ana@example.test')).toHaveLength(2);
+
+    // The pending write kept its row and took the address of the guild it belonged to.
+    expect(repo.listOutbox('https://guild.example.test')).toMatchObject([
+      { path: '/v1/personal/tools/p-a', attempts: 1, lastError: 'retry' },
+    ]);
+
+    // And the migrated database is the fresh schema, table for table and column for column.
+    const fresh = memorySqlite();
+    createRepo(fresh).migrate();
+    expect(tableNames(db)).toEqual(tableNames(fresh));
+    for (const table of tableNames(db)) expect(shapeOf(db, table)).toEqual(shapeOf(fresh, table));
+    expect(userVersion(db)).toBe(10);
+    // Idempotent: a second migrate rewrites nothing.
+    createRepo(db).migrate();
+    expect(userVersion(db)).toBe(10);
+    expect(repo.hostRecords()).toHaveLength(2);
   });
 
   test('a v2 database with no version at all is completed and stamped the same way', () => {
@@ -1180,11 +1276,49 @@ describe('schema version 8 — the sealed `secret` table (RF-63) over the connec
 
     createRepo(db).migrate();
 
-    expect(userVersion(db)).toBe(8);
+    expect(userVersion(db)).toBe(10);
     expect(tableNames(db)).toContain('host_outbox');
   });
 
-  test('a v3 database gains `peer_keys` and is stamped 8, keeping its rows (SP06 §2, K1–K2)', () => {
+  test('a v9 database gains the library fields and keeps every row (RF-77/RF-78)', () => {
+    const db = memorySqlite();
+    const repo = createRepo(db);
+    repo.migrate();
+    repo.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app' }));
+
+    // Back to the shape a `9` build left: the library's two columns never existed.
+    db.exec('ALTER TABLE tool DROP COLUMN tags');
+    db.exec('ALTER TABLE tool DROP COLUMN org_account');
+    db.exec('PRAGMA user_version = 9');
+
+    createRepo(db).migrate();
+
+    expect(userVersion(db)).toBe(10);
+    // The row it held reads as tagless and label-less — what `NULL` means, never an invented value.
+    expect(repo.listEntries()).toHaveLength(1);
+    expect(repo.listEntries()[0]).toMatchObject({ id: 'alpha', category: null });
+    expect(repo.entry('alpha')?.tags).toBeUndefined();
+    expect(repo.entry('alpha')?.orgAccount).toBeNull();
+    // And a write of the two fields lands, the JSON array kept whole — the trimming rules are the
+    // shared validator's (`shared/catalog.ts`), which every write of the app goes through; the
+    // repo stores what it is given, exactly like every other column of the row.
+    repo.saveEntry({
+      ...entry('alpha', { url: 'https://alpha.example.test/app' }),
+      tags: ['boards', 'stand-up'],
+      orgAccount: 'team@guild.example',
+    });
+    const saved = repo.entry('alpha');
+    expect(saved).toMatchObject({ tags: ['boards', 'stand-up'], orgAccount: 'team@guild.example' });
+    expect(db.all('SELECT tags, org_account FROM tool WHERE id = ?', ['alpha'])).toEqual([
+      { tags: '["boards","stand-up"]', org_account: 'team@guild.example' },
+    ]);
+    // A personal row keeps `NULL` in both, exactly like the category.
+    const person = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: [] });
+    repo.saveEntry({ ...entry('p-mine', { url: 'https://mine.example.test' }), scope: 'personal', ownerId: person.id, tags: ['x'] });
+    expect(db.all('SELECT tags FROM tool WHERE id = ?', ['p-mine'])).toEqual([{ tags: null }]);
+  });
+
+  test('a v3 database gains `peer_keys` and is stamped 10, keeping its rows (SP06 §2, K1–K2)', () => {
     const db = memorySqlite();
     const v3 = createRepo(db);
     v3.migrate();
@@ -1197,7 +1331,7 @@ describe('schema version 8 — the sealed `secret` table (RF-63) over the connec
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(8);
+    expect(userVersion(db)).toBe(10);
     expect(tableNames(db)).toContain('peer_keys');
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
     expect(repo.meta('seed_version')).toBe('2');
@@ -1233,7 +1367,7 @@ describe('schema version 8 — the sealed `secret` table (RF-63) over the connec
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(8);
+    expect(userVersion(db)).toBe(10);
     const item = repo.vaultItemById(person.id, saved.id);
     expect(item).not.toBeNull();
     // SP06 §3–§5: an item that never travelled has no credential group and the default scope.
@@ -1275,7 +1409,7 @@ describe('schema version 8 — the sealed `secret` table (RF-63) over the connec
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(8);
+    expect(userVersion(db)).toBe(10);
     // Every row written before the column is uncategorized, and both scopes survive.
     expect(repo.listEntries().map((e) => [e.id, e.category])).toEqual([
       ['alpha', null],
@@ -1307,7 +1441,7 @@ describe('schema version 8 — the sealed `secret` table (RF-63) over the connec
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(8);
+    expect(userVersion(db)).toBe(10);
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
     expect(repo.secret('nod.cred.p-ana.alpha')).toBeNull();
     repo.setSecret('nod.cred.p-ana.alpha', 'bv1.first');
@@ -1612,7 +1746,7 @@ CREATE TABLE vault_item (
   });
 });
 
-describe('host and outbox (SP05 §2)', () => {
+describe('host and outbox (SP05 §2; E07/RF-71)', () => {
   const PIN = {
     address: 'https://nod.example.test',
     guild: 'Example Guild',
@@ -1622,104 +1756,208 @@ describe('host and outbox (SP05 §2)', () => {
     salt: 'c2FsdA',
     addedAt: '2026-10-16T10:00:00.000Z',
   };
+  /** A second guild: another container, another key and another account (E07). */
+  const OTHER = {
+    address: 'https://other.example.test',
+    guild: 'Other Guild',
+    kid: 'kid-b',
+    publicKey: 'b3RoZXIta2V5',
+    personId: 'uuid-person-2',
+    salt: 'b3RoZXItc2FsdA',
+    addedAt: '2026-10-16T11:00:00.000Z',
+  };
+  const EMPTY = { snapshot: null, version: null, issuedAt: null, lastSyncAt: null, lastError: null };
 
-  test('without a host there is no row and no pending write', () => {
+  test('without a guild there is no row and no pending write', () => {
     const repo = newRepo();
-    expect(repo.hostRecord()).toBeNull();
-    expect(repo.listOutbox()).toEqual([]);
+    expect(repo.hostRecords()).toEqual([]);
+    expect(repo.hostRecordByAddress(PIN.address)).toBeNull();
+    expect(repo.hostRecordForPerson(PIN.personId)).toBeNull();
+    expect(repo.hostRowClaimsPerson(PIN.personId)).toBe(false);
+    expect(repo.listOutbox(PIN.address)).toEqual([]);
   });
 
-  test('saveHost writes the single row of a guild and replaces it whole', () => {
+  test('saveHost adds a guild and replaces only the row of its own address (RF-71)', () => {
     const repo = newRepo();
-    expect(repo.saveHost(PIN)).toEqual({ ...PIN, snapshot: null, version: null, issuedAt: null, lastSyncAt: null, lastError: null });
-    expect(repo.hostRecord()).toEqual(repo.saveHost(PIN));
+    expect(repo.saveHost(PIN)).toEqual({ ...PIN, ...EMPTY });
+    expect(repo.saveHost(OTHER)).toEqual({ ...OTHER, ...EMPTY });
 
-    repo.saveHostSnapshot({ snapshot: '{"api":1}', version: 'v1', issuedAt: '2026-10-16T10:00:00.000Z', syncedAt: '2026-10-16T10:00:01.000Z' });
-    repo.saveHostError('could not reach the host');
+    // Two guilds, in the order they were added, both whole.
+    expect(repo.hostRecords()).toEqual([
+      { ...PIN, ...EMPTY },
+      { ...OTHER, ...EMPTY },
+    ]);
+    expect(repo.hostRecordByAddress(OTHER.address)).toEqual({ ...OTHER, ...EMPTY });
 
+    // A re-add of the same address replaces that row — and what belonged to the host that is gone
+    // goes with it: no snapshot, no error.
+    repo.saveHostSnapshot(PIN.address, {
+      snapshot: '{"api":1}',
+      version: 'v1',
+      issuedAt: '2026-10-16T10:00:00.000Z',
+      syncedAt: '2026-10-16T10:00:01.000Z',
+    });
+    repo.saveHostError(PIN.address, 'could not reach the host');
     const replaced = repo.saveHost({ ...PIN, guild: 'Another Guild', addedAt: '2026-10-16T12:00:00.000Z' });
     expect(replaced.guild).toBe('Another Guild');
-    // What belonged to the host that is gone went with it: no snapshot, no error, one row.
     expect(replaced.snapshot).toBeNull();
     expect(replaced.lastError).toBeNull();
     expect(replaced.lastSyncAt).toBeNull();
+    // The other guild was not touched by any of it.
+    expect(repo.hostRecordByAddress(OTHER.address)).toEqual({ ...OTHER, ...EMPTY });
   });
 
   test('the verified snapshot, its version, the sync time and the last error', () => {
     const repo = newRepo();
     repo.saveHost(PIN);
-    repo.saveHostError('could not reach the host');
-    expect(repo.hostRecord()?.lastError).toBe('could not reach the host');
+    repo.saveHostError(PIN.address, 'could not reach the host');
+    expect(repo.hostRecordByAddress(PIN.address)?.lastError).toBe('could not reach the host');
 
     const body = '{"api":1,"version":"v1"}';
-    repo.saveHostSnapshot({ snapshot: body, version: 'v1', issuedAt: '2026-10-16T10:00:00.000Z', syncedAt: '2026-10-16T10:00:01.000Z' });
+    repo.saveHostSnapshot(PIN.address, {
+      snapshot: body,
+      version: 'v1',
+      issuedAt: '2026-10-16T10:00:00.000Z',
+      syncedAt: '2026-10-16T10:00:01.000Z',
+    });
 
-    const record = repo.hostRecord();
+    const record = repo.hostRecordByAddress(PIN.address);
     expect(record?.snapshot).toBe(body); // verbatim, byte for byte (SP04 §2)
     expect(record?.version).toBe('v1');
     expect(record?.issuedAt).toBe('2026-10-16T10:00:00.000Z');
     expect(record?.lastSyncAt).toBe('2026-10-16T10:00:01.000Z');
     expect(record?.lastError).toBeNull(); // a good sync clears the failure before it
 
-    repo.saveHostError(null);
-    expect(repo.hostRecord()?.lastError).toBeNull();
+    repo.saveHostError(PIN.address, null);
+    expect(repo.hostRecordByAddress(PIN.address)?.lastError).toBeNull();
   });
 
-  test('a snapshot for a host that does not exist is a caller bug, not an empty cache', () => {
+  test('a snapshot for a guild that does not exist is a caller bug, not an empty cache', () => {
     const repo = newRepo();
     expect(() =>
-      repo.saveHostSnapshot({ snapshot: '{}', version: 'v1', issuedAt: '2026-10-16T10:00:00.000Z', syncedAt: '2026-10-16T10:00:01.000Z' }),
+      repo.saveHostSnapshot('https://nobody.example.test', {
+        snapshot: '{}',
+        version: 'v1',
+        issuedAt: '2026-10-16T10:00:00.000Z',
+        syncedAt: '2026-10-16T10:00:01.000Z',
+      }),
     ).toThrow('host not found');
-    expect(() => repo.saveHostError('boom')).toThrow('host not found');
+    expect(() => repo.saveHostError('https://nobody.example.test', 'boom')).toThrow('host not found');
   });
 
-  test('clearHost forgets the host and everything pending for it', () => {
+  test('hostRecordForPerson and hostRowClaimsPerson name the entered guild (E07 §2)', () => {
     const repo = newRepo();
     repo.saveHost(PIN);
-    repo.enqueueOutbox({ method: 'PUT', path: '/v1/personal/tools/p-a', body: '{"title":"A"}', createdAt: '2026-10-16T10:00:00.000Z' });
+    repo.saveHost(OTHER);
 
-    repo.clearHost();
-
-    expect(repo.hostRecord()).toBeNull();
-    expect(repo.listOutbox()).toEqual([]);
+    expect(repo.hostRecordForPerson(PIN.personId)?.address).toBe(PIN.address);
+    expect(repo.hostRecordForPerson(OTHER.personId)?.address).toBe(OTHER.address);
+    expect(repo.hostRecordForPerson('uuid-nobody')).toBeNull();
+    expect(repo.hostRowClaimsPerson(PIN.personId)).toBe(true);
+    expect(repo.hostRowClaimsPerson('uuid-nobody')).toBe(false);
   });
 
-  test('saveHostSalt moves the cached salt and nothing else (SP02 §6–§7)', () => {
+  test('the same email in two guilds is two accounts, and neither is a local holder (E07)', () => {
+    const repo = newRepo();
+    const v2: PasswordHashV2 = {
+      algorithm: 'BOND-KDF-V1',
+      salt: 'AAECAwQFBgcICQoLDA0ODw',
+      iterations: 600_000,
+      check: 'Zmh6rfhivXdsj8GLjp-OIAiXFIVu4jOzkCpZHQ1fKSU',
+    };
+    // The owner's answer of 2026-11-19: one account per guild, the same email allowed in both.
+    repo.saveConnectedPerson({ id: PIN.personId, email: 'ana@guild.test', name: 'Ana', password: v2, roles: [] });
+    repo.saveConnectedPerson({ id: OTHER.personId, email: 'ana@guild.test', name: 'Ana', password: v2, roles: [] });
+    repo.saveHost(PIN);
+    repo.saveHost(OTHER);
+
+    expect(repo.personsAuthByEmail('ana@guild.test').map((row) => row.person.id)).toEqual([
+      PIN.personId,
+      OTHER.personId,
+    ]);
+    expect(repo.personAuthById(OTHER.personId)?.person.email).toBe('ana@guild.test');
+    // A guild's own account is never the local holder a join adopts — both rows are claimed.
+    expect(repo.personByEmailAnyState('ana@guild.test')).toBeNull();
+
+    // A genuinely local account with the same email is still what a join finds and adopts.
+    const local = repo.createPerson({ email: 'ana@guild.test', name: 'Ana', password: PASSWORD, roles: [] });
+    expect(repo.personByEmailAnyState('ana@guild.test')?.person.id).toBe(local.id);
+  });
+
+  test('removeHost forgets one guild and its pending writes only (RF-71)', () => {
     const repo = newRepo();
     repo.saveHost(PIN);
-    repo.saveHostSnapshot({
+    repo.saveHost(OTHER);
+    repo.enqueueOutbox({
+      address: PIN.address, method: 'PUT', path: '/v1/personal/tools/p-a', body: '{"title":"A"}', createdAt: '2026-10-16T10:00:00.000Z' });
+    repo.enqueueOutbox({
+      address: OTHER.address, method: 'PUT', path: '/v1/personal/tools/p-b', body: '{"title":"B"}', createdAt: '2026-10-16T10:00:01.000Z' });
+
+    repo.removeHost(PIN.address);
+
+    expect(repo.hostRecordByAddress(PIN.address)).toBeNull();
+    expect(repo.listOutbox(PIN.address)).toEqual([]);
+    // The other guild is whole: its row and its own pending write.
+    expect(repo.hostRecordByAddress(OTHER.address)).toEqual({ ...OTHER, ...EMPTY });
+    expect(repo.listOutbox(OTHER.address)).toHaveLength(1);
+  });
+
+  test('saveHostSalt moves the cached salt of that person guild and nothing else (SP02 §6–§7)', () => {
+    const repo = newRepo();
+    repo.saveHost(PIN);
+    repo.saveHostSnapshot(PIN.address, {
       snapshot: '{"api":1}',
       version: 'v1',
       issuedAt: '2026-10-16T10:00:00.000Z',
       syncedAt: '2026-10-16T10:00:01.000Z',
     });
 
-    repo.saveHostSalt('AAECAwQFBgcICQoLDA0ODw');
+    repo.saveHostSalt(PIN.personId, 'AAECAwQFBgcICQoLDA0ODw');
 
-    const record = repo.hostRecord();
+    const record = repo.hostRecordByAddress(PIN.address);
     expect(record?.salt).toBe('AAECAwQFBgcICQoLDA0ODw');
     // The cached catalog and the rest of the pin are what they were: a change of password is not a
     // reason to lose the org tools (SP04 §3).
-    expect(record).toEqual({ ...PIN, salt: 'AAECAwQFBgcICQoLDA0ODw', snapshot: '{"api":1}', version: 'v1', issuedAt: '2026-10-16T10:00:00.000Z', lastSyncAt: '2026-10-16T10:00:01.000Z', lastError: null });
+    expect(record).toEqual({
+      ...PIN,
+      salt: 'AAECAwQFBgcICQoLDA0ODw',
+      snapshot: '{"api":1}',
+      version: 'v1',
+      issuedAt: '2026-10-16T10:00:00.000Z',
+      lastSyncAt: '2026-10-16T10:00:01.000Z',
+      lastError: null,
+    });
 
-    // Without a host there is no cache to keep, and no error either.
-    repo.clearHost();
-    expect(() => repo.saveHostSalt('AAECAwQFBgcICQoLDA0ODw')).not.toThrow();
+    // Without that person's row there is no cache to keep, and no error either.
+    repo.removeHost(PIN.address);
+    expect(() => repo.saveHostSalt(PIN.personId, 'AAECAwQFBgcICQoLDA0ODw')).not.toThrow();
   });
 
-  test('the outbox keeps its writes in id order and its attempts per write', () => {
+  test('the outbox keeps its writes per guild, in id order, with its attempts', () => {
     const repo = newRepo();
+    repo.saveHost(PIN);
+    repo.saveHost(OTHER);
     const first = repo.enqueueOutbox({
+      address: PIN.address,
       method: 'PUT',
       path: '/v1/personal/tools/p-a',
       body: '{"title":"A"}',
       createdAt: '2026-10-16T10:00:00.000Z',
     });
     const second = repo.enqueueOutbox({
+      address: PIN.address,
       method: 'DELETE',
       path: '/v1/personal/views/p-b',
       body: '{"updatedAt":"2026-10-16T10:00:01.000Z"}',
       createdAt: '2026-10-16T10:00:01.000Z',
+    });
+    // A write of another guild is another guild's list.
+    repo.enqueueOutbox({
+      address: OTHER.address,
+      method: 'PUT',
+      path: '/v1/personal/tools/p-c',
+      body: '{"title":"C"}',
+      createdAt: '2026-10-16T10:00:02.000Z',
     });
 
     expect(second.id).toBeGreaterThan(first.id);
@@ -1732,21 +1970,22 @@ describe('host and outbox (SP05 §2)', () => {
       attempts: 0,
       lastError: null,
     });
-    expect(repo.listOutbox().map((row) => row.id)).toEqual([first.id, second.id]);
+    expect(repo.listOutbox(PIN.address).map((row) => row.id)).toEqual([first.id, second.id]);
+    expect(repo.listOutbox(OTHER.address)).toHaveLength(1);
 
     repo.markOutboxAttempt(first.id, 'the host failed to answer');
-    expect(repo.listOutbox()[0].attempts).toBe(1);
-    expect(repo.listOutbox()[0].lastError).toBe('the host failed to answer');
+    expect(repo.listOutbox(PIN.address)[0].attempts).toBe(1);
+    expect(repo.listOutbox(PIN.address)[0].lastError).toBe('the host failed to answer');
     repo.markOutboxAttempt(first.id, null);
-    expect(repo.listOutbox()[0]).toMatchObject({ attempts: 2, lastError: null });
+    expect(repo.listOutbox(PIN.address)[0]).toMatchObject({ attempts: 2, lastError: null });
 
     // The replay of SP04 §4: a `2xx` (or a `409`, or another `4xx`) drops the row.
     repo.deleteOutbox(first.id);
-    expect(repo.listOutbox().map((row) => row.id)).toEqual([second.id]);
+    expect(repo.listOutbox(PIN.address).map((row) => row.id)).toEqual([second.id]);
     // An id that is not there is a no-op: the loop may race with its own delete.
     repo.markOutboxAttempt(first.id, 'gone');
     repo.deleteOutbox(first.id);
-    expect(repo.listOutbox().map((row) => row.id)).toEqual([second.id]);
+    expect(repo.listOutbox(PIN.address).map((row) => row.id)).toEqual([second.id]);
   });
 });
 

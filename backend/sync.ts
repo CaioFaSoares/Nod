@@ -59,6 +59,12 @@ export const UPDATE_REQUIRED_ERROR = 'update required — this guild needs a new
 /** What `createSync` needs from its runtime. */
 export interface SyncDeps {
   repo: Repo;
+  /**
+   * The `host` row of the guild this session entered, or `null` (E07/RF-71: a Nod may hold several,
+   * and a run syncs the one the unlocked person's account belongs to — `hostRecordForPerson`).
+   * RF-30: no row, no client, no call.
+   */
+  activeRow: () => HostRecord | null;
   /** The connection to the pinned host, or `null`. RF-30: no host row, no client, no call. */
   connection: () => HostConnection | null;
   /** Milliseconds since the epoch: the backoff, `syncedAt` and the state's clock. */
@@ -100,6 +106,19 @@ export interface Sync {
   stop(): void;
   syncNow(): Promise<HostState>;
   state(): HostState;
+  /**
+   * E07/RF-71: the state of every guild this Nod holds, the entered one included — what
+   * Settings → Hosts lists (`host.list`). `None` when no guild is held.
+   */
+  states(): HostState[];
+  /** The state of one guild by its pinned address, or `null` when this Nod does not hold it. */
+  stateOf(address: string): HostState | null;
+  /**
+   * E07/RF-71: the pinned keys' fingerprints of every guild, computed and cached, so `states()` can
+   * answer synchronously. `fingerprintOf` is async (WebCrypto); main calls this at boot, after an
+   * unlock and after a guild joins.
+   */
+  primeFingerprints(): Promise<void>;
   afterWrite(): void;
   /**
    * O2/SP04 §1: the `minAppVersion` a host just told this Nod — from the discovery of a join (the
@@ -130,8 +149,11 @@ export function createSync(deps: SyncDeps): Sync {
   /** F6: the first client id of the batch the host refused for good, so a refusal is recorded once
    *  per batch instead of once per retry. */
   let refusedBatch: string | null = null;
-  /** The pinned key's fingerprint, computed once per key (`fingerprintOf` is async). */
-  let fingerprint: { kid: string; publicKey: string; value: string } | null = null;
+  /**
+   * The pinned keys' fingerprints, keyed by `kid` + key (E07: one per guild, and a Nod may hold
+   * several). Computed lazily per key (`fingerprintOf` is async) and kept for the process.
+   */
+  const fingerprints = new Map<string, string>();
   /**
    * O2/SP04 §1: the oldest version the host told this Nod it serves — the discovery of a join or
    * `GET /v1/meta/app`. Kept in memory only: it is the host's fact, re-read on every sync, and
@@ -148,7 +170,7 @@ export function createSync(deps: SyncDeps): Sync {
    * behind.
    */
   function updateRequiredNow(): boolean {
-    return repo.hostRecord() !== null && tooOldFor(deps.appVersion(), minAppVersion);
+    return deps.activeRow() !== null && tooOldFor(deps.appVersion(), minAppVersion);
   }
 
   /**
@@ -292,7 +314,7 @@ export function createSync(deps: SyncDeps): Sync {
 
   async function runOnce(): Promise<HostState> {
     const connection = deps.connection();
-    const record = repo.hostRecord();
+    const record = deps.activeRow();
     // RF-30: without a host row there is nothing to sync with, and no call is made.
     if (connection === null || record === null) return state();
     await rememberFingerprint(record);
@@ -306,7 +328,7 @@ export function createSync(deps: SyncDeps): Sync {
     if (updateRequiredNow()) return publish();
     try {
       // SP04 §3's order: the outbox, then the events, then the state.
-      await flushOutbox(connection);
+      await flushOutbox(connection, record.address);
     } catch (error) {
       return failed(connection, record, error);
     }
@@ -356,7 +378,7 @@ export function createSync(deps: SyncDeps): Sync {
     });
     if (!result.notModified) {
       if (stillTheHost(record)) {
-        repo.saveHostSnapshot({
+        repo.saveHostSnapshot(record.address, {
           snapshot: result.raw,
           version: result.snapshot.version,
           issuedAt: result.snapshot.issuedAt,
@@ -370,7 +392,7 @@ export function createSync(deps: SyncDeps): Sync {
       throw new Error('the host answered 304 with no cached snapshot');
     }
     if (!stillTheHost(record)) return;
-    repo.saveHostSnapshot({
+    repo.saveHostSnapshot(record.address, {
       snapshot: record.snapshot,
       version: record.version,
       issuedAt: record.issuedAt,
@@ -380,12 +402,13 @@ export function createSync(deps: SyncDeps): Sync {
 
   /**
    * F8: the pin is the row's identity, and a run writes only into the row it read. `host.remove` and
-   * the `saveHost` of another host can land between the two ends of a run — the body verified against
-   * the old key and the sign-out of its session are not the new row's to receive. `addedAt` is the
-   * instant the person added this host: no two hosts of one Nod share the pair with `kid`.
+   * a `saveHost` of the same address can land between the two ends of a run — the body verified
+   * against the old key and the sign-out of its session are not the new row's to receive. E07: the
+   * lookup is by address, so another guild's row is never mistaken for this one. `addedAt` is the
+   * instant the person added this host: no two rows of one Nod share the pair with `kid`.
    */
   function stillTheHost(record: HostRecord): boolean {
-    const pinned = repo.hostRecord();
+    const pinned = repo.hostRecordByAddress(record.address);
     return pinned !== null && pinned.kid === record.kid && pinned.addedAt === record.addedAt;
   }
 
@@ -394,8 +417,8 @@ export function createSync(deps: SyncDeps): Sync {
    * drops it and the next snapshot brings the host's version; another `4xx` drops it as refused; a
    * `5xx` or a call that never arrived marks the attempt and stops the flush until the next sync.
    */
-  async function flushOutbox(connection: HostConnection): Promise<void> {
-    for (const entry of repo.listOutbox()) {
+  async function flushOutbox(connection: HostConnection, address: string): Promise<void> {
+    for (const entry of repo.listOutbox(address)) {
       let body: unknown;
       try {
         body = entry.body === '' ? undefined : (JSON.parse(entry.body) as unknown);
@@ -510,7 +533,7 @@ export function createSync(deps: SyncDeps): Sync {
     if (error.failure === 'key-changed' || error.failure === 'key-mismatch') {
       // SP04 §1: nothing is replaced silently. The client's own message is what the screen shows,
       // and the loop stops: retrying cannot fix a key that has to be confirmed by a person.
-      if (stillTheHost(record)) repo.saveHostError(error.message);
+      if (stillTheHost(record)) repo.saveHostError(record.address, error.message);
       stop();
       return publish();
     }
@@ -521,7 +544,7 @@ export function createSync(deps: SyncDeps): Sync {
     // a body that did not verify or was older than the last accepted one — leaves the cache in use,
     // shows the failure and backs off (SP04 §3, §6).
     failures = Math.min(failures + 1, BACKOFF_MS.length);
-    if (stillTheHost(record)) repo.saveHostError(error.message);
+    if (stillTheHost(record)) repo.saveHostError(record.address, error.message);
     return publish();
   }
 
@@ -543,7 +566,7 @@ export function createSync(deps: SyncDeps): Sync {
     if (record.snapshot !== null && record.lastSyncAt !== null) {
       const cleared = clearOrgData(record.snapshot);
       if (cleared !== null) {
-        repo.saveHostSnapshot({
+        repo.saveHostSnapshot(record.address, {
           snapshot: cleared,
           version: record.version ?? '',
           issuedAt: record.issuedAt ?? '',
@@ -551,7 +574,7 @@ export function createSync(deps: SyncDeps): Sync {
         });
       }
     }
-    repo.saveHostError(SIGNED_OUT_ERROR);
+    repo.saveHostError(record.address, SIGNED_OUT_ERROR);
     failures = 0;
     const published = publish();
     if (record.lastError !== SIGNED_OUT_ERROR) deps.onSignedOut();
@@ -568,32 +591,38 @@ export function createSync(deps: SyncDeps): Sync {
     return record.lastError === null ? 'connected' : 'stale';
   }
 
+  /** The cached fingerprint of one row's pinned key, or `null` before it was computed. */
   function fingerprintOfRecord(record: HostRecord | null): string | null {
-    if (record === null || fingerprint === null) return null;
-    return fingerprint.kid === record.kid && fingerprint.publicKey === record.publicKey
-      ? fingerprint.value
-      : null;
+    if (record === null) return null;
+    return fingerprints.get(`${record.kid}\n${record.publicKey}`) ?? null;
   }
 
   async function rememberFingerprint(record: HostRecord): Promise<void> {
-    if (fingerprint !== null && fingerprint.kid === record.kid && fingerprint.publicKey === record.publicKey) {
-      return;
-    }
+    await primeOne(record);
+  }
+
+  /** E07: one guild's pinned key, computed once (a key this build cannot read stays absent). */
+  async function primeOne(record: HostRecord): Promise<void> {
+    const key = `${record.kid}\n${record.publicKey}`;
+    if (fingerprints.has(key)) return;
     try {
-      fingerprint = {
-        kid: record.kid,
-        publicKey: record.publicKey,
-        value: await fingerprintOf(fromBase64url(record.publicKey)),
-      };
+      fingerprints.set(key, await fingerprintOf(fromBase64url(record.publicKey)));
     } catch {
       // A pinned key that is not 32 raw bytes is a row this run cannot read; SP04 §1's check belongs
       // to whoever pinned it. The state then shows no fingerprint.
-      fingerprint = null;
     }
   }
 
-  function state(): HostState {
-    const record = repo.hostRecord();
+  /**
+   * E07/RF-71: every guild's fingerprint, for `states()`. `fingerprintOf` is async and `state()` is
+   * not, so this fills the cache whenever the set of rows can have changed (boot, unlock, a join).
+   */
+  async function primeFingerprints(): Promise<void> {
+    for (const record of repo.hostRecords()) await primeOne(record);
+  }
+
+  /** One guild's `HostState`; `null` is the `none` of a Nod that never held one. */
+  function stateOfRecord(record: HostRecord | null): HostState {
     return {
       status: statusOf(record),
       guild: record === null ? null : record.guild,
@@ -601,17 +630,34 @@ export function createSync(deps: SyncDeps): Sync {
       fingerprint: fingerprintOfRecord(record),
       lastSyncAt: record === null ? null : record.lastSyncAt,
       lastError: record === null ? null : record.lastError,
-      pendingWrites: repo.listOutbox().length,
-      // K8/RF-47: the count of the last missing-copy read. The field is absent for a Nod wired
+      // E07: only this guild's writes — the outbox is per guild now.
+      pendingWrites: record === null ? 0 : repo.listOutbox(record.address).length,
+      // K8/RF-47: the count of the last missing-copy read — the entered guild's, so a list that
+      // carries another guild's card does not repeat it there. The field is absent for a Nod wired
       // without the read (a member, or the sync of a test), which the page reads as zero.
-      ...(deps.missingCopies === undefined ? {} : { missingCopies: deps.missingCopies() }),
+      ...(deps.missingCopies === undefined || deps.activeRow()?.address !== record?.address
+        ? {}
+        : { missingCopies: deps.missingCopies() }),
       // O2: without a `host` row there is no guild to be too old for, and no minimum to show.
-      updateRequired: updateRequiredNow(),
+      updateRequired: record !== null && tooOldFor(deps.appVersion(), minAppVersion),
       minAppVersion: record === null ? null : minAppVersion,
       // 0.5.0 (RF-60): the offline session is the session's own fact (`backend/session.ts`), read
       // here because the state is what the sidebar and the Hosts tab draw the guild from.
       offlineSession: deps.offlineSession === undefined ? false : deps.offlineSession(),
     };
+  }
+
+  function state(): HostState {
+    return stateOfRecord(deps.activeRow());
+  }
+
+  function states(): HostState[] {
+    return repo.hostRecords().map(stateOfRecord);
+  }
+
+  function stateOf(address: string): HostState | null {
+    const record = repo.hostRecordByAddress(address);
+    return record === null ? null : stateOfRecord(record);
   }
 
   function publish(): HostState {
@@ -620,5 +666,5 @@ export function createSync(deps: SyncDeps): Sync {
     return published;
   }
 
-  return { start, stop, syncNow, state, afterWrite, observeMinVersion };
+  return { start, stop, syncNow, state, states, stateOf, primeFingerprints, afterWrite, observeMinVersion };
 }

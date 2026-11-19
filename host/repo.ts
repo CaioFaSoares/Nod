@@ -155,6 +155,16 @@ export interface HostEntry {
   title: string;
   /** RF-62: the display category the guild gave the tool; `null` while it filed it nowhere. */
   category: string | null;
+  /**
+   * RF-77: the tool's tags, a JSON array in the column with the same name — `null` while the guild
+   * wrote none. A personal entry always stays `null`.
+   */
+  tags: string[] | null;
+  /**
+   * RF-78: the label of the account the whole guild uses for the tool — plain text by the owner's
+   * choice, never a secret. `null` while the guild wrote none; a personal entry always stays `null`.
+   */
+  orgAccount: string | null;
   url: string;
   icon: string | null;
   /** `Entry.order`; the column is `ord`. */
@@ -189,6 +199,16 @@ export interface EntryInput {
    * ignored for a personal tool.
    */
   category?: string | null;
+  /**
+   * RF-77: the tool's tags. Optional for the same reason as the category — a personal write's
+   * statement names no `tags` column, so a value here is ignored for a personal tool.
+   */
+  tags?: string[];
+  /**
+   * RF-78: the org's default account label. Optional for the same reason; a personal write leaves
+   * the column alone.
+   */
+  orgAccount?: string | null;
   url: string;
   icon: string | null;
   order: number;
@@ -698,8 +718,8 @@ interface PersonRow {
 }
 
 const ENTRY_COLUMNS = `e.id AS id, e.scope AS scope, e.owner_id AS ownerId, e.title AS title,
-  e.category AS category, e.url AS url, e.icon AS icon, e.ord AS "order", e.auth AS auth,
-  e.active AS active, e.updated_at AS updatedAt, g.role_id AS roleId`;
+  e.category AS category, e.tags AS tags, e.org_account AS orgAccount, e.url AS url, e.icon AS icon,
+  e.ord AS "order", e.auth AS auth, e.active AS active, e.updated_at AS updatedAt, g.role_id AS roleId`;
 
 interface EntryRow {
   id: string;
@@ -707,6 +727,8 @@ interface EntryRow {
   ownerId: string | null;
   title: string;
   category: string | null;
+  tags: string | null;
+  orgAccount: string | null;
   url: string;
   icon: string | null;
   order: number;
@@ -1070,6 +1092,8 @@ export function createRepo(db: Database): Repo {
           ownerId: row.ownerId,
           title: row.title,
           category: row.category,
+          tags: row.tags === null ? null : (JSON.parse(row.tags) as string[]),
+          orgAccount: row.orgAccount,
           url: row.url,
           icon: row.icon,
           order: row.order,
@@ -1700,15 +1724,18 @@ export function createRepo(db: Database): Repo {
       if (existing !== null && existing.scope !== 'org') throw new ForbiddenError('not yours');
 
       db.query(
-        `INSERT INTO entries (id, scope, owner_id, title, category, url, icon, ord, auth, active, updated_at)
-         VALUES (?, 'org', NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO entries (id, scope, owner_id, title, category, tags, org_account, url, icon, ord, auth, active, updated_at)
+         VALUES (?, 'org', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET title = excluded.title, category = excluded.category,
+           tags = excluded.tags, org_account = excluded.org_account,
            url = excluded.url, icon = excluded.icon,
            ord = excluded.ord, auth = excluded.auth, active = excluded.active, updated_at = excluded.updated_at`,
       ).run(
         tool.id,
         tool.title,
         tool.category ?? null,
+        tool.tags === undefined || tool.tags.length === 0 ? null : JSON.stringify(tool.tags),
+        tool.orgAccount ?? null,
         tool.url,
         tool.icon,
         tool.order,

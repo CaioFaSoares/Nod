@@ -357,7 +357,7 @@ describe('discovery (SP04 §1)', () => {
     expect(refused.failure).toBe('key-mismatch');
     expect(refused.message).toBe(HOST_KEY_MISMATCH);
     expect(host.calls.length).toBe(before + 1); // one request, the discovery itself
-    expect(repo.hostRecord()).toBeNull();
+    expect((repo.hostRecords()[0] ?? null)).toBeNull();
     expect(await empty.get(hostTokenKey(host.kid, PERSON))).toBeNull();
   });
 
@@ -503,6 +503,7 @@ describe('the bearer (SP02 §5)', () => {
       addedAt: ISSUED,
     });
     repo.enqueueOutbox({
+      address: (repo.hostRecords()[0] ?? null)?.address ?? '',
       method: 'PUT',
       path: '/v1/personal/tools/p-abc',
       body: '{"title":"Mine"}',

@@ -36,10 +36,10 @@ import {
   type GuildIconResponse,
   type GuildInvite,
   type HostEvent,
-  type OrgTool,
 } from '../../shared/host-api';
 import type { Entry, Role } from '../../shared/types';
 import { adminAuth, callerOf, hostOf, personAuth } from '../auth';
+import { entryOf } from '../snapshot';
 import {
   ForbiddenError,
   NotFoundError,
@@ -96,6 +96,13 @@ const toolBody = t.Object({
   title: nameSchema,
   /** RF-62: the display category. `null` is "no category"; the length mirrors the validator's. */
   category: t.Optional(t.Union([t.String({ maxLength: 40 }), t.Null()])),
+  /** RF-77: the tool's tags — at most twelve, each at most 24 characters, like the shared validator. */
+  tags: t.Optional(t.Array(t.String({ maxLength: 24 }), { maxItems: 12 })),
+  /**
+   * RF-78: the account the whole guild uses for the tool — a plain label, so the schema bounds only
+   * its length, the way the validator does.
+   */
+  orgAccount: t.Optional(t.Union([t.String({ maxLength: 120 }), t.Null()])),
   url: textSchema,
   icon: nullableText,
   order: t.Number(),
@@ -189,6 +196,11 @@ function toToolInput(id: string, tool: Entry): ToolInput {
     // RF-62: the same normalization the shared validator applies — trimmed, and nothing is `null` —
     // so a write that reaches the host directly is filed exactly like one the Nod validated.
     category: category === null || category.trim() === '' ? null : category.trim(),
+    // RF-77: the tags as the shared validator trims and deduplicates them.
+    tags: [...new Set((tool.tags ?? []).map((tag) => tag.trim()).filter((tag) => tag !== ''))],
+    // RF-78: the org account label, trimmed the same way.
+    orgAccount:
+      typeof tool.orgAccount !== 'string' || tool.orgAccount.trim() === '' ? null : tool.orgAccount.trim(),
     url: tool.url,
     icon: tool.icon ?? null,
     order: tool.order,
@@ -437,8 +449,11 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
     const id = ctx.params.id;
     if (ctx.body.id !== id) return status(400, { error: 'invalid body: id must match the path id' });
     // The host clock, never the body's: an org write has no `updatedAt` of the Nod's (SP04 §4).
-    const saved: OrgTool = repo.saveOrgTool(toToolInput(id, ctx.body), auth.now());
-    return saved;
+    // The wire shape is `Entry`'s — `entryOf` is the one mapping of a host row to it (the snapshot
+    // and the web portal answer through the same function) — with the one field of the row the admin
+    // contract always answered beside it: the host clock the write was stamped with.
+    const saved = repo.saveOrgTool(toToolInput(id, ctx.body), auth.now());
+    return { ...entryOf(saved), updatedAt: saved.updatedAt };
   })
 
   .delete(HOST_ROUTES.adminTool, { params: entryIdParams }, (ctx) => {
@@ -451,7 +466,7 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
    * the path, and the owner keeps theirs. The copy starts with no grants and with fresh view ids —
    * a personal view is its owner's row (SP01 §2), so it is copied, never moved.
    */
-  .post(HOST_ROUTES.adminToolPromote, { params: entryIdParams, body: promoteBody }, (ctx): OrgTool => {
+  .post(HOST_ROUTES.adminToolPromote, { params: entryIdParams, body: promoteBody }, (ctx) => {
     const { repo, auth } = hostOf(ctx);
     const { person } = callerOf(ctx);
     // A personal tool is only ever read through its owner (`host/repo.ts`): an id the admin does not
@@ -475,7 +490,8 @@ export const adminRoutes = new Elysia({ name: 'host-admin-routes' })
       auth: personal.auth,
       active: personal.active,
     };
-    return repo.saveOrgTool(toToolInput(id, copy), auth.now());
+    const promoted = repo.saveOrgTool(toToolInput(id, copy), auth.now());
+    return { ...entryOf(promoted), updatedAt: promoted.updatedAt };
   })
 
   /**

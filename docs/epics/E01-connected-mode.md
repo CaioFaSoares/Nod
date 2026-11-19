@@ -95,6 +95,9 @@ Done when observed on the real surface:
 - Several guilds at once: one host serves one guild, and one Nod is in **one guild at a time**
   (owner, 2026-10-16: "no momento nao. se sair e voltar ele poderia entrar em outra"). Removing the
   host (§5) and adding another is how a person changes guild.
+  **Reopened on 2026-11-19** (owner: "além do gerenciamento do lado do usuário de poder acessar mais
+  de um nó"): a Nod now holds several guilds — RF-71, `docs/epics/E07-several-guilds.md`. This
+  non-goal is superseded for the Nod; the tenancy half (one host serves one guild) stands.
 
 ## 5. Modes
 

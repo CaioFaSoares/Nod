@@ -8,10 +8,18 @@ export type HostConfig = {
   dataDir: string;
   /** The `https://` address the proxy exposes; the host itself serves plain HTTP (SP07 §2). */
   publicUrl: string;
-  /** Port inside the container network; `PORT` in the Dockerfile (SP07 §1). */
+  /**
+   * Port inside the container network; `PORT` in the Dockerfile is its default, and the compose
+   * files pass `NOD_PORT` over it (SP07 §2). No port is written into code.
+   */
   port: number;
   /** Dev runs may point `NOD_PUBLIC_URL` at a plain `http://` address. */
   dev: boolean;
+  /**
+   * E04/RF-73: the browser portal is served. Absent is off — the host stays API-only until the
+   * deployment sets `WEB_UI`; the compose files turn it on as the deployment's own default.
+   */
+  webUi?: boolean;
 };
 
 export const DEFAULT_PORT = 8080;
@@ -55,6 +63,7 @@ export function loadConfig(env: Record<string, string | undefined>): HostConfig 
     publicUrl: parsePublicUrl(env.NOD_PUBLIC_URL?.trim(), dev),
     port: parsePort(env.PORT?.trim()),
     dev,
+    webUi: env.WEB_UI === '1' || env.WEB_UI === 'true',
   };
 }
 

@@ -33,7 +33,7 @@ import { HostError } from './host-client';
 import { BIOMETRIC_ITEM_PREFIX } from './secret-store';
 import { keysKey } from './keys';
 import { reencryptVaultItems } from './vault';
-import type { DerivedKeys, PasswordHashV2 } from '../shared/auth';
+import type { DerivedKeys, PasswordHashV2, StoredPassword } from '../shared/auth';
 import type { PasswordChangeRequest } from '../shared/host-api';
 import type {
   EntryTarget,
@@ -592,11 +592,35 @@ export function createSession(deps: SessionDeps): Session {
    * this Nod still holds that `host` row and only for the person of it; every other answer is the
    * `invalid credentials` the screen already shows for a wrong password, so a tile never says who
    * the guild's account is (canonico §22 "Entry screen"). No target is the Offline tile (RF-60).
+   * E07/RF-71: the row is found by the tile's address, so several guilds are several targets.
    */
   function entryAllowed(target: EntryTarget | undefined, personId: Id): boolean {
     if (target === undefined || target.kind === 'offline') return true;
-    const row = deps.repo.hostRecord();
-    return row !== null && row.address === target.id && row.personId === personId;
+    const row = deps.repo.hostRecordByAddress(target.id);
+    return row !== null && row.personId === personId;
+  }
+
+  /**
+   * E07/RF-71: which row an unlock is about. A guild tile names its guild, so the row is that
+   * guild's account and the typed email only has to be that account's — the tile is what decides.
+   * The Offline tile has nothing but the email, and the email is no longer unique: exactly one row
+   * must hold it, or nobody is named and the answer is the one failure (E07 §3), which is also what
+   * keeps the screen from telling apart "no such account" and "two of them".
+   */
+  function unlockCandidate(
+    email: string,
+    target: EntryTarget | undefined,
+  ): { person: Person; password: StoredPassword } | null {
+    const address = email.trim().toLowerCase();
+    if (target !== undefined && target.kind === 'guild') {
+      const row = deps.repo.hostRecordByAddress(target.id);
+      if (row === null) return null;
+      const found = deps.repo.personAuthById(row.personId);
+      if (found === null) return null;
+      return found.person.email.trim().toLowerCase() === address ? found : null;
+    }
+    const rows = deps.repo.personsAuthByEmail(address);
+    return rows.length === 1 ? rows[0] : null;
   }
 
   /** 0.5.0 (RF-60): the mode and the remembered tile of an unlock that just succeeded. */
@@ -704,7 +728,7 @@ export function createSession(deps: SessionDeps): Session {
   async function unlock(p: { email: string; password: string; target?: EntryTarget }): Promise<SessionState> {
     if (waitMs() > 0) throw new Error(WAIT_BEFORE_RETRY);
 
-    const found = deps.repo.personAuthByEmail(p.email.trim().toLowerCase());
+    const found = unlockCandidate(p.email, p.target);
 
     // A missing email derives against `fakePassword`: same cost as a real verify, so the response
     // does not tell "does not exist" from "wrong password".
@@ -795,7 +819,7 @@ export function createSession(deps: SessionDeps): Session {
 
   async function enableBiometric(password: string): Promise<SessionState> {
     const person = requireUnlocked();
-    const found = deps.repo.personAuthByEmail(person.email);
+    const found = deps.repo.personAuthById(person.id);
     // `person` came from the repository: `found` is null only if it was revoked during this session.
     if (found === null) throw new Error(INVALID_CREDENTIALS);
     // The one derivation of a V2 row also verifies the password and hands the `vaultKey` over:
@@ -1080,10 +1104,16 @@ export function createSession(deps: SessionDeps): Session {
       if (current !== null && !holder.revoked && holder.person.id !== current.id) {
         throw new Error(JOIN_OTHER_ACCOUNT);
       }
-      // F1: the choice itself. The join answers it without calling the host, so the code the person
-      // was given is still whole when they decide.
-      if (!p.adoptLocal) return { kind: 'choose', person: holder.person };
-      local = holder.person;
+      // E07/RF-71 (owner, 2026-11-19: the same email may exist in two guilds): a holder another
+      // guild's `host` row already claims is that guild's account, not a local one — this join
+      // creates the new guild's own row and the F1 choice never comes up, because adopting would
+      // re-key the other guild's account onto this host's person and leave its tile dead.
+      if (!deps.repo.hostRowClaimsPerson(holder.person.id)) {
+        // F1: the choice itself. The join answers it without calling the host, so the code the person
+        // was given is still whole when they decide.
+        if (!p.adoptLocal) return { kind: 'choose', person: holder.person };
+        local = holder.person;
+      }
     }
 
     // F3: a sign-in is a password check against the host, and it pays the backoff an unlock pays —
@@ -1124,7 +1154,8 @@ export function createSession(deps: SessionDeps): Session {
     host?: (request: PasswordChangeRequest) => Promise<void>,
   ): Promise<void> {
     const person = requireUnlocked();
-    const found = deps.repo.personAuthByEmail(person.email);
+    // E07/RF-71: the row is the unlocked one — the email alone names nobody in a multi-guild Nod.
+    const found = deps.repo.personAuthById(person.id);
     if (found === null) throw new Error(INVALID_CREDENTIALS);
 
     // One derivation of the current password: for a V2 row it verifies the check and hands back the
@@ -1186,7 +1217,7 @@ export function createSession(deps: SessionDeps): Session {
       // The salt the `host` row caches for offline unlock (SP02 §6) is the host's, and the host just
       // moved it: a cache left on the old salt makes the next sign-in read a reset and wipe the
       // vault (SP02 §7, RF-43).
-      deps.repo.saveHostSalt(salt);
+      deps.repo.saveHostSalt(person.id, salt);
     }
     currentKeys = newKeys;
     currentVaultKey = newKeys.vaultKey;

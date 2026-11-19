@@ -40,7 +40,7 @@ import type {
 } from '../shared/types';
 import { HostError, type HostConnection } from './host-client';
 import type { Keys } from './keys';
-import type { Repo } from './repo';
+import type { HostRecord, Repo } from './repo';
 import type { Vault } from './vault';
 
 // ---------------------------------------------------------------- reasons (English, no values)
@@ -291,9 +291,14 @@ export interface Shares {
   holdersOf(credentialId: string): Holder[];
 }
 
+/** E07/RF-71: the guild this session entered — the row of the unlocked person's account. */
+function activeRow(repo: Repo, person: Person | null): HostRecord | null {
+  return person === null ? null : repo.hostRecordForPerson(person.id);
+}
+
 /** The JSON body of the cached snapshot, or `null` when there is none this side can read. */
-function readSnapshot(repo: Repo): Snapshot | null {
-  const row = repo.hostRecord();
+function readSnapshot(repo: Repo, person: Person | null): Snapshot | null {
+  const row = activeRow(repo, person);
   if (row === null || row.snapshot === null) return null;
   try {
     const body = JSON.parse(row.snapshot) as unknown;
@@ -386,7 +391,7 @@ export function createShares(deps: SharesDeps): Shares {
   // ---------------------------------------------------------------- snapshot reads
 
   function roster(): SnapshotPerson[] {
-    const people = readSnapshot(deps.repo)?.people;
+    const people = readSnapshot(deps.repo, deps.session.current())?.people;
     if (!Array.isArray(people)) return [];
     const rows: SnapshotPerson[] = [];
     for (const item of people) {
@@ -397,7 +402,7 @@ export function createShares(deps: SharesDeps): Shares {
   }
 
   function openShares(): IncomingShare[] {
-    const shares = readSnapshot(deps.repo)?.incomingShares;
+    const shares = readSnapshot(deps.repo, deps.session.current())?.incomingShares;
     if (!Array.isArray(shares)) return [];
     const rows: IncomingShare[] = [];
     for (const item of shares) {
@@ -408,7 +413,7 @@ export function createShares(deps: SharesDeps): Shares {
   }
 
   function holdersOf(credentialId: string): Holder[] {
-    const holders = readSnapshot(deps.repo)?.holders;
+    const holders = readSnapshot(deps.repo, deps.session.current())?.holders;
     if (holders === undefined || holders === null) return [];
     const rows = holders[credentialId];
     return Array.isArray(rows) ? rows : [];
@@ -416,7 +421,7 @@ export function createShares(deps: SharesDeps): Shares {
 
   function rotationPending(credentialId: string | null): boolean {
     if (credentialId === null) return false;
-    const pending = readSnapshot(deps.repo)?.rotationPending;
+    const pending = readSnapshot(deps.repo, deps.session.current())?.rotationPending;
     return Array.isArray(pending) && pending.includes(credentialId);
   }
 
@@ -432,7 +437,7 @@ export function createShares(deps: SharesDeps): Shares {
    * without a host or for a snapshot of somebody else.
    */
   function myRoles(me: Person): Id[] {
-    const meRow = readSnapshot(deps.repo)?.me;
+    const meRow = readSnapshot(deps.repo, deps.session.current())?.me;
     if (meRow !== undefined && meRow.id === me.id && Array.isArray(meRow.roles)) return meRow.roles;
     return me.roles;
   }
@@ -487,7 +492,7 @@ export function createShares(deps: SharesDeps): Shares {
    */
   function stripSettledSealed(ids: Id[]): void {
     if (ids.length === 0) return;
-    const record = deps.repo.hostRecord();
+    const record = activeRow(deps.repo, deps.session.current());
     if (record === null || record.snapshot === null || record.version === null || record.issuedAt === null) {
       return;
     }
@@ -510,13 +515,13 @@ export function createShares(deps: SharesDeps): Shares {
       changed = true;
     }
     if (!changed) return;
-    deps.repo.saveHostSnapshot({
+    deps.repo.saveHostSnapshot(record.address, {
       snapshot: JSON.stringify(body),
       version: record.version,
       issuedAt: record.issuedAt,
       syncedAt: record.lastSyncAt ?? record.issuedAt,
     });
-    if (record.lastError !== null) deps.repo.saveHostError(record.lastError);
+    if (record.lastError !== null) deps.repo.saveHostError(record.address, record.lastError);
   }
 
   /** L4: one in-flight accept/applyUpdates per share id, so a second run cannot double-apply. */
@@ -1173,7 +1178,7 @@ export function createShares(deps: SharesDeps): Shares {
    * session is not the snapshot's.
    */
   function amAdmin(me: Person): boolean {
-    const row = readSnapshot(deps.repo)?.me;
+    const row = readSnapshot(deps.repo, deps.session.current())?.me;
     if (row !== undefined && row.id === me.id && typeof row.admin === 'boolean') return row.admin;
     return me.admin;
   }

@@ -43,11 +43,14 @@ import type {
 //
 // The `host` and `host_outbox` tables of SP05 §2 are new: no earlier build wrote them, so the
 // `IF NOT EXISTS` here creates them on a fresh database and on an existing one alike. `host` has no
-// token column and never will (SP02 §5): the bearer lives in the system keychain.
+// token column and never will (SP02 §5): the bearer lives in the system keychain. Since E07 (RF-71)
+// the row is one *per guild*, keyed by `address`; the single-row `CHECK (id = 1)` a `8` database
+// carries is taken off by `rebuildHost`, and `person.email`'s `UNIQUE` — an account is keyed by its
+// host's person id, and the same email may exist in two guilds — by `rebuildPerson`.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS person (
   id TEXT PRIMARY KEY,
-  email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  email TEXT NOT NULL COLLATE NOCASE,
   name TEXT NOT NULL,
   password_hash TEXT NOT NULL,
   password_salt TEXT NOT NULL,
@@ -79,7 +82,9 @@ CREATE TABLE IF NOT EXISTS tool (
   probe_json TEXT,
   scope TEXT NOT NULL DEFAULT 'org',
   owner_id TEXT,
-  category TEXT
+  category TEXT,
+  tags TEXT,
+  org_account TEXT
 );
 CREATE TABLE IF NOT EXISTS tool_view (
   tool_id TEXT NOT NULL REFERENCES tool (id) ON DELETE CASCADE,
@@ -133,8 +138,7 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS host (
-  id            INTEGER PRIMARY KEY CHECK (id = 1),
-  address       TEXT NOT NULL,
+  address       TEXT PRIMARY KEY,
   guild         TEXT NOT NULL,
   kid           TEXT NOT NULL,
   public_key    TEXT NOT NULL,
@@ -154,7 +158,8 @@ CREATE TABLE IF NOT EXISTS host_outbox (
   body        TEXT NOT NULL,
   created_at  TEXT NOT NULL,
   attempts    INTEGER NOT NULL DEFAULT 0,
-  last_error  TEXT
+  last_error  TEXT,
+  address     TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS peer_keys (
   person_id       TEXT PRIMARY KEY,
@@ -210,11 +215,26 @@ CREATE TABLE IF NOT EXISTS secret (
  * default of its tool, which is what it was. Two partial unique indexes are created after that
  * rebuild: one credential copy per person (`vault_item_credential`) and one default per tool
  * (`vault_item_default`).
+ *
+ * `10` is the library's two catalog fields (RF-77/RF-78, owner 2026-11-19): `tool.tags` (a JSON array)
+ * and `tool.org_account` (the plain label of the account the whole guild uses — information, never
+ * a secret, so no column of it is sealed). Two columns of an existing table, so a `9` database
+ * gets them from `addColumns` and every row it holds reads as tagless and label-less, which is
+ * what `NULL` means; a personal row stays `NULL` in both, exactly like the category.
+ *
+ * `9` is E07's several guilds (RF-71, owner 2026-11-19 — "uma conta por guild"): `host` loses the
+ * single-row `CHECK (id = 1)` and becomes one row per guild keyed by `address` (`rebuildHost`);
+ * `host_outbox` gains the `address` each pending write belongs to (a column by presence, then
+ * backfilled from the one row a `8` database holds); and `person.email` loses `UNIQUE`
+ * (`rebuildPerson`), because a guild account's row is keyed by its host's person id and the same
+ * email may exist in two guilds — the entry target, never the email alone, names the row
+ * (`backend/session.ts`). Each change is guarded by the shape itself, so `migrate()` stays
+ * idempotent, and no *value* a `8` database holds moves.
  */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 10;
 
-/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2–v7, current. */
-const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION];
+/** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2–v8, current. */
+const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION];
 
 /**
  * The database was created by an older Nod (v1, in Portuguese). `migrate` throws this and touches
@@ -265,6 +285,10 @@ interface ToolRow {
   owner_id: Id | null;
   /** RF-62: the display category of an org row; `null` while it has none (a personal row always). */
   category: string | null;
+  /** RF-77: the row's tags, a JSON array; `null` while the guild wrote none (a personal row always). */
+  tags: string | null;
+  /** RF-78: the org's default account label; `null` while the guild wrote none (a personal row always). */
+  org_account: string | null;
 }
 
 interface ViewRow {
@@ -316,7 +340,6 @@ interface EventRow {
 }
 
 interface HostRow {
-  id: number;
   address: string;
   guild: string;
   kid: string;
@@ -333,6 +356,7 @@ interface HostRow {
 
 interface OutboxRowSql {
   id: number;
+  address: string;
   method: string;
   path: string;
   body: string;
@@ -355,9 +379,10 @@ interface PeerKeyRow {
 }
 
 /**
- * The one `host` row of SP05 §2 as the rest of the backend reads it: the pinned host (address, key,
- * person id, salt) and the cache of the last verified snapshot. No token field exists, on purpose
- * (SP02 §5): the bearer is a keychain item, `nod.host.<kid>.<personId>`.
+ * One `host` row as the rest of the backend reads it — since RF-71 there is one *per guild*, keyed
+ * by `address` (E07, SP05 §2): the pinned host (address, key, person id, salt) and the cache of the
+ * last verified snapshot. No token field exists, on purpose (SP02 §5): the bearer is a keychain
+ * item, `nod.host.<kid>.<personId>` — per guild and per person, so several guilds need nothing new.
  */
 export interface HostRecord {
   address: string;
@@ -471,8 +496,22 @@ export interface Repo {
     codeHash: string,
     now: Date,
   ): Person | null;
-  /** Case-insensitive; ignores revoked people. */
+  /**
+   * Case-insensitive; ignores revoked people. E07/RF-71: the same email may exist twice (one row per
+   * guild), so this answers the first by creation order and only for the rules that must not depend
+   * on it — a question of *existence* (is this email taken?), never of identity. Anything that signs
+   * somebody in resolves the row first (`personAuthById`, `personsAuthByEmail`).
+   */
   personByEmail(email: string): { person: Person; password: PasswordHash } | null;
+  /**
+   * SP02 §6: every live person with that email, oldest first — the shape a multi-guild database
+   * needs (RF-71), where one e-mail can belong to one row per guild. The offline unlock takes the
+   * answer only when it is a single row; anything else is `invalid credentials`, because the e-mail
+   * alone names nobody (E07 §3).
+   */
+  personsAuthByEmail(email: string): Array<{ person: Person; password: StoredPassword }>;
+  /** The person plus the verifier their row carries (SP02 §6): the read every guild unlock goes through. */
+  personAuthById(id: Id): { person: Person; password: StoredPassword } | null;
   /**
    * The person plus the verifier their row carries (SP02 §6): the V2 record when
    * `password_algorithm` is `PASSWORD_V2_ALGORITHM`, the v1 PBKDF2 hash otherwise — the read every local
@@ -485,6 +524,11 @@ export interface Repo {
    * join that ignored it ended in a raw `UNIQUE constraint failed` — the email column is unique
    * across every state (the `person` table's `email TEXT NOT NULL COLLATE NOCASE UNIQUE`). `revoked`
    * says whether the row is the one the state hides.
+   *
+   * E07/RF-71: with one row per guild this answers at most the *local* holder — a person no `host`
+   * row claims — because a guild's own account is never what a join adopts (re-keying it would leave
+   * that guild's row pointing at nothing); the same email in another guild is simply not a
+   * collision.
    */
   personByEmailAnyState(email: string): { person: Person; revoked: boolean } | null;
   /**
@@ -672,17 +716,38 @@ export interface Repo {
   secret(key: string): string | null;
   setSecret(key: string, value: string): void;
   deleteSecret(key: string): void;
-  // host (connected mode, SP05 §2)
+  // host (connected mode, SP05 §2; one row per guild since RF-71)
   /**
-   * The one `host` row, or `null` without a host. Everything the Nod sends to a host is built from
-   * this row (RF-30: no row, no client, no call).
+   * Every guild this Nod holds, in the order they were added (ties by address). The entry screen
+   * draws one tile per row (RF-71); nothing else may assume there is only one.
    */
-  hostRecord(): HostRecord | null;
+  hostRecords(): HostRecord[];
   /**
-   * Adds or replaces the row — `id = 1`, one guild at a time (SP05 §2). The pinned half is what the
-   * caller passes; `snapshot`, `version`, `issuedAt`, `lastSyncAt` and `lastError` start empty and
-   * are written by `saveHostSnapshot`/`saveHostError`. The token is never a parameter of anything
-   * here (SP02 §5).
+   * The row of one guild by its pinned address — the address an `EntryTarget`'s `guild` tile
+   * carries — or `null` when this Nod does not hold that guild.
+   */
+  hostRecordByAddress(address: string): HostRecord | null;
+  /**
+   * The row of the guild that person's account belongs to, or `null`. While a session is unlocked
+   * as that person this is "the active guild" — the row every reader of "the host" takes (E07 §2),
+   * so no session state had to be added: the row carries `personId`, and a guild account is a
+   * person row keyed by its host's person id (SP05 §2). Deterministic by `added_at` should two
+   * hosts ever name the same person id.
+   */
+  hostRecordForPerson(personId: Id): HostRecord | null;
+  /**
+   * Whether a `host` row claims that person id — the read that tells a join whether the row holding
+   * the email is a guild's own account (never adoptable: re-keying it would leave that guild's row
+   * pointing at nothing) or a genuinely local one (F1's choice).
+   */
+  hostRowClaimsPerson(personId: Id): boolean;
+  /**
+   * Adds a guild, or re-adds one over the row of its own address (SP05 §2, RF-71): the upsert is by
+   * `address`, so joining another guild never touches the ones already held, and a re-add of the
+   * same address replaces that row whole — including the snapshot and the last error, which belong
+   * to the host that is going away. The pinned half is what the caller passes; `snapshot`,
+   * `version`, `issuedAt`, `lastSyncAt` and `lastError` start empty and are written by
+   * `saveHostSnapshot`/`saveHostError`. The token is never a parameter of anything here (SP02 §5).
    */
   saveHost(h: {
     address: string;
@@ -694,32 +759,47 @@ export interface Repo {
     addedAt: string;
   }): HostRecord;
   /**
-   * Stores one verified snapshot verbatim (SP04 §2) — the body as received, its `version`, its
-   * `issuedAt` and when the sync succeeded. `syncedAt` also clears `last_error`: the last call
-   * decided.
+   * Stores one verified snapshot of that guild, verbatim (SP04 §2) — the body as received, its
+   * `version`, its `issuedAt` and when the sync succeeded. `syncedAt` also clears `last_error`: the
+   * last call decided.
    */
-  saveHostSnapshot(s: { snapshot: string; version: string; issuedAt: string; syncedAt: string }): void;
+  saveHostSnapshot(
+    address: string,
+    s: { snapshot: string; version: string; issuedAt: string; syncedAt: string },
+  ): void;
   /**
-   * Rewrites the salt the `host` row caches for offline unlock (SP02 §6) — and nothing else. SP02
-   * §7's password change moves that salt, and the cached one has to move with it: the sign-in of
-   * §7 calls a salt other than the cached one a reset, and a reset wipes the vault (RF-43). No-op
-   * without a host row.
+   * Rewrites the salt the row of that person's guild caches for offline unlock (SP02 §6) — and
+   * nothing else. SP02 §7's password change moves that salt, and the cached one has to move with
+   * it: the sign-in of §7 calls a salt other than the cached one a reset, and a reset wipes the
+   * vault (RF-43). No-op without a row of that person: losing the host in the middle of a password
+   * change must not fail the change, and without a row there is no cache to keep.
    */
-  saveHostSalt(salt: string): void;
-  /** The failure of the last sync, for Settings → Hosts (SP04 §3); `null` clears it. */
-  saveHostError(message: string | null): void;
+  saveHostSalt(personId: Id, salt: string): void;
+  /** The failure of that guild's last sync, for Settings → Hosts (SP04 §3); `null` clears it. */
+  saveHostError(address: string, message: string | null): void;
   /**
-   * Forgets the host: the row and the pending writes in one transaction. Without a host the outbox
-   * can never be replayed (nothing builds a client), so keeping it would only hide rows. What
-   * happens to the local personal tools is the caller's `keepPersonal` decision (SP05 §3), not this
+   * Forgets one guild: its row and its pending writes, in one transaction. Without the row the
+   * outbox can never be replayed (nothing builds a client for that guild), so keeping it would only
+   * hide rows; the other guilds' rows and outboxes stay exactly as they are (RF-71). What happens
+   * to the local personal tools is the caller's `keepPersonal` decision (SP05 §3), not this
    * method's: they are `tool` rows, untouched here.
    */
-  clearHost(): void;
+  removeHost(address: string): void;
   // outbox
-  /** Appends one pending write (SP04 §4); the local cache already changed when this is called. */
-  enqueueOutbox(w: { method: OutboxMethod; path: string; body: string; createdAt: string }): OutboxEntry;
-  /** Every pending write, `id` order: the replay order of SP04 §4. */
-  listOutbox(): OutboxEntry[];
+  /**
+   * Appends one pending write of that guild (SP04 §4); the local cache already changed when this is
+   * called. The address is the guild's pinned one, so the flush replays only the writes of the
+   * guild being synced.
+   */
+  enqueueOutbox(w: {
+    address: string;
+    method: OutboxMethod;
+    path: string;
+    body: string;
+    createdAt: string;
+  }): OutboxEntry;
+  /** Every pending write of that guild, `id` order: the replay order of SP04 §4. */
+  listOutbox(address: string): OutboxEntry[];
   /** One more failed attempt and why it failed; `null` clears the message. Unknown id: no-op. */
   markOutboxAttempt(id: number, error: string | null): void;
   /** Drops one row: the write is done, or the host refused it for good (SP04 §4). Unknown id: no-op. */
@@ -849,6 +929,13 @@ export function createRepo(db: SqlDb): Repo {
     // RF-62 (0.5.0): the display category the guild gave a local org tool. Every row a `5` database
     // holds is uncategorized, which is what `NULL` means; a personal row stays `NULL`.
     addColumn('tool', 'category', 'TEXT');
+    // RF-77/RF-78 (1.0.0): the library's catalog fields. Every row a `9` database holds reads as
+    // tagless and label-less, which is what `NULL` means; a personal row stays `NULL` in both.
+    addColumn('tool', 'tags', 'TEXT');
+    addColumn('tool', 'org_account', 'TEXT');
+    // E07/RF-71: the guild a pending write belongs to. A `8` database's rows are all of its one
+    // guild, and `backfillOutboxAddress` gives them that row's address.
+    addColumn('host_outbox', 'address', "TEXT NOT NULL DEFAULT ''");
   }
 
   /**
@@ -995,6 +1082,115 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
   }
 
   /**
+   * E07/RF-71: `host` was one row with `CHECK (id = 1)`; the guild is now keyed by `address` and a
+   * Nod may hold several. The guard is the old shape itself — a table that still carries an `id`
+   * column is a `8` database's, and the DDL of `SCHEMA` already has the new shape for a fresh one —
+   * the same recipe `rebuildVaultItem` uses: the new table, the one row, `DROP`, `RENAME`, with the
+   * foreign keys off only while a table is dropped (none of these rows is referenced). Nothing a
+   * `8` database holds moves: the one guild it had is the one guild it keeps.
+   */
+  function rebuildHost(): void {
+    const columns = db.all<{ name: string }>('PRAGMA table_info(host)').map((row) => row.name);
+    if (columns.length === 0 || !columns.includes('id')) return;
+    const foreignKeysOn = singleRow<{ foreign_keys: number }>('PRAGMA foreign_keys')?.foreign_keys === 1;
+    if (foreignKeysOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      transaction(() => {
+        // The shape of `host` in `SCHEMA` above, table name apart.
+        db.exec(`
+CREATE TABLE host_rebuilt (
+  address       TEXT PRIMARY KEY,
+  guild         TEXT NOT NULL,
+  kid           TEXT NOT NULL,
+  public_key    TEXT NOT NULL,
+  person_id     TEXT NOT NULL,
+  salt          TEXT NOT NULL,
+  snapshot      TEXT,
+  version       TEXT,
+  issued_at     TEXT,
+  last_sync_at  TEXT,
+  last_error    TEXT,
+  added_at      TEXT NOT NULL
+);`);
+        db.run(
+          `INSERT INTO host_rebuilt
+             (address, guild, kid, public_key, person_id, salt, snapshot, version, issued_at,
+              last_sync_at, last_error, added_at)
+           SELECT address, guild, kid, public_key, person_id, salt, snapshot, version, issued_at,
+                  last_sync_at, last_error, added_at
+             FROM host`,
+        );
+        db.exec('DROP TABLE host');
+        db.exec('ALTER TABLE host_rebuilt RENAME TO host');
+      });
+    } finally {
+      if (foreignKeysOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+
+  /**
+   * E07/RF-71: `person.email` loses `UNIQUE`, because an account is keyed by its guild's person id
+   * and the same email may exist in two guilds. The old table is recognised by the constraint in
+   * its own SQL — the DDL of `SCHEMA` already reads `email TEXT NOT NULL COLLATE NOCASE` — and the
+   * rebuild follows `rebuildVaultItem`: no row's value moves, and the `person_role`/`vault_item`
+   * foreign keys come along because the keys do.
+   *
+   * `PRAGMA writable_schema` is not used: the table is dropped and renamed back like the vault's,
+   * which is the documented way to change a constraint in SQLite.
+   */
+  function rebuildPerson(): void {
+    const sql =
+      singleRow<{ sql: string }>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'person'")
+        ?.sql ?? '';
+    if (sql === '' || !/UNIQUE/i.test(sql)) return;
+    const foreignKeysOn = singleRow<{ foreign_keys: number }>('PRAGMA foreign_keys')?.foreign_keys === 1;
+    if (foreignKeysOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      transaction(() => {
+        // The shape of `person` in `SCHEMA` above, table name apart.
+        db.exec(`
+CREATE TABLE person_rebuilt (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL COLLATE NOCASE,
+  name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  password_iterations INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT,
+  password_check TEXT,
+  password_algorithm TEXT NOT NULL DEFAULT 'PBKDF2-SHA256'
+);`);
+        db.run(
+          `INSERT INTO person_rebuilt
+             (id, email, name, password_hash, password_salt, password_iterations, created_at,
+              revoked_at, password_check, password_algorithm)
+           SELECT id, email, name, password_hash, password_salt, password_iterations, created_at,
+                  revoked_at, password_check, password_algorithm
+             FROM person`,
+        );
+        db.exec('DROP TABLE person');
+        db.exec('ALTER TABLE person_rebuilt RENAME TO person');
+      });
+    } finally {
+      if (foreignKeysOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+
+  /**
+   * E07/RF-71: a pending write now names the guild it belongs to. A `8` database's outbox is all of
+   * its one guild, so every row takes that row's address; a database with no `host` row can hold no
+   * write (nothing enqueued one), and `''` is a value no guild can have.
+   */
+  function backfillOutboxAddress(): void {
+    db.run(
+      `UPDATE host_outbox
+          SET address = COALESCE((SELECT h.address FROM host h ORDER BY h.added_at ASC, h.address ASC LIMIT 1), '')
+        WHERE address = ''`,
+    );
+  }
+
+  /**
    * §4: `PRAGMA user_version` is the schema version. `3` is already this build's, so the DDL below
    * only completes what is missing; `2` is a database of the previous block-1 build; no version at
    * all is a database from before the versioning — empty (a fresh install), v2-shaped (an earlier
@@ -1006,6 +1202,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
    * takes off (`rebuildVaultItem`) and whose `UNIQUE (person_id, tool_id)` 0.5.5's RF-65 takes off
    * with `is_default` in its place, and even that keeps every row as it stands. The rules of the new
    * shape come last (`ensureVaultInvariants`), after the table they belong to is the final one.
+   *
+   * E07 (RF-71) moves two more: `host` (`rebuildHost`, one row per guild) and `person`
+   * (`rebuildPerson`, no `UNIQUE` on the email), and fills `host_outbox.address` from the one guild
+   * a `8` database holds (`backfillOutboxAddress`).
    */
   function migrate(): void {
     const version = singleRow<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
@@ -1017,9 +1217,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
     }
     db.exec(SCHEMA);
     addColumns();
+    rebuildPerson();
+    rebuildHost();
     rebuildVaultItem();
     ensureVaultInvariants();
     backfillVaultOrigin();
+    backfillOutboxAddress();
     if (version !== SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
@@ -1151,11 +1354,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
    * no v1 hash and its `check` decides; anything else is the v1 PBKDF2 hash. A V2 row with no
    * `check` reads as an empty one, which matches no password.
    */
-  function personAuthByEmail(email: string): { person: Person; password: StoredPassword } | null {
-    const row = singleRow<PersonRow>('SELECT * FROM person WHERE email = ? AND revoked_at IS NULL', [
-      email.trim().toLowerCase(),
-    ]);
-    if (row === null) return null;
+  function personAuthOf(row: PersonRow): { person: Person; password: StoredPassword } {
     if (row.password_algorithm === PASSWORD_V2_ALGORITHM) {
       return {
         person: buildPerson(row),
@@ -1178,10 +1377,44 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
     };
   }
 
+  /**
+   * E07/RF-71: every live row with that email, oldest first. `email` is no longer unique — a guild
+   * account is keyed by its host's person id, and the same person may be in two guilds with the same
+   * address — so the offline unlock takes this answer only when it is a single row and refuses
+   * anything else (E07 §3); a guild unlock names its row through the `host` row instead.
+   */
+  function personsAuthByEmail(email: string): Array<{ person: Person; password: StoredPassword }> {
+    return db
+      .all<PersonRow>(
+        'SELECT * FROM person WHERE email = ? AND revoked_at IS NULL ORDER BY created_at, id',
+        [email.trim().toLowerCase()],
+      )
+      .map(personAuthOf);
+  }
+
+  /** The read every guild unlock goes through: the row the session is about is already known there. */
+  function personAuthById(id: Id): { person: Person; password: StoredPassword } | null {
+    const row = singleRow<PersonRow>('SELECT * FROM person WHERE id = ? AND revoked_at IS NULL', [id]);
+    return row === null ? null : personAuthOf(row);
+  }
+
+  function personAuthByEmail(email: string): { person: Person; password: StoredPassword } | null {
+    return personsAuthByEmail(email)[0] ?? null;
+  }
+
+  /**
+   * E07/RF-71: the local holder of that email — a person no `host` row claims, revoked included. A
+   * guild's own account is never the answer: a join that adopted it would re-key a row its guild
+   * still points at, and joining a second guild with the same email is not a collision at all.
+   */
   function personByEmailAnyState(email: string): { person: Person; revoked: boolean } | null {
-    const row = singleRow<PersonRow>('SELECT * FROM person WHERE email = ?', [
-      email.trim().toLowerCase(),
-    ]);
+    const row = singleRow<PersonRow>(
+      `SELECT * FROM person
+        WHERE email = ?
+          AND id NOT IN (SELECT person_id FROM host)
+        ORDER BY created_at, id`,
+      [email.trim().toLowerCase()],
+    );
     return row === null ? null : { person: buildPerson(row), revoked: row.revoked_at !== null };
   }
 
@@ -1383,6 +1616,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
       title: l.title,
       // RF-62: the guild's category, `null` on a row written before the column and on a personal one.
       category: l.category,
+      // RF-77: the guild's tags — absent in the `Entry` when the row carries none, so an old row and
+      // a tagless one read alike.
+      ...(l.tags === null ? {} : { tags: JSON.parse(l.tags) as string[] }),
+      // RF-78: the org's default account label, `null` on a row written before the column.
+      orgAccount: l.org_account,
       url: l.url,
       // The icon does not leave here: the backend serves the bytes by `iconHash` (data URI, §4).
       icon: null,
@@ -1424,10 +1662,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
     // has its own group in the display, and the host ignores a category on a personal write.
     const category =
       scope === 'personal' ? null : (e.category !== undefined ? e.category : (previous?.category ?? null));
+    // RF-77/RF-78: the library's catalog fields follow the category's presence rule — an entry that
+    // carries them writes them, one that carries none keeps what the row has, and a personal row is
+    // always tagless and label-less (the host ignores both on a personal write).
+    const tags =
+      scope === 'personal'
+        ? null
+        : e.tags !== undefined
+          ? (e.tags.length === 0 ? null : JSON.stringify(e.tags))
+          : previous?.tags ?? null;
+    const orgAccount =
+      scope === 'personal'
+        ? null
+        : e.orgAccount !== undefined
+          ? e.orgAccount
+          : (previous?.org_account ?? null);
     transaction(() => {
       db.run(
-        `INSERT INTO tool (id, title, url, origin, icon_hash, sort_order, active, auth_json, probe_json, scope, owner_id, category)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO tool (id, title, url, origin, icon_hash, sort_order, active, auth_json, probe_json, scope, owner_id, category, tags, org_account)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -1439,7 +1692,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
            probe_json = excluded.probe_json,
            scope = excluded.scope,
            owner_id = excluded.owner_id,
-           category = excluded.category`,
+           category = excluded.category,
+           tags = excluded.tags,
+           org_account = excluded.org_account`,
         [
           e.id,
           e.title,
@@ -1453,6 +1708,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
           scope,
           ownerId,
           category,
+          tags,
+          orgAccount,
         ],
       );
       // Views and grants are rewritten wholesale: whatever did not come in the entry is gone.
@@ -1969,9 +2226,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
     };
   }
 
-  function hostRecord(): HostRecord | null {
-    const row = singleRow<HostRow>('SELECT * FROM host WHERE id = 1');
+  /** RF-71: every guild, in the order they were added — the tiles of the entry screen. */
+  function hostRecords(): HostRecord[] {
+    return db
+      .all<HostRow>('SELECT * FROM host ORDER BY added_at ASC, address ASC')
+      .map(buildHost);
+  }
+
+  function hostRecordByAddress(address: string): HostRecord | null {
+    const row = singleRow<HostRow>('SELECT * FROM host WHERE address = ?', [address]);
     return row === null ? null : buildHost(row);
+  }
+
+  /**
+   * E07 §2: "the active guild" is derived — the row of the guild whose account this person is.
+   * `added_at` breaks the tie should two rows ever claim one person id (a re-key that left a stale
+   * row behind), and the oldest wins, which is the guild the account came from.
+   */
+  function hostRecordForPerson(personId: Id): HostRecord | null {
+    const row = singleRow<HostRow>(
+      'SELECT * FROM host WHERE person_id = ? ORDER BY added_at ASC, address ASC',
+      [personId],
+    );
+    return row === null ? null : buildHost(row);
+  }
+
+  function hostRowClaimsPerson(personId: Id): boolean {
+    return singleRow<{ n: number }>('SELECT COUNT(*) AS n FROM host WHERE person_id = ?', [personId])?.n !== 0;
   }
 
   function saveHost(h: {
@@ -1983,15 +2264,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
     salt: string;
     addedAt: string;
   }): HostRecord {
-    // One row, id 1 (SP05 §2): adding a host over an existing one replaces it whole — including the
-    // snapshot and the last error, which belong to the host that is going away. What is already
-    // there is not read first: the caller decided to replace it.
+    // RF-71: the upsert is by `address`, so a second guild is a second row and never replaces the
+    // first. A re-add of the same address replaces that row whole — including the snapshot and the
+    // last error, which belong to the host that is going away. What is already there is not read
+    // first: the caller decided to replace it.
     db.run(
-      `INSERT INTO host (id, address, guild, kid, public_key, person_id, salt, snapshot, version, issued_at,
+      `INSERT INTO host (address, guild, kid, public_key, person_id, salt, snapshot, version, issued_at,
                          last_sync_at, last_error, added_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?)
-       ON CONFLICT (id) DO UPDATE SET
-         address = excluded.address,
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?)
+       ON CONFLICT (address) DO UPDATE SET
          guild = excluded.guild,
          kid = excluded.kid,
          public_key = excluded.public_key,
@@ -2005,36 +2286,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
          added_at = excluded.added_at`,
       [h.address, h.guild, h.kid, h.publicKey, h.personId, h.salt, h.addedAt],
     );
-    return orFail(hostRecord(), 'host not found');
+    return orFail(hostRecordByAddress(h.address), 'host not found');
   }
 
-  function saveHostSnapshot(s: { snapshot: string; version: string; issuedAt: string; syncedAt: string }): void {
+  function saveHostSnapshot(
+    address: string,
+    s: { snapshot: string; version: string; issuedAt: string; syncedAt: string },
+  ): void {
     db.run(
       `UPDATE host
           SET snapshot = ?, version = ?, issued_at = ?, last_sync_at = ?, last_error = NULL
-        WHERE id = 1`,
-      [s.snapshot, s.version, s.issuedAt, s.syncedAt],
+        WHERE address = ?`,
+      [s.snapshot, s.version, s.issuedAt, s.syncedAt, address],
     );
     // A snapshot row with no host is a caller bug, not an empty cache: say so instead of dropping it
     // (the verified body the caller just checked would be lost silently).
     if (rowsChanged() === 0) throw new Error('host not found');
   }
 
-  function saveHostError(message: string | null): void {
-    db.run('UPDATE host SET last_error = ? WHERE id = 1', [message]);
+  function saveHostError(address: string, message: string | null): void {
+    db.run('UPDATE host SET last_error = ? WHERE address = ?', [message, address]);
     if (rowsChanged() === 0) throw new Error('host not found');
   }
 
-  function saveHostSalt(salt: string): void {
+  function saveHostSalt(personId: Id, salt: string): void {
     // No `host not found` here, unlike the snapshot and the error: losing the host in the middle of
-    // a password change must not fail the change, and without a row there is no cache to keep.
-    db.run('UPDATE host SET salt = ? WHERE id = 1', [salt]);
+    // a password change must not fail the change, and without a row there is no cache to keep. The
+    // row is the one of that person's guild — a password change never moves another guild's salt.
+    db.run('UPDATE host SET salt = ? WHERE person_id = ?', [salt, personId]);
   }
 
-  function clearHost(): void {
+  function removeHost(address: string): void {
     transaction(() => {
-      db.run('DELETE FROM host_outbox');
-      db.run('DELETE FROM host');
+      db.run('DELETE FROM host_outbox WHERE address = ?', [address]);
+      db.run('DELETE FROM host WHERE address = ?', [address]);
     });
   }
 
@@ -2054,19 +2339,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
     };
   }
 
-  function enqueueOutbox(w: { method: OutboxMethod; path: string; body: string; createdAt: string }): OutboxEntry {
+  function enqueueOutbox(w: {
+    address: string;
+    method: OutboxMethod;
+    path: string;
+    body: string;
+    createdAt: string;
+  }): OutboxEntry {
     // `RETURNING id`: the runtime's `run()` returns nothing (not even rowid), same as `addEvent`.
     const inserted = singleRow<{ id: number }>(
-      `INSERT INTO host_outbox (method, path, body, created_at, attempts, last_error)
-       VALUES (?, ?, ?, ?, 0, NULL) RETURNING id`,
-      [w.method, w.path, w.body, w.createdAt],
+      `INSERT INTO host_outbox (address, method, path, body, created_at, attempts, last_error)
+       VALUES (?, ?, ?, ?, ?, 0, NULL) RETURNING id`,
+      [w.address, w.method, w.path, w.body, w.createdAt],
     );
     const id = orFail(inserted, 'outbox write not recorded').id;
     return buildOutbox(orFail(singleRow<OutboxRowSql>('SELECT * FROM host_outbox WHERE id = ?', [id]), 'outbox write not found'));
   }
 
-  function listOutbox(): OutboxEntry[] {
-    return db.all<OutboxRowSql>('SELECT * FROM host_outbox ORDER BY id ASC').map(buildOutbox);
+  /** RF-71: only the writes of that guild — the flush replays the guild it is syncing, never another's. */
+  function listOutbox(address: string): OutboxEntry[] {
+    return db
+      .all<OutboxRowSql>('SELECT * FROM host_outbox WHERE address = ? ORDER BY id ASC', [address])
+      .map(buildOutbox);
   }
 
   function markOutboxAttempt(id: number, error: string | null): void {
@@ -2179,6 +2473,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
     createPerson,
     createPersonWithInvite,
     personByEmail,
+    personsAuthByEmail,
+    personAuthById,
     personAuthByEmail,
     personByEmailAnyState,
     saveConnectedPerson,
@@ -2231,12 +2527,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_default ON vault_item (person_id, t
     secret,
     setSecret,
     deleteSecret,
-    hostRecord,
+    hostRecords,
+    hostRecordByAddress,
+    hostRecordForPerson,
+    hostRowClaimsPerson,
     saveHost,
     saveHostSnapshot,
     saveHostSalt,
     saveHostError,
-    clearHost,
+    removeHost,
     enqueueOutbox,
     listOutbox,
     markOutboxAttempt,

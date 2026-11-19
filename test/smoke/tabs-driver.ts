@@ -356,7 +356,17 @@ async function latestReport(pid: string): Promise<TabReport | null> {
 async function ask(pid: string, cmd: string, arg?: string): Promise<TabReport> {
   const tag = `t${Math.random().toString(36).slice(2, 10)}`;
   await desk('/desk/cmd', { pid, cmd, arg, tag });
-  return await waitForReport(`the ${cmd} answer of ${pid}`, (report) => report.tag === tag);
+  try {
+    return await waitForReport(`the ${cmd} answer of ${pid}`, (report) => report.tag === tag);
+  } catch (error) {
+    // The delivery evidence beside the timeout: a pid whose queue grows is a page that stopped
+    // polling; a pid absent from the queues is a command that never landed.
+    const dump = await desk('/desk/queues');
+    const queues = (dump.queues ?? {}) as Record<string, number>;
+    throw new Error(
+      `${message(error)}; delivery: ${JSON.stringify(queues[pid] === undefined ? { pid, known: Object.keys(queues).length } : { pid, waiting: queues[pid] })}`,
+    );
+  }
 }
 
 function track(report: TabReport): Tracked {
@@ -1343,6 +1353,7 @@ function inside(point: { x: number; y: number }, rect: Rect): boolean {
 
 /** Two docked tabs: real clicks on the strip switch between them. */
 async function checkRealStripClicks(): Promise<Outcome> {
+  await ensureToolTabs(2);
   const state = await stateOf();
   expect(state.tabs.length >= 2, `${state.tabs.length} tab(s) open`);
   const hidden = await hiddenNow();
@@ -1363,6 +1374,7 @@ async function checkRealStripClicks(): Promise<Outcome> {
  * real click on Home's own button inside that rect must reach the page and bring the tab back.
  */
 async function checkRealClickOverHiddenTab(): Promise<Outcome> {
+  await ensureToolTabs(1);
   const hidden = await hiddenNow();
   if (hidden !== null) return blocked(hidden);
   const slot = await slotScreenRect();
@@ -1389,6 +1401,7 @@ async function checkRealClickOverHiddenTab(): Promise<Outcome> {
 
 /** A tab detached into its own window must not take the main window's clicks either. */
 async function checkRealClickWhileDetached(): Promise<Outcome> {
+  await ensureDetachedTab();
   const hidden = await hiddenNow();
   if (hidden !== null) return blocked(hidden);
   const state = await stateOf();
@@ -1557,6 +1570,9 @@ async function checkPopupAdoption(): Promise<Outcome> {
   const tab = found as TabState;
   expect(tab.toolId === null, `the adopted tab has toolId ${JSON.stringify(tab.toolId)}`);
   expect(tab.id.startsWith('popup'), `the adopted window id is ${tab.id}`);
+  // 1.0.0 (nested tabs): the adopted popup nests under the tab that opened it — the parent link
+  // is the state the strip indents by, and the row carries the nested class.
+  expect(tab.parentId === 'tool_tool-a', `the adopted tab's parentId is ${JSON.stringify(tab.parentId)}`);
   const at = rowIndex(state, tab.id);
   expect(ids[at - 1] === 'tool_tool-a', `the ad-hoc tab is at ${at} of ${ids.join(', ')}`);
   expect(state.active === tab.id, `active = ${JSON.stringify(state.active)}`);
@@ -1564,6 +1580,7 @@ async function checkPopupAdoption(): Promise<Outcome> {
   const rows = await stripRows();
   expect(rows[at].querySelector('.tab-unsaved') !== null, 'the strip does not mark the tab as not saved');
   expect(rows[at].classList.contains('tab-item-active'), 'the strip does not mark the adopted tab active');
+  expect(rows[at].classList.contains('tab-child'), 'the strip does not nest the adopted tab under its opener');
 
   const report = await waitForReport(
     'the popup page',
@@ -1579,8 +1596,66 @@ async function checkPopupAdoption(): Promise<Outcome> {
   }
   return (
     `window.open('${CONFIG.originB}/doc') from the Tool A page → ${tab.id} (the page's own ` +
-    `tiny.win.id is ${JSON.stringify(report.win)}) right after tool_tool-a: ${ids.join(', ')}; ${took}`
+    `tiny.win.id is ${JSON.stringify(report.win)}) nested under tool_tool-a: ${ids.join(', ')}; ${took}`
   );
+}
+
+/**
+ * 1.0.0 (nested tabs): a second popup of the same opener lands at the end of its family; the drag's
+ * own action (`tabs.move`) reorders the children — before a sibling, to the family's end — and
+ * refuses what is not the same parent's child. Functional on purpose: the mouse's part of the drag
+ * is the real-click block's subject, not this one's.
+ */
+async function checkNestedMove(): Promise<string> {
+  const first = a1;
+  expect(first !== null && popupId !== '', 'the opener and its popup were never tracked');
+  await activateRow('tool_tool-a');
+  const opened = await ask(first.pid, 'open', `${CONFIG.originB}/doc2`);
+  expect(opened.note === 'open', `the Tool A page answered ${JSON.stringify(opened.note)}`);
+  const second = await waitForState('the second adopted popup', (next) => {
+    const found = next.tabs.filter((tab) => tab.adhoc && tab.parentId === 'tool_tool-a');
+    return found.length === 2 ? next : null;
+  });
+  const ids = second.tabs.map((tab) => tab.id);
+  const children = second.tabs.filter((tab) => tab.parentId === 'tool_tool-a').map((tab) => tab.id);
+  const secondId = children.find((id) => id !== popupId) ?? '';
+  expect(secondId !== '', `the family is ${children.join(', ')}`);
+  expect(
+    ids.indexOf(secondId) === ids.indexOf(popupId) + 1,
+    `the second child sits at ${ids.indexOf(secondId)} of ${ids.join(', ')}, not after ${popupId}`,
+  );
+
+  // The drag's commit: before the first child, then to the family's end.
+  let moved = await call('tabs.move', { id: secondId, before: popupId });
+  expect(
+    moved.tabs.map((tab) => tab.id).indexOf(popupId) ===
+      moved.tabs.map((tab) => tab.id).indexOf(secondId) + 1,
+    `after the move the family reads ${moved.tabs.map((tab) => tab.id).join(', ')}`,
+  );
+  moved = await call('tabs.move', { id: secondId, before: null });
+  expect(
+    moved.tabs.map((tab) => tab.id).indexOf(secondId) ===
+      moved.tabs.map((tab) => tab.id).indexOf(popupId) + 1,
+    `after the move to the end the family reads ${moved.tabs.map((tab) => tab.id).join(', ')}`,
+  );
+
+  // The one refusal: a tab that nests under nobody, and a child of another parent.
+  let refused = '';
+  try {
+    await call('tabs.move', { id: 'tool_tool-a', before: popupId });
+  } catch (error) {
+    refused = message(error);
+  }
+  expect(refused !== '', 'moving a parent into a family was not refused');
+  refused = '';
+  try {
+    await call('tabs.move', { id: popupId, before: 'tool_tool-a_t2' });
+  } catch (error) {
+    refused = message(error);
+  }
+  expect(refused !== '', 'moving a child before another parent\'s tab was not refused');
+  return `a second popup ${secondId} nested under tool_tool-a; tabs.move reordered the family ` +
+    `(before ${popupId}, then to the end) and refused what is not the same parent's child`;
 }
 
 async function checkOpenLinkByHand(): Promise<string> {
@@ -1622,6 +1697,56 @@ async function checkOpenLinkByHand(): Promise<string> {
 }
 
 // ------------------------------------------------------------- RF-68: no API for an ad-hoc tab
+
+/**
+ * 1.0.0 (nested tabs): a subject leaves whole — closing the parent takes the children the opener
+ * spawned. Self-sufficient on purpose (the close-all before it emptied the strip), so it runs
+ * wherever the story has room for it.
+ */
+async function checkParentCloseTakesChildren(): Promise<string> {
+  // Self-sufficient: whatever the strip holds leaves first — a blocked real-mouse stage before this
+  // one (the close all, without its Accessibility authorization) may have left every tab open, and
+  // this family is built on an empty panel.
+  await call('tabs.closeAll');
+  await waitForState('the strip emptied', (next) => next.tabs.length === 0);
+  // The mark of this reopen: earlier tool-A load reports (the restore's own) still sit in the
+  // report list and would answer any "new pid" question instantly — the ask below must reach the
+  // page THIS click loaded, never a tab that has already left.
+  const since = Date.now();
+  await clickSidebarTool('Tool A');
+  const state = await waitForState('one tab of Tool A', (next) => next.tabs.length === 1);
+  expect(state.tabs[0]?.id === 'tool_tool-a', `the reopened tab is ${state.tabs[0]?.id}`);
+  const report = await waitForReport(
+    'the reopened Tool A page',
+    (item) => item.tool === 'A' && item.note === 'load' && (item.at ?? 0) >= since,
+  );
+  const page = track(report);
+  await activateRow('tool_tool-a');
+  // The runtime throttles an occluded page's timers (docs/electrobun.md §3), and the smoke's window
+  // may sit behind whatever the person has on screen — a throttled page never answers its poll.
+  // Activation is the ui driver's own raise: the window comes to front for the two asks below.
+  await tiny.win.show({ activate: true });
+  await sleep(300);
+  // The reopened page is live before anything is asked of it: its own poll answers a no-op report
+  // command, so a silent page is never mistaken for a failed adoption.
+  const live = await ask(page.pid, 'report');
+  expect(live.note === 'ask', `the reopened page answered ${JSON.stringify(live.note)}`);
+  const opened = await ask(page.pid, 'open', `${CONFIG.originB}/doc`);
+  expect(opened.note === 'open', `the Tool A page answered ${JSON.stringify(opened.note)}`);
+  const family = await waitForState('the adopted child', (next) =>
+    next.tabs.some((tab) => tab.parentId === 'tool_tool-a') ? next : null,
+  );
+  const childId = family.tabs.find((tab) => tab.parentId === 'tool_tool-a')?.id ?? '';
+  expect(childId !== '', 'the popup was never adopted');
+
+  await call('tabs.close', { id: 'tool_tool-a' });
+  const after = await waitForState('the family gone', (next) => next.tabs.length === 0);
+  expect(
+    !after.tabs.some((tab) => tab.id === childId),
+    `the child ${childId} survived its parent's close: ${after.tabs.map((tab) => tab.id).join(', ')}`,
+  );
+  return `closing tool_tool-a took its child ${childId} with it — a subject leaves whole`;
+}
 
 async function checkAdhocNoApi(): Promise<string> {
   const first = a1;
@@ -1914,7 +2039,44 @@ function blocked(why: string): Blocked {
   return { blocked: why };
 }
 
+/**
+ * The real-mouse block's own setups. Since 1.0.0 the four `realClick` stages run at the end of the
+ * suite: they need macOS Accessibility authorization for the input helper, and a machine without it
+ * (`docs/handovers/0.9.0-ui.md`) used to stop the run before any functional check of the tabs had
+ * run — the 0.9.0 validation answered "blocked" where it could have answered "creation works". Each
+ * stage below builds the state it needs itself, so the functional story above it stays exactly the
+ * order it always was, and the blocked answer names only its own subject.
+ */
+async function ensureToolTabs(wanted: number): Promise<void> {
+  let state = await stateOf();
+  if (state.tabs.length >= wanted) return;
+  await clickSidebarTool('Tool A');
+  state = await waitForState('the strip to hold a tab again', (next) => next.tabs.length >= 1);
+  while (state.tabs.length < wanted) {
+    const plus = await waitForValue('the strip + button', () => {
+      const node = document.querySelector<HTMLButtonElement>('.tab-strip .tab-new');
+      return node !== null && !node.disabled ? node : null;
+    });
+    plus.click();
+    state = await waitForState('one more tab', (next) => next.tabs.length === state.tabs.length + 1);
+  }
+  // The two rows the strip checks name: the first tab of Tool A, then its "+" sibling.
+  await activateRow('tool_tool-a');
+}
+
+/** One tab in a window of its own — the state the detached-click stage needs. */
+async function ensureDetachedTab(): Promise<void> {
+  const state = await stateOf();
+  if (state.tabs.some((tab) => !tab.docked)) return;
+  await ensureToolTabs(1);
+  await activateRow('tool_tool-a');
+  await clickToolbar('Detach');
+  await waitForState('the tab to detach', (next) =>
+    next.tabs.some((tab) => tab.id === 'tool_tool-a' && !tab.docked) ? next : null);
+}
+
 async function checkMenuOverNativeTab(): Promise<Outcome> {
+  await ensureToolTabs(1);
   const rail = document.querySelector<HTMLElement>('.sidebar-tools');
   expect(rail !== null, 'no sidebar tools');
   rail.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 220 }));
@@ -1942,27 +2104,37 @@ async function checkMenuOverNativeTab(): Promise<Outcome> {
   }
 }
 
+/**
+ * The story runs functional-first: creation, switching, detach/dock, the adopted popup, the hand
+ * links, saving, the restore and the parent's close. The five real-mouse stages close the suite —
+ * they need the Accessibility authorization the machine may not have
+ * (`docs/handovers/0.9.0-ui.md`), and running them first let a blocked input helper hide every
+ * functional answer behind it. Each of the four builds its own state (`ensureToolTabs`,
+ * `ensureDetachedTab`), so the two halves meet in the strip either way.
+ */
 const CHECKS: Checks = [
   ['RF-52 default mode on macOS', checkDefaultMode],
   ['RF-49 a sidebar click opens one docked tab on the panel', checkOpenDocked],
   ['RF-49 the docked tab lands on the slot', checkOpenOnSlot],
-  ['Atrius sidebar menu above a native tab', checkMenuOverNativeTab],
   ['RF-49 the docked tab follows a resize', checkResizeFollow],
   ['RF-50 + opens a second tab of the tool', checkSecondTab],
   ['RF-50 the second tab takes the slot', checkSecondOnSlot],
   ['RF-50 switching tabs keeps the draft', checkSwitchKeepsDraft],
-  ['0.7.0a real clicks on the strip switch tabs', checkRealStripClicks],
-  ['0.7.0a a real click on Home reaches the page over a hidden tab', checkRealClickOverHiddenTab],
   ['RF-51 detach brings the frame back without reloading', checkDetach],
-  ['0.7.0a a real click reaches the main window while a tab is detached', checkRealClickWhileDetached],
   ['RF-51 the strip docks it back without reloading', checkDockBack],
-  ['RF-66 a tool popup becomes a tab beside its opener', checkPopupAdoption],
+  ['RF-66 a tool popup nests under its opener', checkPopupAdoption],
   ['RF-66 Open link… opens one by hand', checkOpenLinkByHand],
+  ['1.0.0 nested children reorder (tabs.move)', checkNestedMove],
   ['RF-68 an ad-hoc tab gets no API', checkAdhocNoApi],
   ['RF-67 save a tab of a known origin (view)', checkSaveView],
   ['RF-67 save a tab of a new origin (tool)', checkSaveTool],
   ['T6 lock and unlock restore the tabs', checkRestore],
   ['0.6.0b Open tabs from Home', checkOpenTabsButton],
+  ['1.0.0 closing the parent takes its children', checkParentCloseTakesChildren],
+  ['Atrius sidebar menu above a native tab', checkMenuOverNativeTab],
+  ['0.7.0a real clicks on the strip switch tabs', checkRealStripClicks],
+  ['0.7.0a a real click on Home reaches the page over a hidden tab', checkRealClickOverHiddenTab],
+  ['0.7.0a a real click reaches the main window while a tab is detached', checkRealClickWhileDetached],
   ["0.7.0c the strip's close all closes every tab", checkCloseAll],
 ];
 

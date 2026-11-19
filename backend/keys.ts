@@ -376,7 +376,9 @@ export function createKeys(deps: KeysDeps): Keys {
    * makes the field optional). A body this side cannot read is not one it pins keys from.
    */
   function rosterOf(): RosterPerson[] | null {
-    const row = deps.repo.hostRecord();
+    // E07/RF-71: the roster is the entered guild's — the row of the unlocked person's account.
+    const person = deps.session.current();
+    const row = person === null ? null : deps.repo.hostRecordForPerson(person.id);
     if (row === null || row.snapshot === null) return null;
     const body = jsonValue(row.snapshot);
     if (typeof body !== 'object' || body === null || !('people' in body)) return null;
