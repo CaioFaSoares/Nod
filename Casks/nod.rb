@@ -2,13 +2,13 @@
 cask "nod" do
   arch arm: "arm64", intel: "x86_64"
 
-  version "0.8.0"
-  sha256 arm:   "e81c4d59c6d281c1e72855cabf39f6436dd0d09ae3d68a1740ae791f33b4ad28",
-         intel: "e2fc8b0a61ec17ec063e5165919047db89e5243a1ce5cbd05b0d9035e85a38c3"
+  version "0.9.0"
+  sha256 arm:   "a98dfe7273877ee9c542c5968ecb8354fff13218bfcfb6d33ec29e45008ff686",
+         intel: "ac3dbc286e75276243913fb44209dc4fb22d78bf5ecf5aa1ec1a5e7db169b318"
 
   url "https://github.com/CaioFaSoares/Nod/releases/download/release-#{version}/nod-#{version}-macos-#{arch}.zip"
   name "Nod"
-  desc "Team's internal tools in one window, logins kept in the system keychain"
+  desc "Team's internal tools in one window, logins kept in the local vault"
   homepage "https://github.com/CaioFaSoares/Nod"
 
   # Nod installs its own updates (docs/distribuicao.md §8).
