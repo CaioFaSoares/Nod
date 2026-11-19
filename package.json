@@ -1,11 +1,11 @@
 {
   "name": "nod",
   "private": true,
-  "version": "0.9.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --strictPort",
-    "build": "tsc && vite build --base=./",
+    "build": "tsc && vite build --base=./ && vite build -c web/vite.config.ts",
     "test": "bun test test/",
     "typecheck": "bun scripts/typecheck.ts",
     "typecheck:app": "tsc -p tsconfig.json && tsc -p backend/tsconfig.json && tsc -p host/tsconfig.json",
@@ -14,7 +14,8 @@
     "eb:verify": "bun scripts/eb-postbuild.ts --verify-only",
     "validate": "bun scripts/validate.ts",
     "app:dev": "bun scripts/eb-dev.ts",
-    "app:build": "bun scripts/eb-build.ts"
+    "app:build": "bun scripts/eb-build.ts",
+    "web:build": "vite build -c web/vite.config.ts"
   },
   "devDependencies": {
     "typescript": "~6.0.2",

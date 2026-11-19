@@ -239,6 +239,16 @@ INSERT INTO meta (key, value)
    WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key = 'owner_id')
    ORDER BY created_at, id LIMIT 1;
 `,
+
+  // 8 — the library's two catalog fields (1.0.0, RF-77/RF-78). `tags` is the tool's own short names
+  // (a JSON array, like `guild_invites.roles`), `org_account` the label of the account the whole
+  // guild uses for the tool — plain text by the owner's choice: information, never a secret, so the
+  // password stays sealed in the Nods' vaults and never in a column here (SP06 §6). `NULL` is what
+  // every row written before these columns carries, and what a personal entry always stays.
+  `
+ALTER TABLE entries ADD COLUMN tags TEXT;
+ALTER TABLE entries ADD COLUMN org_account TEXT;
+`,
 ];
 
 export const SCHEMA_VERSION_KEY = 'schema_version';

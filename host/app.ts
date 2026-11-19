@@ -26,9 +26,10 @@ import { personRoutes } from './routes/person';
 import { presenceRoutes } from './routes/presence';
 import { shareRoutes } from './routes/shares';
 import { stateRoutes } from './routes/state';
+import { webRoutes } from './routes/web';
 
 export type AppDeps = {
-  /** Host configuration resolved at boot (SP07 §1–§2). */
+  /** Host configuration resolved at boot (SP07 §1–§§2). */
   config: HostConfig;
   /** The migrated connection of the process (SP01 §1). */
   db: Database;
@@ -38,6 +39,11 @@ export type AppDeps = {
    * environment per request (`appMetaOf`) — the same values, resolved the same way.
    */
   appMeta?: AppMeta;
+  /**
+   * E04/RF-73: where the portal's files are read from. Absent is `host/public` — the vite build of
+   * `web/` — and a test passes its own directory, so no test reads or writes the real one.
+   */
+  webDir?: string;
 };
 
 /** SP03 §1: 256 KB for every body; a body that carries a tool icon may reach 512 KB. */
@@ -85,7 +91,7 @@ export function createApp(deps: AppDeps) {
     hostSecret: loadOrCreateHostSecret(deps.config.dataDir),
   });
 
-  return new Elysia()
+  const app = new Elysia()
     // All of them land on the request context, so the routes of H4 onward read the resolved
     // configuration, the open connection, the repo, the auth service and the app metadata of SP03 §3
     // instead of deriving them again.
@@ -127,4 +133,10 @@ export function createApp(deps: AppDeps) {
     .use(shareRoutes)
     .use(assignmentRoutes)
     .use(presenceRoutes);
+
+  // E04/RF-73: the portal hangs beside the API groups — mounted only while `WEB_UI` is on, so with
+  // the flag off `GET /` stays the host's own 404 and the process is API-only, as SP03 defines it.
+  if (deps.config.webUi === true) app.use(webRoutes({ webDir: deps.webDir }));
+
+  return app;
 }

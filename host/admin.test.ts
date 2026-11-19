@@ -886,6 +886,75 @@ describe('org tools', () => {
     expect(await body<ErrorResponse>(again)).toEqual({ error: 'unknown tool' });
   });
 
+  test('PUT writes the library fields, and the snapshot carries them beside the tool (RF-77/RF-78)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+
+    const created = await put(
+      host,
+      HOST_ROUTES.adminTool.replace(':id', 'jitsi'),
+      tool('jitsi', {
+        tags: ['  meetings  ', 'meetings', 'video'],
+        orgAccount: '  team@guild.example  ',
+      }),
+      admin.token,
+    );
+    expect(created.status).toBe(200);
+    const saved = await body<{ tags?: string[]; orgAccount?: string | null; updatedAt: string }>(created);
+    // RF-77: trimmed, deduplicated, and never `undefined` on the wire.
+    expect(saved.tags).toEqual(['meetings', 'video']);
+    // RF-78: the label trimmed like the category. It is information, never a secret — the host's
+    // own no-plaintext rule never asks for it, because there is no password in it.
+    expect(saved.orgAccount).toBe('team@guild.example');
+    const row = host.repo.listOrgTools()[0];
+    expect(row?.tags).toEqual(['meetings', 'video']);
+    expect(row?.orgAccount).toBe('team@guild.example');
+
+    // The signed snapshot's mapping carries them — the app and the portal read the same fields.
+    const state = await get(host, HOST_ROUTES.state, admin.token);
+    const snapshot = await body<{ orgTools: Array<{ id: string; tags?: string[]; orgAccount?: string | null }> }>(state);
+    const carried = snapshot.orgTools.find((entry) => entry.id === 'jitsi');
+    expect(carried?.tags).toEqual(['meetings', 'video']);
+    expect(carried?.orgAccount).toBe('team@guild.example');
+
+    // The schema bounds a tag's length and count, and the label's length.
+    const tooLongTag = await put(
+      host,
+      HOST_ROUTES.adminTool.replace(':id', 'jitsi'),
+      tool('jitsi', { tags: ['x'.repeat(25)] }),
+      admin.token,
+    );
+    expect(tooLongTag.status).toBe(400);
+    const tooMany = await put(
+      host,
+      HOST_ROUTES.adminTool.replace(':id', 'jitsi'),
+      tool('jitsi', { tags: Array.from({ length: 13 }, (_, index) => `t${index}`) }),
+      admin.token,
+    );
+    expect(tooMany.status).toBe(400);
+    const tooLongLabel = await put(
+      host,
+      HOST_ROUTES.adminTool.replace(':id', 'jitsi'),
+      tool('jitsi', { orgAccount: 'x'.repeat(121) }),
+      admin.token,
+    );
+    expect(tooLongLabel.status).toBe(400);
+
+    // An empty write clears both, exactly like an empty category.
+    const cleared = await put(
+      host,
+      HOST_ROUTES.adminTool.replace(':id', 'jitsi'),
+      tool('jitsi', { tags: [], orgAccount: '' }),
+      admin.token,
+    );
+    expect(cleared.status).toBe(200);
+    const clearedAnswer = await body<{ tags?: string[]; orgAccount?: string | null }>(cleared);
+    // An empty write clears both: the wire omits a field the row no longer carries — the same
+    // "nothing" the app and the portal decide from one reader each (`orgAccountOf`, `tagsOf`).
+    expect(clearedAnswer.tags).toBeUndefined();
+    expect(clearedAnswer.orgAccount).toBeUndefined();
+  });
+
   test('DELETE refuses a tool a share still names, and removes an unshared one (F2)', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);

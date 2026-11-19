@@ -35,6 +35,11 @@ export interface TabsApi {
   closeAll: () => void;
   detach: (id: string) => void;
   dock: (id: string) => void;
+  /**
+   * 1.0.0 (nested tabs): one child before another of the same opener — the drag of a nested row.
+   * `null` sends the child to the end of its family; the child travels with its own descendants.
+   */
+  move: (id: string, before: string | null) => void;
   next: (step: 1 | -1) => void;
   /** RF-67 (⌘D): the tab's address saved to the sidebar — the app's own `save` does the rest. */
   save: (id: string) => void;
@@ -63,6 +68,8 @@ export function tabsApi(deps: TabsDeps): TabsApi {
     detach: (id) => deps.run(() => call('tabs.detach', { id })),
     // RF-51 (⌘⇧D): back onto the slot — the same window, the same page.
     dock: (id) => deps.run(() => call('tabs.dock', { id })),
+    // 1.0.0 (nested tabs): the drag of a nested row — the same parent's children only.
+    move: (id, before) => deps.run(() => call('tabs.move', { id, before })),
     // RF-50 (⌃Tab / ⌃⇧Tab): the strip's neighbours, wrapping.
     next: (step) => deps.run(() => call('tabs.next', { step })),
     save: deps.save,
@@ -203,6 +210,9 @@ export function mountTabs(root: HTMLElement, ctx: TabsViewCtx): TabsHandle {
  * E03 (RF-50/RF-51, RF-66): one tab of the strip. The row activates the tab — a docked one takes
  * the slot, a detached one (marked ↗) is brought forward in its own window. The × closes it, and
  * never activates it on the way.
+ *
+ * 1.0.0 (nested tabs): a tab another one opened renders **nested** — the `tab-child` class indents
+ * it under its parent's row, and the row can be dragged (or Alt/Option-moved) among its siblings.
  */
 function tabNode(tab: TabState, active: boolean, tools: ToolStatus[], actions: TabsApi): HTMLElement {
   // The tooltip and the accessible name carry what the narrow strip cannot: the marks and the
@@ -212,14 +222,22 @@ function tabNode(tab: TabState, active: boolean, tools: ToolStatus[], actions: T
     (tab.toolId === null ? ' — not saved' : '') +
     (tab.docked ? '' : ' — in its own window') +
     (tab.error === null ? '' : ` — failed: ${tab.error}`);
+  const child = tab.parentId !== null;
   const node = el(
     'div',
     {
-      class: active ? 'tab-item tab-item-active' : 'tab-item',
+      class: active
+        ? child
+          ? 'tab-item tab-child tab-item-active'
+          : 'tab-item tab-item-active'
+        : child
+          ? 'tab-item tab-child'
+          : 'tab-item',
       role: 'tab',
       title: name,
       aria: { selected: active ? 'true' : 'false', label: name },
       attrs: { tabindex: active ? '0' : '-1' },
+      data: { id: tab.id, parent: tab.parentId ?? '' },
     },
     tabMark(tab, tools),
     el('span', { class: 'tab-title' }, tab.title),
@@ -238,7 +256,76 @@ function tabNode(tab: TabState, active: boolean, tools: ToolStatus[], actions: T
     event.preventDefault();
     actions.activate(tab.id);
   });
+  if (child) childReorder(node, tab, actions);
   return node;
+}
+
+/**
+ * 1.0.0 (nested tabs): the nested row's own reorder. A pointer drag moves the row among its
+ * siblings (the row itself is the preview, 4 pt before it starts so a click stays a click), and
+ * Alt/Option + ↑/↓ walks the same list for the keyboard — the rail's own vocabulary, so the two
+ * reorder surfaces say the same thing. Only the same parent's children answer; the commit is one
+ * `tabs.move`, and the answer the app draws from is the backend's.
+ */
+function childReorder(row: HTMLElement, tab: TabState, actions: TabsApi): void {
+  /** The rows of this family, in strip order — `data-parent` is what the drag never leaves. */
+  const siblings = (): HTMLElement[] => {
+    const strip = row.closest('.tab-strip');
+    if (strip === null) return [row];
+    return [...strip.querySelectorAll<HTMLElement>('.tab-item.tab-child')].filter(
+      (other) => (other.dataset.parent ?? '') === (row.dataset.parent ?? ''),
+    );
+  };
+
+  row.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || event.target instanceof HTMLButtonElement) return;
+    const start = { x: event.clientX, y: event.clientY };
+    let dragging = false;
+    let before: string | null = null;
+    const onMove = (move: PointerEvent): void => {
+      if (!dragging) {
+        if (Math.hypot(move.clientX - start.x, move.clientY - start.y) < 4) return;
+        dragging = true;
+        row.classList.add('tab-dragging');
+        row.setPointerCapture(move.pointerId);
+      }
+      const rows = siblings();
+      let target: HTMLElement | null = null;
+      for (const other of rows) {
+        if (other === row) continue;
+        const box = other.getBoundingClientRect();
+        if (move.clientX < box.left + box.width / 2) {
+          target = other;
+          break;
+        }
+      }
+      before = target === null ? null : (target.dataset.id ?? null);
+      // the preview: the row itself moves; the backend's answer is what stays
+      if (target !== null) row.parentElement?.insertBefore(row, target);
+      else row.parentElement?.insertBefore(row, rows[rows.length - 1]?.nextSibling ?? null);
+    };
+    const onEnd = (): void => {
+      row.removeEventListener('pointermove', onMove);
+      row.removeEventListener('pointerup', onEnd);
+      row.removeEventListener('pointercancel', onEnd);
+      if (!dragging) return;
+      row.classList.remove('tab-dragging');
+      actions.move(tab.id, before);
+    };
+    row.addEventListener('pointermove', onMove);
+    row.addEventListener('pointerup', onEnd);
+    row.addEventListener('pointercancel', onEnd);
+  });
+
+  row.addEventListener('keydown', (event) => {
+    if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+    const ids = siblings().map((other) => other.dataset.id ?? '');
+    const at = ids.indexOf(tab.id);
+    if (at === -1) return;
+    event.preventDefault();
+    const before = event.key === 'ArrowUp' ? (ids[at - 1] ?? null) : (ids[at + 2] ?? null);
+    actions.move(tab.id, before);
+  });
 }
 
 /**

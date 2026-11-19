@@ -10,6 +10,7 @@
 import { auditUrl, byOrderAndTitle, groupByCategory } from './catalog';
 import { HOST_ROUTES } from './host-api';
 import type { PersonalView, Snapshot } from './host-api';
+import type { SnapshotPerson } from './host-api';
 import type { Entry, Id, Role, View } from './types';
 
 // ---------------------------------------------------------------- the cached org window
@@ -66,6 +67,11 @@ export interface SnapshotRows {
   personalViews: PersonalView[];
   favorites: Id[];
   guildIcon: string | null;
+  /**
+   * RF-79: the guild's roster (SP04 §2's `people`), for the library's organization views — a name,
+   * the roles and nothing else (no email, no key; the host's own `SnapshotPerson` is the shape).
+   */
+  people: SnapshotPerson[];
 }
 
 /** The rows plus the two fields the `host` row stores beside the body (SP04 §2). */
@@ -131,7 +137,56 @@ function readEntry(v: unknown): Entry {
   if (category !== undefined && category !== null && typeof category !== 'string') {
     throw new SnapshotShapeError('entry.category');
   }
-  return { ...(v as Entry), category: typeof category === 'string' ? category : null };
+  // RF-77: the same optional-field rule — an older host answers none and the tool reads as tagless.
+  const tags = entry.tags;
+  if (tags !== undefined && tags !== null && !Array.isArray(tags)) {
+    throw new SnapshotShapeError('entry.tags');
+  }
+  if (Array.isArray(tags)) {
+    for (const tag of tags) {
+      if (typeof tag !== 'string') throw new SnapshotShapeError('entry.tags');
+    }
+  }
+  // RF-78: the org account label — an optional field of the same rule.
+  const orgAccount = entry.orgAccount;
+  if (orgAccount !== undefined && orgAccount !== null && typeof orgAccount !== 'string') {
+    throw new SnapshotShapeError('entry.orgAccount');
+  }
+  return {
+    ...(v as Entry),
+    category: typeof category === 'string' ? category : null,
+    ...(Array.isArray(tags) ? { tags } : {}),
+    orgAccount: typeof orgAccount === 'string' ? orgAccount : null,
+  };
+}
+
+/**
+ * RF-79: the roster's rows — SP04 §2's own `people`: a name, the roles and the `kind`, with the
+ * public keys optional exactly as the host sends them (a person who never activated has none).
+ * Absent altogether is an older host's snapshot, and reads as no roster: the optional-field rule
+ * every other addition followed (RF-62's category, RF-77's tags).
+ */
+function readPeople(v: unknown): SnapshotPerson[] {
+  const rows = list(v, 'people');
+  const people: SnapshotPerson[] = [];
+  for (const row of rows) {
+    const person = object(row, 'person');
+    const id = text(person.id, 'person.id');
+    const name = text(person.name, 'person.name');
+    const roles: Id[] = [];
+    for (const role of list(person.roles, 'person.roles')) {
+      if (typeof role !== 'string') throw new SnapshotShapeError('person.roles');
+      roles.push(role);
+    }
+    // `kind` is a string on the wire on purpose (SP04 §2): a newer host may add a kind this Nod
+    // does not know, and the roster travels whole rather than refused.
+    const kind = text(person.kind, 'person.kind');
+    const out: SnapshotPerson = { id, name, roles, kind };
+    if (typeof person.x25519Public === 'string') out.x25519Public = person.x25519Public;
+    if (typeof person.ed25519Public === 'string') out.ed25519Public = person.ed25519Public;
+    people.push(out);
+  }
+  return people;
 }
 
 function readPersonalView(v: unknown): PersonalView {
@@ -155,6 +210,7 @@ function readBody(value: unknown): SnapshotBody {
       roles: list(body.roles, 'roles').map(readRole),
       orgTools: list(body.orgTools, 'orgTools').map(readEntry),
       personalTools: list(body.personalTools, 'personalTools').map(readEntry),
+      people: body.people === undefined ? [] : readPeople(body.people),
       personalViews: list(body.personalViews, 'personalViews').map(readPersonalView),
       favorites: list(body.favorites, 'favorites').map((id) => text(id, 'favorites')),
       // Cosmetic, so read permissively: a missing or non-string icon is `null`, not a shape refusal.
@@ -207,6 +263,8 @@ export function clearOrgData(raw: string): string | null {
     personalViews: body.rows.personalViews,
     favorites: body.rows.favorites,
     guildIcon: body.rows.guildIcon,
+    // RF-79: the roster is the guild's own — a signed-out cache keeps none of it (RF-39's drop).
+    people: [],
   };
   return JSON.stringify(cleared);
 }

@@ -63,6 +63,19 @@ export interface Entry {
    * has its own group in the display) and the host ignores a category on a personal write.
    */
   category?: string | null;
+  /**
+   * RF-77 (1.0.0): the tool's own tags, short names the guild files it under in the library's
+   * search and cards. Optional so data written before the field reads as none; a personal tool
+   * carries none, exactly like the category, and the host ignores them on a personal write.
+   */
+  tags?: string[];
+  /**
+   * RF-78 (1.0.0): the account the whole guild uses for this tool — a plain label (an email, a
+   * team name), chosen by the owner as information rather than a shared credential. Optional so
+   * data written before the field reads as none; never a secret, so it travels in the clear while
+   * the password stays only in the app's vault (SP06 §6).
+   */
+  orgAccount?: string | null;
   /** https URL (http only on loopback); no user:password@ */
   url: string;
   /** seed: path relative to resources/ or data URI; runtime: data URI or null */
@@ -444,6 +457,12 @@ export interface TabState {
   id: string;
   /** null for an ad-hoc tab (RF-66): an address outside the catalog or a link a tool opened */
   toolId: Id | null;
+  /**
+   * 1.0.0 (nested tabs, §22 "Nested tabs under the opener"): the tab whose page opened this one —
+   * the adopted popup, a link of a tool's page. `null` for a tool's own tab, a view and a link
+   * opened by hand (`tabs.openLink`), which nest under nobody.
+   */
+  parentId: string | null;
   /** the entry title (with the view label), or the page host for an ad-hoc tab */
   title: string;
   /** last main-frame URL as `auditUrl` (origin + path, no query or fragment); '' when unknown */
@@ -494,8 +513,8 @@ export interface SessionState {
 
 /**
  * 0.5.0 (RF-60): one tile of the entry screen. `offline` is this machine's own profile; `guild` is a
- * guild this Nod joined, named by its `id` — today the pinned host's address, the one guild of
- * canonico §22 "Guilds per install"; an id per guild is what lets several guilds live here later.
+ * guild this Nod joined, named by its `id` — the pinned host's address, one id per guild row since
+ * E07/RF-71 (the Nod may hold several).
  */
 export type EntryTarget = { kind: 'offline' } | { kind: 'guild'; id: string };
 
@@ -525,7 +544,7 @@ export interface EntryProfiles {
     /** `session.importSeed` is offered: no account exists yet */
     seedImportable: boolean;
   };
-  /** at most one today (canonico §22 "Guilds per install") */
+  /** one tile per guild this Nod holds (RF-71) */
   guilds: GuildProfile[];
   /** the tile the last unlock used, selected when the screen opens */
   last: EntryTarget | null;
@@ -604,6 +623,20 @@ export interface HostState {
    * without a host and in a `guild` session.
    */
   offlineSession: boolean;
+}
+
+/**
+ * RF-79 (1.0.0): one person of the guild as the library's organization views draw them — a name,
+ * the roles they hold and whether they are an admin. The verified snapshot's roster is the source
+ * (SP04 §2's `people`), and no email and no key ever travels in this shape, on the host's own rule.
+ */
+export interface RosterPerson {
+  id: Id;
+  name: string;
+  roles: Id[];
+  /** `PersonKind` on the wire: a string, so a newer host may add a kind this Nod does not know. */
+  kind: string;
+  admin: boolean;
 }
 
 /**
@@ -694,10 +727,41 @@ export interface AppIconState {
   guildIconAvailable: boolean;
 }
 
+/** One of the two skins the main window may wear (decision register, 2026-11-19). */
+export type SkinId = 'atrius' | 'sober';
+
+/** How the skin's palette is chosen: the system's own appearance, or a fixed one. */
+export type ThemeMode = 'auto' | 'light' | 'dark';
+
+/** The two palettes a skin draws; `auto` resolves to one of them (src/appearance.ts). */
+export type ThemeName = 'light' | 'dark';
+
+/** A colour a person may retune, per skin and per palette. Which slots a skin offers is its own. */
+export type ColorSlot = 'accent' | 'info' | 'warning' | 'success' | 'error';
+
+/** The custom colours of one palette: a `#rrggbb` per slot; an absent slot wears the skin's own. */
+export type AppearanceColors = Partial<Record<ColorSlot, string>>;
+
+/**
+ * The look of this machine's window — skin, palette mode and custom colours — as `store.json`
+ * holds it (`appearance`; a preference, never a secret) and `nod.info` answers it. Nothing of it
+ * travels to the host: it is this machine's own face.
+ */
+export interface AppearanceState {
+  skin: SkinId;
+  theme: ThemeMode;
+  colors: Record<ThemeName, AppearanceColors>;
+}
+
 export interface AppInfo {
   version: string;
   seedVersion: number | null;
   os: 'macos' | 'windows' | 'linux';
+  /**
+   * 2026-11-19 style toggle: the look the window wears, read once at boot so even the locked
+   * entry screen opens in it (`nod.setAppearance` is what changes it).
+   */
+  appearance: AppearanceState;
   /** origins allowed to report login results in this build (from the embedded seed) */
   gateOrigins: string[];
   /** a tray icon exists, so closing the main window hides it instead of quitting */
@@ -778,6 +842,12 @@ export interface ApiContract {
   // the first run has no account yet, and the password only ever travels page → backend. F3: when
   // this Nod already has an account and no host, the two joins need that account's session.
   'host.state': [void, HostState];
+  /**
+   * E07/RF-71: every guild this Nod holds, the entered one included — what Settings → Hosts lists.
+   * `host.state` stays the *active* guild (the one the unlocked person's account belongs to), so
+   * the sidebar badge and every reader of "the guild" are unchanged.
+   */
+  'host.list': [void, HostState[]];
   'host.discover': [{ address: string }, { guild: string; fingerprint: string }];
   'host.activate': [
     {
@@ -816,8 +886,11 @@ export interface ApiContract {
   /** 0.5.0 (RF-59), admin: revokes an invite; a person who already joined keeps their account. */
   'guildInvites.revoke': [{ id: Id }, true];
   'host.syncNow': [void, HostState];
-  /** `keepPersonal` is SP05 §3's choice about the local personal tools (block 2). */
-  'host.remove': [{ keepPersonal: boolean }, HostState];
+  /**
+   * `keepPersonal` is SP05 §3's choice about the local personal tools (block 2). E07/RF-71: `address`
+   * names the guild to forget — a Nod holds several, and only the one asked for leaves.
+   */
+  'host.remove': [{ address: string; keepPersonal: boolean }, HostState];
   /**
    * B8a: publishes this Nod's local catalog — the `org` rows of the local `tool` table, with their
    * views and their icons, and the local roles — to a host that has no org tool yet (SP03 §2
@@ -886,6 +959,12 @@ export interface ApiContract {
    * Settings → Account lists them and asks for the confirmation a change needs (RF-45).
    */
   'peers.list': [void, PeerKey[]];
+  /**
+   * RF-79: the guild's roster for the library's organization views — a name and the roles, from the
+   * verified snapshot. Empty with no guild (or while this build is too old for it, O2), exactly
+   * like `peers.list`.
+   */
+  'roster.list': [void, RosterPerson[]];
   /**
    * K2/SP06 §2: the person confirmed that a changed key of a colleague is really theirs — the pair
    * whose `fingerprint` the list was showing, which the page passes back as it read it (L2). That
@@ -1086,6 +1165,12 @@ export interface ApiContract {
   'tabs.openLink': [{ url: string }, ToolsState];
   /** E03 (RF-67): the tab's address saved to the sidebar in one step (⌘D). */
   'tabs.save': [{ id: string }, SaveTabResult];
+  /**
+   * 1.0.0 (nested tabs): one child before another of the same opener — the drag of a nested row.
+   * `before: null` sends the child to the end of its family; the child travels with its own
+   * descendants, and anything that is not the same parent's child is refused.
+   */
+  'tabs.move': [{ id: string; before: string | null }, ToolsState];
 
   'events.list': [EventFilter, AuditEvent[]];
   /** SP04 §5: the sent/pending counters of Settings → Activity (`{ sent: 0, pending: 0 }` with no host). */
@@ -1104,6 +1189,12 @@ export interface ApiContract {
    * `default` puts the bundle icon back. Whole app, not one window, so nothing else moves.
    */
   'nod.setAppIcon': [{ choice: AppIconChoice }, AppIconState];
+  /**
+   * 2026-11-19 style toggle: stores this machine's whole normalized appearance — skin, palette
+   * mode, custom colours — in `store.json` (a preference, never a secret) and answers it. The
+   * next `nod.info` carries the same state; nothing is pushed, because only this window wears it.
+   */
+  'nod.setAppearance': [{ appearance: AppearanceState }, AppearanceState];
   'nod.checkUpdate': [void, UpdateInfo];
   'nod.installUpdate': [void, boolean];
   /** RF-55: hides the notice of one version on this machine; only the version string is stored. */

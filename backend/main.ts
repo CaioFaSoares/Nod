@@ -12,6 +12,7 @@ import {
   verifyStoredPassword,
 } from '../shared/auth';
 import { BUILD_MODE_STAMP, stampMode } from '../shared/build-mode';
+import { APPEARANCE_KEY, normalizeAppearance } from '../shared/appearance';
 import { auditUrl, catalogMode, exportSeed, originOf, validateEntry, validateSeed, visibleEntries } from '../shared/catalog';
 import { fromBase64url, toBase64url } from '../shared/encoding';
 import { HOST_ROUTES, codeKindOf, isPng } from '../shared/host-api';
@@ -26,6 +27,7 @@ import type {
   AppIconChoice,
   AppIconState,
   AppInfo,
+  AppearanceState,
   CredentialHolders,
   Entry,
   EntryDetails,
@@ -50,6 +52,7 @@ import type {
   ReportState,
   Result,
   Role,
+  RosterPerson,
   SaveTabResult,
   Seed,
   SessionState,
@@ -101,7 +104,7 @@ import type { HostClient, HostConnection, HostDiscovery } from './host-client';
 import type { Icons } from './icons';
 import type { Keys } from './keys';
 import type { Personal } from './personal';
-import type { EventInput, Repo } from './repo';
+import type { EventInput, HostRecord, Repo } from './repo';
 import type { Session } from './session';
 import type { Shares } from './shares';
 import type { Sync } from './sync';
@@ -201,6 +204,11 @@ let bundledSeed: Seed | null = null;
 let bootFailure: string | null = null;
 /** RF-55: the notice the main window shows, `null` while there is nothing to announce. */
 let updateNotice: UpdateInfo | null = null;
+/**
+ * 2026-11-19 style toggle: this machine's appearance — skin, palette mode, custom colours — read
+ * from `store` once and kept (a preference, never a secret; AGENTS.md allows it in `store.json`).
+ */
+let appearance: AppearanceState | null = null;
 
 /** How often the background check of the update channel runs (RF-55). */
 const UPDATE_CHECK_MS = 24 * 60 * 60 * 1000;
@@ -309,8 +317,12 @@ export async function init(app: TinyApp): Promise<void> {
     biometricAvailable: biometrics,
     // SP02 §7, RF-63: the bearer is sealed under the `vaultKey` a password change moves.
     sealedExtras: (personId) => {
-      const host = database.hostRecord();
-      return host !== null && host.personId === personId ? [hostTokenKey(host.kid, personId)] : [];
+      // E07/RF-71: the bearer is one sealed item per guild (`nod.host.<kid>.<person>`), and a person
+      // may have an account in several — all of them move with the `vaultKey` a password change moves.
+      return database
+        .hostRecords()
+        .filter((host) => host.personId === personId)
+        .map((host) => hostTokenKey(host.kid, personId));
     },
   });
   // 0.7.0: on a runtime without biometric unlock (the Electrobun target), a Mac that migrated from
@@ -370,6 +382,8 @@ export async function init(app: TinyApp): Promise<void> {
   client = createHostClient({ fetch, keychain: bearers });
   sync = createSync({
     repo: database,
+    // E07/RF-71: a run syncs the guild this session entered — the row of the unlocked person.
+    activeRow: () => activeHostRow(),
     connection: () => connectionOf(),
     now: () => Date.now(),
     // O2: the version of this build, against the host's `minAppVersion`.
@@ -421,7 +435,10 @@ export async function init(app: TinyApp): Promise<void> {
     // its own `setInterval` answered.
     clearInterval: (handle) => clearInterval(handle as number),
   });
-  // B7/SP05 §2: the personal layer. Which home a write gets is `db.hostRecord()`'s answer at the
+  // E07/RF-71: the pinned keys of every guild cached before anyone unlocks, so the entry screen and
+  // Settings → Hosts can name them synchronously. A boot with no row costs one empty loop.
+  void sync.primeFingerprints();
+  // B7/SP05 §2: the personal layer. Which home a write gets is the active guild's row at the
   // moment of the write — the row, not the cache — and the two callbacks are what makes the write
   // visible: the local one reloads the catalog, the connected one re-derives the snapshot's with the
   // new outbox row applied, pushes it and asks the sync loop for a run of its own (SP04 §3–§4).
@@ -429,7 +446,11 @@ export async function init(app: TinyApp): Promise<void> {
     repo: database,
     entries: () => visibleEntriesOf(),
     personId: () => unlockedPerson('personal').id,
-    connected: () => database.hostRecord() !== null,
+    connected: () => activeHostRow() !== null,
+    guildAddress: () => {
+      const row = activeHostRow();
+      return row === null ? null : row.address;
+    },
     now: () => Date.now(),
     removeCredentials: (toolId) => required(vault, 'personal.removeTool').removeAllForTool(toolId),
     onWrite: () => {
@@ -582,8 +603,10 @@ function refreshConnectedCatalog(): boolean {
   const r = repo;
   const catalog = connected;
   if (r === null || catalog === null) return false;
-  const record = r.hostRecord();
-  const changed = catalog.refresh(record, r.listOutbox());
+  const record = activeHostRow();
+  // E07/RF-71: a guild's outbox is its own — the overlay of another guild's pending writes is not
+  // this catalog's to show.
+  const changed = catalog.refresh(record, record === null ? [] : r.listOutbox(record.address));
   // O2/SP04 §1 (owner decision 2026-10-17): too old for the guild, the row's snapshot is not the
   // catalog any more — the local tables are, as if no host existed. The row, the bearer and the
   // cached body stay on disk, and Settings → Hosts keeps showing the guild.
@@ -628,7 +651,7 @@ function catalogEntryOf(id: Id): Entry | null {
  */
 function snapshotBody(): Snapshot | null {
   if (disconnected()) return null;
-  const record = repo === null ? null : repo.hostRecord();
+  const record = activeHostRow();
   if (record === null || record.snapshot === null) return null;
   try {
     const value = JSON.parse(record.snapshot) as unknown;
@@ -773,7 +796,7 @@ function rolesOf(): Role[] {
 function leftoverTools(): Entry[] {
   const r = repo;
   if (disconnected()) return [];
-  const record = r === null ? null : r.hostRecord();
+  const record = r === null ? null : activeHostRow();
   if (r === null || record === null || record.snapshot === null) return [];
   let orgTools: Entry[];
   let personalTools: Entry[];
@@ -1126,9 +1149,22 @@ function offlineSession(): boolean {
   return s !== null && s.mode() === 'offline' && hasHostRow();
 }
 
-/** RF-30: a guild exists on this machine only while the `host` row does. */
+/** RF-30: a guild exists on this machine only while a `host` row does (E07: any of them). */
 function hasHostRow(): boolean {
-  return repo !== null && repo.hostRecord() !== null;
+  return repo !== null && repo.hostRecords().length > 0;
+}
+
+/**
+ * E07/RF-71: the `host` row of the guild this session entered — the row of the unlocked person's
+ * account (`Repo.hostRecordForPerson`). Every reader of "the host" takes this instead of "the one
+ * row": sync, the catalog, the icon, the admin screens and the shares. Without a session there is
+ * no entered guild, and a locked Nod reads only what the tiles and the cache already answer.
+ */
+function activeHostRow(): HostRecord | null {
+  const r = repo;
+  const person = currentPerson();
+  if (r === null || person === null) return null;
+  return r.hostRecordForPerson(person.id);
 }
 
 /**
@@ -1252,6 +1288,19 @@ async function authenticate(reason: string, password?: string): Promise<void> {
 function required<T>(value: T | null, where: string): T {
   if (value === null) throw new Error(`${where}: Nod has not finished starting`);
   return value;
+}
+
+/**
+ * 2026-11-19 style toggle: the stored appearance, read once per process — `nod.info` answers it so
+ * the page can wear it before its first render, and `nod.setAppearance` keeps this copy current.
+ * Anything invalid (an old value, a hand-edited file) reads as the default.
+ */
+async function currentAppearance(): Promise<AppearanceState> {
+  if (appearance === null) {
+    const app = required(runtime, 'nod.info');
+    appearance = normalizeAppearance(await app.store.get(APPEARANCE_KEY));
+  }
+  return appearance;
 }
 
 function object(value: unknown, message: string): Record<string, unknown> {
@@ -1536,8 +1585,11 @@ async function afterUnlock(state: SessionState): Promise<SessionState> {
   // 0.5.0 (RF-60): an offline session reaches no host at all — no pair is published and the loop
   // does not start, so the entry by the Offline tile is the same disconnect as having no host. The
   // O2 case is left as it was: there the run itself is what confirms the minimum.
-  const host = offlineSession() ? null : required(repo, 'host').hostRecord();
+  // E07/RF-71: the guild this unlock entered — the row of the person's account, not "the" host.
+  const host = offlineSession() ? null : activeHostRow();
   if (host !== null) await ensureKeys(false);
+  // E07: every guild's fingerprint cached, so Settings → Hosts can list them without an async read.
+  void sync?.primeFingerprints();
   // SP04 §3: the unlock is the first trigger of a sync. RF-30: without a `host` row there is no
   // client and no call, so `start()` is only armed when there is something to sync with.
   const running = sync;
@@ -1558,8 +1610,8 @@ async function importLegacy(personId: Id): Promise<void> {
   const app = runtime;
   const vaultKey = session === null ? null : session.vaultKey();
   if (r === null || app === null || vaultKey === null) return;
-  const host = r.hostRecord();
-  const bearer = host !== null && host.personId === personId ? hostTokenKey(host.kid, personId) : null;
+  const host = r.hostRecordForPerson(personId);
+  const bearer = host === null ? null : hostTokenKey(host.kid, personId);
   const keys = [
     ...r.listVault(personId).map((item) => item.keychainKey),
     keysKey(personId),
@@ -1614,7 +1666,7 @@ async function afterHostWrite(): Promise<void> {
   await afterChange();
   const running = sync;
   const r = repo;
-  if (running === null || r === null || r.hostRecord() === null) return;
+  if (running === null || r === null || activeHostRow() === null) return;
   await running.syncNow();
 }
 
@@ -1629,7 +1681,7 @@ function connectionOf(): HostConnection | null {
   const r = repo;
   const c = client;
   if (r === null || c === null) return null;
-  const row = r.hostRecord();
+  const row = activeHostRow();
   if (row === null) return null;
   return c.connect({
     address: row.address,
@@ -1818,16 +1870,16 @@ export interface ProfilesDeps {
   hasOpenInvite: () => boolean;
   /** The person of the last unlock, for the Offline tile's prefilled email. */
   lastPerson: () => Promise<Person | null>;
-  /** The one `host` row, or `null` (`Repo.hostRecord`). */
-  hostRecord: () => { address: string; guild: string; personId: Id; snapshot: string | null } | null;
-  /** The local person of the guild's own account; `null` when their row is gone. */
+  /** Every guild this Nod holds, in the order they were added (E07/RF-71). */
+  hostRecords: () => Array<{ address: string; guild: string; personId: Id; snapshot: string | null }>;
+  /** The local person of a guild's own account; `null` when their row is gone. */
   personById: (id: Id) => Person | null;
-  /** The `guildIcon` of the cached body — `undefined` without a row (SP04 §2). */
-  snapshotIconHash: () => string | null | undefined;
+  /** The `guildIcon` digest of that row's cached body — `undefined` when it has none (SP04 §2). */
+  iconHashOf: (row: { snapshot: string | null }) => string | null | undefined;
   /** That icon as a data URI, when the bytes on disk are the signed ones. */
   guildIcon: (hash: string | null) => Promise<string | null>;
-  /** The guild as `host.state` reports it (status, updateRequired). */
-  hostState: () => HostState;
+  /** One guild as the sync reports it (status, updateRequired), or `null` when unknown. */
+  hostStateOf: (address: string) => HostState | null;
   /** The tile of the last unlock (`Session.lastEntry`). */
   lastEntry: () => Promise<EntryTarget | null>;
   /** Biometrics enabled for the last person (`SessionState.biometric`). */
@@ -1845,14 +1897,16 @@ export interface ProfilesDeps {
  */
 export async function entryProfiles(deps: ProfilesDeps): Promise<EntryProfiles> {
   const total = deps.countPeople();
-  const host = deps.hostRecord();
   const guilds: GuildProfile[] = [];
-  if (host !== null) {
+  // E07/RF-71: one tile per guild held, in the order they were added — the array was the ground the
+  // 0.5.0 screen was built on. Only the entered guild's icon bytes are on this machine
+  // (`backend/guild-icon.ts` keeps one file), so the others fall back to their initials.
+  for (const host of deps.hostRecords()) {
     const person = deps.personById(host.personId);
-    const state = deps.hostState();
-    const hash = deps.snapshotIconHash();
+    const state = deps.hostStateOf(host.address);
+    const hash = deps.iconHashOf(host);
     guilds.push({
-      // 0.5.0: one guild, named by the address it is pinned to — the id `EntryTarget` carries.
+      // The id `EntryTarget` carries: the address the guild is pinned to.
       id: host.address,
       guild: host.guild,
       address: host.address,
@@ -1860,8 +1914,8 @@ export async function entryProfiles(deps: ProfilesDeps): Promise<EntryProfiles> 
       // A guild account the local table lost (a revocation) leaves the tile with nothing to prefill.
       email: person === null ? '' : person.email,
       name: person === null ? '' : person.name,
-      status: state.status,
-      updateRequired: state.updateRequired,
+      status: state === null ? 'none' : state.status,
+      updateRequired: state === null ? false : state.updateRequired,
     });
   }
   const last = await deps.lastPerson();
@@ -1935,12 +1989,18 @@ function removeFile(path: string): Promise<void> {
  * not read) — and it means the machine is not connected, so nothing of the guild's is touched.
  */
 function snapshotIconHash(): string | null | undefined {
-  const row = repo === null ? null : repo.hostRecord();
+  // E07/RF-71: the icon is the entered guild's; another guild's snapshot is not this one's to wear.
+  const row = repo === null ? null : activeHostRow();
   if (row === null) return undefined;
-  if (row.snapshot === null) return null;
+  return iconHashOfBody(row.snapshot);
+}
+
+/** The `guildIcon` digest of one cached body — the reader `entryProfiles` needs per guild. */
+function iconHashOfBody(snapshot: string | null): string | null | undefined {
+  if (snapshot === null) return null;
   let value: unknown;
   try {
-    value = JSON.parse(row.snapshot) as unknown;
+    value = JSON.parse(snapshot) as unknown;
   } catch {
     return undefined;
   }
@@ -2203,11 +2263,11 @@ const methods: { [M in Method]: Handler<M> } = {
       countPeople: () => r.countPeople(),
       hasOpenInvite: () => r.listInvites().some((invite) => invite.usedAt === null),
       lastPerson: () => s.lastPerson(),
-      hostRecord: () => r.hostRecord(),
+      hostRecords: () => r.hostRecords(),
       personById: (id) => r.personById(id),
-      snapshotIconHash: () => snapshotIconHash(),
+      iconHashOf: (row) => iconHashOfBody(row.snapshot),
       guildIcon: (hash) => (guildIcon === null ? Promise.resolve(null) : guildIcon.dataUri(hash)),
-      hostState: () => hostState(),
+      hostStateOf: (address) => sync?.stateOf(address) ?? null,
       lastEntry: () => s.lastEntry(),
       // `state()` is already here: the answer is the same one `session.state` gives, so asking the
       // keychain twice for it would be one read too many.
@@ -2337,6 +2397,11 @@ const methods: { [M in Method]: Handler<M> } = {
 
   // -------------------------------------------------------------- host (connected mode)
   'host.state': () => hostState(),
+  /**
+   * E07/RF-71: every guild this Nod holds — what Settings → Hosts lists. The entered one is among
+   * them; which one that is stays `host.state`'s answer, so the sidebar badge is unchanged.
+   */
+  'host.list': () => required(sync, 'host.list').states(),
 
   'host.discover': async (params) => {
     // SP04 §1 steps 1–4: nothing is written — the page shows the guild and the fingerprint.
@@ -2366,10 +2431,14 @@ const methods: { [M in Method]: Handler<M> } = {
     const name = optional(p.name, (value) => text(value, 'invalid name'));
     const adoptLocal = optional(p.adoptLocal, (value) => booleanValue(value, 'invalid join')) ?? false;
 
-    // SP05 §2 keeps one guild at a time. Replacing the row here would drop the current host's
-    // bearer and snapshot without a word, so the person removes the host first.
-    if (r.hostRecord() !== null) {
-      throw new Error('Nod is already connected to a host — remove it first');
+    // E07/RF-71: joining a guild keeps the ones already held — a Nod may have several. Only the
+    // same guild is refused here: re-adding it would replace its row (and drop its bearer and
+    // snapshot) without a word, so the person removes it first.
+    const alreadyHeld = r
+      .hostRecords()
+      .find((row) => originOf(row.address) === originOf(address));
+    if (alreadyHeld !== undefined) {
+      throw new Error('this Nod already holds that guild — remove it first');
     }
 
     // 0.5.0 (RF-59): the code the person typed decides the route — a setup code creates the first
@@ -2482,6 +2551,8 @@ const methods: { [M in Method]: Handler<M> } = {
     // 0.5.0 (RF-60): the join entered as the guild, and the tile of it — its address — is what the
     // next entry screen preselects.
     await s.rememberEntry({ kind: 'guild', id: found.address });
+    // E07/RF-71: the new guild's pinned key, so Settings → Hosts can list it without an async read.
+    void sync?.primeFingerprints();
     pendingJoin = null;
     return { kind: 'session', session: await afterUnlock(state), wipedVault } satisfies JoinResult;
   },
@@ -2497,12 +2568,12 @@ const methods: { [M in Method]: Handler<M> } = {
     const password = text(p.password, 'invalid password');
     const adoptLocal = optional(p.adoptLocal, (value) => booleanValue(value, 'invalid join')) ?? false;
 
-    const row = r.hostRecord();
-    // F3: with a host row this is the sign-in of the host this Nod already has. It goes to the
-    // address the row pinned and to no other — the page prefills it from the row, so a different one
-    // is a Nod being pointed at a second host, not a sign-in.
-    if (row !== null && originOf(address) !== originOf(row.address)) {
-      throw new Error('this Nod is connected to another host — remove it first');
+    // E07/RF-71: the row is the guild the typed address belongs to, found among the ones held. A
+    // sign-in enters a guild this Nod already holds; a guild it does not is a join (an invite or an
+    // access code), which is what keeps a typed address from silently adding one.
+    const row = r.hostRecords().find((held) => originOf(held.address) === originOf(address)) ?? null;
+    if (row === null && r.hostRecords().length > 0) {
+      throw new Error('this Nod does not hold that guild — join it with an invite first');
     }
     // F1/F3/F7: the same local gate. With a host row the session may stay locked (that is the
     // signed-out case F3 is about) and the attempt pays the unlock backoff; without one, a Nod that
@@ -2596,7 +2667,8 @@ const methods: { [M in Method]: Handler<M> } = {
   },
 
   'host.syncNow': async () => {
-    if (required(repo, 'host.syncNow').hostRecord() === null) {
+    // E07/RF-71: a run syncs the entered guild; without one there is nothing to sync.
+    if (activeHostRow() === null) {
       throw new Error('Nod is not connected to a host');
     }
     return await required(sync, 'host.syncNow').syncNow();
@@ -2713,29 +2785,44 @@ const methods: { [M in Method]: Handler<M> } = {
 
   'host.remove': async (params) => {
     const r = required(repo, 'host.remove');
+    const p = parameters(params, 'invalid removal');
+    // E07/RF-71: the guild to forget is named — a Nod holds several and only this one leaves.
+    const address = text(p.address, 'invalid address');
+    const row = r.hostRecordByAddress(address);
+    if (row === null) throw new Error('this Nod does not hold that guild');
     // SP05 §3, B7: the flag decides what happens to the personal half of the snapshot — the tools,
     // their views and the favorites stay as local data (`tool` rows and the local store), or go with
-    // the host. `clearHost` never touches them either way.
-    const keepPersonal = booleanValue(parameters(params, 'invalid removal').keepPersonal, 'invalid removal');
+    // the host. `removeHost` never touches them either way.
+    const keepPersonal = booleanValue(p.keepPersonal, 'invalid removal');
+    // The entered guild's removal stops the loop; another guild's does not touch it (E07 §2: a
+    // session enters one guild, and only that guild is being synced).
+    const wasActive = activeHostRow()?.address === address;
+    if (wasActive) sync?.stop();
 
-    sync?.stop();
-    const connection = connectionOf();
+    const c = client;
+    const connection =
+      c === null
+        ? null
+        : c.connect({
+            address: row.address,
+            kid: row.kid,
+            publicKey: row.publicKey,
+            personId: row.personId,
+          });
     // SP02 §5: the bearer goes with the host; without a row nothing would ever read it again.
     if (connection !== null) await connection.forgetToken();
-    // Before the row goes, while the last verified body is still readable (SP05 §2).
-    const last = r.hostRecord();
     required(personal, 'host.remove').adoptSnapshot(
-      last === null ? null : last.snapshot,
-      last === null ? '' : last.personId,
+      row.snapshot,
+      row.personId,
       keepPersonal,
       // B8b: a write still in the outbox is part of the personal half the person is deciding about —
-      // `clearHost` below takes the outbox with the host, so the overlay is what keeps a personal
-      // tool the person just added (a join's adopted leftovers, offline included).
-      r.listOutbox(),
+      // `removeHost` below takes that guild's outbox with it, so the overlay is what keeps a
+      // personal tool the person just added (a join's adopted leftovers, offline included).
+      r.listOutbox(address),
     );
-    r.clearHost();
-    // SP05 §6: the guild's icon goes with the guild — the file and the app icon it was showing.
-    await required(guildIcon, 'host.remove').reset();
+    r.removeHost(address);
+    // SP05 §6: the entered guild's icon goes with it — the file and the app icon it was showing.
+    if (wasActive) await required(guildIcon, 'host.remove').reset();
     // SP05 §2: without a `host` row the local tables are the catalog again — "removing the host
     // returns to them" — so the effective catalog and the page's list are re-derived here.
     refreshConnectedCatalog();
@@ -2901,6 +2988,25 @@ const methods: { [M in Method]: Handler<M> } = {
    */
   'peers.list': (): Promise<PeerKey[]> =>
     disconnected() ? Promise.resolve([]) : required(keys, 'peers.list').peers(),
+
+  /**
+   * RF-79: the guild's roster as the library's organization views draw it — a name, the roles and
+   * the admin flag, resolved through the guild's own roles. The verified snapshot is the source
+   * (SP04 §2's `people`, no email, no key), and the answer is empty exactly where `peers.list`'s
+   * is: no guild, or a Nod too old for the host's minimum (O2), so nothing of a disconnected guild
+   * is drawn.
+   */
+  'roster.list': (): RosterPerson[] => {
+    if (disconnected()) return [];
+    const rows = required(connected, 'roster.list');
+    return rows.people().map((person) => ({
+      id: person.id,
+      name: person.name,
+      roles: person.roles,
+      kind: person.kind,
+      admin: rows.roles().some((role) => role.admin && person.roles.includes(role.id)),
+    }));
+  },
 
   /**
    * K2/RF-45: the person confirmed that a changed key is really that colleague's. The pair whose
@@ -3844,6 +3950,16 @@ const methods: { [M in Method]: Handler<M> } = {
     return required(windows, 'tabs.close').closeTab(text(p.id, 'invalid tab'));
   },
 
+  /**
+   * 1.0.0 (nested tabs): the drag of a nested row — one child before another of the same opener,
+   * `null` for the end of its family. The refusal is the backend's one sentence.
+   */
+  'tabs.move': (params) => {
+    const p = parameters(params, 'invalid move');
+    const before = p.before === undefined || p.before === null ? null : text(p.before, 'invalid move');
+    return required(windows, 'tabs.move').moveTab(text(p.id, 'invalid tab'), before);
+  },
+
   'tabs.closeAll': () => required(windows, 'tabs.closeAll').closeAllTabs(),
 
   'tabs.next': (params) =>
@@ -3909,6 +4025,9 @@ const methods: { [M in Method]: Handler<M> } = {
       os: system,
       gateOrigins: gateOrigins(bundledSeed),
       tray,
+      // 2026-11-19 style toggle: the look the window wears, so even the locked entry screen opens
+      // in it. A preference of `store.json`, read once — `nod.setAppearance` is what changes it.
+      appearance: await currentAppearance(),
       // SP02 §9/`docs/canonico.md` §22: what the page needs to decide between the operating
       // system's prompt and its own password field — the machine capability (not the per-person
       // shortcut of `session.biometric`) and whether this is a non-release dev run, the only case
@@ -3966,6 +4085,23 @@ const methods: { [M in Method]: Handler<M> } = {
   'nod.setAppIcon': async (params): Promise<AppIconState> => {
     const choice = appIconChoice(parameters(params, 'invalid app icon choice').choice);
     return await required(guildIcon, 'nod.setAppIcon').setChoice(choice);
+  },
+
+  /**
+   * 2026-11-19 style toggle: stores this machine's whole appearance — skin, palette mode, custom
+   * colours — normalized first, so nothing invalid reaches `store.json`. A preference of this
+   * machine, never a secret and never a host call: the page applies the answer itself.
+   */
+  'nod.setAppearance': async (params): Promise<AppearanceState> => {
+    const app = required(runtime, 'nod.setAppearance');
+    const next = normalizeAppearance(parameters(params, 'invalid appearance').appearance);
+    // `store.set` answers false when it could not write: better to say so than to let the window
+    // wear a look the next launch loses.
+    if (!(await app.store.set(APPEARANCE_KEY, next))) {
+      throw new Error('Nod could not save the appearance');
+    }
+    appearance = next;
+    return next;
   },
 
   /** RF-55: hides the notice of one version on this machine; `store` keeps the version string. */

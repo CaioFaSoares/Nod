@@ -621,6 +621,150 @@ describe('the tile an unlock enters by (0.5.0, RF-60)', () => {
   });
 });
 
+describe('several guilds at once (E07, RF-71)', () => {
+  const A = 'https://a.example.test';
+  const B = 'https://b.example.test';
+  /** The two guilds' cached salt — one per guild, so the same password derives two `vaultKey`s. */
+  const SALT_B = 'EBESExQVFhcYGRobHB0eHw';
+
+  /** The `host` row of a guild whose account is that person id. */
+  function pin(s: SessionScene, address: string, personId: string, salt: string, kid: string): void {
+    s.repo.saveHost({
+      address,
+      guild: address.includes('a.') ? 'Guild A' : 'Guild B',
+      kid,
+      publicKey: 'A'.repeat(43),
+      personId,
+      salt,
+      addedAt: NOW,
+    });
+  }
+
+  /** Two guilds, one account each, and — the owner's answer of 2026-11-19 — the same email in both. */
+  async function twoGuilds(s: SessionScene): Promise<{ a: string; b: string }> {
+    const SHARED = 'ana@shared.test';
+    await adoptConnected(s, {
+      personId: 'host-person-a',
+      email: SHARED,
+      salt: HOST_SALT,
+      iterations: ITERATIONS,
+      password: GUILD_PASSWORD,
+    });
+    pin(s, A, 'host-person-a', HOST_SALT, 'kid-a');
+    const b = await adoptConnected(s, {
+      personId: 'host-person-b',
+      email: SHARED,
+      salt: SALT_B,
+      iterations: ITERATIONS,
+      password: GUILD_PASSWORD,
+    });
+    pin(s, B, 'host-person-b', SALT_B, 'kid-b');
+    s.session.lock();
+    return { a: 'host-person-a', b: b.person?.id ?? 'host-person-b' };
+  }
+
+  test('each guild tile opens its own account, even with one email in both', async () => {
+    const s = scene();
+    const ids = await twoGuilds(s);
+    expect(ids.b).toBe('host-person-b');
+
+    const enteredA = await s.session.unlock({
+      email: 'ana@shared.test',
+      password: GUILD_PASSWORD,
+      target: { kind: 'guild', id: A },
+    });
+    expect(enteredA.mode).toBe('guild');
+    expect(enteredA.person?.id).toBe('host-person-a');
+    expect(s.repo.hostRecordForPerson('host-person-a')?.address).toBe(A);
+
+    s.session.lock();
+    const enteredB = await s.session.unlock({
+      email: 'ana@shared.test',
+      password: GUILD_PASSWORD,
+      target: { kind: 'guild', id: B },
+    });
+    expect(enteredB.person?.id).toBe('host-person-b');
+    // E07 §2: the entered guild is derived from the person — no session state was added for it.
+    expect(s.repo.hostRecordForPerson('host-person-b')?.address).toBe(B);
+  });
+
+  test('a tile never opens the other guild account, and the offline email is ambiguous', async () => {
+    const s = scene();
+    await twoGuilds(s);
+
+    // Guild A's tile with guild B's person is the one failure: the tile decides the row.
+    expect(
+      await messageOf(() =>
+        s.session.unlock({
+          email: 'ana@shared.test',
+          password: GUILD_PASSWORD,
+          target: { kind: 'guild', id: 'https://unknown.example.test' },
+        }),
+      ),
+    ).toBe('invalid credentials');
+
+    // The Offline tile has only the email, and it names two rows: nobody is named (E07 §3).
+    expect(
+      await messageOf(() => s.session.unlock({ email: 'ana@shared.test', password: GUILD_PASSWORD })),
+    ).toBe('invalid credentials');
+    expect(s.session.mode()).toBeNull();
+  });
+
+  test('removing one guild leaves the other tile enterable', async () => {
+    const s = scene();
+    await twoGuilds(s);
+
+    s.repo.removeHost(A);
+    expect(s.repo.hostRecords().map((row) => row.address)).toEqual([B]);
+
+    const entered = await s.session.unlock({
+      email: 'ana@shared.test',
+      password: GUILD_PASSWORD,
+      target: { kind: 'guild', id: B },
+    });
+    expect(entered.person?.id).toBe('host-person-b');
+    // The tile of a guild that left opens nothing.
+    s.session.lock();
+    expect(
+      await messageOf(() =>
+        s.session.unlock({
+          email: 'ana@shared.test',
+          password: GUILD_PASSWORD,
+          target: { kind: 'guild', id: A },
+        }),
+      ),
+    ).toBe('invalid credentials');
+  });
+
+  test('a join whose email another guild already claims is no F1 choice (RF-71)', async () => {
+    const s = scene();
+    await twoGuilds(s);
+    // The person is unlocked in guild A and joins a third guild with the same email: A's account
+    // holds the email, but a `host` row claims it — a guild account, not a local one — so the join
+    // goes straight out and nothing of A's is offered for adoption.
+    const unlocked = await s.session.unlock({
+      email: 'ana@shared.test',
+      password: GUILD_PASSWORD,
+      target: { kind: 'guild', id: A },
+    });
+    expect(unlocked.unlocked).toBe(true);
+
+    const gate = await s.session.joinGate<{ ok: true }>({
+      email: 'ana@shared.test',
+      adoptLocal: false,
+      hostPinned: false,
+      signIn: false,
+      host: async () => ({ ok: true }),
+    });
+    expect(gate.kind).toBe('join');
+    if (gate.kind !== 'join') throw new Error('unreachable');
+    expect(gate.local).toBeNull();
+    expect(gate.answer).toEqual({ ok: true });
+    // The choice of a local holder is F1's own subject, proven where it always was ("a local
+    // account holding the join email answers the choice", below).
+  });
+});
+
 describe('changePassword', () => {
   test('the old password stops working, the new one works and the vault stays readable (RF-24)', async () => {
     const s = scene();
@@ -1059,7 +1203,7 @@ describe('adoptConnectedAccount (SP02 §6, SP05 §2)', () => {
 
     // Nothing about a host lives here: the salt is cached on the person row (SP02 §6), and the
     // session has no network seam at all.
-    expect(s.repo.hostRecord()).toBeNull();
+    expect((s.repo.hostRecords()[0] ?? null)).toBeNull();
     const state = await s.session.unlock({ email: GUILD_EMAIL, password: GUILD_PASSWORD });
 
     expect(state.unlocked).toBe(true);
@@ -1283,7 +1427,7 @@ describe('changePassword against the host (SP02 §7)', () => {
       salt: HOST_SALT,
       addedAt: NOW,
     });
-    s.repo.saveHostSnapshot({ snapshot: '{"api":1}', version: 'v1', issuedAt: NOW, syncedAt: NOW });
+    s.repo.saveHostSnapshot((s.repo.hostRecords()[0] ?? null)?.address ?? '', { snapshot: '{"api":1}', version: 'v1', issuedAt: NOW, syncedAt: NOW });
     // The vault item points at a tool: the row has to exist (foreign key).
     s.repo.saveEntry(tool('kanban'));
     const vault = createVault({
@@ -1347,7 +1491,7 @@ describe('changePassword against the host (SP02 §7)', () => {
 
     // The salt the `host` row caches for offline unlock moved with the password (SP02 §6), so B2's
     // next sign-in does not read a reset — which would wipe the vault just kept above (SP02 §7).
-    const host = s.repo.hostRecord();
+    const host = (s.repo.hostRecords()[0] ?? null);
     expect(host?.salt).toBe(request.newSalt);
     expect(host?.snapshot).toBe('{"api":1}'); // and the cached org catalog is still there (RF-37)
     expect(host?.version).toBe('v1');

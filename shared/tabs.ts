@@ -88,6 +88,96 @@ export function stepTab(order: string[], current: string | null, step: 1 | -1): 
   return order[(at + step + order.length) % order.length];
 }
 
+// ---------------------------------------------------------------- nested tabs (1.0.0)
+
+/**
+ * 1.0.0 (canonico §22 "Nested tabs under the opener"): a tab a tool opened — the adopted popup, a
+ * link of its page — nests under the tab that opened it. The strip's `order` stays one flat array
+ * with the children following their parent contiguously, so every existing reader of the order
+ * (⌃Tab's wrap, the successor after a close, the persisted list) keeps working unchanged;
+ * `parentId` is what the display nests by, and a hand-opened link (`tabs.openLink`) carries none.
+ */
+export type ParentOf = ReadonlyMap<string, string | null>;
+
+/**
+ * Where a new child of `parent` lands: right after the parent's last descendant — so a second
+ * child stays inside the block even when the first already has children of its own — or right
+ * after the parent when it has none. A parent no longer in the strip appends at the end.
+ */
+export function insertAsChild(order: string[], parentOf: ParentOf, parent: string, id: string): string[] {
+  let at = order.indexOf(parent);
+  if (at === -1) return [...order, id];
+  for (let index = at + 1; index < order.length; index += 1) {
+    let owner: string | null | undefined = parentOf.get(order[index]);
+    while (owner !== undefined && owner !== null && owner !== parent) {
+      // a grandchild of `parent` still belongs to the block: walk up to its branch root
+      owner = parentOf.get(owner);
+    }
+    if (owner !== parent) break;
+    at = index;
+  }
+  const next = [...order];
+  next.splice(at + 1, 0, id);
+  return next;
+}
+
+/** The children of `parent`, in strip order. */
+export function childrenOf(order: readonly string[], parentOf: ParentOf, parent: string): string[] {
+  return order.filter((id) => parentOf.get(id) === parent);
+}
+
+/**
+ * The whole family of `id` — itself, its children, their children — in strip order. Closing a
+ * parent takes its subject with it, and this is the list that goes.
+ */
+export function descendantsOf(order: readonly string[], parentOf: ParentOf, id: string): string[] {
+  const out: string[] = [];
+  for (const other of order) {
+    let owner: string | null | undefined = parentOf.get(other);
+    while (owner !== undefined && owner !== null) {
+      if (owner === id) {
+        out.push(other);
+        break;
+      }
+      owner = parentOf.get(owner);
+    }
+  }
+  return out;
+}
+
+/**
+ * `tabs.move` (1.0.0): one child before another of the same parent — `null` sends it to the end of
+ * its family. The child travels **with its own descendants**: a branch nests inside its parent's
+ * block, and a move that left a grandchild behind would orphan it in the display. Answers the new
+ * order, or `null` when `id` is nobody's child or `before` belongs to another parent; a move that
+ * changes nothing answers the same order.
+ */
+export function moveChild(
+  order: string[],
+  parentOf: ParentOf,
+  id: string,
+  before: string | null,
+): string[] | null {
+  const parent = parentOf.get(id);
+  if (parent === undefined || parent === null) return null;
+  if (before === id) return [...order];
+  if (before !== null && parentOf.get(before) !== parent) return null;
+  const branch = [id, ...descendantsOf(order, parentOf, id)];
+  const without = order.filter((other) => !branch.includes(other));
+  const next = [...without];
+  if (before === null) {
+    // after the family's last remaining member, so the block stays contiguous
+    const remaining = descendantsOf(without, parentOf, parent);
+    const last = remaining[remaining.length - 1] ?? parent;
+    next.splice(next.indexOf(last) + 1, 0, ...branch);
+  } else {
+    next.splice(next.indexOf(before), 0, ...branch);
+  }
+  return next.length === order.length && next.every((other, index) => other === order[index])
+    ? [...order]
+    : next;
+}
+
 // ---------------------------------------------------------------- links (RF-66)
 
 /** A leading `scheme:` — RFC 3986's grammar, the same one the WHATWG `URL` parser accepts. */

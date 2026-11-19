@@ -119,8 +119,12 @@ export interface ErrorResponse {
 
 // ---------------------------------------------------------------- devices and sessions
 
-/** SP01 §2 `sessions.os`; `AppInfo.os` in `shared/types.ts` holds the same three values. */
-export type DeviceOs = 'macos' | 'windows' | 'linux';
+/**
+ * SP01 §2 `sessions.os`; `AppInfo.os` in `shared/types.ts` holds the same three values of the app
+ * itself. E04/RF-74: `'web'` is the browser portal's sign-in — a `sessions` row like any other, so
+ * the account's devices list it and revoking it signs the browser out.
+ */
+export type DeviceOs = 'macos' | 'windows' | 'linux' | 'web';
 
 /** SP03 §2: `device = { name, os, appVersion }`, one row per sign-in (SP02 §5). */
 export interface Device {

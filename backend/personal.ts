@@ -144,6 +144,11 @@ export interface PersonalDeps {
   personId: () => Id;
   /** From the `host` row, not from the cache (SP05 §2): a write goes to the outbox whenever one exists. */
   connected: () => boolean;
+  /**
+   * E07/RF-71: the pinned address of the guild the write belongs to — the entered one's row — or
+   * `null`. The outbox is per guild, so a pending write keeps it.
+   */
+  guildAddress: () => string | null;
   /** Epoch milliseconds: `updatedAt` of a write is the Nod's clock (SP04 §4). */
   now: () => number;
   /** A personal tool that goes away takes the credential saved for it (A6); local mode only. */
@@ -201,7 +206,11 @@ export function createPersonal(deps: PersonalDeps): Personal {
 
   /** One outbox row: the method, the SP03 §2 route with its id in it, and the body (SP04 §4). */
   function queue(method: 'PUT' | 'DELETE', path: string, body: unknown): void {
-    repo.enqueueOutbox({ method, path, body: JSON.stringify(body), createdAt: writtenAt() });
+    const address = deps.guildAddress();
+    // Without a guild there is nothing to replay the write against: this is a caller bug (a write is
+    // queued only while connected), and dropping it silently would lose the person's edit.
+    if (address === null) throw new Error('no guild to send the write to');
+    repo.enqueueOutbox({ address, method, path, body: JSON.stringify(body), createdAt: writtenAt() });
   }
 
   function localViews(personId: Id): PersonalView[] {

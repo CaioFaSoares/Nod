@@ -348,13 +348,13 @@ async function syncNod(nod: Nod): Promise<Snapshot> {
   if (connection === null) throw new Error('the Nod is not connected');
   const result = await connection.snapshot();
   if (result.notModified) throw new Error('the host answered 304 to a Nod with no cached version');
-  nod.repo.saveHostSnapshot({
+  nod.repo.saveHostSnapshot((nod.repo.hostRecords()[0] ?? null)?.address ?? '', {
     snapshot: result.raw,
     version: result.snapshot.version,
     issuedAt: result.snapshot.issuedAt,
     syncedAt: AT,
   });
-  nod.catalog.refresh(nod.repo.hostRecord());
+  nod.catalog.refresh((nod.repo.hostRecords()[0] ?? null));
   await nod.keys.observe();
   return result.snapshot;
 }

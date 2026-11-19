@@ -114,12 +114,16 @@ next time someone signs in on the web — so it stays out unless the owner asks 
 
 ## 7. Requirements (proposal)
 
-| ID | Requirement | Acceptance |
-| --- | --- | --- |
-| RF-58 | With `WEB_UI=true`, the host serves a browser version on its own address; without it, no web UI exists. | Flag off: `GET /` is 404; flag on: sign-in page. |
-| RF-59 | Browser sessions are HttpOnly SameSite cookies, revocable like app sessions. | Revoking the device on the host signs the browser out on its next request. |
-| RF-60 | The browser never sends the password: it derives `authKey` with the same parameters as the app. | A capture of web sign-in shows no password; the same password signs in on app and web. |
-| RF-61 | A client sees only what their role grants and opens tools in new browser tabs. | Client account on a clean browser: only granted links, each opening in a new tab. |
+The approved requirements live in `docs/canonico.md` §14 as **RF-73–RF-76** (the flag and the port,
+the cookie session, the password never travelling, the Origin/budget rules) — the IDs below were
+this epic's first draft and are long taken by block releases, so the register is the home:
+
+| Canonico | This epic's draft said |
+| --- | --- |
+| RF-73 | With `WEB_UI=true`, the host serves a browser version on its own address; without it, no web UI exists (flag off: `GET /` is 404). |
+| RF-74 | Browser sessions are HttpOnly SameSite cookies, revocable like app sessions. |
+| RF-75 | The browser never sends the password: it derives `authKey` with the same parameters as the app. |
+| RF-76 | Every portal write checks `Origin`; sign-in pays the same budgets as the app's routes. |
 
 ## 8. Open questions
 
@@ -127,5 +131,47 @@ Parked by the owner on 2026-10-16 ("acho que podemos deixar essas perguntas do e
 answered when E04 starts, after E01 and E02.
 
 1. Same address as the API, or a separate one (e.g. a `portal` subdomain) for clients?
+   **Answered by the owner's build request on 2026-11-19** ("…o sistema de acessar o nod via web, com
+   a porta de acesso configurável"): **same address** — the web UI and the API share the host's one
+   configurable port (`NOD_PORT`, SP07 §2), which is §3's one-origin rule: no CORS, a first-party
+   cookie. A separate portal port or subdomain stays out until the owner asks for it.
 2. Can clients add personal tools and favorites, or only see what's granted?
+   Still parked — clients are M3 (`kind: client`), and nothing of M3 is built.
 3. Should a client see anything besides links — a short note per item, a welcome page per role?
+   Still parked with M3.
+
+## 9. Built (2026-11-19) — the M1 portal
+
+The owner asked for the system to be finished ("termine de preparar também o sistema de acessar o
+nod via web…"), and what landed is M1's portal against §1–§3 and §7's RF-73–RF-76 (the register
+row in `docs/canonico.md` §22):
+
+- `host/config.ts` — `WEB_UI` resolves `webUi` (off by default; the compose files turn it on as the
+  deployment's default, the code stays API-only until the flag is set).
+- `shared/host-api.ts` — `DeviceOs` gains `'web'`: a browser sign-in is a `sessions` row like any
+  other, shown in the account's devices and revocable there (RF-74).
+- `host/routes/web.ts` — the portal's routes, mounted only while `webUi` is on: the static page
+  under `/` with a strict CSP, `POST /web/api/login` (Origin check, the same address and email
+  budgets, `auth.verify`, a `sessions` row with os `web`, the cookie `HttpOnly; SameSite=Strict`,
+  `Secure` outside dev), `POST /web/api/logout`, `GET /web/api/me`, and `GET /web/api/catalog` —
+  the granted catalog built from `snapshotSource`, so the role filter is the repo's own
+  (`orgToolsFor`), never a second one.
+- `web/` — the portal's page (vite builds it to `host/public/`, served by the host; the Dockerfile
+  builds the same bundle into the image): sign-in, the guild's name, the entries granted to the
+  signed-in person — favorites first, then org tools by category and personal tools — each opening
+  in a new browser tab, a filter box, and a sign-out. The derivation is `shared/auth.ts` imported,
+  not copied (RF-75).
+
+What M1 deliberately does not carry (kept honest by §2's table): no vault, no shares, no autofill,
+no docked tabs, no admin screens (M2), no `kind: client` (M3), and no activation in the browser —
+the owner's request is the person who already holds an account ("uma pessoa com conta naquela
+guild/no"); a browser join is M1's deferred half, parked with M3 unless the owner asks.
+
+Proof by execution, 2026-11-19: `host/web.test.ts` over the real Elysia app — flag off `GET /` is
+404; flag on the page serves with its CSP; a wrong `authKey` is the one `invalid credentials`; a
+member's web sign-in sets the cookie, `me` answers the person, `catalog` answers exactly the role's
+grants (a member sees the granted tool and not the ungranted one, an admin sees both), the devices
+list shows the `web` row, logout revokes it, and a cross-origin `POST` is refused. The connected
+smoke (`test/smoke/connected.ts`) proves it against the real host process: the page over loopback,
+the salt request, the real `deriveKeys`, the cookie login, `me` and `catalog` over the same port the
+app syncs through, and the sign-out.

@@ -22,6 +22,15 @@ admin group of SP03 §2 — H5), `routes/state.ts` (discovery + the signed state
 `routes/meta.ts` (`GET /v1/meta/app` — O2), `routes/shares.ts` (block 2's public keys, shares,
 holders and the share lifecycle — E02 K1/K3/K7/K9) and `routes/assignments.ts` (the admin's
 assignments and the missing-copy list — E02 K8);
+**1.0.0, RF-73–RF-76**: `routes/web.ts` — the browser
+portal, mounted only while `WEB_UI` is on (`config.ts`'s `webUi`): the page under `/` with a strict
+CSP from `host/public` (the vite build of `web/`, built into the image by the `Dockerfile`'s page
+stage; the compose files turn the flag on as the deployment's default), `POST /web/api/login`
+(the same address and email budgets, `auth.verify`, a `sessions` row with os `web`, the
+`HttpOnly; SameSite=Strict` cookie — `Secure` outside dev), `POST /web/api/logout`,
+`GET /web/api/me` and `GET /web/api/catalog` — built from `snapshotSource`, so the role filter is
+the repo's own, never a second one (`docs/epics/E04-web-nod.md` §9 is the epic's half); migration 8
+adds the library's `entries.tags` and `entries.org_account`;
 `auth.ts` holds the argon2id hash and verify, the salt
 lookup, the session tokens, the rate limits and the `personAuth`/`adminAuth` guards each group mounts
 for itself; `snapshot.ts` builds the discovery document and the signed snapshot. The guild icon

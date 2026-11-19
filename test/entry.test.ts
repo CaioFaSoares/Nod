@@ -70,11 +70,11 @@ describe('session.profiles — the tiles of the entry screen (RF-60)', () => {
       countPeople: () => 0,
       hasOpenInvite: () => false,
       lastPerson: async () => null,
-      hostRecord: () => null,
+      hostRecords: () => [],
       personById: () => null,
-      snapshotIconHash: () => undefined,
+      iconHashOf: () => undefined,
       guildIcon: async () => null,
-      hostState: () => hostState({ status: 'none', guild: null, address: null, fingerprint: null }),
+      hostStateOf: () => null,
       lastEntry: async () => null,
       biometric: async () => false,
     });
@@ -97,11 +97,11 @@ describe('session.profiles — the tiles of the entry screen (RF-60)', () => {
       countPeople: () => 2,
       hasOpenInvite: () => true,
       lastPerson: async () => person({ email: 'last@example.test' }),
-      hostRecord: () => null,
+      hostRecords: () => [],
       personById: () => null,
-      snapshotIconHash: () => undefined,
+      iconHashOf: () => undefined,
       guildIcon: async () => null,
-      hostState: () => hostState({ status: 'none' }),
+      hostStateOf: () => null,
       lastEntry: async () => ({ kind: 'offline' }),
       biometric: async () => true,
     });
@@ -122,12 +122,12 @@ describe('session.profiles — the tiles of the entry screen (RF-60)', () => {
       countPeople: () => 1,
       hasOpenInvite: () => false,
       lastPerson: async () => person(),
-      hostRecord: () => ({ address: ADDRESS, guild: 'Guild', personId: 'host-person-1', snapshot: '{}' }),
+      hostRecords: () => [{ address: ADDRESS, guild: 'Guild', personId: 'host-person-1', snapshot: '{}' }],
       personById: () => person({ id: 'host-person-1', email: 'ana@guild.test', name: 'Ana Guild' }),
       // The cached body names a digest; the module answers the icon only when the bytes match it.
-      snapshotIconHash: () => 'a'.repeat(64),
+      iconHashOf: () => 'a'.repeat(64),
       guildIcon: async (hash) => (hash === null ? null : 'data:image/png;base64,AAAA'),
-      hostState: () => hostState({ updateRequired: true }),
+      hostStateOf: () => hostState({ updateRequired: true }),
       lastEntry: async () => ({ kind: 'guild', id: ADDRESS }),
       biometric: async () => false,
     });
@@ -154,11 +154,11 @@ describe('session.profiles — the tiles of the entry screen (RF-60)', () => {
       countPeople: () => 1,
       hasOpenInvite: () => false,
       lastPerson: async () => null,
-      hostRecord: () => ({ address: ADDRESS, guild: 'Guild', personId: 'host-person-1', snapshot: null }),
+      hostRecords: () => [{ address: ADDRESS, guild: 'Guild', personId: 'host-person-1', snapshot: null }],
       personById: () => null,
-      snapshotIconHash: () => null,
+      iconHashOf: () => null,
       guildIcon: async () => null,
-      hostState: () => hostState(),
+      hostStateOf: () => hostState(),
       lastEntry: async () => null,
       biometric: async () => false,
     });
@@ -169,6 +169,50 @@ describe('session.profiles — the tiles of the entry screen (RF-60)', () => {
     expect(tile.name).toBe('');
   });
 
+  test('several guilds are several tiles, each with its own account and state (RF-71)', async () => {
+    const h = await backend();
+    const OTHER = 'https://other.example.test';
+    const profiles = await h.entryProfiles({
+      countPeople: () => 2,
+      hasOpenInvite: () => false,
+      lastPerson: async () => person(),
+      hostRecords: () => [
+        { address: ADDRESS, guild: 'Guild', personId: 'host-person-1', snapshot: '{}' },
+        { address: OTHER, guild: 'Other Guild', personId: 'host-person-2', snapshot: null },
+      ],
+      personById: (id) =>
+        id === 'host-person-1'
+          ? person({ id, email: 'ana@guild.test', name: 'Ana Guild' })
+          : person({ id, email: 'ana@other.test', name: 'Ana Other' }),
+      // Only the entered guild's icon bytes are on this machine; the other falls back to initials.
+      iconHashOf: (row) => (row.snapshot === null ? null : 'a'.repeat(64)),
+      guildIcon: async (hash) => (hash === null ? null : 'data:image/png;base64,AAAA'),
+      hostStateOf: (address) =>
+        address === ADDRESS
+          ? hostState()
+          : hostState({ status: 'stale', guild: 'Other Guild', address: OTHER, lastError: 'offline' }),
+      lastEntry: async () => ({ kind: 'guild', id: OTHER }),
+      biometric: async () => false,
+    });
+
+    // One tile per guild, in the order they were added — the entry screen draws the rail already.
+    expect(profiles.guilds.map((tile) => tile.id)).toEqual([ADDRESS, OTHER]);
+    expect(profiles.guilds[0]).toMatchObject({
+      guild: 'Guild',
+      email: 'ana@guild.test',
+      icon: 'data:image/png;base64,AAAA',
+      status: 'connected',
+    });
+    expect(profiles.guilds[1]).toMatchObject({
+      guild: 'Other Guild',
+      email: 'ana@other.test',
+      icon: null,
+      status: 'stale',
+    });
+    // The tile the last unlock used is still the one preselected.
+    expect(profiles.last).toEqual({ kind: 'guild', id: OTHER });
+  });
+
   test('a remembered guild this Nod no longer holds preselects nothing', async () => {
     const h = await backend();
     const profiles = await h.entryProfiles({
@@ -176,11 +220,11 @@ describe('session.profiles — the tiles of the entry screen (RF-60)', () => {
       hasOpenInvite: () => false,
       lastPerson: async () => person(),
       // No `host` row: the guild the `store` remembers was removed since (`host.remove`).
-      hostRecord: () => null,
+      hostRecords: () => [],
       personById: () => null,
-      snapshotIconHash: () => undefined,
+      iconHashOf: () => undefined,
       guildIcon: async () => null,
-      hostState: () => hostState({ status: 'none', guild: null, address: null, fingerprint: null }),
+      hostStateOf: () => null,
       lastEntry: async () => ({ kind: 'guild', id: ADDRESS }),
       biometric: async () => false,
     });

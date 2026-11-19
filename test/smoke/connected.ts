@@ -91,6 +91,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { GUILD_ICON_FILE } from '../../backend/guild-icon';
+import { deriveKeys, randomSalt } from '../../shared/auth';
 import { sha256Hex, toBase64url } from '../../shared/encoding';
 import {
   appDataDir as dataDir,
@@ -147,9 +148,27 @@ const APP_IDS = [ADMIN_APP_ID, PERSON_APP_ID, OTHER_APP_ID, ADMIN_SECOND_APP_ID]
 /** The guild name the host is booted with (`NOD_GUILD_NAME`), asserted by both pages. */
 const GUILD_NAME = 'Smoke Guild';
 
+/**
+ * E07/RF-71, M3's proof: a second host on another port is a second guild. The person's Nod joins
+ * B while holding A — the real-surface acceptance of "join B with A held" — and P's own page drives
+ * the entering, the removal and the tile that stays. (`HOST_B_DATA` is declared beside
+ * `CONNECTED_DIR` below: it is a path under it.)
+ */
+const GUILD_B_NAME = 'Smoke Guild B';
+
+/**
+ * RF-73: the web portal's own member — an account that exists only to sign in on the browser half
+ * the same run serves. The admin's page creates the invite; the runner redeems it headlessly with
+ * a password it chose, then signs in on the portal with the same derivation the page runs.
+ */
+const WEB_EMAIL = 'web@smoke.test';
+const WEB_PASSWORD = 'smoke-web-1';
+
 const ROOT = join(import.meta.dir, '..', '..');
 const GENERATED_DIR = join(import.meta.dir, '.gerado');
 const CONNECTED_DIR = join(GENERATED_DIR, 'connected');
+/** E07/RF-71: guild B's temp data dir, under the run's own generated tree. */
+const HOST_B_DATA = join(CONNECTED_DIR, 'host-b-data');
 const CONNECTED_TEMPLATE = join(import.meta.dir, 'connected.html');
 const SEED = join(ROOT, 'resources', 'seed.json');
 const SEED_BACKUP = join(GENERATED_DIR, 'seed.json.bak');
@@ -201,6 +220,7 @@ interface Phase {
     | 'person2-accept'
     | 'admin-update'
     | 'person-update'
+    | 'person-second-guild'
     | 'admin-rotate'
     | 'admin-second-machine'
     | 'admin-revoke'
@@ -224,6 +244,9 @@ const PHASES: Phase[] = [
   { name: 'person2-accept', appId: OTHER_APP_ID },
   { name: 'admin-update', appId: ADMIN_APP_ID },
   { name: 'person-update', appId: PERSON_APP_ID },
+  // E07/RF-71, M3: B is joined with A held, entered, removed — and A still enters. It sits before
+  // the rotation because P's own syncs must keep answering `connected` through the whole story.
+  { name: 'person-second-guild', appId: PERSON_APP_ID },
   { name: 'admin-rotate', appId: ADMIN_APP_ID },
   { name: 'admin-second-machine', appId: ADMIN_SECOND_APP_ID },
   { name: 'admin-revoke', appId: ADMIN_APP_ID },
@@ -360,6 +383,8 @@ function generatePage(
   address: string,
   deskOrigin: string,
   methods: Methods,
+  addressB: string,
+  guildB: string,
   icon: GuildIconFixture,
 ): string {
   const template = readFileSync(CONNECTED_TEMPLATE, 'utf8');
@@ -371,6 +396,9 @@ function generatePage(
     nonce,
     address,
     guild: GUILD_NAME,
+    // E07/RF-71: guild B, the second host of the run.
+    addressB,
+    guildB,
     desk: deskOrigin,
     originA: tools.originA,
     originB: tools.originB,
@@ -407,6 +435,7 @@ async function runPhase(
   tools: Tools,
   deskOrigin: string,
   address: string,
+  addressB: string,
   methods: Methods,
   icon: GuildIconFixture,
 ): Promise<{ ok: boolean; error: string | null; steps: Step[] }> {
@@ -414,7 +443,7 @@ async function runPhase(
   // The seed of this app id: `gen-electrobun-config` reads it here (the runtime gate of `login.report`) and the
   // app reads it at boot (its local catalog, applied on the first one). Two machines, two seeds.
   writeFileSync(SEED, temporarySeed(tools, phase.appId));
-  const page = generatePage(phase, nonce, tools, address, deskOrigin, methods, icon);
+  const page = generatePage(phase, nonce, tools, address, deskOrigin, methods, addressB, GUILD_B_NAME, icon);
 
   let app: SmokeLaunch;
   try {
@@ -461,8 +490,8 @@ async function runPhase(
 
 interface Desk {
   origin: string;
-  /** The invite code one of the two members was handed, or null before that. Never printed. */
-  handedOver(who: 'person' | 'other'): string | null;
+  /** The invite code one of the members was handed, or null before that. Never printed. */
+  handedOver(who: 'person' | 'other' | 'web'): string | null;
   stop(): void;
 }
 
@@ -486,9 +515,17 @@ function deskJson(value: unknown, status = 200): Response {
 function startDesk(deps: {
   address: string;
   setupCode: string;
+  /** E07/RF-71: guild B's address, name and setup code — the terminal of the second host. */
+  addressB: string;
+  guildB: string;
+  setupCodeB: string;
   host: HostControl;
 }): Desk {
-  const codes: { person: string | null; other: string | null } = { person: null, other: null };
+  const codes: { person: string | null; other: string | null; web: string | null } = {
+    person: null,
+    other: null,
+    web: null,
+  };
   const notes = new Map<string, string>();
   const server = Bun.serve({
     hostname: '127.0.0.1',
@@ -499,16 +536,22 @@ function startDesk(deps: {
         if (url.pathname === '/desk/admin') {
           return deskJson({ ok: true, address: deps.address, guild: GUILD_NAME, code: deps.setupCode });
         }
+        if (url.pathname === '/desk/guild-b') {
+          return deskJson({ ok: true, address: deps.addressB, guild: deps.guildB, code: deps.setupCodeB });
+        }
         if (url.pathname === '/desk/handover' && request.method === 'POST') {
           const body = (await request.json()) as { code?: unknown; who?: unknown };
           if (typeof body.code !== 'string' || body.code.trim().length === 0) {
             return deskJson({ ok: false, error: 'no code' }, 400);
           }
-          codes[body.who === 'other' ? 'other' : 'person'] = body.code.trim();
+          const who = body.who === 'other' || body.who === 'web' ? body.who : 'person';
+          codes[who] = body.code.trim();
           return deskJson({ ok: true });
         }
         if (url.pathname === '/desk/person') {
-          const code = codes[url.searchParams.get('who') === 'other' ? 'other' : 'person'];
+          const asked = url.searchParams.get('who');
+          const who = asked === 'other' || asked === 'web' ? asked : 'person';
+          const code = codes[who];
           if (code === null) return deskJson({ ok: false, error: 'no code handed over yet' }, 409);
           return deskJson({ ok: true, address: deps.address, guild: GUILD_NAME, code });
         }
@@ -544,6 +587,127 @@ function startDesk(deps: {
     handedOver: (who) => codes[who],
     stop: () => server.stop(true),
   };
+}
+
+// ------------------------------------------------------------- RF-73: the web portal
+
+/**
+ * The portal's own half of the run (E04 M1, RF-73–RF-76), over the same loopback the app syncs
+ * through. The web member's account is created through the real join route — the invite the
+ * admin's page issued — and every request after it is the browser's own: the salt request, the
+ * `authKey` the page would derive (RF-75), the cookie the host answers, the granted catalog, the
+ * `web` device row the app's own devices list carries, and the sign-out that revokes it.
+ */
+async function checkWebPortal(address: string, deps: {
+  email: string;
+  password: string;
+  code: string;
+}): Promise<{ lines: string[]; ok: boolean }> {
+  const lines: string[] = [];
+  const fail = (why: string): { lines: string[]; ok: boolean } => {
+    lines.push(why);
+    return { lines, ok: false };
+  };
+
+  // The page the host serves while `WEB_UI` is on — built by `bun run web:build` into
+  // `host/public`; the smoke builds it when it is missing, so one command still runs the proof.
+  if (!existsSync(join(ROOT, 'host', 'public', 'index.html'))) {
+    const built = Bun.spawnSync(['bun', 'run', 'web:build'], { cwd: ROOT });
+    if (built.exitCode !== 0) return fail('the portal bundle did not build');
+    lines.push('portal bundle built by web:build (it was missing)');
+  }
+
+  // The member, through the real join route: the runner's own salt, only the derived key on the wire.
+  const salt = randomSalt();
+  const keys = await deriveKeys(deps.password, new TextEncoder().encode(salt), 600_000);
+  const joined = await fetch(`${address}/v1/auth/join`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      email: deps.email,
+      name: 'Web Member',
+      code: deps.code,
+      salt,
+      authKey: toBase64url(keys.authKey),
+      device: { name: 'nod-smoke', os: 'macos', appVersion: 'smoke' },
+    }),
+  });
+  if (joined.status !== 200) return fail(`the web member's join answered ${joined.status}`);
+  const opened = (await joined.json()) as { token: string; personId: string };
+  lines.push('the web member joined through /v1/auth/join (only the derived key travelled)');
+
+  // RF-73: the portal answers on the host's own port, with the hardening headers E04 §3 asks for.
+  const page = await fetch(`${address}/`);
+  if (page.status !== 200) return fail(`GET / answered ${page.status}`);
+  const html = await page.text();
+  if (!html.includes('<title>Nod</title>')) return fail('the page is not the portal');
+  const csp = page.headers.get('content-security-policy') ?? '';
+  if (!csp.includes("script-src 'self'")) return fail('the CSP does not restrict scripts to the page origin');
+  lines.push('GET / serves the portal with its strict CSP');
+
+  // RF-75: the salt request, the derivation, and only the `authKey` in the login body.
+  const salted = await fetch(`${address}/v1/auth/salt`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: deps.email }),
+  });
+  const saltBody = (await salted.json()) as { salt: string; iterations: number };
+  const webKeys = await deriveKeys(deps.password, new TextEncoder().encode(saltBody.salt), saltBody.iterations);
+  const login = await fetch(`${address}/web/api/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: address },
+    body: JSON.stringify({ email: deps.email, authKey: toBase64url(webKeys.authKey) }),
+  });
+  if (login.status !== 204) return fail(`the web login answered ${login.status}`);
+  const set = login.headers.get('set-cookie') ?? '';
+  if (!set.includes('HttpOnly') || !set.includes('SameSite=Strict')) {
+    return fail(`the cookie is not HttpOnly SameSite=Strict: ${set}`);
+  }
+  const cookie = set.split(';')[0] ?? '';
+  lines.push('the web login answered the HttpOnly SameSite cookie (no Secure: this host is dev)');
+
+  // RF-74: the account's devices carry the `web` row — the same table, revocable like any other.
+  const sessions = await fetch(`${address}/v1/sessions`, {
+    headers: { authorization: `Bearer ${opened.token}` },
+  });
+  const deviceRows = (await sessions.json()) as Array<{ device: { os: string; name: string } }>;
+  if (!deviceRows.some((row) => row.device.os === 'web')) {
+    return fail('the devices list carries no web session');
+  }
+  lines.push('the devices list carries the web session (os web)');
+
+  // RF-73's acceptance: the granted catalog, exactly what the roles grant.
+  const me = await fetch(`${address}/web/api/me`, { headers: { cookie } });
+  const who = (await me.json()) as { name: string; guild: string };
+  if (who.name !== 'Web Member' || who.guild !== GUILD_NAME) return fail(`me answered ${JSON.stringify(who)}`);
+  const catalog = await fetch(`${address}/web/api/catalog`, { headers: { cookie } });
+  const body = (await catalog.json()) as {
+    orgTools: Array<{ id: string }>;
+    people: Array<{ name: string }>;
+    roles: Array<{ id: string }>;
+  };
+  if (!body.orgTools.some((tool) => tool.id === TOOL_A_ID)) {
+    return fail(`the portal catalog carries no granted tool: ${JSON.stringify(body.orgTools)}`);
+  }
+  lines.push(`the portal catalog answers the granted tools (${body.orgTools.length}), the roster (${body.people.length}) and the roles (${body.roles.length})`);
+
+  // RF-76: a foreign origin is refused — the request carries the live cookie, so it is the origin
+  // check that answers, not the caller guard (an unauthenticated request would 401 first).
+  const foreign = await fetch(`${address}/web/api/logout`, {
+    method: 'POST',
+    headers: { cookie, origin: 'https://elsewhere.example' },
+  });
+  if (foreign.status !== 403) return fail(`a foreign origin answered ${foreign.status}`);
+  const out = await fetch(`${address}/web/api/logout`, {
+    method: 'POST',
+    headers: { cookie, origin: address },
+  });
+  if (out.status !== 204) return fail(`the sign-out answered ${out.status}`);
+  const after = await fetch(`${address}/web/api/me`, { headers: { cookie } });
+  if (after.status !== 401) return fail(`the browser's next request answered ${after.status}`);
+  lines.push('a foreign origin refused, the sign-out revoked the session, and the next request is 401');
+
+  return { lines, ok: true };
 }
 
 // ------------------------------------------------------------- the host's own rows
@@ -897,6 +1061,8 @@ async function main(): Promise<number> {
   let tools: Tools | null = null;
   let desk: Desk | null = null;
   let host: HostControl | null = null;
+  /** E07/RF-71: the second host of the run — guild B, on a port of its own. */
+  let hostB: HostControl | null = null;
   let seedMoved = false;
   let cleaned = false;
 
@@ -910,6 +1076,15 @@ async function main(): Promise<number> {
         /* the host is going away anyway */
       }
       host.kill();
+    }
+    // E07/RF-71: guild B's host goes the same way its sibling does.
+    if (hostB !== null) {
+      try {
+        if (hostB.running()) await hostB.stop();
+      } catch {
+        /* ditto */
+      }
+      hostB.kill();
     }
     desk?.stop();
     tools?.stop();
@@ -966,12 +1141,23 @@ async function main(): Promise<number> {
     // Every machine starts from nothing: a repeated run must not inherit a host row or a person.
     for (const appId of APP_IDS) rmSync(dataDir(appId), { recursive: true, force: true });
     rmSync(HOST_DATA, { recursive: true, force: true });
+    rmSync(HOST_B_DATA, { recursive: true, force: true });
     console.log(`smoke app data wiped before the run (${APP_IDS.length} app ids)`);
 
-    host = hostControl(ROOT, HOST_DATA, GUILD_NAME);
+    // RF-73: this host serves the web portal too — `WEB_UI` is the compose's own default, and it
+    // belongs to the deployment: every start of this control carries it, the desk's restarts among
+    // them, and the run's last check drives the browser half through it.
+    host = hostControl(ROOT, HOST_DATA, GUILD_NAME, { WEB_UI: '1' });
     console.log(await host.start());
     const setupCode = issueSetupCode(ROOT, host.env);
     console.log(`setup code issued by host/cli/setup-code.ts (${setupCode.length} chars, not printed)`);
+
+    // E07/RF-71: the second guild of the run — its own host process, its own data dir, its own
+    // setup code — the same launch recipe, because the proof is about two real hosts.
+    hostB = hostControl(ROOT, HOST_B_DATA, GUILD_B_NAME);
+    console.log(await hostB.start());
+    const setupCodeB = issueSetupCode(ROOT, hostB.env);
+    console.log(`guild B's setup code issued (${setupCodeB.length} chars, not printed)`);
 
     const methods = resolveMethods();
     console.log(
@@ -980,8 +1166,9 @@ async function main(): Promise<number> {
         `invite=${methods.inviteCreate ?? '(none)'} link=${methods.inviteCreateLink}`,
     );
 
+    const addressB = `http://127.0.0.1:${hostB.port}`;
     const address = `http://127.0.0.1:${host.port}`;
-    desk = startDesk({ address, setupCode, host });
+    desk = startDesk({ address, setupCode, host, addressB, guildB: GUILD_B_NAME, setupCodeB });
 
     // SP05 §6: the fixture both halves of the icon proof work with. Reading the repository's own PNG
     // here is what lets the runner hash exactly the bytes the page uploads.
@@ -1001,7 +1188,7 @@ async function main(): Promise<number> {
     for (const phase of PHASES) {
       const devPort = freePort();
       console.log(`\nphase ${phase.name} (app id ${phase.appId}, dev port ${devPort})`);
-      const result = await runPhase(phase, devPort, tools, desk.origin, address, methods, icon);
+      const result = await runPhase(phase, devPort, tools, desk.origin, address, addressB, methods, icon);
       for (const step of result.steps) {
         console.log(`${step.ok ? 'ok    ' : 'FAILED'} ${step.step} (${step.ms} ms) ${step.detail}`);
       }
@@ -1044,6 +1231,21 @@ async function main(): Promise<number> {
             return 1;
           }
         }
+      }
+    }
+
+    // RF-73–RF-76: the portal's own proof, against the same host the app synced through.
+    const webCode = desk === null ? null : desk.handedOver('web');
+    if (webCode === null) {
+      console.error('the admin phase never handed the web member an invite');
+      failed = true;
+    } else {
+      const portal = await checkWebPortal(address, { email: WEB_EMAIL, password: WEB_PASSWORD, code: webCode });
+      console.log('\nthe web portal, over the same loopback (E04 M1):');
+      for (const line of portal.lines) console.log(`  ${line}`);
+      if (!portal.ok) {
+        console.error('the web portal check failed');
+        failed = true;
       }
     }
 

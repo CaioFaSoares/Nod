@@ -19,7 +19,7 @@ Runtime: Electrobun 2.0.5 (Bun 1.4.4 empacotado), com Vite para a página. API e
 app.json              versioned app config (name, version, size, URL scheme, media usage strings)
 electrobun.config.ts  GENERATED (gitignored) from app.json by scripts/gen-electrobun-config.ts
 index.html            the single page (main window)
-src/                  frontend: api.ts (typed client), ui.ts (DOM helpers), app.ts, palette.ts, settings.ts, style.css
+src/                  frontend: api.ts (typed client), ui.ts (DOM helpers), appearance.ts (skins), app.ts, palette.ts, settings.ts, style.css, fonts/
 shared/               pure logic — no runtime, no DOM — tested with bun
 backend/              runtime-agnostic backend (app facade, sqlite, windows, host client, sync)
 host/                 the guild server (Bun + Elysia 2 beta): main.ts, app.ts, config.ts, repo.ts,
@@ -304,20 +304,29 @@ backend com um arquivo forjado).
 ### `backend/sqlite.ts` — `export function openSqlite(path: string): SqlDb` (tjs:sqlite; `foreign_keys`, `WAL`).
 
 ### `backend/repo.ts` — `export function createRepo(db: SqlDb): Repo`
-Schema (inglês): `person(id, email UNIQUE NOCASE, name, password_hash, password_salt,
-password_iterations, created_at, revoked_at)`, `role(id, name, admin)`, `person_role`, `tool(id, title,
-url, origin, icon_hash, sort_order, active, auth_json, probe_json)`, `tool_view(tool_id, idx, label,
-url, mode)`, `tool_grant(role_id, tool_id)`, `vault_item(id, person_id, tool_id, label, username,
-keychain_key, created_at, updated_at, origin, UNIQUE(person_id, tool_id))`, `invite(id, code_hash UNIQUE,
-roles_json, expires_at, used_at, created_by)`, `event(id AUTOINCREMENT, at, person_id, tool_id, type,
-url, result, detail)`, `meta(key, value)`. `migrate()` idempotente.
+Schema: a casa única é a constante `SCHEMA` de `backend/repo.ts` (e `SCHEMA_VERSION`, hoje `9`); a
+forma com as colunas que builds posteriores acrescentaram está na spec correspondente (SP05 §2,
+SP06 §2). Leia de lá, não daqui:
+`person(id, email NOCASE, name, password_hash, password_salt, password_iterations, created_at,
+revoked_at, password_check, password_algorithm)` — **sem `UNIQUE` no e-mail desde E07/RF-71**: uma
+conta é endereçada pelo id de pessoa do seu host, e a mesma pessoa pode ter conta em duas guilds;
+`role`, `person_role`, `tool(id, title, url, origin, icon_hash, sort_order, active, auth_json,
+probe_json, scope, owner_id, category)`, `tool_view`, `tool_grant`, `vault_item(id, person_id,
+tool_id, label, username, keychain_key, created_at, updated_at, origin, credential_id, scope,
+is_default)` — sem FK para `tool` e sem `UNIQUE(person_id, tool_id)` (SP05 §2, RF-65) —, `invite`,
+`event(id AUTOINCREMENT, at, person_id, tool_id, type, url, result, detail, client_id, sent_at)`,
+`meta`, `host(address PK, guild, kid, public_key, person_id, salt, snapshot, version, issued_at,
+last_sync_at, last_error, added_at)` — **uma linha por guild** (E07/RF-71) —, `host_outbox(…, address)`,
+`peer_keys`, `secret`. `migrate()` idempotente.
 ```ts
 migrate(): void                               // idempotent; also adds SP05 §2's columns by presence —
                                               // `vault_item.origin` (B9), backfilled from `tool.origin` —
                                               // and rebuilds `vault_item` without the FK to `tool` when
                                               // `PRAGMA foreign_key_list(vault_item)` still names it
                                               // (`rebuildVaultItem`, the SQLite 12-step recipe; `user_version`
-                                              // is `SCHEMA_VERSION` = 5, the guard is the constraint)
+                                              // is `SCHEMA_VERSION` = 9, the guard is the constraint);
+                                              // `rebuildHost` does the same for the per-guild `host`
+                                              // table and `rebuildPerson` for the email's `UNIQUE` (E07)
 // people
 countPeople(): number                         // INCLUDING revoked (first-account rule, P6)
 countAdmins(): number                         // active people with an admin role
@@ -457,8 +466,9 @@ export interface Personal {
 }
 export function createPersonal(deps): Personal;
 ```
-While a `host` row exists a write appends one `host_outbox` row (SP04 §4) and re-derives the
-catalog; without one it writes the local `tool`/`meta` tables.
+While a `host` row of the entered guild exists a write appends one `host_outbox` row carrying that
+guild's `address` (SP04 §4) and re-derives the catalog; without one it writes the local
+`tool`/`meta` tables.
 
 ### `backend/tool-windows.ts` — abas, janelas de ferramenta, cascata, atalhos (canonico §7, §14; E03)
 ```ts
@@ -732,12 +742,13 @@ export function createHostAdmin(connection: HostConnection): HostAdmin;
 
 | Arquivo | Faz |
 | --- | --- |
-| `index.html` | `lang="en"`, título `Nod`, `<div id="app">`, `src/app.ts`, `src/style.css`. |
+| `index.html` | `lang="en"`, título `Nod`, `<div id="app">`, `src/app.ts`, `src/style.css`. `data-skin`/`data-theme` no `<html>` escolhem o bloco de tokens da skin (RF-72); um script curto resolve o theme do sistema antes do módulo carregar, para a janela não abrir no theme errado por um instante. |
 | `src/app.ts` | Boot e roteamento. Bloqueado: tela de entrada (criar a conta de admin / entrar / entrar com convite / Touch ID / espera). Desbloqueado: **sidebar** à esquerda (logo; um ícone por ferramenta com dígito e estado — aberta, carregando, falhou; no rodapé Settings e Lock) e **conteúdo**: Home (cartões das ferramentas: abrir/focar, vistas, fechar, estado e resultado de login) ou Settings (`src/settings.ts`). Teclado: ⌘/Ctrl+1..9 abre, ⌘/Ctrl+K paleta, ⌘/Ctrl+, Settings. Ouve `session`, `tools`, `catalog`, `palette`, and the connected events `host`, `join` (a `nod://join` invite) and `update` (the new-version notice). A `host` push drives the "offline" badge and the signed-out notice; a "Join a guild" path lives on the blocked screen beside create-account and invite. |
 | `src/palette.ts` | `export function openPalette(ctx): void` — overlay dentro da janela com busca (subsequência, sem acento) sobre ferramentas, vistas e ações (Home, cada aba de Settings, Lock, Quit); ↑/↓/Enter/Esc; foco preso enquanto aberta. |
 | `src/tabs.ts` | E03: a visão de abas do painel central — a faixa das abas abertas, a barra que age na ativa e o slot onde o backend deita a aba docked. `tabsApi(deps)` é a metade da página dos métodos `tabs.*` (uma definição por ação, compartilhada pela faixa, pela paleta e pelo teclado); `mountTabs(root, ctx)` monta a visão e devolve `{ update, destroy }`; `reportSlot(rect)` manda o retângulo do slot ao backend; `activeTab(state)` é a aba docked que a faixa, a barra e a paleta miram. `src/app.ts` a monta só quando o runtime permite posicionar janelas — não há modo escolhido (§22 "Seamless tabs: always inside, detach on demand"). |
-| `src/settings.ts` | `export function mountSettings(root: HTMLElement, ctx: { session: SessionState; info: AppInfo; tab?: SettingsTab }): { setTab(tab: SettingsTab): void; update(session: SessionState): void; destroy(): void }`, com `export type SettingsTab = 'account' \| 'hosts' \| 'vault' \| 'tools' \| 'roles' \| 'people' \| 'activity' \| 'catalog'`. Todas as pessoas: Account (trocar senha, habilitar/desabilitar biometria, versão, atualização; e, com host, os dispositivos com Revoke de O1, a impressão digital da chave própria de K1 e os colegas com o aviso `key changed` de K2) e Vault (salvar/revelar 10 s/remover; export/import com `tiny.dialog`; e o compartilhamento de K4–K9: inbox, escopo, Send, holders com Remove e o chip `rotation pending`). **Hosts** (todos, SP05 §4): without a host, address → `host.discover` → guild + fingerprint → email + code (or password) → set password; with a host, guild, address, fingerprint, last sync, pending writes, "Sync now", "Remove host" (keep-personal), and a "Keep your local tools" step after a join (B8b). Só admin: Tools (colar endereço → `catalog.probe` → formulário pré-preenchido; vistas, papéis, `noFill`; aviso quando a origin não está em `info.gateOrigins`; "usually signs in via …" de `catalog.get`), Roles (CRUD + concessões), People (papéis, revogar, emitir convite mostrando o código uma vez), Activity (lista + exportar JSONL; sent vs pending from `events.syncStatus` while a host exists), Catalog (exportar/importar seed com modo merge/overwrite). Só admin, conectado: the four admin tabs read/write the host through the same RPC and a "publish local tools" card calls `host.bootstrap` once. |
-| `src/style.css` | Tema escuro sóbrio, monospace, contraste alto, `:focus-visible`. Classes usadas por `src/ui.ts`: `.button .button-primary .button-danger .button-ghost .field .field-label .field-hint .input .message .message-error .message-ok .message-info`. |
+| `src/settings.ts` | `export function mountSettings(root: HTMLElement, ctx: { session: SessionState; info: AppInfo; tab?: SettingsTab }): { setTab(tab: SettingsTab): void; update(session: SessionState): void; destroy(): void }`, com `export type SettingsTab = 'account' \| 'hosts' \| 'vault' \| 'tools' \| 'roles' \| 'people' \| 'activity' \| 'catalog'`. Todas as pessoas: Account (trocar senha, habilitar/desabilitar biometria, **Appearance** — o toggle de estilo de RF-72: skin, theme e cores customizadas —, versão, atualização; e, com host, os dispositivos com Revoke de O1, a impressão digital da chave própria de K1 e os colegas com o aviso `key changed` de K2) e Vault (salvar/revelar 10 s/remover; export/import com `tiny.dialog`; e o compartilhamento de K4–K9: inbox, escopo, Send, holders com Remove e o chip `rotation pending`). **Hosts** (todos, SP05 §4): without a host, address → `host.discover` → guild + fingerprint → email + code (or password) → set password; with a host, guild, address, fingerprint, last sync, pending writes, "Sync now", "Remove host" (keep-personal), and a "Keep your local tools" step after a join (B8b). Só admin: Tools (colar endereço → `catalog.probe` → formulário pré-preenchido; vistas, papéis, `noFill`; aviso quando a origin não está em `info.gateOrigins`; "usually signs in via …" de `catalog.get`), Roles (CRUD + concessões), People (papéis, revogar, emitir convite mostrando o código uma vez), Activity (lista + exportar JSONL; sent vs pending from `events.syncStatus` while a host exists), Catalog (exportar/importar seed com modo merge/overwrite). Só admin, conectado: the four admin tabs read/write the host through the same RPC and a "publish local tools" card calls `host.bootstrap` once. |
+| `src/style.css` | A folha única da janela, com as duas skins (RF-72): quatro blocos de tokens — Atrius `light`/`dark` (tinta, `brand`, `state-*`, cantos retos, mono) e Nod Sober `light`/`dark` (zinc quente, um verde de acento, anéis de 1px, raios suaves, Rubik) — e, abaixo deles, regras que leem só os tokens internos, então as duas vestem o mesmo DOM. `data-skin`/`data-theme` em `<html>` selecionam o bloco; `src/appearance.ts` escreve uma cor customizada como variável inline, que vence o bloco. Rubik mora em `src/fonts/` (SIL OFL, `OFL-Rubik.txt`) e é copiada pelo Vite. Classes usadas por `src/ui.ts`: `.button .button-primary .button-danger .button-ghost .field .field-label .field-hint .input .message .message-error .message-ok .message-info`. |
+| `src/appearance.ts` | A metade da página do toggle de estilo (RF-72): `applyAppearance(state)` escreve `data-skin`/`data-theme` em `<html>` e as cores customizadas do theme em tela como variáveis inline, limpando antes as que o estado anterior pôs; `auto` segue `prefers-color-scheme` e re-veste a janela quando o sistema muda (`nod:appearance`); `offeredColorSlots`/`colorOfSlot`/`resolvedTheme` são o que o card de Settings desenha. Nada é guardado na página: o estado vem de `nod.info` e de `nod.setAppearance`. |
 | `src/ui.ts` | Helpers de DOM (já escrito pelo coordenador; não editar). |
 
 ## 6. Build e dev

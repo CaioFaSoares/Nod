@@ -12,6 +12,11 @@ const LOOPBACK_IPV4 = /^127(\.\d{1,3}){3}$/;
 const FORBIDDEN_KEY = /password|secret|token|senha|segredo/i;
 /** RF-62: the longest category name the guild may give a tool. */
 export const CATEGORY_MAX_LENGTH = 40;
+/** RF-77: the longest tag the guild may give a tool, and how many a tool may carry. */
+export const TAG_MAX_LENGTH = 24;
+export const TAG_MAX_COUNT = 12;
+/** RF-78: the longest org-account label a tool may carry (an email or a team name is far shorter). */
+export const ORG_ACCOUNT_MAX_LENGTH = 120;
 /** A control character in a category name: it is printed in the sidebar and in Home, so refused. */
 const CATEGORY_CONTROL = /[\u0000-\u001f\u007f]/;
 
@@ -132,6 +137,42 @@ function validateCategory(v: unknown): string | null {
   return name;
 }
 
+/**
+ * RF-77: the tool's tags. Each is trimmed, an empty one is dropped, a duplicate is kept once, and
+ * more than `TAG_MAX_COUNT` or one longer than `TAG_MAX_LENGTH` characters, or with a control
+ * character, is refused — the tags are printed on cards and typed into the library's search.
+ */
+function validateTags(v: unknown): string[] {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v)) throw new Error('invalid tags');
+  const out: string[] = [];
+  for (const item of v) {
+    if (typeof item !== 'string') throw new Error('invalid tags');
+    const name = item.trim();
+    if (name === '') continue;
+    if (name.length > TAG_MAX_LENGTH || CATEGORY_CONTROL.test(name)) throw new Error('invalid tags');
+    if (!out.includes(name)) out.push(name);
+  }
+  if (out.length > TAG_MAX_COUNT) throw new Error('invalid tags');
+  return out;
+}
+
+/**
+ * RF-78: the account the whole guild uses for this tool. A label — an email, a team name — trimmed,
+ * empty meaning "the guild wrote none". It is information, never a secret: the password stays in
+ * the app's vault, and this is why no validator here refuses a value for looking like an account.
+ */
+function validateOrgAccount(v: unknown): string | null {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== 'string') throw new Error('invalid org account');
+  const label = v.trim();
+  if (label === '') return null;
+  if (label.length > ORG_ACCOUNT_MAX_LENGTH || CATEGORY_CONTROL.test(label)) {
+    throw new Error('invalid org account');
+  }
+  return label;
+}
+
 /** Normalizes a catalog entry, applying the defaults and refusing what does not serve. */
 export function validateEntry(e: unknown): Entry {
   const raw = record(e, 'invalid entry');
@@ -165,6 +206,8 @@ export function validateEntry(e: unknown): Entry {
     id,
     title,
     category: validateCategory(raw.category),
+    tags: validateTags(raw.tags),
+    orgAccount: validateOrgAccount(raw.orgAccount),
     url,
     icon: raw.icon === undefined || raw.icon === null ? null : requiredText(raw.icon, 'invalid icon'),
     order,
@@ -292,6 +335,27 @@ export function categoryOf(entry: Entry): string | null {
   const name = entry.category;
   if (typeof name !== 'string') return null;
   const trimmed = name.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+/**
+ * RF-77: `Entry.tags` as every display reads it — the guild's names, never `undefined`, so the
+ * library's cards and search never check the field's presence. The one place that decides it.
+ */
+export function tagsOf(entry: Entry): string[] {
+  const tags = entry.tags;
+  if (!Array.isArray(tags)) return [];
+  return tags.filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '');
+}
+
+/**
+ * RF-78: `Entry.orgAccount` as every display reads it — the guild's label, or `null`. The one place
+ * that decides it, beside `categoryOf` and `tagsOf`.
+ */
+export function orgAccountOf(entry: Entry): string | null {
+  const label = entry.orgAccount;
+  if (typeof label !== 'string') return null;
+  const trimmed = label.trim();
   return trimmed === '' ? null : trimmed;
 }
 

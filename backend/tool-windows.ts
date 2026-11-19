@@ -25,8 +25,11 @@ import { newCascade, stepCascade } from '../shared/login-cascade';
 import { isIdentityPath } from '../shared/probe';
 import { combo, ctrlCombo, digits, shiftCombo } from '../shared/shortcuts';
 import {
+  descendantsOf,
   insertAfter,
+  insertAsChild,
   linkWindowId,
+  moveChild,
   neighbourAfterClose,
   nextLinkNumber,
   nextTabNumber,
@@ -181,6 +184,12 @@ export interface ToolWindows {
   activate(id: string): Promise<ToolsState>;
   /** `tabs.close` (⌘W): closes one tab; an ad-hoc one is forgotten (RF-66) */
   closeTab(id: string): ToolsState;
+  /**
+   * `tabs.move` (1.0.0, nested tabs): one child before another of the same opener — the drag of a
+   * nested row. The child travels with its own descendants; anything that is not the same parent's
+   * child is refused.
+   */
+  moveTab(id: string, before: string | null): ToolsState;
   /** `tabs.closeAll` (0.7.0c): closes every tab of the strip, docked or detached */
   closeAllTabs(): ToolsState;
   /** `tabs.next` (⌃Tab / ⌃⇧Tab): the next or previous tab of the strip, wrapping */
@@ -228,6 +237,11 @@ interface TabWindow {
   foreign: boolean;
   /** RF-66: not saved, not restored, no method, no autofill — an address of no catalog at all */
   adhoc: boolean;
+  /**
+   * 1.0.0 (nested tabs): the tab whose page opened this one — the adopted popup, a link of a tool's
+   * page. `null` for a tool's own tab, a view and a hand-opened link.
+   */
+  parentId: string | null;
   /** false: detached — its own framed window, off the panel (RF-51) */
   docked: boolean;
   /** whether we last showed it; a hidden tab keeps its page alive (RF-50) */
@@ -856,6 +870,9 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       cancelFillCheck: null,
       foreign: spec.foreign,
       adhoc: spec.toolId === null,
+      // A tab the Nod itself opens — the tool's own, a view, a link by hand — nests under nobody;
+      // only an adopted popup carries the opener (1.0.0, nested tabs).
+      parentId: null,
       docked,
       shown: true,
       placed: null,
@@ -1154,10 +1171,18 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     return tab.view === null ? entry.title : viewTitle(entry, tab.view);
   }
 
+  /** 1.0.0: the strip's parent links, for the pure order helpers of `shared/tabs.ts`. */
+  function parentOf(): Map<string, string | null> {
+    const links = new Map<string, string | null>();
+    for (const tab of tabs.values()) links.set(tab.windowId, tab.parentId);
+    return links;
+  }
+
   function tabState(tab: TabWindow): TabState {
     return {
       id: tab.windowId,
       toolId: tab.toolId,
+      parentId: tab.parentId,
       title: tabTitle(tab),
       // RF-69: the iframe loads the full address; a window tab keeps the audit form.
       url: auditUrl(tab.url) ?? '',
@@ -1491,7 +1516,12 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     return 'external';
   }
 
-  /** E03 (RF-66): the popup the site opened becomes a docked ad-hoc tab right after its opener. */
+  /**
+   * E03 (RF-66): the popup the site opened becomes a docked ad-hoc tab **nested under its opener**
+   * (1.0.0, §22 "Nested tabs under the opener"): the opener is the parent the strip indents the
+   * row under, and the flat `order` keeps the family contiguous — right after the opener, after
+   * its last descendant when the family already has members.
+   */
   function adopt(id: string, opener: string, url: string): void {
     if (tabs.has(id)) return;
     const tab: TabWindow = {
@@ -1507,12 +1537,13 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       cancelFillCheck: null,
       foreign: false,
       adhoc: true,
+      parentId: opener,
       docked: true,
       shown: true,
       placed: null,
     };
     tabs.set(id, tab);
-    order = insertAfter(order, opener, id);
+    order = insertAsChild(order, parentOf(), opener, id);
     touch(id);
     active = id;
     const window = handle(id);
@@ -1742,18 +1773,53 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     return state();
   }
 
-  /** E03 (⌘W, `tabs.close`): one tab goes away and its neighbour takes the slot (RF-49). */
+  /**
+   * E03 (⌘W, `tabs.close`): one tab goes away and its neighbour takes the slot (RF-49). 1.0.0
+   * (nested tabs): a parent's close takes its family with it — a subject leaves whole — and the
+   * heir is the docked neighbour of the family block, never a tab that just left.
+   */
   function closeTab(id: string): ToolsState {
     const tab = tabs.get(id);
     if (tab === undefined) throw new Error('unknown tab');
-    const heir = successorTab(id)?.windowId ?? null;
-    dropTab(id);
-    closeWindow(id);
-    if (active === null) active = heir;
+    const family = [id, ...descendantsOf(order, parentOf(), id)];
+    const firstAt = order.indexOf(id);
+    const right = firstAt + family.length < order.length ? order[firstAt + family.length] : null;
+    const left = firstAt - 1 >= 0 ? order[firstAt - 1] : null;
+    for (const member of family) {
+      if (dropTab(member) !== null) closeWindow(member);
+    }
+    if (active === null) {
+      // `successorTab`'s rule on the family-less strip: the block's right docked neighbour, else
+      // its left, else the first docked tab left (a detached neighbour has no place on the panel).
+      const remaining = (candidate: string | null): TabWindow | null => {
+        const found = candidate === null ? undefined : tabs.get(candidate);
+        return found === undefined ? null : found;
+      };
+      const heir =
+        remaining(right)?.docked === true
+          ? right
+          : remaining(left)?.docked === true
+            ? left
+            : (order.find((candidate) => tabs.get(candidate)?.docked === true) ?? null);
+      active = heir;
+    }
     updateHotkeys();
     syncDocked();
     updatePoll();
     persist();
+    publish();
+    return state();
+  }
+
+  /**
+   * `tabs.move` (1.0.0, nested tabs): the drag of a nested row — one child before another of the
+   * same opener, the branch traveling with it. The pure rule is `shared/tabs.ts`'s `moveChild`;
+   * what stays here is the live list and the one refusal it answers.
+   */
+  function moveTab(id: string, before: string | null): ToolsState {
+    const moved = moveChild(order, parentOf(), id, before);
+    if (moved === null) throw new Error('a nested tab moves only inside its opener');
+    order = moved;
     publish();
     return state();
   }
@@ -2109,5 +2175,6 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     openLink,
     tabForSave,
     adoptSavedTab,
+    moveTab,
   };
 }

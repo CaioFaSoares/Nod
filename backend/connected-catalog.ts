@@ -19,6 +19,7 @@
 import { visibleEntries } from '../shared/catalog';
 import { applyOutbox, attachPersonalViews, orgToolsUsable, parseSnapshot, sidebarOrder } from '../shared/host-merge';
 import type { OutboxOp, SnapshotRows } from '../shared/host-merge';
+import type { SnapshotPerson } from '../shared/host-api';
 import type { Entry, Id, Role } from '../shared/types';
 
 /**
@@ -53,6 +54,11 @@ export interface EffectiveCatalog {
   favorites: Id[];
   /** The entries the person sees, in SP05 §4's order — favorites, org, personal. */
   entries: Entry[];
+  /**
+   * RF-79: the guild's roster as the snapshot carried it (SP04 §2's `people`) — a name, the roles
+   * and nothing else, for the library's organization views.
+   */
+  people: SnapshotPerson[];
 }
 
 export interface ConnectedCatalogDeps {
@@ -81,6 +87,8 @@ export interface ConnectedCatalog {
   entries(): Entry[];
   /** The guild's roles; empty without an effective catalog. */
   roles(): Role[];
+  /** RF-79: the guild's roster; empty without an effective catalog. */
+  people(): SnapshotPerson[];
 }
 
 /** SP04 §2's body, or `null` when the bytes are not that document. */
@@ -164,6 +172,9 @@ export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCat
       roles: rows.roles,
       favorites: half.favorites,
       entries: attachPersonalViews(ordered, half.personalViews),
+      // RF-79: the roster only while the org half is being shown — the same window the roles and
+      // the org tools answer inside (RF-37/RF-39).
+      people: usable ? rows.people : [],
     };
   }
 
@@ -228,5 +239,11 @@ export function createConnectedCatalog(deps: ConnectedCatalogDeps): ConnectedCat
     return value === null ? [] : value.roles;
   }
 
-  return { refresh, current: effective, entries, roles };
+  /** RF-79: the guild's roster — a name and the roles, for the library's organization views. */
+  function people(): SnapshotPerson[] {
+    const value = effective();
+    return value === null ? [] : value.people;
+  }
+
+  return { refresh, current: effective, entries, roles, people };
 }

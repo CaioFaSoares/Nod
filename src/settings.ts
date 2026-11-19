@@ -4,16 +4,20 @@
 // only through src/api.ts; the only other runtime surface it touches is `tiny.dialog`, to choose
 // the file of an export or import (docs/arquitetura.md §2).
 import { call, errorMessage, on } from './api';
+import { applyAppearance, colorOfSlot, offeredColorSlots, resolvedTheme } from './appearance';
 import { mountJoinFlow } from './join';
 import { attemptGate, runGate } from './vault-gate';
 import { button, clear, el, field, iconButton, input, message } from './ui';
-import { categoryOf, groupByCategory, originOf, slug } from '../shared/catalog';
+import { categoryOf, groupByCategory, orgAccountOf, originOf, slug, tagsOf } from '../shared/catalog';
 import { toBase64url } from '../shared/encoding';
 import type { DeviceSession, GuildInvite, ShareKind, ShareScope } from '../shared/host-api';
 import type {
   AppIconChoice,
   AppIconState,
   AppInfo,
+  AppearanceState,
+  SkinId,
+  ThemeMode,
   AuditEvent,
   CredentialHolders,
   Entry,
@@ -255,6 +259,10 @@ export function mountSettings(
     order: string;
     /** RF-62: the display category of the org tool; '' means none (the validator answers `null`). */
     category: string;
+    /** RF-77: the tags as the admin typed them, comma-separated; the validator trims and dedupes. */
+    tags: string;
+    /** RF-78: the org's default account label; '' means none. */
+    orgAccount: string;
     roles: Id[];
     active: boolean;
     views: View[];
@@ -372,8 +380,10 @@ export function mountSettings(
      * matches — and no secret, which is typed again on the form.
      */
     vaultEdit: null as { itemId: Id; toolId: Id } | null,
-    /** SP05 §3: the one host, as `host.state` or the push `host` last answered. */
+    /** SP05 §3: the entered guild, as `host.state` or the push `host` last answered. */
     host: ctx.host ?? null,
+    /** E07/RF-71: every guild this Nod holds, as `host.list` answers — the Hosts tab lists them. */
+    hosts: [] as HostState[],
     /**
      * O1: this person's devices, as the Account tab read them (`host.sessions`). Empty while the
      * guild is not connected, and after a read that failed (the screen shows the reason).
@@ -399,6 +409,8 @@ export function mountSettings(
     join: ctx.join ?? null,
     /** SP05 §6: the app-icon choice and whether a guild icon is available, as `nod.appIcon` answers. */
     appIcon: null as AppIconState | null,
+    /** 2026-11-19 style toggle: this machine's look, from `nod.info` and `nod.setAppearance`. */
+    appearance: ctx.info.appearance,
     /**
      * SP05 §6: the PNG an admin picked in this session — the base64url the upload takes, and the
      * data URI of the preview. Only the host holds the stored icon's bytes: the page is handed the
@@ -707,6 +719,8 @@ export function mountSettings(
         case 'hosts':
           // SP05 §3: the tab reads the state itself instead of waiting for a push.
           state.host = await call('host.state');
+          // E07/RF-71: every guild held, so the tab can list them instead of drawing "the" one.
+          state.hosts = await call('host.list');
           // B8a: whether the publish offer still applies is a question about the entries the
           // snapshot carries (RF-40), so the tab reads the same list the sidebar shows.
           state.entries = await call('catalog.list');
@@ -803,13 +817,14 @@ export function mountSettings(
 
   /**
    * SP05 §4's "with a host" half: guild, address, fingerprint, last sync, pending writes, "Sync
-   * now", "Remove host".
+   * now", "Remove host". E07/RF-71: one card per guild; only the entered one can be synced, because
+   * a run talks to the guild the unlocked person's account belongs to (§2).
    */
-  function hostCard(host: HostState): HTMLElement {
+  function hostCard(host: HostState, active: boolean): HTMLElement {
     const card = el(
       'section',
       { class: 'card stack' },
-      el('h2', {}, host.guild ?? 'Guild'),
+      el('h2', {}, `${host.guild ?? 'Guild'}${active ? '' : ' (not entered)'}`),
       hostLine('Address', host.address ?? '—'),
       hostLine('Fingerprint', host.fingerprint ?? '—'),
       hostLine('Last sync', host.lastSyncAt ?? 'never'),
@@ -841,13 +856,24 @@ export function mountSettings(
       card.append(el('p', { class: 'message message-error' }, host.lastError));
     }
     card.append(
-      el('div', { class: 'row' }, button('Sync now', () => void syncNow(), { kind: 'primary' })),
+      el(
+        'div',
+        { class: 'row' },
+        active
+          ? button('Sync now', () => void syncNow(), { kind: 'primary' })
+          : el(
+              'p',
+              { class: 'field-hint' },
+              'Enter this guild from the lock screen to sync it — one guild is synced at a time.',
+            ),
+      ),
     );
     return card;
   }
 
-  function removeCard(host: HostState): HTMLElement {
+  function removeCard(host: HostState, active = true): HTMLElement {
     let keepPersonal = true;
+    const address = host.address ?? '';
     const keep = checkbox('keepPersonal', true, (on) => {
       keepPersonal = on;
     });
@@ -858,7 +884,9 @@ export function mountSettings(
       el(
         'p',
         { class: 'muted' },
-        `Nod goes back to its local catalog and stops showing anything from ${host.guild ?? 'the guild'}.`,
+        active
+          ? `Nod goes back to its local catalog and stops showing anything from ${host.guild ?? 'the guild'}.`
+          : `Nod stops holding ${host.guild ?? 'this guild'} — the others stay as they are.`,
       ),
       checkboxField('Keep my personal tools', keep),
       el(
@@ -869,7 +897,7 @@ export function mountSettings(
       el(
         'div',
         { class: 'row' },
-        button('Remove host', () => void removeHost(keepPersonal), { kind: 'danger' }),
+        button('Remove host', () => void removeHost(address, keepPersonal), { kind: 'danger' }),
       ),
     );
   }
@@ -1003,6 +1031,13 @@ export function mountSettings(
     );
   }
 
+  /** E07/RF-71: the guilds held, the entered one first — `host.list`, or the one the push carried. */
+  function guildCards(): HostState[] {
+    const list = state.hosts.length > 0 ? state.hosts : state.host === null ? [] : [state.host];
+    const active = state.host === null ? null : state.host.address;
+    return [...list].sort((a, b) => Number(b.address === active) - Number(a.address === active));
+  }
+
   function viewHosts(): HTMLElement {
     const box = el('section', { class: 'stack' });
     const host = state.host;
@@ -1010,7 +1045,8 @@ export function mountSettings(
       box.append(el('p', { class: 'muted' }, 'Reading the host…'));
       return box;
     }
-    if (host.status === 'none') {
+    const guilds = guildCards();
+    if (guilds.length === 0 || host.status === 'none') {
       box.append(
         el(
           'p',
@@ -1021,18 +1057,33 @@ export function mountSettings(
       );
       return box;
     }
-    box.append(hostCard(host));
-    // SP05 §6: the guild's icon is the admin's, and it belongs to the guild's own card. Both this
-    // card and the two offers below reach the host, so a disconnected Nod (O2, owner 2026-10-17)
-    // offers none of them: its Hosts tab is the guild's card, and the way back is an update.
-    if (isAdmin() && !host.updateRequired) box.append(guildIconCard());
-    const offer = publishOffer();
-    if (offer !== null) box.append(offer);
-    const leftovers = leftoverCard();
-    if (leftovers !== null) box.append(leftovers);
-    // SP04 §3: signed out asks for a sign-in; on the same screen, the host can also be removed.
-    if (host.status === 'signed-out') box.append(joinSection('signin'));
-    box.append(removeCard(host));
+    // E07/RF-71: a card per guild. The admin cards (icon, publish offer, leftovers) are the entered
+    // guild's, because the calls behind them reach that guild; the others offer their own status
+    // and removal. "Sync now" is only the entered guild's — a session syncs one guild (§2).
+    for (const guild of guilds) {
+      const active = guild.address === host.address;
+      box.append(hostCard(guild, active));
+      if (!active) {
+        box.append(removeCard(guild, false));
+        continue;
+      }
+      // SP05 §6: the guild's icon is the admin's, and it belongs to the guild's own card. Both this
+      // card and the two offers below reach the host, so a disconnected Nod (O2, owner 2026-10-17)
+      // offers none of them: its Hosts tab is the guild's card, and the way back is an update.
+      if (isAdmin() && !guild.updateRequired) box.append(guildIconCard());
+      const offer = publishOffer();
+      if (offer !== null) box.append(offer);
+      const leftovers = leftoverCard();
+      if (leftovers !== null) box.append(leftovers);
+      // SP04 §3: signed out asks for a sign-in; on the same screen, the guild can also be removed.
+      if (guild.status === 'signed-out') box.append(joinSection('signin'));
+      box.append(removeCard(guild));
+    }
+    // E07/RF-71: another guild is joined here — the flow adds a row and never replaces one.
+    box.append(
+      el('h2', {}, 'Join another guild'),
+      joinSection('join'),
+    );
     return box;
   }
 
@@ -1085,6 +1136,7 @@ export function mountSettings(
     state.status = null;
     try {
       state.host = await call('host.syncNow');
+      state.hosts = await call('host.list');
       state.status = { kind: 'ok', text: 'Synced' };
     } catch (e) {
       state.status = { kind: 'error', text: errorMessage(e) };
@@ -1092,10 +1144,11 @@ export function mountSettings(
     render();
   }
 
-  async function removeHost(keepPersonal: boolean): Promise<void> {
+  async function removeHost(address: string, keepPersonal: boolean): Promise<void> {
     state.status = null;
     try {
-      state.host = await call('host.remove', { keepPersonal });
+      state.host = await call('host.remove', { address, keepPersonal });
+      state.hosts = await call('host.list');
       // A host that left takes the offer's history with it: another host starts from its own state.
       state.publishClosed = false;
       // B8b: the leftovers were that host's; without one there is nothing to offer.
@@ -1221,6 +1274,107 @@ export function mountSettings(
   }
 
   // ---------------------------------------------------------------- tab: account
+
+  /**
+   * 2026-11-19 style toggle: the skin, the theme and the colours of this machine's window.
+   * It is on Account (every person sees it) and changes nothing else: no host call, no secret, one
+   * `store.json` preference. The colours are the ones of the theme on screen — under Automatic
+   * that is the system's own — and a skin only offers the slots it actually paints with
+   * (`src/appearance.ts` owns the map).
+   */
+  function styleCard(): HTMLElement {
+    const appearance = state.appearance;
+    const skin = select(
+      'skin',
+      [
+        { value: 'atrius', label: 'Atrius' },
+        { value: 'sober', label: 'Nod Sober' },
+      ],
+      appearance.skin,
+      (value) => void saveAppearance({ ...state.appearance, skin: value as SkinId }),
+    );
+    const theme = select(
+      'theme',
+      [
+        { value: 'auto', label: 'Automatic' },
+        { value: 'light', label: 'Light' },
+        { value: 'dark', label: 'Dark' },
+      ],
+      appearance.theme,
+      (value) => void saveAppearance({ ...state.appearance, theme: value as ThemeMode }),
+    );
+
+    const themeName = resolvedTheme();
+    const colors = appearance.colors[themeName];
+    const grid = el('div', { class: 'color-grid' });
+    for (const { slot, label, hint } of offeredColorSlots(appearance.skin)) {
+      const picker = el('input', {
+        class: 'color-input',
+        attrs: { type: 'color', name: slot },
+        aria: { label: `${label} colour` },
+      });
+      // The picker always carries a colour: the custom one in force, or the skin's own right now.
+      picker.value = colors[slot] ?? colorOfSlot(slot);
+      picker.addEventListener('change', () => {
+        void saveAppearance({
+          ...state.appearance,
+          colors: {
+            ...state.appearance.colors,
+            [themeName]: { ...state.appearance.colors[themeName], [slot]: picker.value },
+          },
+        });
+      });
+      const cell = el(
+        'div',
+        { class: 'color-cell' },
+        el('span', { class: 'field-label' }, label),
+        el('div', { class: 'row' }, picker, colors[slot] === undefined ? el('span', { class: 'muted' }, 'skin default') : null),
+        el('span', { class: 'field-hint' }, hint),
+      );
+      grid.append(cell);
+    }
+
+    const reset = button(
+      'Reset colours',
+      () =>
+        void saveAppearance({
+          ...state.appearance,
+          colors: { ...state.appearance.colors, [themeName]: {} },
+        }),
+      { kind: 'ghost' },
+    );
+    reset.disabled = Object.keys(colors).length === 0;
+
+    return el(
+      'section',
+      { class: 'card stack' },
+      el('h2', {}, 'Style'),
+      el('p', { class: 'muted' }, 'How this machine’s window looks. It is local to this machine and never shared with the guild.'),
+      el('div', { class: 'row' }, field('Skin', skin), field('Theme', theme)),
+      el(
+        'p',
+        { class: 'field-hint' },
+        appearance.theme === 'auto'
+          ? `Colours of the ${themeName} theme — Automatic follows your system, which is ${themeName} right now.`
+          : `Colours of the ${themeName} theme.`,
+      ),
+      grid,
+      el('div', { class: 'row' }, reset),
+    );
+  }
+
+  /** The one write of the style toggle: the backend stores it, the page wears the answer. */
+  async function saveAppearance(next: AppearanceState): Promise<void> {
+    state.status = null;
+    try {
+      state.appearance = await call('nod.setAppearance', { appearance: next });
+      applyAppearance(state.appearance);
+      state.status = { kind: 'ok', text: 'Style saved' };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
 
   /**
    * SP05 §6: the app icon of this machine — the bundle's, or the guild's PNG. One choice per
@@ -1608,7 +1762,8 @@ export function mountSettings(
         changed ? 'Verify people — key changed' : attention ? `Verify people — keys ${keyStatus}` : 'Verify people',
         [keyFingerprintCard(), colleaguesCard()], changed || attention));
     }
-    box.append(disclosure('appearance', 'App icon', [appIconCard()]));
+    // 2026-11-19: the style toggle leads the appearance disclosure; the app icon follows it.
+    box.append(disclosure('appearance', 'Appearance', [styleCard(), appIconCard()]));
     return box;
   }
 
@@ -2898,6 +3053,8 @@ export function mountSettings(
       title: '',
       order: '0',
       category: '',
+      tags: '',
+      orgAccount: '',
       roles: [],
       active: true,
       views: [],
@@ -2921,6 +3078,8 @@ export function mountSettings(
       title: entry.title,
       order: String(entry.order),
       category: categoryOf(entry) ?? '',
+      tags: tagsOf(entry).join(', '),
+      orgAccount: orgAccountOf(entry) ?? '',
       roles: [...entry.roles],
       active: entry.active,
       views: entry.views.map((view) => ({ ...view })),
@@ -2982,13 +3141,32 @@ export function mountSettings(
     category.addEventListener('input', (event) => {
       editor.category = (event.target as HTMLInputElement).value;
     });
+    // RF-77: the tags, comma-separated — the validator trims, drops empties and keeps twelve.
+    const tags = input('tags', { value: editor.tags, placeholder: 'e.g. meetings, video' });
+    tags.addEventListener('input', (event) => {
+      editor.tags = (event.target as HTMLInputElement).value;
+    });
+    // RF-78: the account the whole guild uses for the tool — a plain label, never a secret.
+    const orgAccount = input('org-account', {
+      value: editor.orgAccount,
+      placeholder: 'e.g. team@guild.example',
+    });
+    orgAccount.addEventListener('input', (event) => {
+      editor.orgAccount = (event.target as HTMLInputElement).value;
+    });
     card.append(
       el(
         'div',
         { class: 'row' },
         field('Category', category, 'Optional — groups tools for everyone'),
+        field('Tags', tags, 'Optional — comma-separated, searchable in the library'),
       ),
       categoryDatalist(),
+      el(
+        'div',
+        { class: 'row' },
+        field('Guild account', orgAccount, 'Optional — the account everyone uses; the password stays in the vault'),
+      ),
     );
 
     const preview = editor.icon !== null ? iconDataUri(editor.icon) : editor.savedIcon;
@@ -3312,6 +3490,12 @@ export function mountSettings(
       title: editor.title.trim(),
       // RF-62: whitespace is no category; the validator trims the name it receives.
       category: editor.category.trim() === '' ? null : editor.category,
+      // RF-77/RF-78: the validator trims the tags and the label it receives.
+      tags: editor.tags
+        .split(',')
+        .map((tag) => tag.trim())
+        .filter((tag) => tag !== ''),
+      orgAccount: editor.orgAccount.trim() === '' ? null : editor.orgAccount.trim(),
       url: editor.url.trim(),
       // The saved icon only changes when the admin picked another one; then it goes explicit.
       icon: editor.iconChanged ? null : editor.savedIcon,
@@ -4284,6 +4468,15 @@ export function mountSettings(
     else if (state.tab === 'vault') void load();
   });
 
+  /**
+   * 2026-11-19 style toggle: under Automatic the theme follows the system, so a system change
+   * while the Appearance disclosure is open redraws the colours it is editing.
+   */
+  const onAppearance = (): void => {
+    if (alive && state.tab === 'account') render();
+  };
+  window.addEventListener('nod:appearance', onAppearance);
+
   state.tab = ctx.tab !== undefined && canShow(ctx.tab) ? ctx.tab : defaultTab();
   render();
   void load();
@@ -4306,6 +4499,7 @@ export function mountSettings(
       if (toastTimer !== null) window.clearTimeout(toastTimer);
       offCatalog();
       offHost();
+      window.removeEventListener('nod:appearance', onAppearance);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       hideRevealed();
       clear(root);

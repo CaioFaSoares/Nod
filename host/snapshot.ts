@@ -130,16 +130,22 @@ function viewOf(row: HostView): View {
   };
 }
 
-/** An entry row as `Entry`: the host's own columns (`updatedAt`, `ord`) stay out of the wire shape. */
-function entryOf(row: HostTool): Entry {
+/**
+ * An entry row as `Entry`: the host's own columns (`updatedAt`, `ord`) stay out of the wire shape.
+ * Exported because the web portal answers the same shape (`host/routes/web.ts`) — the mapping of a
+ * host row to what a client reads stays one definition.
+ */
+export function entryOf(row: HostTool): Entry {
   return {
     id: row.id,
     scope: row.scope,
     ownerId: row.ownerId,
     title: row.title,
-    // RF-62: the guild's category travels with the tool, `null` while it filed it nowhere. A
-    // personal entry's is always `null` (the personal routes never write one).
+    // RF-62: the guild's category, `null` while it filed the tool nowhere.
     category: row.category,
+    // RF-77/RF-78: the library's two catalog fields — absent only in a row written before them.
+    ...(row.tags === null || row.tags === undefined ? {} : { tags: row.tags }),
+    ...(row.orgAccount === null || row.orgAccount === undefined ? {} : { orgAccount: row.orgAccount }),
     url: row.url,
     icon: row.icon,
     order: row.order,
@@ -150,8 +156,11 @@ function entryOf(row: HostTool): Entry {
   };
 }
 
-/** A personal view row as `PersonalView`: it names the entry it hangs under and its own id (SP04 §2). */
-function personalViewOf(row: HostView): PersonalView {
+/**
+ * A personal view row as `PersonalView`: it names the entry it hangs under and its own id (SP04 §2).
+ * Exported with `entryOf` for the web portal's catalog answer.
+ */
+export function personalViewOf(row: HostView): PersonalView {
   return { ...viewOf(row), id: row.id, entryId: row.entryId, updatedAt: row.updatedAt };
 }
 

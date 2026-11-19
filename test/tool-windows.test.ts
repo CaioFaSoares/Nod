@@ -1426,6 +1426,8 @@ describe('tabs — docked mode (RF-49…RF-52, RF-66…RF-68)', () => {
       {
         id: 'tool_kanban',
         toolId: 'kanban',
+        // 1.0.0 (nested tabs): a tab the Nod opened itself nests under nobody.
+        parentId: null,
         title: 'Kanban',
         url: ENTRY_AUDIT,
         docked: true,
@@ -1879,6 +1881,7 @@ describe('tabs — docked mode (RF-49…RF-52, RF-66…RF-68)', () => {
       {
         id: 'tool_kanban',
         toolId: 'kanban',
+        parentId: null,
         title: 'Kanban',
         url: ENTRY_AUDIT,
         docked: false,

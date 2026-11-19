@@ -175,6 +175,8 @@ function harness(script: Partial<Script> = {}): Harness {
 
   const deps: SyncDeps = {
     repo,
+    // E07/RF-71: a test holds one guild, and it is the one a run syncs.
+    activeRow: () => repo.hostRecords()[0] ?? null,
     connection: () => connection,
     now: () => clock,
     appVersion: () => app,
@@ -240,13 +242,14 @@ function harness(script: Partial<Script> = {}): Harness {
 
 /** The row as a run of the default script leaves it: one verified body and a success time. */
 function cachedSnapshot(h: Harness): string {
-  const raw = h.calls.snapshot === 0 ? BODY_RAW : (h.repo.hostRecord()?.snapshot ?? '');
-  h.repo.saveHostSnapshot({ snapshot: raw, version: 'v1', issuedAt: BODY.issuedAt, syncedAt: EARLIER });
+  const raw = h.calls.snapshot === 0 ? BODY_RAW : ((h.repo.hostRecords()[0] ?? null)?.snapshot ?? '');
+  h.repo.saveHostSnapshot((h.repo.hostRecords()[0] ?? null)?.address ?? '', { snapshot: raw, version: 'v1', issuedAt: BODY.issuedAt, syncedAt: EARLIER });
   return raw;
 }
 
 function enqueue(h: Harness, method: OutboxMethod, path: string, body: unknown, at: string): void {
-  h.repo.enqueueOutbox({ method, path, body: JSON.stringify(body), createdAt: at });
+  h.repo.enqueueOutbox({
+      address: (h.repo.hostRecords()[0] ?? null)?.address ?? '', method, path, body: JSON.stringify(body), createdAt: at });
 }
 
 /** One local event as the app records it: the repo stamps the client id (SP04 §5). */
@@ -291,9 +294,9 @@ describe('triggers', () => {
     // SP04 §1.1's fingerprint, computed from the pinned key.
     expect(state.fingerprint).toMatch(/^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
     // The body lands verbatim, with its own version and issuedAt.
-    expect(h.repo.hostRecord()?.snapshot).toBe(BODY_RAW);
-    expect(h.repo.hostRecord()?.version).toBe('v1');
-    expect(h.repo.hostRecord()?.issuedAt).toBe(BODY.issuedAt);
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).toBe(BODY_RAW);
+    expect((h.repo.hostRecords()[0] ?? null)?.version).toBe('v1');
+    expect((h.repo.hostRecords()[0] ?? null)?.issuedAt).toBe(BODY.issuedAt);
     expect(h.states.at(-1)).toEqual(state);
   });
 
@@ -304,7 +307,7 @@ describe('triggers', () => {
     h.advance(SYNC_INTERVAL_MS);
     await h.fire();
     expect(h.calls.snapshot).toBe(2);
-    expect(h.repo.hostRecord()?.lastSyncAt).toBe(new Date(START + SYNC_INTERVAL_MS).toISOString());
+    expect((h.repo.hostRecords()[0] ?? null)?.lastSyncAt).toBe(new Date(START + SYNC_INTERVAL_MS).toISOString());
   });
 
   test('syncNow() with no loop running syncs once and arms nothing', async () => {
@@ -369,8 +372,8 @@ describe('triggers', () => {
     expect(state.status).toBe('connected');
     expect(state.lastError).toBeNull();
     // The follow-up's answer is what landed, not the one the in-flight run had read.
-    expect(h.repo.hostRecord()?.version).toBe('v2');
-    expect(h.repo.hostRecord()?.snapshot).toBe(newerRaw);
+    expect((h.repo.hostRecords()[0] ?? null)?.version).toBe('v2');
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).toBe(newerRaw);
     expect(h.armed()).toBe(1);
   });
 
@@ -389,7 +392,7 @@ describe('triggers', () => {
 
   test('without a host row no sync reaches anywhere', async () => {
     const h = harness();
-    h.repo.clearHost();
+    h.repo.removeHost((h.repo.hostRecords()[0] ?? null)?.address ?? '');
     const state = await h.sync.syncNow();
     expect(h.calls.snapshot).toBe(0);
     expect(h.calls.request).toEqual([]);
@@ -419,8 +422,8 @@ describe('snapshot', () => {
     expect(state.status).toBe('connected');
     expect(state.lastSyncAt).toBe(new Date(START).toISOString());
     expect(state.lastError).toBeNull();
-    expect(h.repo.hostRecord()?.snapshot).toBe(raw);
-    expect(h.repo.hostRecord()?.version).toBe('v1');
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).toBe(raw);
+    expect((h.repo.hostRecords()[0] ?? null)?.version).toBe('v1');
   });
 
   test('a network failure is stale, keeps the cache and backs off to five minutes', async () => {
@@ -431,7 +434,7 @@ describe('snapshot', () => {
     expect(first.status).toBe('stale');
     expect(first.lastError).toBe('could not reach the host');
     expect(first.lastSyncAt).toBe(EARLIER);
-    expect(h.repo.hostRecord()?.snapshot).toBe(raw);
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).toBe(raw);
     expect(h.delay()).toBe(BACKOFF_MS[0]);
 
     const delays: number[] = [];
@@ -456,7 +459,7 @@ describe('snapshot', () => {
     expect(state.lastError).toBe(HOST_KEY_CHANGED);
     expect(state.guild).toBe('Guild');
     expect(h.armed()).toBe(0);
-    expect(h.repo.hostRecord()?.snapshot).toBeNull();
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).toBeNull();
   });
 });
 
@@ -478,22 +481,22 @@ describe('401', () => {
     expect(h.calls.request.length).toBe(1);
     expect(state.pendingWrites).toBe(1);
 
-    const cached = h.repo.hostRecord()?.snapshot ?? '';
+    const cached = (h.repo.hostRecords()[0] ?? null)?.snapshot ?? '';
     const rows = JSON.parse(cached) as Snapshot;
     expect(rows.orgTools).toEqual([]);
     expect(rows.roles).toEqual([]);
     expect(rows.me.id).toBe('p1');
     expect(rows.personalTools.map((tool) => tool.id)).toEqual(['mine']);
     expect(rows.favorites).toEqual(['jitsi']);
-    expect(h.repo.hostRecord()?.version).toBe('v1');
-    expect(h.repo.hostRecord()?.issuedAt).toBe(BODY.issuedAt);
+    expect((h.repo.hostRecords()[0] ?? null)?.version).toBe('v1');
+    expect((h.repo.hostRecords()[0] ?? null)?.issuedAt).toBe(BODY.issuedAt);
 
     // A second retry neither asks for sign-in again nor loses the pending write; it never reached
     // the snapshot, because the flush stopped at the same 401.
     await h.sync.syncNow();
     expect(h.signedOutCount()).toBe(1);
     expect(h.calls.snapshot).toBe(0);
-    expect(h.repo.listOutbox()).toHaveLength(1);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toHaveLength(1);
   });
 
   test('a network failure after a sign-out leaves the state signed out', async () => {
@@ -511,14 +514,14 @@ describe('401', () => {
     const h = harness({ snapshot: signedOut });
     cachedSnapshot(h);
     await h.sync.syncNow();
-    expect(h.repo.hostRecord()?.snapshot).not.toBe(BODY_RAW);
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).not.toBe(BODY_RAW);
 
     h.keychain.set(TOKEN_KEY, 'a-new-token');
     h.script.snapshot = fullBody;
     const state = await h.sync.syncNow();
     expect(state.status).toBe('connected');
     expect(state.lastError).toBeNull();
-    expect(h.repo.hostRecord()?.snapshot).toBe(BODY_RAW);
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).toBe(BODY_RAW);
     // The sign-out had emptied the cache, so that run went out unconditionally; the next one is
     // conditional again, because the row holds the host's own bytes.
     expect(h.calls.options.at(-1)?.version).toBeNull();
@@ -540,7 +543,7 @@ describe('outbox', () => {
       ['DELETE', '/v1/personal/views/v-1'],
     ]);
     expect(h.calls.request[0]?.body).toEqual(write);
-    expect(h.repo.listOutbox()).toEqual([]);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toEqual([]);
     expect(state.pendingWrites).toBe(0);
   });
 
@@ -554,7 +557,7 @@ describe('outbox', () => {
     expect(state.pendingWrites).toBe(2);
     // One request at a time: the flush stops at the first write it could not place.
     expect(h.calls.request.length).toBe(1);
-    const kept = h.repo.listOutbox();
+    const kept = h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '');
     expect(kept.map((row) => row.id)).toEqual([1, 2]);
     expect(kept[0]?.attempts).toBe(1);
     expect(kept[0]?.lastError).toBe('could not reach the host');
@@ -566,7 +569,7 @@ describe('outbox', () => {
     expect(state.status).toBe('connected');
     expect(state.pendingWrites).toBe(0);
     expect(h.calls.request.length).toBe(3);
-    expect(h.repo.listOutbox()).toEqual([]);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toEqual([]);
   });
 
   test('a 409 and a 403 drop the write: neither can be replayed', async () => {
@@ -581,7 +584,7 @@ describe('outbox', () => {
       });
       enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, '2026-10-15T11:00:00.000Z');
       const state = await h.sync.syncNow();
-      expect(h.repo.listOutbox()).toEqual([]);
+      expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toEqual([]);
       expect(state.pendingWrites).toBe(0);
       // The rest of the run still happened: the snapshot was asked for.
       expect(h.calls.snapshot).toBe(1);
@@ -590,7 +593,8 @@ describe('outbox', () => {
 
   test('a row whose body is not JSON is dropped rather than blocking the queue', async () => {
     const h = harness();
-    h.repo.enqueueOutbox({ method: 'PUT', path: '/v1/personal/tools/mine', body: 'not json', createdAt: EARLIER });
+    h.repo.enqueueOutbox({
+      address: (h.repo.hostRecords()[0] ?? null)?.address ?? '', method: 'PUT', path: '/v1/personal/tools/mine', body: 'not json', createdAt: EARLIER });
     enqueue(h, 'PUT', '/v1/personal/tools/other', { id: 'other' }, EARLIER);
     const state = await h.sync.syncNow();
     expect(state.pendingWrites).toBe(0);
@@ -688,7 +692,7 @@ describe('event push', () => {
     const h = harness();
     recordEvent(h, EARLIER);
     recordEvent(h, EARLIER);
-    h.repo.clearHost();
+    h.repo.removeHost((h.repo.hostRecords()[0] ?? null)?.address ?? '');
 
     const state = await h.sync.syncNow();
 
@@ -732,7 +736,7 @@ describe('event push', () => {
     ]);
     expect(batchesOf(h).map((batch) => batch.map((event) => event.kind))).toEqual([['sync.rejected']]);
     expect(h.repo.eventSyncCounts()).toEqual({ sent: 1, pending: 0 });
-    expect(h.repo.listOutbox()).toEqual([]);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toEqual([]);
   });
 
   test('a 409 is not a refusal: the write is dropped and no event is raised', async () => {
@@ -746,7 +750,7 @@ describe('event push', () => {
 
     const state = await h.sync.syncNow();
 
-    expect(h.repo.listOutbox()).toEqual([]);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toEqual([]);
     expect(h.repo.listEvents({})).toEqual([]);
     expect(state.status).toBe('connected');
   });
@@ -764,7 +768,7 @@ describe('event push', () => {
 
     // F6: a refused push used to end the run here, and the person stopped receiving org changes.
     expect(h.calls.snapshot).toBe(1);
-    expect(h.repo.hostRecord()?.snapshot).toBe(BODY_RAW);
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).toBe(BODY_RAW);
     expect(state.status).toBe('stale');
     expect(state.lastError).toBe('the host refused the request');
     // SP04 §5 has no verdict for a batch refused for good: the events stay pending and the refusal
@@ -792,7 +796,7 @@ describe('event push', () => {
     const state = await h.sync.syncNow();
 
     expect(h.calls.snapshot).toBe(1);
-    expect(h.repo.hostRecord()?.snapshot).toBe(BODY_RAW);
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).toBe(BODY_RAW);
     expect(state.status).toBe('stale');
     expect(state.lastError).toBe('the host failed to answer');
     expect(h.repo.eventSyncCounts()).toEqual({ sent: 0, pending: 1 });
@@ -838,13 +842,13 @@ describe('a run that outlives its host (F8)', () => {
   test('remove and re-add during an in-flight run leaves the new row untouched', async () => {
     const h = harness();
     h.sync.start(); // the run in flight, holding the host it read
-    h.repo.clearHost(); // `host.remove`
+    h.repo.removeHost((h.repo.hostRecords()[0] ?? null)?.address ?? ''); // `host.remove`
     h.repo.saveHost({ ...OTHER, addedAt: '2026-10-16T09:30:00.000Z' }); // the host added in its place
 
     const state = await h.settle();
 
     // The verified body of the old host is not the new row's to receive (F8).
-    const record = h.repo.hostRecord();
+    const record = (h.repo.hostRecords()[0] ?? null);
     expect(record?.kid).toBe(OTHER.kid);
     expect(record?.snapshot).toBeNull();
     expect(record?.version).toBeNull();
@@ -859,19 +863,19 @@ describe('a run that outlives its host (F8)', () => {
   test('a failure of a run whose host was replaced does not mark the new row', async () => {
     const h = harness({ snapshot: offline });
     h.sync.start();
-    h.repo.clearHost();
+    h.repo.removeHost((h.repo.hostRecords()[0] ?? null)?.address ?? '');
     h.repo.saveHost(OTHER);
 
     await h.settle();
 
-    expect(h.repo.hostRecord()?.lastError).toBeNull();
+    expect((h.repo.hostRecords()[0] ?? null)?.lastError).toBeNull();
   });
 
   test('a 401 that outlives its host neither forgets the token nor signs the new row out', async () => {
     // The same host added again: its keychain item is the same `nod.host.<kid>.<personId>`.
     const h = harness({ snapshot: signedOut });
     h.sync.start();
-    h.repo.clearHost();
+    h.repo.removeHost((h.repo.hostRecords()[0] ?? null)?.address ?? '');
     h.repo.saveHost({ ...OTHER, kid: HOST.kid });
     h.keychain.set(TOKEN_KEY, 'the-token-of-the-new-sign-in');
 
@@ -879,8 +883,8 @@ describe('a run that outlives its host (F8)', () => {
 
     expect(h.keychain.get(TOKEN_KEY)).toBe('the-token-of-the-new-sign-in');
     expect(h.signedOutCount()).toBe(0);
-    expect(h.repo.hostRecord()?.lastError).toBeNull();
-    expect(h.repo.hostRecord()?.snapshot).toBeNull();
+    expect((h.repo.hostRecords()[0] ?? null)?.lastError).toBeNull();
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).toBeNull();
   });
 
   test('a host replaced while the bearer is being forgotten is not written either', async () => {
@@ -889,15 +893,15 @@ describe('a run that outlives its host (F8)', () => {
     // while it is busy.
     h.connection.forgetToken = async () => {
       h.keychain.delete(TOKEN_KEY);
-      h.repo.clearHost();
+      h.repo.removeHost((h.repo.hostRecords()[0] ?? null)?.address ?? '');
       h.repo.saveHost(OTHER);
     };
 
     await h.sync.syncNow();
 
-    expect(h.repo.hostRecord()?.kid).toBe(OTHER.kid);
-    expect(h.repo.hostRecord()?.lastError).toBeNull();
-    expect(h.repo.hostRecord()?.snapshot).toBeNull();
+    expect((h.repo.hostRecords()[0] ?? null)?.kid).toBe(OTHER.kid);
+    expect((h.repo.hostRecords()[0] ?? null)?.lastError).toBeNull();
+    expect((h.repo.hostRecords()[0] ?? null)?.snapshot).toBeNull();
     expect(h.signedOutCount()).toBe(0);
   });
 });
@@ -924,7 +928,7 @@ describe('minimum app version (O2)', () => {
     const h = harness({ meta: () => ({ minAppVersion: '0.4.0', update: null }) });
     enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, EARLIER);
     recordEvent(h, EARLIER);
-    const before = h.repo.hostRecord();
+    const before = (h.repo.hostRecords()[0] ?? null);
 
     const state = await h.sync.syncNow();
 
@@ -935,11 +939,11 @@ describe('minimum app version (O2)', () => {
     expect(state.updateRequired).toBe(true);
     expect(state.minAppVersion).toBe('0.4.0');
     // The person's writes and events are still here, waiting for the update.
-    expect(h.repo.listOutbox()).toHaveLength(1);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toHaveLength(1);
     expect(h.repo.eventSyncCounts()).toEqual({ sent: 0, pending: 1 });
     // The host's row and the cached body are untouched by the state: the guild is still there for
     // Settings → Hosts, and updating is the whole of what brings it back.
-    expect(h.repo.hostRecord()).toEqual(before);
+    expect((h.repo.hostRecords()[0] ?? null)).toEqual(before);
     // The host answered: this is not the stale state of a host that could not be reached.
     expect(state.status).toBe('connected');
     expect(state.lastError).toBeNull();
@@ -958,7 +962,7 @@ describe('minimum app version (O2)', () => {
       const state = await h.sync.syncNow();
 
       expect(state.updateRequired).toBe(false);
-      expect(h.repo.listOutbox()).toHaveLength(0);
+      expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toHaveLength(0);
       expect(h.calls.snapshot).toBe(1);
     }
   });
@@ -990,13 +994,13 @@ describe('minimum app version (O2)', () => {
     enqueue(h, 'PUT', '/v1/personal/tools/mine', { id: 'mine' }, EARLIER);
 
     expect((await h.sync.syncNow()).updateRequired).toBe(true);
-    expect(h.repo.listOutbox()).toHaveLength(1);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toHaveLength(1);
 
     min = '0.3.0';
     const state = await h.sync.syncNow();
 
     expect(state.updateRequired).toBe(false);
-    expect(h.repo.listOutbox()).toHaveLength(0);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toHaveLength(0);
     expect(h.calls.request).toEqual([
       { method: 'PUT', path: '/v1/personal/tools/mine', body: { id: 'mine' } },
     ]);
@@ -1014,13 +1018,13 @@ describe('minimum app version (O2)', () => {
 
     expect(state.status).toBe('connected');
     expect(state.lastError).toBeNull();
-    expect(h.repo.listOutbox()).toHaveLength(0);
+    expect(h.repo.listOutbox((h.repo.hostRecords()[0] ?? null)?.address ?? '')).toHaveLength(0);
     expect(h.calls.snapshot).toBe(1);
   });
 
   test('without a host row nothing is reported and nothing is refused', async () => {
     const h = harness();
-    h.repo.clearHost();
+    h.repo.removeHost((h.repo.hostRecords()[0] ?? null)?.address ?? '');
     h.sync.observeMinVersion('9.9.9');
 
     const state = h.sync.state();

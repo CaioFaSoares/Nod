@@ -29,11 +29,14 @@ still hold: secrets only in the keychain, the page only calls `src/api.ts`, the 
 | `src/settings.ts` | Settings → Hosts tab; admin tabs read/write through the same RPC (the backend decides local or host); the App icon select and the admin's Guild icon card (§6) |
 | `src/app.ts` | Sidebar order; stale badge; favorites toggle; personal tool add |
 
-## 2. Local schema, `user_version = 6`
+## 2. Local schema, `user_version = 9`
+
+The block below is the history of the connected schema from `3` to `8`; E07 (§2.1) takes it to `9`,
+where `host` is keyed by `address` and `person.email` is no longer unique.
 
 ```sql
 CREATE TABLE host (
-  id            INTEGER PRIMARY KEY CHECK (id = 1),     -- one guild at a time (decided 2026-10-16)
+  id            INTEGER PRIMARY KEY CHECK (id = 1),     -- `3`–`8`: one guild at a time (superseded by E07, RF-71)
   address       TEXT NOT NULL,
   guild         TEXT NOT NULL,
   kid           TEXT NOT NULL,
@@ -120,19 +123,53 @@ CREATE UNIQUE INDEX IF NOT EXISTS vault_item_credential                      -- 
   and sync; a 0.5.5 credential appends its own `id` to that key and carries the result on its row
   (`docs/canonico.md` §11).
 
+### Several guilds (E07, RF-71; `user_version = 9`)
+
+Owner, 2026-11-19: "além do gerenciamento do lado do usuário de poder acessar mais de um nó". Decided
+in `docs/canonico.md` §22 "Several guilds at once"; the shape below is the build contract.
+
+- **`host` is one row per guild, keyed by `address`** — the address is also the `EntryTarget`'s guild
+  id, so the entry screen and the restore needed no new identifier. `CHECK (id = 1)` is gone:
+  `migrate()` rebuilds the table when its `PRAGMA table_info` still shows the old `id` column
+  (`rebuildHost`, the SQLite 12-step recipe `rebuildVaultItem` already uses), and the one row a `8`
+  database holds is the one guild it keeps.
+- **`host_outbox.address`** says which guild a pending write belongs to; `listOutbox(address)` and
+  the flush see only that guild. A `8` database's rows are backfilled to its single row's address
+  (`backfillOutboxAddress`).
+- **`person.email` is no longer `UNIQUE`** (`rebuildPerson`, guarded by the `UNIQUE` in the table's
+  own `sql`). A guild account is keyed by its host's person id, and the owner chose **one account per
+  guild** on 2026-11-19: the same email may exist in two guilds, and the entry tile — never the email
+  alone — names the row. The offline unlock therefore accepts an email only when exactly one
+  **unclaimed** row holds it (`personsAuthByEmail`, `personByEmailAnyState` skips a person a `host`
+  row claims); a guild unlock resolves the row through its `host` row (`personAuthById`).
+- **"The active guild" is derived, never stored** — `hostRecordForPerson(personId)`: the row whose
+  `personId` is the unlocked person. Sync, the catalog, the admin screens, presence and the shares
+  read that row; `hostRecords()` lists every guild for the entry screen and Settings → Hosts.
+- **A guild's own account is never adopted** by a join: `hostRowClaimsPerson` is what separates it
+  from a genuinely local account, so joining guild B with the email of guild A's account is a new
+  account rather than F1's choice (and never `EMAIL_TAKEN`).
+- **The bearer needed nothing**: its key is already `nod.host.<kid>.<personId>` (SP02 §5), and two
+  guilds are two `kid`s and two persons, so two sealed items in the `secret` table.
+- **`removeHost(address)`** forgets one guild — its row and its outbox — and leaves the others
+  exactly as they are. What happens to the personal half is still the caller's `keepPersonal`
+  decision (SP05 §3).
+
+
 ## 3. RPC additions (`ApiContract`)
 
 | Method | Params | Result | Who |
 | --- | --- | --- | --- |
 | `host.state` | — | `HostState` (`none` / `connected` / `stale`, guild, address, fingerprint, lastSyncAt, lastError, pending outbox count, `updateRequired`, `minAppVersion`) | unlocked |
 | `host.discover` | `{ address }` | `{ guild, fingerprint }` | no session needed (first run) |
-| `host.activate` | `{ address, fingerprint, email, code, password, name? }` | `SessionState` | no session needed; `name` only for a setup code |
-| `host.signIn` | `{ address, fingerprint, email, password }` | `SessionState` | no session needed |
-| `host.syncNow` | — | `HostState` | unlocked |
-| `host.remove` | `{ keepPersonal: boolean }` | `HostState` | unlocked |
+| `host.activate` | `{ address, fingerprint, email, code, password, name?, adoptLocal? }` | `JoinResult` | no session needed; `name` for a setup code and an invite. E07/RF-71: joining a **new** guild keeps the ones already held; only a guild already held is refused (`this Nod already holds that guild — remove it first`) |
+| `host.signIn` | `{ address, fingerprint, email, password, adoptLocal? }` | `JoinResult` | no session needed; E07/RF-71: enters a guild this Nod already holds, found among its rows by the address |
+| `host.list` | — | `HostState[]` — every guild this Nod holds, the entered one included (E07/RF-71); `host.state` stays the entered one | unlocked |
+| `host.syncNow` | — | `HostState` | unlocked; a run syncs the entered guild (E07 §2) |
+| `host.remove` | `{ address, keepPersonal: boolean }` | `HostState` | unlocked; `address` names the guild to forget (E07/RF-71) — the others stay |
 | `host.bootstrap` | — | `{ created: number; refused: boolean }` | unlocked, admin (B8a); publishes the local org tools to an empty host; the host's `409` is `{ created: 0, refused: true }` |
 | `events.syncStatus` | — | counts of sent and pending events | unlocked (B10); the two numbers Settings → Activity shows |
 | `nod.appIcon` / `nod.setAppIcon` | `— / { choice }` | `AppIconState` | unlocked; every person picks the icon of this machine (§6) |
+| `nod.setAppearance` | `{ appearance: { skin, theme, colors } }` | `AppearanceState` | unlocked; the style toggle of RF-72 — a preference of this machine (`store.json` `appearance`), normalized before it is stored, never a host call; `nod.info` answers the same state so the window opens in it |
 | `host.setGuildIcon` / `host.clearGuildIcon` | `{ png }` / `—` | `{ sha256 }` / `true` | unlocked, admin, connected; the guild's icon (§6, SP03 §2) |
 | `host.sessions` / `host.revokeSession` | `— / { id }` | `DeviceSession[] / true` | unlocked (block 2, O1) |
 | `personal.saveTool` / `personal.removeTool` | `{ entry }` / `{ id }` | `Entry` / `true` | unlocked (block 2) |
