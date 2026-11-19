@@ -6,7 +6,7 @@
 import { call, errorMessage, on } from './api';
 import { mountJoinFlow } from './join';
 import { attemptGate, runGate } from './vault-gate';
-import { button, clear, el, field, input, message } from './ui';
+import { button, clear, el, field, iconButton, input, message } from './ui';
 import { categoryOf, groupByCategory, originOf, slug } from '../shared/catalog';
 import { toBase64url } from '../shared/encoding';
 import type { DeviceSession, GuildInvite, ShareKind, ShareScope } from '../shared/host-api';
@@ -40,27 +40,8 @@ import type {
   VaultItem,
 } from '../shared/types';
 
-export type SettingsTab =
-  | 'account'
-  | 'hosts'
-  | 'vault'
-  | 'tools'
-  | 'roles'
-  | 'people'
-  | 'activity'
-  | 'catalog';
-
-/** Tabs in the order of the screen; `admin` marks the ones only an admin person sees (§2). */
-const TABS: ReadonlyArray<{ id: SettingsTab; label: string; admin: boolean }> = [
-  { id: 'account', label: 'Account', admin: false },
-  { id: 'hosts', label: 'Hosts', admin: false },
-  { id: 'vault', label: 'Vault', admin: false },
-  { id: 'tools', label: 'Tools', admin: true },
-  { id: 'roles', label: 'Roles', admin: true },
-  { id: 'people', label: 'People', admin: true },
-  { id: 'activity', label: 'Activity', admin: true },
-  { id: 'catalog', label: 'Catalog', admin: true },
-];
+import { SETTINGS_GROUPS, SETTINGS_TABS as TABS, settingsTabs, type SettingsTab } from './settings-navigation';
+export type { SettingsTab } from './settings-navigation';
 
 /** Image types accepted for a tool icon, mapped to `RawIcon.type`. */
 const ICON_TYPES: ReadonlyArray<{ mime: string; type: RawIcon['type'] }> = [
@@ -237,6 +218,7 @@ export function mountSettings(
   },
 ): {
   setTab(tab: SettingsTab): void;
+  addTool(): void;
   update(session: SessionState): void;
   destroy(): void;
 } {
@@ -573,6 +555,25 @@ export function mountSettings(
 
   // ---------------------------------------------------------------- drawing
 
+  // Expansion belongs to this mounted Settings screen, not storage. Re-renders keep context;
+  // leaving/locking destroys it along with the inputs. Warnings remain outside disclosures.
+  const expanded = new Map<string, boolean>();
+  function disclosure(key: string, title: string, children: HTMLElement[], forceOpen = false): HTMLDetailsElement {
+    const node = el('details', { class: 'disclosure', data: { section: key } },
+      el('summary', {}, title), el('div', { class: 'disclosure-body stack' }, ...children));
+    node.open = forceOpen || expanded.get(key) === true;
+    let lastOpen = node.open;
+    node.addEventListener('toggle', () => {
+      if (!node.isConnected || node.open === lastOpen) return;
+      lastOpen = node.open;
+      expanded.set(key, node.open);
+      if (!node.open) {
+        for (const secret of node.querySelectorAll<HTMLInputElement>('input[type="password"]')) secret.value = '';
+      }
+    });
+    return node;
+  }
+
   function render(): void {
     if (!alive) return;
     clear(root);
@@ -583,23 +584,25 @@ export function mountSettings(
       return;
     }
 
-    const tabs = el('nav', { class: 'tabs', role: 'tablist' });
-    for (const tab of TABS) {
-      if (tab.admin && !isAdmin()) continue;
-      const active = tab.id === state.tab;
-      tabs.append(
-        el(
-          'button',
-          {
-            class: active ? 'tab tab-active' : 'tab',
-            role: 'tab',
-            attrs: { type: 'button' },
-            aria: { selected: active ? 'true' : 'false' },
-            on: { click: () => void selectTab(tab.id) },
-          },
-          tab.label,
-        ),
-      );
+    const tabs = el('nav', { class: 'tabs settings-navigation', aria: { label: 'Settings' } });
+    const visible = settingsTabs(isAdmin());
+    for (const group of SETTINGS_GROUPS) {
+      const entries = visible.filter((tab) => tab.group === group.id);
+      if (entries.length === 0) continue;
+      const links = el('div', { class: 'settings-links' });
+      for (const tab of entries) {
+        const active = tab.id === state.tab;
+        links.append(el('button', {
+          class: active ? 'tab tab-active' : 'tab',
+          attrs: { type: 'button' },
+          aria: { current: active ? 'page' : 'false' },
+          on: { click: () => void selectTab(tab.id) },
+        }, tab.label));
+      }
+      tabs.append(group.id === 'advanced'
+        ? disclosure('advanced-navigation', group.label, [links], entries.some((tab) => tab.id === state.tab))
+        : el('section', { class: 'settings-group', aria: { label: group.label } },
+            el('h2', { class: 'settings-group-title' }, group.label), links));
     }
 
     const toast = el('div', { class: 'toast-region' });
@@ -609,7 +612,10 @@ export function mountSettings(
       armToast(state.status);
     }
 
-    root.append(el('div', { class: 'stack' }, tabs, tabContent(owner)), toast);
+    const selected = TABS.find((tab) => tab.id === state.tab)!;
+    root.append(el('div', { class: 'settings-layout' }, tabs,
+      el('div', { class: 'settings-panel stack' },
+        el('h1', { class: 'content-title' }, selected.label), tabContent(owner))), toast);
   }
 
   /** How long a toast stays: an error is read longer than a confirmation. A click closes it. */
@@ -807,7 +813,7 @@ export function mountSettings(
       hostLine('Address', host.address ?? '—'),
       hostLine('Fingerprint', host.fingerprint ?? '—'),
       hostLine('Last sync', host.lastSyncAt ?? 'never'),
-      hostLine('Pending writes', String(host.pendingWrites)),
+      hostLine('Pending changes', String(host.pendingWrites)),
     );
     if (host.updateRequired) {
       // O2/SP04 §1 (owner, 2026-10-17): the guild answered the version check and asked for a newer
@@ -1587,19 +1593,22 @@ export function mountSettings(
         ),
       ),
     );
-    // K1–K2/SP06 §2: the guild account's own fingerprint and the keys of its colleagues, above the
-    // machine's devices. Only a guild has either (a local account holds no pair, SP06 §2).
-    if (hasHost()) box.append(keyFingerprintCard(), colleaguesCard());
-    // O1: the devices of this account, above the machine's own settings. Only a guild has them.
-    if (hasHost()) box.append(devicesCard());
-    // SP05 §6: the icon of this machine, before the account's own cards.
-    box.append(appIconCard());
     box.append(changePasswordCard());
     // SP02 §9/canonico §9: the shortcut is offered only where the runtime can back an unlock with
     // the keychain — `authenticate` plus 0.7.0's `biometricUnlock` (`nod.info.biometricAvailable`),
     // which is not the gate's answer (`systemPrompt`). The Electrobun target hides the card.
     if (state.info.biometricAvailable) box.append(biometricCard());
     box.append(versionCard());
+    if (hasHost()) {
+      box.append(devicesCard());
+      const changed = state.peers.some((peer) => peer.status === 'changed');
+      const keyStatus = state.keys?.status;
+      const attention = keyStatus === 'unavailable' || keyStatus === 'pending';
+      box.append(disclosure('verify-people',
+        changed ? 'Verify people — key changed' : attention ? `Verify people — keys ${keyStatus}` : 'Verify people',
+        [keyFingerprintCard(), colleaguesCard()], changed || attention));
+    }
+    box.append(disclosure('appearance', 'App icon', [appIconCard()]));
     return box;
   }
 
@@ -1718,7 +1727,7 @@ export function mountSettings(
     return el(
       'section',
       { class: 'card stack' },
-      el('h2', {}, editing !== null ? 'Edit credential' : 'Save credential'),
+      el('h2', {}, editing !== null ? 'Edit login' : 'New login'),
       el(
         'div',
         { class: 'row' },
@@ -1727,7 +1736,7 @@ export function mountSettings(
         field('Password', secret),
         field('Label', label),
         button(
-          editing !== null ? 'Save changes' : 'Save credential',
+          editing !== null ? 'Save changes' : 'Save login',
           () =>
             void saveCredential(
               tool.value,
@@ -1740,7 +1749,7 @@ export function mountSettings(
         ),
         editing !== null ? button('Cancel', () => cancelEdit(), { kind: 'ghost' }) : null,
       ),
-      el('p', { class: 'muted' }, 'The value goes to the system keychain; the local database keeps only the index.'),
+      el('p', { class: 'muted' }, 'Encrypted on this device, protected by your Nod password.'),
     );
   }
 
@@ -2373,13 +2382,13 @@ export function mountSettings(
       aria: { label: 'Vault inbox' },
       attrs: { tabindex: '-1' },
     });
-    box.append(el('h2', {}, 'Inbox'));
+    box.append(el('h2', {}, 'Shared with you'));
     if (!sharing()) {
       box.append(el('p', { class: 'muted' }, 'Shares arrive from a guild; none is connected.'));
       return box;
     }
     if (state.inbox.length === 0) {
-      box.append(el('p', { class: 'empty' }, 'No share is waiting.'));
+      box.append(el('p', { class: 'empty' }, 'No shared logins to review.'));
       return box;
     }
     for (const share of state.inbox) box.append(inboxRow(share));
@@ -2430,21 +2439,16 @@ export function mountSettings(
 
   function viewVault(): HTMLElement {
     const box = el('section', { class: 'stack' });
-    box.append(el('p', { class: 'muted' }, 'Your credentials for the tools of the catalog.'));
-    // K4: the inbox first — a share waiting for an answer is the thing that cannot wait.
-    box.append(inboxCard());
-    // K8/RF-47: the admin's missing-copy list, above the vault it assigns from.
-    const missing = missingCard();
-    if (missing !== null) box.append(missing);
-    // M7/RF-54: the admin's view of every guild credential's holders, above the vault itself.
-    const holders = credentialHoldersCard();
-    if (holders !== null) box.append(holders);
-    box.append(saveCredentialCard());
-    box.append(vaultTransferCard());
-    if (state.vault.length === 0) {
-      box.append(el('p', { class: 'empty' }, 'No credentials saved.'));
-      return box;
+    // Pending shares stay first; empty inboxes and admin reports no longer bury saved logins.
+    if (state.inbox.length > 0) box.append(inboxCard());
+    const missingCount = state.host?.missingCopies ?? state.missing.length;
+    if (sharing() && isAdmin() && missingCount > 0) {
+      box.append(el('p', { class: 'chip chip-warn', role: 'status' },
+        `${missingCount} missing ${missingCount === 1 ? 'copy' : 'copies'} — review Copies to send below.`));
     }
+    box.append(disclosure('add-login', state.vaultEdit !== null ? 'Edit login' : 'Add login',
+      [saveCredentialCard()], state.vaultEdit !== null || state.vault.length === 0));
+    if (state.vault.length === 0) box.append(el('p', { class: 'empty' }, 'No saved logins yet.'));
     // RF-65: several credentials may share a tool, so the list groups them under the tool's heading,
     // the default first, and every card below is one credential of it.
     const byTool = new Map<Id, VaultItem[]>();
@@ -2465,6 +2469,12 @@ export function mountSettings(
       list.append(group);
     }
     box.append(list);
+    if (state.inbox.length === 0) box.append(inboxCard());
+    const missing = missingCard();
+    if (missing !== null) box.append(disclosure('missing-copies', `Copies to send (${missingCount})`, [missing], missingCount > 0));
+    const holders = credentialHoldersCard();
+    if (holders !== null) box.append(disclosure('login-access', 'Who has access', [holders]));
+    box.append(disclosure('login-backup', 'Back up or restore logins', [vaultTransferCard()]));
     return box;
   }
 
@@ -2928,9 +2938,10 @@ export function mountSettings(
     const card = el(
       'section',
       { class: 'card stack' },
-      el('h2', {}, editor.isNew ? 'New tool' : `Edit ${editor.id !== '' ? editor.id : 'tool'}`),
+      el('h2', {}, editor.isNew ? 'New tool' : `Edit ${editor.title || 'tool'}`),
     );
 
+    const options = el('div', { class: 'stack' });
     const address = input('url', {
       type: 'url',
       value: editor.url,
@@ -2944,7 +2955,7 @@ export function mountSettings(
         'div',
         { class: 'row' },
         field('Address', address),
-        button(editor.isNew ? 'Probe' : 'Probe again', () => void probe(editor)),
+        button(editor.isNew ? 'Get details' : 'Refresh details', () => void probe(editor)),
       ),
     );
     if (editor.probeNote !== '') card.append(el('p', { class: 'muted' }, editor.probeNote));
@@ -2961,7 +2972,8 @@ export function mountSettings(
     order.addEventListener('input', (event) => {
       editor.order = (event.target as HTMLInputElement).value;
     });
-    card.append(el('div', { class: 'row' }, field('Id', id), field('Title', title), field('Order', order)));
+    card.append(field('Name', title));
+    options.append(el('div', { class: 'row' }, field('Id', id), field('Order', order)));
 
     // RF-62: the category is a free name — the guild's own, up to 40 characters — and the datalist
     // offers the ones already in use, so a second tool of the same category is one keystroke away.
@@ -2974,7 +2986,7 @@ export function mountSettings(
       el(
         'div',
         { class: 'row' },
-        field('Category', category, 'Empty: the tool is not filed under a category'),
+        field('Category', category, 'Optional — groups tools for everyone'),
       ),
       categoryDatalist(),
     );
@@ -2994,7 +3006,7 @@ export function mountSettings(
         },
       },
     });
-    card.append(
+    options.append(
       el(
         'div',
         { class: 'row' },
@@ -3020,7 +3032,7 @@ export function mountSettings(
       el(
         'div',
         { class: 'stack' },
-        label('Roles'),
+        label('Who can use this tool'),
         roleCheckboxes(
           (role) => `tool-role-${role.id}`,
           (role) => editor.roles.includes(role.id),
@@ -3067,11 +3079,11 @@ export function mountSettings(
         ),
       );
     });
-    card.append(
+    options.append(
       el(
         'div',
         { class: 'stack' },
-        label('Views'),
+        label('Saved links'),
         views,
         button('Add view', () => {
           editor.views.push({ label: '', url: '', mode: 'window' });
@@ -3090,14 +3102,13 @@ export function mountSettings(
             editor.active = on;
           }),
         ),
-        checkboxField(
-          'Never fill the sign-in form',
-          checkbox('no-fill', editor.noFill, (on) => {
-            editor.noFill = on;
-          }),
-        ),
       ),
     );
+
+    options.append(checkboxField('Turn off autofill', checkbox('no-fill', editor.noFill, (on) => {
+      editor.noFill = on;
+    })));
+    card.append(disclosure('tool-options', 'More options', [options]));
 
     if (editor.usualLogin !== null) {
       card.append(el('p', { class: 'muted' }, `Usually signs in via: ${editor.usualLogin}`));
@@ -3150,9 +3161,10 @@ export function mountSettings(
     const noFill = entry.auth?.noFill === true;
     // RF-62: the chip names the category the tool is filed under; an unfiled tool shows none.
     const category = categoryOf(entry);
+    // One row of the Tools list — name, address, roles, views, acts — in the same columns as Home.
     return el(
       'div',
-      { class: 'card stack' },
+      { class: 'card stack tool-item' },
       el(
         'div',
         { class: 'row' },
@@ -3170,10 +3182,10 @@ export function mountSettings(
       ),
       el(
         'div',
-        { class: 'row' },
-        button('Edit', () => void editEntry(entry)),
-        button('Open', () => void openTool(entry)),
-        button('Remove', () => void removeTool(entry), { kind: 'danger' }),
+        { class: 'tool-actions', role: 'group', aria: { label: `${entry.title} actions` } },
+        iconButton('✎', 'Edit', () => void editEntry(entry), { title: `Edit ${entry.title}` }),
+        iconButton('↗', 'Open', () => void openTool(entry), { kind: 'primary', title: `Open ${entry.title}` }),
+        iconButton('×', 'Remove', () => void removeTool(entry), { kind: 'danger', title: `Remove ${entry.title}` }),
       ),
     );
   }
@@ -4279,6 +4291,12 @@ export function mountSettings(
   return {
     setTab(tab: SettingsTab): void {
       void selectTab(tab);
+    },
+    addTool(): void {
+      if (!alive || !isAdmin() || state.tab !== 'tools') return;
+      state.editor = newEditor();
+      state.status = null;
+      render();
     },
     update(session: SessionState): void {
       updateSession(session);

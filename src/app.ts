@@ -11,7 +11,23 @@ import { openPalette } from './palette';
 import { mountSettings } from './settings';
 import { activeTab, mountTabs, reportSlot, tabsApi } from './tabs';
 import type { TabsApi, TabsHandle } from './tabs';
-import { button, clear, el, field, glyph, initials, input, message } from './ui';
+import { button, clear, closeMenu, closePrompt, el, field, glyph, iconButton, iconSlot, initials, input, message, openMenu, promptText } from './ui';
+import type { MenuItem } from './ui';
+import {
+  addFolder,
+  folderOf,
+  mergeIntoFolder,
+  moveFolder,
+  moveTool,
+  newFolderId,
+  removeFolder,
+  renameFolder,
+  seedLayout,
+  setFolderOpen,
+  step,
+  takeOutOfFolder,
+} from '../shared/sidebar-layout';
+import type { Drop } from '../shared/sidebar-layout';
 import type { SettingsTab } from './settings';
 import type {
   AppInfo,
@@ -23,6 +39,8 @@ import type {
   LoginResult,
   SaveTabResult,
   SessionState,
+  SidebarFolder,
+  SidebarLayout,
   TabState,
   ToolStatus,
   ToolsState,
@@ -55,11 +73,7 @@ interface Shell {
 }
 
 /** What `mountSettings` returns (docs/arquitetura.md §5): the Settings view is mounted, then kept. */
-interface SettingsHandle {
-  setTab(tab: SettingsTab): void;
-  update(session: SessionState): void;
-  destroy(): void;
-}
+type SettingsHandle = ReturnType<typeof mountSettings>;
 
 /** The page's only container: `index.html` provides `#app` (docs/arquitetura.md §5). */
 function requireRoot(): HTMLElement {
@@ -99,6 +113,11 @@ let catalogRevision = 0;
  * the backend already; this list is what draws the toggle's state.
  */
 let favorites: Id[] = [];
+/**
+ * The person's own sidebar (`sidebar.layout`): their order and folders, or `null` while they keep the
+ * default one. The first edit seeds it from the default (`seedLayout`), so nothing else moves.
+ */
+let layout: SidebarLayout | null = null;
 /** Push `update` (RF-55): the newer release to announce, or `null` when there is none. */
 let update: UpdateInfo | null = null;
 /** SP05 §3: the one host, from `host.state` or the push `host`. */
@@ -145,6 +164,14 @@ function stateText(tool: ToolStatus | null): string {
   if (tool.loading) return 'Loading…';
   if (tool.error !== null) return `Failed: ${tool.error}`;
   return tool.openWindows > 0 ? 'Open' : 'Not open';
+}
+
+/** Atrius: the state of a tool as a key for its glyph — the words stay `stateText`'s. */
+function stateKey(tool: ToolStatus | null): 'closed' | 'loading' | 'failed' | 'open' {
+  if (tool === null) return 'closed';
+  if (tool.loading) return 'loading';
+  if (tool.error !== null) return 'failed';
+  return tool.openWindows > 0 ? 'open' : 'closed';
 }
 
 // -------------------------------------------------------------- entry screen
@@ -206,6 +233,9 @@ function buildShell(): void {
 }
 
 function teardownShell(): void {
+  closeMenu();
+  closePrompt();
+  endRailDrag();
   destroySettings();
   // E03: the tab view goes with the panel (a lock), reporting the empty slot on its way out.
   destroyTabView();
@@ -220,6 +250,21 @@ function renderSidebar(): void {
   if (shell === null || session === null) return;
   const list = el('nav', { class: 'sidebar-tools', aria: { label: 'Tools' } });
   for (const node of sidebarRows()) list.append(node);
+  // The quick way to a new tool, at the end of the tools: the dialog of `personal.saveTool`.
+  const add = el(
+    'button',
+    { class: 'sidebar-add', title: 'Add tool', aria: { label: 'Add tool' }, attrs: { type: 'button' } },
+    el('span', { class: 'glyph', aria: { hidden: 'true' } }, '+'),
+    el('span', { class: 'sidebar-action-label' }, 'Add tool'),
+  );
+  add.addEventListener('click', () => openPersonalToolDialog());
+  list.append(add);
+  // A right click on the rail itself (not on an item) offers what the whole rail can do.
+  list.addEventListener('contextmenu', (event) => {
+    if (event.target !== list) return;
+    event.preventDefault();
+    openMenu({ x: event.clientX, y: event.clientY }, railMenu(), 'Sidebar');
+  });
   const footer = el(
     'div',
     { class: 'sidebar-footer' },
@@ -237,9 +282,13 @@ function renderSidebar(): void {
           'offline',
         )
       : null,
-    sidebarAction('⚙', 'Settings', () => {
-      go('account');
+    sidebarAction('⚿', 'Saved logins', () => {
+      go('vault');
     }, inboxCount),
+    // Atrius: ☷ is the rail's Settings glyph (⚙ can render as an emoji on macOS).
+    sidebarAction('☷', 'Settings', () => {
+      go('account');
+    }),
     sidebarAction('⏻', 'Lock', () => {
       void lockSession();
     }),
@@ -316,6 +365,7 @@ function sidebarTabs(): HTMLButtonElement | null {
  * category is a run of the same name; the favorites are never split.
  */
 function sidebarRows(): HTMLElement[] {
+  if (layout !== null) return customRows(layout);
   const entryOf = new Map<Id, Entry>();
   for (const entry of catalog) entryOf.set(entry.id, entry);
   /** RF-62: the name a tool is filed under, `null` for a tool the catalog does not resolve. */
@@ -361,6 +411,425 @@ function sidebarDivider(category: string | null): HTMLElement {
   return el('div', { class: 'sidebar-divider', aria: { hidden: 'true' } }, label, el('span', { class: 'sidebar-divider-rule' }));
 }
 
+// ------------------------------------------------------------ the person's own sidebar
+
+/**
+ * The default sidebar as groups — what `sidebarRows` draws while there is no layout: the favorites,
+ * the guild's categories in order, the uncategorized org tools, the personal tools. The first edit
+ * seeds the layout from it (`seedLayout`): each category becomes an open folder of the same name.
+ */
+function defaultGroups(): { category: string | null; ids: Id[] }[] {
+  const entryOf = new Map<Id, Entry>();
+  for (const entry of catalog) entryOf.set(entry.id, entry);
+  const favorite = new Set(favorites);
+  const groups: { category: string | null; ids: Id[] }[] = [];
+  let index = 0;
+  const top: Id[] = [];
+  while (index < tools.length && favorite.has(tools[index].id)) {
+    top.push(tools[index].id);
+    index += 1;
+  }
+  groups.push({ category: null, ids: top });
+  const rest = tools.slice(index);
+  for (const tool of rest) {
+    const entry = entryOf.get(tool.id);
+    const category = entry === undefined || entry.scope === 'personal' ? null : categoryOf(entry);
+    const last = groups[groups.length - 1];
+    if (last.category === category) last.ids.push(tool.id);
+    else groups.push({ category, ids: [tool.id] });
+  }
+  return groups;
+}
+
+/** The layout to edit: the person's, or the default seeded into one. */
+function currentLayout(): SidebarLayout {
+  const current = layout ?? seedLayout(defaultGroups(), () => newFolderId());
+  const placed = new Set(current.nodes.flatMap((node) => node.kind === 'tool' ? [node.id] : node.folder.tools));
+  // A sync or quick-add can introduce tools after the layout was saved. They are drawn at the end
+  // and must be included before an edit too, otherwise moving one of them is a silent no-op.
+  return { nodes: [...current.nodes, ...tools.filter((tool) => !placed.has(tool.id)).map((tool) => ({ kind: 'tool' as const, id: tool.id }))] };
+}
+
+/**
+ * One edit of the sidebar: drawn at once, then stored whole. The backend pushes the catalog and the
+ * tools back in the new order (the digits follow); a refusal puts the stored layout back.
+ */
+async function commitLayout(next: SidebarLayout | null): Promise<void> {
+  const owner = shell;
+  if (owner === null || session?.unlocked !== true) return;
+  layout = next;
+  renderSidebar();
+  clearBanner();
+  try {
+    await call('sidebar.setLayout', { layout: next });
+  } catch (e) {
+    if (shell !== owner) return;
+    showBanner(e);
+    try {
+      const stored = await call('sidebar.layout');
+      if (shell !== owner) return;
+      layout = stored;
+    } catch {
+      // The next catalog push reads it again.
+    }
+    renderSidebar();
+  }
+}
+
+/** The rail in the person's order: their items, then whatever the layout does not name yet. */
+function customRows(current: SidebarLayout): HTMLElement[] {
+  const byId = new Map<Id, ToolStatus>();
+  for (const tool of tools) byId.set(tool.id, tool);
+  const rows: HTMLElement[] = [];
+  const placed = new Set<Id>();
+  for (const node of current.nodes) {
+    if (node.kind === 'tool') {
+      const tool = byId.get(node.id);
+      if (tool === undefined || placed.has(tool.id)) continue;
+      placed.add(tool.id);
+      rows.push(sidebarTool(tool));
+      continue;
+    }
+    const inside: ToolStatus[] = [];
+    for (const id of node.folder.tools) {
+      const tool = byId.get(id);
+      if (tool === undefined || placed.has(id)) continue;
+      placed.add(id);
+      inside.push(tool);
+    }
+    rows.push(sidebarFolder(node.folder, inside));
+  }
+  const rest = tools.filter((tool) => !placed.has(tool.id));
+  if (rest.length > 0) {
+    // Tools the guild added since the person arranged the rail: after a bare rule, in catalog order.
+    if (rows.length > 0) rows.push(sidebarDivider(null));
+    for (const tool of rest) rows.push(sidebarTool(tool));
+  }
+  return rows;
+}
+
+/**
+ * One folder of the rail. Closed, its cell shows up to four of its tools in small; open, the cell is
+ * its name and its tools follow inside a band. A click opens or closes it (stored with the layout).
+ */
+function sidebarFolder(folder: SidebarFolder, inside: ToolStatus[]): HTMLElement {
+  const onPanel = tabOnPanel();
+  const holdsCurrent = onPanel !== null && inside.some((tool) => tool.id === onPanel.toolId);
+  const holdsOpen = inside.some((tool) => tool.openWindows > 0);
+  const count = `${inside.length} ${inside.length === 1 ? 'tool' : 'tools'}`;
+  const classes = ['folder-head'];
+  if (!folder.open && holdsOpen) classes.push('open');
+  if (!folder.open && holdsCurrent) classes.push('current');
+  const head = el(
+    'button',
+    {
+      class: classes.join(' '),
+      title: `${folder.name} — ${count}`,
+      aria: { label: `Folder ${folder.name}, ${count}`, expanded: folder.open ? 'true' : 'false' },
+      data: { 'folder-head': folder.id },
+      attrs: { type: 'button' },
+    },
+    folder.open
+      ? el('span', { class: 'folder-name', aria: { hidden: 'true' } }, folder.name)
+      : el(
+          'span',
+          { class: 'folder-grid', aria: { hidden: 'true' } },
+          ...inside.slice(0, 4).map((tool) => glyph(tool.title, tool.icon)),
+        ),
+  );
+  head.addEventListener('click', () => {
+    void commitLayout(setFolderOpen(currentLayout(), folder.id, !folder.open));
+  });
+  arrangeable(head, { folder: folder.id }, folder.name);
+  const box = el(
+    'div',
+    { class: folder.open ? 'rail-folder rail-folder-open' : 'rail-folder', role: 'group', aria: { label: folder.name }, data: { folder: folder.id } },
+    head,
+  );
+  if (folder.open) {
+    for (const tool of inside) box.append(sidebarTool(tool));
+    if (inside.length === 0) box.append(el('span', { class: 'folder-empty', aria: { hidden: 'true' } }, '·'));
+  }
+  return box;
+}
+
+type RailRef = { tool: Id } | { folder: string };
+
+/** The folders of the layout, in rail order. */
+function folders(of: SidebarLayout): SidebarFolder[] {
+  const found: SidebarFolder[] = [];
+  for (const node of of.nodes) if (node.kind === 'folder') found.push(node.folder);
+  return found;
+}
+
+/** Asks for a folder's name; `null` when the person cancels. */
+async function askFolderName(value = ''): Promise<string | null> {
+  const owner = shell;
+  const name = await promptText({
+    title: value === '' ? 'New folder' : 'Rename folder',
+    label: 'Name',
+    value,
+    placeholder: 'Work',
+    confirm: value === '' ? 'Create folder' : 'Rename',
+  });
+  return owner !== null && shell === owner && session?.unlocked === true ? name : null;
+}
+
+/** What the rail as a whole can do — its right click, and the palette's sidebar rows. */
+function railMenu(): MenuItem[] {
+  const items: MenuItem[] = [
+    { label: 'Add tool…', glyph: '+', run: () => openPersonalToolDialog() },
+    {
+      label: 'New folder…',
+      glyph: '▤',
+      run: () => {
+        void askFolderName().then((name) => {
+          if (name !== null) void commitLayout(addFolder(currentLayout(), name, newFolderId()));
+        });
+      },
+    },
+  ];
+  if (layout !== null) {
+    items.push('separator', { label: 'Reset sidebar order', glyph: '↺', run: () => void commitLayout(null) });
+  }
+  return items;
+}
+
+/** The acts on one rail item: its right click, the menu key, and Shift+F10. */
+function itemMenu(ref: RailRef): MenuItem[] {
+  const current = currentLayout();
+  const items: MenuItem[] = [
+    { group: 'Arrange' },
+    { label: 'Move up', glyph: '↑', hint: '[⌥↑]', run: () => void commitLayout(step(currentLayout(), ref, -1)) },
+    { label: 'Move down', glyph: '↓', hint: '[⌥↓]', run: () => void commitLayout(step(currentLayout(), ref, 1)) },
+  ];
+  if ('tool' in ref) {
+    const id = ref.tool;
+    const holder = folderOf(current, id);
+    items.push({ group: 'Folder' });
+    for (const folder of folders(current)) {
+      if (holder !== null && holder.id === folder.id) continue;
+      items.push({ label: `Move to ${folder.name}`, glyph: '▸', run: () => void commitLayout(moveTool(layout === null ? current : currentLayout(), id, { into: folder.id })) });
+    }
+    items.push({
+      label: 'New folder with this tool…',
+      glyph: '▤',
+      run: () => {
+        void askFolderName().then((name) => {
+          if (name !== null) void commitLayout(addFolder(currentLayout(), name, newFolderId(), id));
+        });
+      },
+    });
+    if (holder !== null) {
+      items.push({ label: `Take out of ${holder.name}`, glyph: '◂', run: () => void commitLayout(takeOutOfFolder(currentLayout(), id)) });
+    }
+  } else {
+    const folderId = ref.folder;
+    const folder = folders(current).find((item) => item.id === folderId);
+    if (folder !== undefined) {
+      items.push(
+        { group: 'Folder' },
+        {
+          label: folder.open ? 'Close folder' : 'Open folder',
+          glyph: folder.open ? '▴' : '▾',
+          run: () => void commitLayout(setFolderOpen(currentLayout(), folderId, !folder.open)),
+        },
+        {
+          label: 'Rename folder…',
+          glyph: '✎',
+          run: () => {
+            void askFolderName(folder.name).then((name) => {
+              if (name !== null) void commitLayout(renameFolder(currentLayout(), folderId, name));
+            });
+          },
+        },
+        { label: 'Add tool here…', glyph: '+', run: () => openPersonalToolDialog(folderId) },
+        'separator',
+        { label: 'Delete folder, keep its tools', glyph: '×', danger: true, run: () => void commitLayout(removeFolder(currentLayout(), folderId)) },
+      );
+    }
+  }
+  items.push('separator', ...railMenu());
+  return items;
+}
+
+/** The drag in progress over the rail, if any. */
+interface RailDrag {
+  ref: RailRef;
+  source: HTMLElement;
+  x: number;
+  y: number;
+  active: boolean;
+  /** where it lands, or the tool it would make a folder with */
+  target: { drop: Drop; line: { top: number } | null; into: HTMLElement | null } | null;
+  marker: HTMLElement | null;
+}
+
+let railDrag: RailDrag | null = null;
+
+/**
+ * Makes a rail item arrangeable: drag it (the pointer, 4 px before it counts) to move it or, onto
+ * another tool, to make a folder of the two; ⌥↑/⌥↓ step it from the keyboard; the right click (or
+ * the menu key) opens its acts. A drag never opens the item it started on.
+ */
+function arrangeable(node: HTMLElement, ref: RailRef, name: string): void {
+  node.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const at = event.clientX === 0 && event.clientY === 0 ? node : { x: event.clientX, y: event.clientY };
+    openMenu(at, itemMenu(ref), name);
+  });
+  node.addEventListener('keydown', (event) => {
+    if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+      event.preventDefault();
+      void commitLayout(step(currentLayout(), ref, event.key === 'ArrowUp' ? -1 : 1)).then(() => {
+        refocus(ref);
+      });
+    } else if (event.key === 'F10' && event.shiftKey) {
+      event.preventDefault();
+      openMenu(node, itemMenu(ref), name);
+    }
+  });
+  node.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || railDrag !== null) return;
+    railDrag = { ref, source: node, x: event.clientX, y: event.clientY, active: false, target: null, marker: null };
+    window.addEventListener('pointermove', onRailMove);
+    window.addEventListener('pointerup', onRailUp, { once: true });
+    window.addEventListener('pointercancel', onRailCancel, { once: true });
+    document.addEventListener('keydown', onRailEscape, true);
+  });
+}
+
+/** The focus follows an item the keyboard just moved (the rail was drawn again). */
+function refocus(ref: RailRef): void {
+  const selector = 'tool' in ref ? `.sidebar [data-tool="${CSS.escape(ref.tool)}"]` : `.sidebar [data-folder-head="${CSS.escape(ref.folder)}"]`;
+  document.querySelector<HTMLElement>(selector)?.focus();
+}
+
+function onRailMove(event: PointerEvent): void {
+  const drag = railDrag;
+  if (drag === null) return;
+  if (!drag.active) {
+    if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 4) return;
+    drag.active = true;
+    drag.source.classList.add('dragging');
+    document.body.classList.add('rail-dragging');
+    drag.marker = el('div', { class: 'rail-drop', aria: { hidden: 'true' } });
+    document.body.append(drag.marker);
+    document.addEventListener('keydown', onRailEscape, true);
+  }
+  event.preventDefault();
+  drag.target = railTarget(drag, event.clientX, event.clientY);
+  document.querySelectorAll('.drop-into').forEach((node) => node.classList.remove('drop-into'));
+  const marker = drag.marker;
+  if (marker === null) return;
+  const line = drag.target?.line ?? null;
+  marker.hidden = line === null;
+  if (line !== null) {
+    const rail = document.querySelector('.sidebar')?.getBoundingClientRect();
+    marker.style.top = `${Math.round(line.top - 1)}px`;
+    marker.style.left = `${Math.round(rail?.left ?? 0)}px`;
+    marker.style.width = `${Math.round(rail?.width ?? 48)}px`;
+  }
+  drag.target?.into?.classList.add('drop-into');
+}
+
+/**
+ * Where the pointer would drop the dragged item: next to an item (the top or bottom third of it),
+ * into a folder (the middle of its cell), onto a tool (its middle: the two become a folder), or at
+ * the end (the rail's empty part).
+ */
+function railTarget(drag: RailDrag, x: number, y: number): RailDrag['target'] {
+  const hit = document.elementFromPoint(x, y);
+  const rail = hit?.closest('.sidebar-tools');
+  if (hit === null || rail === null || rail === undefined) return null;
+  const item = hit.closest<HTMLElement>('[data-tool], [data-folder-head]');
+  if (item === null) {
+    const last = rail.querySelector('.sidebar-add')?.getBoundingClientRect();
+    return { drop: { end: true }, line: last === undefined ? null : { top: last.top }, into: null };
+  }
+  const box = item.getBoundingClientRect();
+  const rel = (y - box.top) / box.height;
+  const dragging = drag.ref;
+  const toolId = item.dataset.tool;
+  if (toolId !== undefined) {
+    if ('tool' in dragging && dragging.tool === toolId) return null;
+    if ('folder' in dragging) {
+      return rel < 0.5
+        ? { drop: { before: toolId }, line: { top: box.top }, into: null }
+        : { drop: { after: toolId }, line: { top: box.bottom }, into: null };
+    }
+    if (rel < 0.3) return { drop: { before: toolId }, line: { top: box.top }, into: null };
+    if (rel > 0.7) return { drop: { after: toolId }, line: { top: box.bottom }, into: null };
+    // The middle of a tool: the two make a folder (or join the folder the target is in).
+    return { drop: { before: toolId }, line: null, into: item };
+  }
+  const folderId = item.dataset.folderHead ?? '';
+  const open = item.getAttribute('aria-expanded') === 'true';
+  if ('folder' in dragging) {
+    if (dragging.folder === folderId) return null;
+    const box2 = item.closest('.rail-folder')?.getBoundingClientRect() ?? box;
+    return rel < 0.5
+      ? { drop: { beforeFolder: folderId }, line: { top: box.top }, into: null }
+      : { drop: { afterFolder: folderId }, line: { top: box2.bottom }, into: null };
+  }
+  if (rel < 0.3) return { drop: { beforeFolder: folderId }, line: { top: box.top }, into: null };
+  if (rel > 0.7 && !open) return { drop: { afterFolder: folderId }, line: { top: box.bottom }, into: null };
+  return { drop: { into: folderId, index: open ? 0 : undefined }, line: null, into: item };
+}
+
+function endRailDrag(): RailDrag | null {
+  const drag = railDrag;
+  railDrag = null;
+  window.removeEventListener('pointermove', onRailMove);
+  window.removeEventListener('pointerup', onRailUp);
+  window.removeEventListener('pointercancel', onRailCancel);
+  document.removeEventListener('keydown', onRailEscape, true);
+  document.body.classList.remove('rail-dragging');
+  document.querySelectorAll('.drop-into').forEach((node) => node.classList.remove('drop-into'));
+  if (drag !== null) {
+    drag.source.classList.remove('dragging');
+    drag.marker?.remove();
+  }
+  return drag;
+}
+
+function onRailCancel(): void {
+  endRailDrag();
+}
+
+function onRailEscape(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  event.stopPropagation();
+  endRailDrag();
+}
+
+function onRailUp(): void {
+  const drag = endRailDrag();
+  if (drag === null || !drag.active) return;
+  // The click that follows a drag is not a request to open the item.
+  const swallow = (event: Event): void => {
+    event.stopPropagation();
+    event.preventDefault();
+  };
+  window.addEventListener('click', swallow, { capture: true, once: true });
+  window.setTimeout(() => window.removeEventListener('click', swallow, { capture: true }), 0);
+  const target = drag.target;
+  if (target === null) return;
+  const current = currentLayout();
+  if ('folder' in drag.ref) {
+    void commitLayout(moveFolder(current, drag.ref.folder, target.drop));
+    return;
+  }
+  const id = drag.ref.tool;
+  if (target.into !== null && target.into.dataset.tool !== undefined) {
+    void commitLayout(mergeIntoFolder(current, target.into.dataset.tool, id, 'New folder', newFolderId()));
+    return;
+  }
+  void commitLayout(moveTool(current, id, target.drop));
+}
+
 function sidebarTool(tool: ToolStatus): HTMLButtonElement {
   const classes = ['tool-icon'];
   if (tool.openWindows > 0) classes.push('open');
@@ -397,6 +866,7 @@ function sidebarTool(tool: ToolStatus): HTMLButtonElement {
   node.addEventListener('click', () => {
     void openTool(tool.id);
   });
+  arrangeable(node, { tool: tool.id }, tool.title);
   return node;
 }
 
@@ -514,8 +984,11 @@ function renderHome(content: HTMLElement): void {
         { class: 'empty' },
         el('p', {}, 'No tools yet.'),
         session.person !== null && session.person.admin
-          ? el('p', { class: 'muted' }, 'Add a tool in Settings → Tools')
-          : null,
+          ? button('Add team tool', () => {
+              go('tools');
+              settings?.addTool();
+            }, { kind: 'primary' })
+          : el('p', { class: 'muted' }, 'Add a personal tool, or ask your admin for access.'),
       ),
     );
   } else {
@@ -527,6 +1000,7 @@ function renderHome(content: HTMLElement): void {
       'header',
       { class: 'content-header' },
       el('h1', { class: 'content-title' }, 'Tools'),
+      button('Search tools', () => openPaletteNow(), { kind: 'ghost', title: 'Search tools or actions (⌘K / Ctrl+K)' }),
       // B7: anyone may add a personal tool; the dialog asks for a title and an address.
       button('Add personal tool', () => openPersonalToolDialog(), {
         kind: 'ghost',
@@ -574,6 +1048,8 @@ function toolSection(title: string, entries: Entry[]): HTMLElement {
     'section',
     { class: 'home-section', aria: { label: title } },
     el('h2', { class: 'home-section-title' }, title),
+    // Atrius: a category carries its count, beside the title (the title's text stays the name).
+    el('span', { class: 'home-section-count', aria: { hidden: 'true' } }, String(entries.length)),
     toolGrid(entries),
   );
 }
@@ -671,10 +1147,11 @@ function favoriteToggle(entry: Entry): HTMLButtonElement {
   const node = el(
     'button',
     {
-      class: on ? 'favorite favorite-on' : 'favorite',
+      class: on ? 'favorite favorite-on icon-button' : 'favorite icon-button',
       title: on ? `Remove ${entry.title} from favorites` : `Add ${entry.title} to favorites`,
       aria: { label: on ? `Remove ${entry.title} from favorites` : `Add ${entry.title} to favorites`, pressed: on ? 'true' : 'false' },
       attrs: { type: 'button' },
+      data: { icon: on ? '★' : '☆' },
     },
     on ? '★' : '☆',
   );
@@ -718,12 +1195,35 @@ const PERSONAL_DIALOG_ID = 'personal-tool-dialog';
  * The id, the owner and the write time are the backend's (`backend/personal.ts`); this side sends the
  * two fields a person can type.
  */
-function openPersonalToolDialog(): void {
+function openPersonalToolDialog(intoFolder: string | null = null): void {
   if (session === null || !session.unlocked || shell === null) return;
   if (document.getElementById(PERSONAL_DIALOG_ID) !== null) return;
 
   const title = input('title', { placeholder: 'Team notes', required: true });
   const url = input('url', { type: 'url', placeholder: 'https://notes.example.com', required: true });
+  // The sidebar's quick add: the new tool can land straight in one of the person's folders.
+  const known = layout === null ? [] : folders(layout);
+  const folderSelect =
+    known.length === 0
+      ? null
+      : el(
+          'select',
+          { class: 'input', attrs: { name: 'folder' } },
+          el('option', { attrs: { value: '' } }, 'No folder'),
+          ...known.map((folder) => el('option', { attrs: { value: folder.id } }, folder.name)),
+        );
+  if (folderSelect !== null && intoFolder !== null) folderSelect.value = intoFolder;
+  // A paste of an address alone fills the title from its host, so two keystrokes add a tool.
+  url.addEventListener('change', () => {
+    if (title.value.trim() !== '') return;
+    try {
+      const host = new URL(url.value.trim()).hostname.replace(/^www\./, '');
+      const name = host.split('.')[0] ?? '';
+      if (name !== '') title.value = name.charAt(0).toUpperCase() + name.slice(1);
+    } catch {
+      // Not an address yet: the person types the title.
+    }
+  });
   const errorBox = el('div', { class: 'palette-message' });
   const overlay = el('div', { id: PERSONAL_DIALOG_ID, class: 'overlay' });
 
@@ -749,6 +1249,10 @@ function openPersonalToolDialog(): void {
       // The backend pushes the catalog; this side shows the new card at once either way.
       if (!catalog.some((entry) => entry.id === saved.id)) catalog = [...catalog, saved];
       refreshChrome();
+      const target = folderSelect === null ? '' : folderSelect.value;
+      if (target !== '' && layout !== null) {
+        void commitLayout(moveTool(layout, saved.id, { into: target }));
+      }
     },
     { kind: 'primary' },
   );
@@ -766,10 +1270,13 @@ function openPersonalToolDialog(): void {
     el(
       'p',
       { class: 'muted' },
-      'Only you see it, on every machine signed in to this Nod. Its camera and microphone need your permission.',
+      guildConnected()
+        ? 'Only you see this tool. It syncs across your guild devices. Camera and microphone require your permission.'
+        : 'Only you see this tool, on this device. Camera and microphone require your permission.',
     ),
-    field('Title', title),
     field('Address', url),
+    field('Title', title),
+    folderSelect === null ? null : field('Folder', folderSelect),
     errorBox,
     el(
       'div',
@@ -784,7 +1291,7 @@ function openPersonalToolDialog(): void {
   });
   document.addEventListener('keydown', onKey);
   document.body.append(overlay);
-  title.focus();
+  url.focus();
 }
 
 function toolCard(entry: Entry): HTMLElement {
@@ -804,81 +1311,78 @@ function toolCard(entry: Entry): HTMLElement {
         el('h2', { class: 'tool-title' }, entry.title),
         el('p', { class: 'tool-host muted' }, hostOf(entry.url)),
       ),
-      favoriteToggle(entry),
     ),
     // canonico §22: the warning the owner asked for, beside the tool in the window that opens it.
     isForeign(entry)
       ? el(
           'p',
           { class: 'tool-warning', role: 'status' },
-          'Not from your org — this link was not added by your organization. Camera and microphone need your permission.',
+          'Personal tool · Not managed by your guild. Camera and microphone require your permission.',
         )
       : null,
-    el('p', { class: 'tool-state' }, stateText(tool)),
+    // Atrius: the state is glyph + word; `data-state` picks the glyph and its colour (style.css).
+    el('p', { class: 'tool-state', title: stateText(tool), data: { state: stateKey(tool) } }, stateText(tool)),
   );
 
   const login = tool === null || tool.login === null ? null : LOGIN_TEXT[tool.login];
-  if (login !== null) card.append(el('p', { class: 'tool-login muted' }, login));
+  if (login !== null && tool !== null && tool.login !== null) {
+    card.append(el('p', { class: 'tool-login muted', data: { login: tool.login } }, login));
+  }
 
+  // The row's acts are icons in fixed slots, the same six in every row — open or bring to front,
+  // close, try again, views, remove, favorite — and a slot that does not apply stays empty, so each
+  // act sits in the same column down the whole list.
+  const views = entry.views;
   const actions = el(
     'div',
-    { class: 'row' },
-    button(open ? 'Bring to front' : 'Open', () => openTool(entry.id), {
+    { class: 'tool-actions', role: 'group', aria: { label: `${entry.title} actions` } },
+    iconButton(open ? '⧉' : '↗', open ? 'Bring to front' : 'Open', () => openTool(entry.id), {
       kind: 'primary',
       title: open ? `Bring ${entry.title} to front` : `Open ${entry.title}`,
     }),
+    open
+      ? iconButton('■', 'Close', () => {
+          void runTools(() => call('tools.close', { id: entry.id }));
+        }, { title: `Close ${entry.title}` })
+      : iconSlot(),
+    tool !== null && tool.error !== null
+      ? iconButton('↻', 'Try again', () => {
+          void runTools(() => call('tools.reload', { id: entry.id }));
+        }, { title: `Try ${entry.title} again` })
+      : iconSlot(),
+    views.length > 0 ? viewsButton(entry) : iconSlot(),
+    // B7: only the person's own tool is theirs to remove.
+    isForeign(entry)
+      ? iconButton('×', 'Remove', () => removePersonalTool(entry.id), { kind: 'danger', title: `Remove ${entry.title}` })
+      : iconSlot(),
+    favoriteToggle(entry),
   );
-  if (open) {
-    actions.append(
-      button('Close', () => {
-        void runTools(() => call('tools.close', { id: entry.id }));
-      }, {
-        kind: 'ghost',
-        title: `Close ${entry.title}`,
-      }),
-    );
-  }
-  if (tool !== null && tool.error !== null) {
-    actions.append(
-      button('Try again', () => {
-        void runTools(() => call('tools.reload', { id: entry.id }));
-      }, {
-        kind: 'ghost',
-        title: `Try ${entry.title} again`,
-      }),
-    );
-  }
-  // B7: only the person's own tool is theirs to remove.
-  if (isForeign(entry)) {
-    actions.append(
-      button('Remove', () => removePersonalTool(entry.id), {
-        kind: 'danger',
-        title: `Remove ${entry.title}`,
-      }),
-    );
-  }
-  // The views (deep links) are one select in the action row instead of a button each, so a tool
-  // with several views never wraps the card onto more lines. Picking one opens it and the select
-  // goes back to its placeholder, ready for the next pick.
-  if (entry.views.length > 0) {
-    const views = el(
-      'select',
-      { class: 'input tool-views', attrs: { name: `views-${entry.id}`, 'aria-label': `${entry.title} views` } },
-      el('option', { attrs: { value: '' } }, 'Views…'),
-    );
-    entry.views.forEach((entryView, index) => {
-      views.append(el('option', { attrs: { value: String(index), title: `${entry.title} › ${entryView.label}` } }, entryView.label));
-    });
-    views.addEventListener('change', () => {
-      const picked = views.value;
-      views.value = '';
-      if (picked === '') return;
-      runTools(() => call('tools.openView', { toolId: entry.id, index: Number(picked) }));
-    });
-    actions.append(views);
-  }
   card.append(actions);
   return card;
+}
+
+/**
+ * The views (deep links) of a tool: one icon that opens them as a menu, so a tool with several views
+ * takes one slot like every other row.
+ */
+function viewsButton(entry: Entry): HTMLButtonElement {
+  const node = iconButton(
+    '☰',
+    'Views',
+    () => {
+      openMenu(
+        node,
+        entry.views.map((entryView, index) => ({
+          label: entryView.label,
+          glyph: '↗',
+          run: () => void runTools(() => call('tools.openView', { toolId: entry.id, index })),
+        })),
+        `${entry.title} views`,
+      );
+    },
+    { title: `${entry.title} views (${entry.views.length})`, popup: true },
+  );
+  return node;
 }
 
 /** Everything around the content that reads the session and the host: sidebar, the panel, notices. */
@@ -1252,7 +1756,7 @@ function openLinkDialog(): void {
     el(
       'p',
       { class: 'muted' },
-      'It opens as an ad-hoc tab: not saved, no autofill, and Nod gives it no access to your account.',
+      'Opens an unsaved tab. No autofill or access to your Nod account.',
     ),
     field('Address', url),
     errorBox,
@@ -1317,7 +1821,7 @@ async function loadUnlocked(): Promise<void> {
   const toolsAt = toolsRevision;
   const catalogAt = catalogRevision;
   try {
-    const [answer, entries, hostState, ids, tiles] = await Promise.all([
+    const [answer, entries, hostState, ids, tiles, arranged] = await Promise.all([
       call('tools.state'),
       call('catalog.list'),
       // SP05 §3: locked windows cannot read it, and the sidebar needs it right after the unlock.
@@ -1327,11 +1831,14 @@ async function loadUnlocked(): Promise<void> {
       // 0.5.0 (RF-60): the tiles of the entry screen, read while locked and kept: the sidebar's top
       // mark is the guild's icon, and the next lock re-reads them anyway.
       call('session.profiles'),
+      // The person's own sidebar, read with the catalog it orders.
+      call('sidebar.layout'),
     ]);
     state = answer;
     if (catalogRevision === catalogAt) {
       catalog = entries;
       favorites = ids;
+      layout = arranged;
     }
     host = hostState;
     profiles = tiles;
@@ -1403,6 +1910,12 @@ function openPaletteNow(): void {
     addPersonalTool: () => {
       window.setTimeout(() => openPersonalToolDialog(), 0);
     },
+    // The sidebar's own acts (new folder, reset), one row away from the keyboard (RNF-07).
+    sidebar: railMenu().flatMap((item) =>
+      typeof item === 'object' && 'run' in item && item.label !== 'Add tool…'
+        ? [{ label: `Sidebar: ${item.label}`, run: () => window.setTimeout(item.run, 0) }]
+        : [],
+    ),
     // RF-58: only with a guild to show.
     showOnline: guildConnected()
       ? () => {
@@ -1499,6 +2012,7 @@ on('session', (next) => {
     tabsState = null;
     catalog = [];
     favorites = [];
+    layout = null;
     host = null;
     inboxCount = 0;
     joinInvite = null;
@@ -1605,9 +2119,14 @@ async function loadCatalog(): Promise<void> {
   try {
     // B7: the list the toggle draws from travels with the entries — a sync that moved the favorites
     // of another machine reaches this side through the same push.
-    const [entries, ids] = await Promise.all([call('catalog.list'), call('favorites.list')]);
+    const [entries, ids, arranged] = await Promise.all([
+      call('catalog.list'),
+      call('favorites.list'),
+      call('sidebar.layout'),
+    ]);
     catalog = entries;
     favorites = ids;
+    layout = arranged;
   } catch (e) {
     showBanner(e);
     return;

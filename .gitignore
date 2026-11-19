@@ -50,5 +50,6 @@ electrobun.config.ts
 build/
 artifacts/
 
-# macOS icon set `scripts/eb-icon.ts` writes from the app icon
+# icon files `scripts/eb-icon.ts` writes from the app icon
 .eb-icon.iconset/
+.eb-icon-256.png

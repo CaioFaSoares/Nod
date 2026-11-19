@@ -390,6 +390,23 @@ export interface EntryDetails {
 
 // ---------------------------------------------------------------- tools (windows)
 
+/** A folder of the person's sidebar: a name, open or closed, and its tools in order. */
+export interface SidebarFolder {
+  /** `f-…`, made by the page */
+  id: string;
+  name: string;
+  open: boolean;
+  tools: Id[];
+}
+
+/** One item of the sidebar's top level: a tool, or a folder of tools. */
+export type SidebarNode = { kind: 'tool'; id: Id } | { kind: 'folder'; folder: SidebarFolder };
+
+/** The person's own sidebar (`sidebar.layout`): the top level in order. */
+export interface SidebarLayout {
+  nodes: SidebarNode[];
+}
+
 export interface ToolStatus {
   id: Id;
   title: string;
@@ -902,6 +919,15 @@ export interface ApiContract {
    * no entry the person sees are dropped, and a repeat keeps its first place.
    */
   'favorites.set': [{ ids: Id[] }, true];
+  /**
+   * The person's own arrangement of the sidebar (`shared/sidebar-layout.ts`): their order and their
+   * folders, `null` while they keep the default one (favorites → the guild's categories → personal).
+   * Local data of this machine and this person, like the window geometry: it is not synced to the
+   * host. The order it gives is the order `catalog.list` and the ⌘1…⌘9 digits follow.
+   */
+  'sidebar.layout': [void, SidebarLayout | null];
+  /** Replaces the arrangement whole; `null` goes back to the default order. */
+  'sidebar.setLayout': [{ layout: SidebarLayout | null }, true];
 
   'catalog.list': [void, Entry[]];
   'catalog.get': [{ id: Id }, EntryDetails];

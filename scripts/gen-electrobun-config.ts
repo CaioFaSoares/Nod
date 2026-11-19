@@ -29,7 +29,7 @@ import { resolve } from 'node:path';
 import type { Seed } from '../shared/types';
 import { BUILD_MODE_STAMP } from '../shared/build-mode';
 import { validateSeed } from '../shared/catalog';
-import { iconForConfig } from './app-config';
+import { WINDOWS_ICON, iconForConfig } from './app-config';
 
 /** Identifier a release always wears (the 0.7.0 migration kept the tinyjs identity). */
 export const RELEASE_IDENTIFIER = 'copland.nod';
@@ -203,6 +203,8 @@ export interface ElectrobunOptions {
   nativeLibrary?: boolean;
   /** Host being built; macOS alone takes an `.iconset`, the others take the PNG. */
   platform?: NodeJS.Platform;
+  /** 256×256 PNG for Windows/Linux; Windows refuses a larger PNG (`PngTooLarge`). */
+  winIcon?: string | null;
   /**
    * App icon the build wears (RF-56 parity), project-relative and already resolved and checked by
    * `iconForConfig` — `.nod-icon.png`, `resources/icon.png` or `assets/icon.png`. macOS gets the
@@ -267,8 +269,8 @@ export function generateElectrobunConfig(
   const linux: Record<string, unknown> = { bundleCEF: false };
   if (icon !== null) {
     if (platform === 'darwin') mac.icons = EB_ICON_ICONSET;
-    win.icon = icon;
-    linux.icon = icon;
+    win.icon = options.winIcon ?? icon;
+    linux.icon = options.winIcon ?? icon;
   }
 
   const config: Record<string, unknown> = {
@@ -366,6 +368,7 @@ if (import.meta.main) {
       sqliteShim: resolve(root, EB_SQLITE_SHIM),
       nativeLibrary: await Bun.file(`${root}/${EB_NATIVE_LIBRARY}`).exists(),
       platform: process.platform,
+      winIcon: (await Bun.file(`${root}/${WINDOWS_ICON}`).exists()) ? WINDOWS_ICON : null,
       // Same resolution, same PNG check and same `NOD_ICON` staging the icon helper runs,
       // so every target wears the same icon. `scripts/eb-icon.ts` reads it again to write
       // the macOS iconset; a file that is not there is refused here, before either build starts.

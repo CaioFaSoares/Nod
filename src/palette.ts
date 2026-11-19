@@ -7,7 +7,7 @@ import { el, message } from './ui';
 import { categoryOf } from '../shared/catalog';
 import type { TabsApi } from './tabs';
 import type { Entry, Id, TabState, ToolStatus } from '../shared/types';
-import type { SettingsTab } from './settings';
+import { settingsTabs, type SettingsTab } from './settings-navigation';
 
 const OVERLAY_ID = 'palette-overlay';
 const LIST_ID = 'palette-list';
@@ -20,24 +20,6 @@ interface Item {
   hint?: string;
   run: () => unknown;
 }
-
-interface SettingsTabItem {
-  id: SettingsTab;
-  label: string;
-  /** admin-only tabs: everyone gets Account and Vault, the rest is the admin's */
-  admin: boolean;
-}
-
-const SETTINGS_TABS: SettingsTabItem[] = [
-  { id: 'account', label: 'Account', admin: false },
-  { id: 'hosts', label: 'Hosts', admin: false },
-  { id: 'vault', label: 'Vault', admin: false },
-  { id: 'tools', label: 'Tools', admin: true },
-  { id: 'roles', label: 'Roles', admin: true },
-  { id: 'people', label: 'People', admin: true },
-  { id: 'activity', label: 'Activity', admin: true },
-  { id: 'catalog', label: 'Catalog', admin: true },
-];
 
 /** Lowercase and without accents: the filter ignores case and diacritics. */
 function matchKey(text: string): string {
@@ -88,6 +70,8 @@ export function openPalette(ctx: {
   lock: () => void;
   /** B7: "Add personal tool" — the dialog of `src/app.ts`, opened from the palette. */
   addPersonalTool: () => void;
+  /** The sidebar's acts — a new folder, back to the default order — as rows of their own. */
+  sidebar: { label: string; run: () => void }[];
   /** RF-58: "Who's online" — Home's card; null while there is no guild to show. */
   showOnline: (() => void) | null;
   /** K4: "Vault inbox" — Settings → Vault, scrolled to the shares waiting; null without a guild. */
@@ -193,6 +177,7 @@ export function openPalette(ctx: {
   // B7/SP05 §4: the dialog of a personal tool, reachable from the keyboard like every action.
   const addPersonal = 'Add personal tool';
   items.push({ label: addPersonal, key: matchKey(addPersonal), run: () => ctx.addPersonalTool() });
+  for (const act of ctx.sidebar) items.push({ label: act.label, key: matchKey(act.label), run: act.run });
   const showOnline = ctx.showOnline;
   if (showOnline !== null) {
     const online = "Who's online";
@@ -201,13 +186,12 @@ export function openPalette(ctx: {
   // K4: the shares waiting for an answer, one keystroke away.
   const openInbox = ctx.openInbox;
   if (openInbox !== null) {
-    const inbox = 'Vault inbox';
-    items.push({ label: inbox, key: matchKey(inbox), run: () => openInbox() });
+    const inbox = 'Review shared logins';
+    items.push({ label: inbox, key: matchKey(`${inbox} vault inbox`), run: () => openInbox() });
   }
-  for (const tab of SETTINGS_TABS) {
-    if (tab.admin && !ctx.isAdmin) continue;
-    const label = `Settings › ${tab.label}`;
-    items.push({ label, key: matchKey(label), run: () => ctx.go(tab.id) });
+  for (const tab of settingsTabs(ctx.isAdmin)) {
+    const label = tab.action;
+    items.push({ label, key: matchKey(`${label} settings ${tab.label} ${tab.aliases}`), run: () => ctx.go(tab.id) });
   }
   const lock = 'Lock';
   items.push({ label: lock, key: matchKey(lock), run: () => ctx.lock() });
@@ -223,11 +207,11 @@ export function openPalette(ctx: {
       'aria-controls': LIST_ID,
       'aria-activedescendant': '',
       'aria-autocomplete': 'list',
-      'aria-label': 'Search tools, views and actions',
+      'aria-label': 'Search tools or actions',
       autocomplete: 'off',
       autocapitalize: 'off',
       spellcheck: 'false',
-      placeholder: 'Search tools, views and actions…',
+      placeholder: 'Search tools or actions…',
     },
   });
   const errorBox = el('div', { class: 'palette-message' });

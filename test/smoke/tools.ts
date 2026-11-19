@@ -294,6 +294,18 @@ export function generateElectrobunDevConfig(
   else delete env.NOD_APP_ID;
   if (mainUrl !== null) env.NOD_MAIN_URL = mainUrl;
   else delete env.NOD_MAIN_URL;
+  const icon = Bun.spawnSync(['bun', 'scripts/eb-icon.ts'], {
+    cwd: root,
+    env,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  if (icon.exitCode !== 0) {
+    return {
+      code: icon.exitCode ?? -1,
+      output: (icon.stdout?.toString() ?? '') + (icon.stderr?.toString() ?? ''),
+    };
+  }
   const result = Bun.spawnSync(['bun', 'scripts/gen-electrobun-config.ts', 'dev'], {
     cwd: root,
     env,
@@ -302,7 +314,11 @@ export function generateElectrobunDevConfig(
   });
   return {
     code: result.exitCode ?? -1,
-    output: (result.stdout?.toString() ?? '') + (result.stderr?.toString() ?? ''),
+    output:
+      (icon.stdout?.toString() ?? '') +
+      (icon.stderr?.toString() ?? '') +
+      (result.stdout?.toString() ?? '') +
+      (result.stderr?.toString() ?? ''),
   };
 }
 

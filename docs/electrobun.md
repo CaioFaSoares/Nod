@@ -50,10 +50,12 @@ bun run validate    # typecheck, unit tests, page build
 bun run validate --smoke   # + the four real-surface smokes (Electrobun only)
 ```
 
-`eb:build` is `scripts/eb-build.ts`: on macOS it compiles the native helper (`swiftc`, AppKit) and
-writes the `.iconset`, then always builds the page, generates the config and runs
-`electrobun build --env=stable`. On Windows/Linux the Swift and `sips` steps are skipped and the
-PNG icon from `app.json`'s resolution is embedded as is. The macOS post-build repairs the camera and
+`eb:build` is `scripts/eb-build.ts`: on macOS it compiles the native helper (`swiftc`, AppKit); on
+every host it writes the icon files (`scripts/eb-icon.ts`), builds the page, generates the config
+and runs `electrobun build --env=stable`. macOS takes the `.iconset`; Windows/Linux take
+`.eb-icon-256.png`, a 256×256 PNG — Hutch's Windows `icoFromPng` refuses a larger PNG
+(`PngTooLarge`). The resizer is `sips` on macOS, `System.Drawing` on Windows, ImageMagick or ffmpeg
+on Linux. The macOS post-build repairs the camera and
 microphone usage strings in the `.app` and in the payload tar, then ad-hoc signs the bundle
 (`scripts/eb-postbuild.ts`, `scripts/eb-sign.ts`); Windows and Linux ship unsigned.
 
@@ -116,6 +118,7 @@ macOS 0.6/0.7 updates itself from the same manifest, as it did on the 0.7.0 cuto
 | No keychain helper on Windows/Linux | Biometric unlock is unavailable and legacy `nod.bio.*` items are not read or deleted. Credentials still work (sealed in `nod.db`). |
 | No view re-parent on Windows/Linux | Tools open as windows, not tabs; detach/dock does not exist there. |
 | No save panel in Electrobun 2.0.5 | Saving picks a directory, not a file name. |
+| Windows icon limit | Hutch embeds only a square PNG ≤256 px; the build derives `.eb-icon-256.png` from the 1024 source. |
 | No update signature | The macOS path verifies sha256; the runtime path verifies the runtime's archive metadata. Neither authenticates the publisher. |
 | Linux tray needs AppIndicator | Without it the app quits when the main window closes, by design (RF-15). |
 

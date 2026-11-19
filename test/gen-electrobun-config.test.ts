@@ -229,6 +229,19 @@ describe('app icon (RF-56 parity with tinyjs)', () => {
     expect(envIcon.build.linux.icon).toBe('.nod-icon.png');
   });
 
+  test('the 256px Windows icon overrides the source PNG', () => {
+    const config = asShape(
+      generateElectrobunConfig(BASE, null, 'build', {
+        sqliteShim: SHIM,
+        icon: 'assets/icon.png',
+        winIcon: '.eb-icon-256.png',
+      }),
+    );
+    expect(config.build.win.icon).toBe('.eb-icon-256.png');
+    expect(config.build.linux.icon).toBe('.eb-icon-256.png');
+    expect(config.build.mac.icons).toBe(EB_ICON_ICONSET);
+  });
+
   test('dev wears the same icon as build', () => {
     const dev = asShape(
       generateElectrobunConfig(BASE, null, 'dev', {
