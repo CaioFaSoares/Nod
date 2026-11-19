@@ -23,9 +23,14 @@ export const MACOS_DEPLOYMENT_TARGET = "15.0";
 
 type Arch = "arm64" | "x86_64";
 
+/** Node/Bun report Intel as `x64`; Swift's target triple calls it `x86_64`. */
+export function nativeHostArch(arch: string = process.arch): Arch {
+    return arch === "x64" || arch === "x86_64" ? "x86_64" : "arm64";
+}
+
 function parseArch(argv: string[]): Arch | "universal" {
     const flag = argv.find((value) => value.startsWith("--arch="));
-    if (!flag) return process.arch === "x86_64" ? "x86_64" : "arm64";
+    if (!flag) return nativeHostArch();
     const value = flag.slice("--arch=".length);
     if (value === "arm64" || value === "x86_64" || value === "universal") return value;
     throw new Error(`unknown arch: ${value} (expected arm64, x86_64 or universal)`);
@@ -70,7 +75,7 @@ export function buildNodNative(options: { arch?: Arch | "universal"; rootDir?: s
     const rootDir = resolve(options.rootDir ?? process.cwd());
     const source = join(rootDir, NATIVE_SOURCE);
     const output = join(rootDir, NATIVE_OUTPUT);
-    const arch = options.arch ?? (process.arch === "x86_64" ? "x86_64" : "arm64");
+    const arch = options.arch ?? (nativeHostArch());
 
     if (process.platform !== "darwin") {
         console.warn(`build-nod-native: skipped (swiftc/AppKit are macOS-only; host is ${process.platform})`);
