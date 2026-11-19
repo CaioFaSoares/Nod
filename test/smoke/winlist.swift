@@ -20,6 +20,7 @@ guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[Stri
 var out: [[String: Any]] = []
 var order = 0
 for window in list {
+  let id = window[kCGWindowNumber as String] as? Int ?? 0
   let pid = window[kCGWindowOwnerPID as String] as? Int ?? 0
   let owner = window[kCGWindowOwnerName as String] as? String ?? ""
   let name = window[kCGWindowName as String] as? String ?? ""
@@ -35,7 +36,7 @@ for window in list {
     height = (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
   }
   out.append([
-    "order": order, "pid": pid, "owner": owner, "name": name, "layer": layer,
+    "order": order, "id": id, "pid": pid, "owner": owner, "name": name, "layer": layer,
     "x": x, "y": y, "w": width, "h": height,
   ])
   order += 1

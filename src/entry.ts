@@ -278,12 +278,12 @@ function createPane(offline: EntryProfiles['offline']): HTMLElement {
         el(
           'p',
           { class: 'muted' },
-          'Have a seed file from an older install? Import it and its tools, roles and invites become this machine\'s own.',
+          'Import tools, roles and invites from a setup file. No passwords are included.',
         ),
         el(
           'div',
           { class: 'row' },
-          button('Import a seed file', () => void importSeed(form), { kind: 'ghost' }),
+          button('Import setup file', () => void importSeed(form), { kind: 'ghost' }),
         ),
       ),
     );
@@ -317,7 +317,7 @@ function offlinePane(offline: EntryProfiles['offline'], biometric: boolean): HTM
   const submit = el(
     'button',
     { class: 'button button-primary', data: { action: 'enter-offline' }, attrs: { type: 'submit' } },
-    'Enter offline',
+    'Unlock',
   );
   const form = el(
     'form',
@@ -342,7 +342,7 @@ function offlinePane(offline: EntryProfiles['offline'], biometric: boolean): HTM
     card.append(button(label, () => submitBiometric({ kind: 'offline' }, { submit, error }), { kind: 'ghost' }));
   }
   card.append(
-    button('I have an invite code', () => {
+    button('Use a local invite', () => {
       creating = true;
       render();
     }, { kind: 'ghost', title: 'Create an account on this machine with an invite code' }),
@@ -360,7 +360,7 @@ function guildPane(guild: GuildProfile, biometric: boolean): HTMLElement {
       ? el('img', { class: 'entry-guild-icon', attrs: { src: guild.icon, alt: '' } })
       : el('span', { class: 'entry-avatar', aria: { hidden: 'true' } }, initials(guild.guild)),
     el('h1', { class: 'entry-title' }, guild.guild),
-    el('p', { class: 'entry-signed-in muted' }, `Signed in as ${guild.name} · ${guild.email}`),
+    el('p', { class: 'entry-signed-in muted' }, `${guild.name} · ${guild.email}`),
   );
 
   if (guild.updateRequired) {
@@ -406,7 +406,7 @@ function guildPane(guild: GuildProfile, biometric: boolean): HTMLElement {
   const submit = el(
     'button',
     { class: 'button button-primary', data: { action: 'enter' }, attrs: { type: 'submit' } },
-    `Enter ${guild.guild}`,
+    'Unlock',
   );
   const form = el(
     'form',

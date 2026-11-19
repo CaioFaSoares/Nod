@@ -58,7 +58,7 @@ const DESK_BUDGET_MS = 15_000;
 const STEP_BUDGET_MS = 60_000;
 /** RF-49: what the tab is given to follow a resize or a click of the sidebar. */
 const FOLLOW_BUDGET_MS = 2_000;
-/** The main window's title, which is how the window server's list is told from the tool windows. */
+/** OmniWM exposes titles independently; CGWindowList identity never relies on them. */
 const MAIN_TITLE = 'Nod';
 
 interface Step {
@@ -99,8 +99,12 @@ interface WinState {
 }
 
 /** One window of this run the window server is really showing (the runner's `winlist`). */
-interface OnScreen {
+interface WindowIdentity {
+  id: number;
   pid: number;
+}
+
+interface OnScreen extends WindowIdentity {
   title: string;
   x: number;
   y: number;
@@ -146,6 +150,13 @@ let personalId = '';
 let layout: Rect = { x: 0, y: 0, width: 0, height: 0 };
 /** Whether the docked tab of this run was a view in the main window (Electrobun) or an OS window. */
 let dockedAsView = false;
+/** Fixed before any tool opens; an unavailable title must not turn main into a tool window. */
+let mainIdentity: WindowIdentity | null = null;
+
+function isMain(window: WindowIdentity): boolean {
+  if (mainIdentity === null) throw new Error('main window identity was not captured before tools');
+  return window.id === mainIdentity.id && window.pid === mainIdentity.pid;
+}
 
 function sleep(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -372,11 +383,12 @@ async function onScreen(): Promise<{ windows: OnScreen[]; why: string; locked: b
   if (Array.isArray(raw)) {
     for (const item of raw) {
       if (typeof item !== 'object' || item === null) continue;
-      if (!('pid' in item && 'title' in item && 'x' in item && 'y' in item && 'width' in item && 'height' in item)) {
+      if (!('id' in item && 'pid' in item && 'title' in item && 'x' in item && 'y' in item && 'width' in item && 'height' in item)) {
         continue;
       }
-      const { pid, title, x, y, width, height } = item;
+      const { id, pid, title, x, y, width, height } = item;
       if (
+        typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0 ||
         typeof pid !== 'number' ||
         typeof title !== 'string' ||
         typeof x !== 'number' ||
@@ -386,7 +398,7 @@ async function onScreen(): Promise<{ windows: OnScreen[]; why: string; locked: b
       ) {
         continue;
       }
-      windows.push({ pid, title, x, y, width, height });
+      windows.push({ id, pid, title, x, y, width, height });
     }
   }
   return {
@@ -704,7 +716,7 @@ function screenText(measured: Measured): string {
     .map((window) => {
       const frame = measured.space === null ? null : toPoints(window, measured.space);
       return (
-        `${JSON.stringify(window.title)} ${window.width}x${window.height}@${window.x},${window.y}` +
+        `${JSON.stringify(window.title)} [${window.pid}/${window.id}] ${window.width}x${window.height}@${window.x},${window.y}` +
         (frame === null ? '' : ` = ${rectText(frame)} pt`)
       );
     })
@@ -761,7 +773,7 @@ function layoutText(): string {
 /** What a window-server reading is, in one string, so two readings can be compared. */
 function screenSignature(windows: OnScreen[]): string {
   return windows
-    .map((window) => `${window.title}|${window.x},${window.y},${window.width},${window.height}`)
+    .map((window) => `${window.pid}/${window.id}|${window.x},${window.y},${window.width},${window.height}`)
     .sort()
     .join(';');
 }
@@ -812,9 +824,9 @@ async function measure(tab: Tracked, what: string, fresh = true): Promise<Measur
   layout = slot;
   const settled = await settleScreen();
   const screen = settled.reading;
-  const mainWindow = screen.windows.find((window) => window.title === MAIN_TITLE);
+  const mainWindow = screen.windows.find(isMain);
   const space = mainWindow === undefined ? null : spaceFrom(main, mainWindow);
-  const toolWindows = screen.windows.filter((window) => window.title !== MAIN_TITLE);
+  const toolWindows = screen.windows.filter((window) => !isMain(window));
   void what;
   return {
     report,
@@ -949,9 +961,9 @@ async function waitPlaced(
     const slot = slotRectOf(main);
     const report = await latestReport(tab.pid);
     const screen = await onScreen();
-    const mainWindow = screen.windows.find((window) => window.title === MAIN_TITLE);
+    const mainWindow = screen.windows.find(isMain);
     const space = mainWindow === undefined ? null : spaceFrom(main, mainWindow);
-    const tool = screen.windows.find((window) => window.title !== MAIN_TITLE);
+    const tool = screen.windows.find((window) => !isMain(window));
     const frame = space === null || tool === undefined ? null : toPoints(tool, space);
     const sized =
       report !== null && near(report.innerWidth, slot.width) && near(report.innerHeight, slot.height);
@@ -1059,10 +1071,18 @@ async function checkDefaultMode(): Promise<string> {
   );
   expect(state.active === null, `active = ${JSON.stringify(state.active)} with no tab`);
   expect(document.querySelector('.tab-strip') === null, 'the panel draws a strip with no tab open');
+  // With no tabs (and a fresh app data dir) exactly one window of this run must be main. Refuse an
+  // absent/ambiguous reading instead of choosing by title or picking a carrier after tools open.
+  const captured = (await desk('/desk/main', {})).mainWindow;
+  expect(typeof captured === 'object' && captured !== null && 'id' in captured && 'pid' in captured &&
+    typeof captured.id === 'number' && Number.isSafeInteger(captured.id) && captured.id > 0 &&
+    typeof captured.pid === 'number' && Number.isSafeInteger(captured.pid) && captured.pid > 0,
+    'the desk did not capture a valid main window identity');
+  mainIdentity = captured as WindowIdentity;
   const main = await mainState();
   expect(main !== null, 'the main window reported no state');
   const screen = await onScreen();
-  const mainWindow = screen.windows.find((window) => window.title === MAIN_TITLE);
+  const mainWindow = screen.windows.find(isMain);
   return (
     `tools.state(): mode=docked tabs=0, active=null; the panel draws no strip; ` +
     `${spaceText(mainWindow === undefined ? null : spaceFrom(main as WinState, mainWindow), mainWindow, main as WinState)}`
@@ -1269,7 +1289,7 @@ async function serverPoint(el: Element, at?: { x: number; y: number }): Promise<
   const main = await mainState();
   if (main === null) return 'the main window reported no state';
   const screen = await onScreen();
-  const mainWindow = screen.windows.find((window) => window.title === MAIN_TITLE);
+  const mainWindow = screen.windows.find(isMain);
   if (mainWindow === undefined) return `the window server shows no main window (${screen.why || 'not on screen'})`;
   const space = spaceFrom(main, mainWindow);
   if (space === null) return 'no map between the app and the window server';
@@ -1288,6 +1308,10 @@ async function serverPoint(el: Element, at?: { x: number; y: number }): Promise<
  * every push). Answers the point it clicked (app points) or the reason it could not click at all.
  */
 async function realClick(find: () => Element | null, what: string): Promise<{ x: number; y: number } | Blocked> {
+  // Raise only this smoke's main window before mapping coordinates. Never click through another
+  // app: the native helper still requires the captured PID + CGWindowNumber at the final point.
+  await tiny.win.show();
+  await sleep(100);
   let last = 'the element was never on the page';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const el = await waitForValue(what, find);
@@ -1296,7 +1320,7 @@ async function realClick(find: () => Element | null, what: string): Promise<{ x:
     last = `page box ${rectText(el.getBoundingClientRect())}, server point ${Math.round(point.x)},${Math.round(point.y)}`;
     const before = trustedClicks.length;
     // Only the main window: a tool or carrier window of this run over the point is a block, not a click.
-    const answer = await desk('/desk/click', { x: point.x, y: point.y, title: MAIN_TITLE });
+    const answer = await desk('/desk/click', { x: point.x, y: point.y, mainWindow: mainIdentity });
     if (answer.clicked !== true) return blocked(`${what}: ${String(answer.why ?? 'not clicked')}`);
     for (let tick = 0; tick < 15; tick += 1) {
       await sleep(40);
@@ -1859,14 +1883,14 @@ async function checkCloseAll(): Promise<Outcome> {
   const mixed = await twoTabs();
   await call('tabs.detach', { id: mixed.tabs[0].id });
   await waitForState('one tab detached', (next) => next.tabs.some((tab) => !tab.docked));
-  const carriers = (await onScreen()).windows.filter((window) => window.title !== MAIN_TITLE).length;
+  const carriers = (await onScreen()).windows.filter((window) => !isMain(window)).length;
   const button = await waitForValue('close all', () =>
     document.querySelector<HTMLButtonElement>('.tab-strip .tab-close-all'),
   );
   button.click();
   await waitForState('every tab closed, the detached one too', (next) => next.tabs.length === 0);
   await waitForValue('the carrier window to close', async () => {
-    const left = (await onScreen()).windows.filter((window) => window.title !== MAIN_TITLE).length;
+    const left = (await onScreen()).windows.filter((window) => !isMain(window)).length;
     return left === 0 ? true : null;
   });
   return (
@@ -1890,10 +1914,39 @@ function blocked(why: string): Blocked {
   return { blocked: why };
 }
 
+async function checkMenuOverNativeTab(): Promise<Outcome> {
+  const rail = document.querySelector<HTMLElement>('.sidebar-tools');
+  expect(rail !== null, 'no sidebar tools');
+  rail.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 220 }));
+  const find = () => all<HTMLButtonElement>('.menu-item').find((node) => text(node.querySelector('.menu-label')) === 'New folder…') ?? null;
+  try {
+    await waitForValue('the sidebar menu', find);
+    const clicked = await realClick(find, 'sidebar menu above the native tab');
+    if ('blocked' in clicked) return clicked;
+    await waitForValue('the folder prompt after a real menu click', () => document.querySelector('.dialog'));
+    return 'a trusted OS click reaches the sidebar menu above a docked native tab';
+  } finally {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await waitForValue('menu and folder prompt cleanup', () =>
+      document.querySelector('.menu, .overlay, .dialog') === null ? true : null);
+    // A hidden page intentionally has no slot. Otherwise wait for the observer's successful restore,
+    // not just removal of the DOM overlay, before a following geometry check can run.
+    if (document.visibilityState !== 'hidden') {
+      await waitForValue('the docked slot restored after menu cleanup', () => {
+        const last = calls.filter((item) => item.method === 'tabs.slot').at(-1);
+        const params = last?.params;
+        return last?.ok === true && typeof params === 'object' && params !== null &&
+          'rect' in params && typeof params.rect === 'object' && params.rect !== null ? true : null;
+      });
+    }
+  }
+}
+
 const CHECKS: Checks = [
   ['RF-52 default mode on macOS', checkDefaultMode],
   ['RF-49 a sidebar click opens one docked tab on the panel', checkOpenDocked],
   ['RF-49 the docked tab lands on the slot', checkOpenOnSlot],
+  ['Atrius sidebar menu above a native tab', checkMenuOverNativeTab],
   ['RF-49 the docked tab follows a resize', checkResizeFollow],
   ['RF-50 + opens a second tab of the tool', checkSecondTab],
   ['RF-50 the second tab takes the slot', checkSecondOnSlot],

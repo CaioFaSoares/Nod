@@ -142,8 +142,12 @@ interface WmWindow {
 }
 
 /** One window the window server is really showing, with the frame it is showing it at. */
-interface OnScreen {
+interface WindowIdentity {
+  id: number;
   pid: number;
+}
+
+interface OnScreen extends WindowIdentity {
   title: string;
   x: number;
   y: number;
@@ -153,6 +157,7 @@ interface OnScreen {
 
 /** `test/smoke/winlist.swift`'s own output, as that file builds it. */
 interface RawOnScreen {
+  id?: unknown;
   pid?: unknown;
   owner?: unknown;
   name?: unknown;
@@ -355,7 +360,11 @@ async function onScreenWindows(rootPid: number | null): Promise<ScreenReading> {
       if (/nod|tinyjs|bun/i.test(String(item.owner ?? ''))) others += 1;
       continue;
     }
+    if (typeof item.id !== 'number' || !Number.isSafeInteger(item.id) || item.id <= 0) {
+      return empty('winlist carried a window of this run without a valid CGWindowNumber');
+    }
     windows.push({
+      id: item.id,
       pid,
       title: typeof item.name === 'string' ? item.name : '',
       x: typeof item.x === 'number' ? item.x : 0,
@@ -372,7 +381,7 @@ const CLICK_BIN = join(GENERATED_DIR, 'click');
 
 /**
  * One real left click (`test/smoke/click.swift`) at a point of the window server's space, only on a
- * window of this run — and, with `title`, only on the window of that title. The DOM's `el.click()`
+ * captured main window of this run (both pid and CGWindowNumber). The DOM's `el.click()`
  * the driver uses elsewhere never reaches AppKit's hit test, so a native view over the page (a
  * docked tab, hidden or detached) is invisible to it.
  */
@@ -380,7 +389,7 @@ async function realClick(
   rootPid: number | null,
   x: number,
   y: number,
-  title: string | null,
+  main: WindowIdentity,
 ): Promise<{ ok: boolean; why: string }> {
   if (rootPid === null) return { ok: false, why: 'the app is not running' };
   const compiler = Bun.which('swiftc');
@@ -390,8 +399,10 @@ async function realClick(
     const built = await runTool([compiler, '-O', '-o', CLICK_BIN, CLICK_SWIFT]);
     if (built.code !== 0) return { ok: false, why: `swiftc exited ${built.code}: ${built.out.trim().slice(-200)}` };
   }
-  const pids = [...(await descendantPids(rootPid))].join(',');
-  const run = await runTool([CLICK_BIN, String(x), String(y), pids, ...(title === null ? [] : [title])]);
+  if (!(await descendantPids(rootPid)).has(main.pid)) {
+    return { ok: false, why: 'the captured main window pid no longer belongs to this run' };
+  }
+  const run = await runTool([CLICK_BIN, String(x), String(y), String(main.pid), String(main.id)]);
   return { ok: run.code === 0, why: run.out.trim() };
 }
 
@@ -515,11 +526,30 @@ function deskJson(value: unknown, status = 200): Response {
  * and carries no secret.
  */
 function startDesk(deps: { tools: TabTools; pid: PidRef }): Desk {
+  // Captured once while the driver has proved there are no tool tabs. Never guess a new main from
+  // a later list: its sole remaining window could be a detached tool. CG titles are diagnostic only.
+  let mainWindow: WindowIdentity | null = null;
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
     async fetch(req) {
       const url = new URL(req.url);
+      if (url.pathname === '/desk/main' && req.method === 'POST') {
+        if (mainWindow === null) {
+          const screen = await onScreenWindows(deps.pid.value);
+          if (screen.why !== '' || screen.locked || screen.windows.length !== 1) {
+            return deskJson({
+              ok: false,
+              error: `cannot capture main before tools: ${screen.why || (screen.locked ? 'screen locked' :
+                `expected exactly one window of this run, found ${screen.windows.length}`)}`,
+            }, 409);
+          }
+          const only = screen.windows[0]!;
+          mainWindow = { id: only.id, pid: only.pid };
+          console.log(`main identity: pid ${mainWindow.pid}, CGWindowNumber ${mainWindow.id}, title ${JSON.stringify(only.title)}`);
+        }
+        return deskJson({ ok: true, mainWindow });
+      }
       if (url.pathname === '/desk/reports') {
         return deskJson({ ok: true, reports: deps.tools.reports() });
       }
@@ -552,11 +582,16 @@ function startDesk(deps: { tools: TabTools; pid: PidRef }): Desk {
         if (typeof body !== 'object' || body === null) return deskJson({ ok: false, error: 'bad body' }, 400);
         const x = 'x' in body ? body.x : undefined;
         const y = 'y' in body ? body.y : undefined;
-        const title = 'title' in body && typeof body.title === 'string' ? body.title : null;
-        if (typeof x !== 'number' || typeof y !== 'number') {
+        if (typeof x !== 'number' || !Number.isFinite(x) || typeof y !== 'number' || !Number.isFinite(y)) {
           return deskJson({ ok: false, error: 'bad point' }, 400);
         }
-        const clicked = await realClick(deps.pid.value, x, y, title);
+        const identity = (body as Record<string, unknown>).mainWindow;
+        if (mainWindow === null || typeof identity !== 'object' || identity === null ||
+            !('id' in identity) || !('pid' in identity) ||
+            identity.id !== mainWindow.id || identity.pid !== mainWindow.pid) {
+          return deskJson({ ok: false, error: 'click requires the captured main window identity' }, 409);
+        }
+        const clicked = await realClick(deps.pid.value, x, y, mainWindow);
         return deskJson({ ok: true, clicked: clicked.ok, why: clicked.why });
       }
       if (url.pathname === '/desk/onscreen') {
@@ -692,7 +727,7 @@ async function runPhase(
       screen.why === ''
         ? `on screen (CGWindowList): ${
             screen.windows
-              .map((w) => `${JSON.stringify(w.title)} ${w.width}x${w.height}@${w.x},${w.y}`)
+              .map((w) => `${JSON.stringify(w.title)} [${w.pid}/${w.id}] ${w.width}x${w.height}@${w.x},${w.y}`)
               .join('; ') || '(none)'
           }`
         : `on screen (CGWindowList): not read — ${screen.why}`,
@@ -811,7 +846,8 @@ async function main(): Promise<number> {
     let blockedSteps = 0;
     for (const step of result.steps) {
       if (step.blocked === true) blockedSteps += 1;
-      if (!step.ok && step.blocked !== true) failed = true;
+      // A blocked subject is still reported as blocked, but is missing release evidence, not a pass.
+      if (!step.ok || step.blocked === true) failed = true;
     }
     if (!result.ok) {
       console.error(`the page did not answer: ${result.error}`);

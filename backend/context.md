@@ -11,6 +11,9 @@ and (from block 1) the host client and sync. Module by module, with signatures:
 - Every network call the Nod makes. The page never talks to the network (`docs/electrobun.md` §1).
 - The RPC gate in `main.ts`: which window and which session may call which method
   (`docs/arquitetura.md` §2).
+- Personal sidebar layout (`main.ts`, `sidebar.layout` / `sidebar.setLayout`): unlocked person's local
+  `meta` entry, never host/outbox. `shared/sidebar-layout.ts` applies it after visibility filtering so
+  `catalog.list`, reconciliation and digit shortcuts share one order. UI behavior: `src/context.md`.
 - Tool windows, popups, shortcuts, the login adapter and the canonico §22 warning of a tool that
   did not come from the org (`tool-windows.ts`, `login-adapter.ts`; B7).
 

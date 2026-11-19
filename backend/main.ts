@@ -17,6 +17,7 @@ import { fromBase64url, toBase64url } from '../shared/encoding';
 import { HOST_ROUTES, codeKindOf, isPng } from '../shared/host-api';
 import { leftoverLocalTools, parseSnapshot } from '../shared/host-merge';
 import { joinLink, parseJoinLink } from '../shared/join-link';
+import { applySidebarLayout, parseLayout } from '../shared/sidebar-layout';
 import { parseLinkUrl, parseOpenLink, saveTarget } from '../shared/tabs';
 import { GATE_PASSWORD_REQUIRED, GATE_PROMPT_FAILED, MAIN_WINDOW, toolOfWindow } from '../shared/types';
 import { compareVersions, tooOldFor } from '../shared/version';
@@ -56,6 +57,7 @@ import type {
   ToolsState,
   UpdateInfo,
   VaultItem,
+  SidebarLayout,
 } from '../shared/types';
 import type {
   ActivateRequest,
@@ -540,9 +542,31 @@ function visibleEntriesOf(): Entry[] {
   // views (B7: favorites → org → personal, the rule the connected half already follows). A Nod older
   // than the guild's minimum is served the local half the same way (O2, owner 2026-10-17): the guild
   // is disconnected, so `connectedMode` is false and this reads the tables.
-  if (connectedMode) return connectedEntries;
+  // The person's own arrangement of the sidebar goes over either half, last: `catalog.list`, the
+  // tool windows and the ⌘1…⌘9 digits all read this one list (`shared/sidebar-layout.ts`).
+  const layout = sidebarLayoutOf(person.id);
+  if (connectedMode) return applySidebarLayout(connectedEntries, layout);
   const layer = personal;
-  return layer === null ? visibleEntries(r.listEntries(), person) : layer.localCatalog(person);
+  return applySidebarLayout(
+    layer === null ? visibleEntries(r.listEntries(), person) : layer.localCatalog(person),
+    layout,
+  );
+}
+
+/** The meta key of a person's sidebar layout: local to this machine, never sent to the host. */
+const SIDEBAR_LAYOUT_KEY = 'sidebar_layout:';
+
+/** The stored layout of this person, or `null` (the default order) — a row that no longer reads is the default too. */
+function sidebarLayoutOf(personId: Id): SidebarLayout | null {
+  const r = repo;
+  if (r === null) return null;
+  const raw = r.meta(SIDEBAR_LAYOUT_KEY + personId);
+  if (raw === null) return null;
+  try {
+    return parseLayout(JSON.parse(raw) as unknown);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -2956,6 +2980,30 @@ const methods: { [M in Method]: Handler<M> } = {
     const effective = connectedMode ? connected?.current() : null;
     if (effective !== null && effective !== undefined) return [...effective.favorites];
     return required(personal, 'favorites.list').localFavorites(person.id);
+  },
+
+  /** The person's own sidebar (`shared/sidebar-layout.ts`), or `null` for the default order. */
+  'sidebar.layout': (): SidebarLayout | null => {
+    const person = unlockedPerson('sidebar.layout');
+    return sidebarLayoutOf(person.id);
+  },
+
+  /**
+   * Replaces the person's sidebar whole. Local data — no outbox, no host — so an outdated Nod (O2)
+   * may arrange its sidebar too. The catalog and the tools are pushed again: their order, and the
+   * ⌘1…⌘9 digits with it, follow the new layout.
+   */
+  'sidebar.setLayout': (params): true => {
+    const person = unlockedPerson('sidebar.setLayout');
+    const r = required(repo, 'sidebar.setLayout');
+    const layout = parseLayout(parameters(params, 'invalid sidebar layout').layout);
+    if (layout === null) r.setMeta(SIDEBAR_LAYOUT_KEY + person.id, 'null');
+    else r.setMeta(SIDEBAR_LAYOUT_KEY + person.id, JSON.stringify(layout));
+    const open = windows;
+    if (open !== null) open.reconcile();
+    push('catalog', null);
+    push('tools', toolsState());
+    return true;
   },
 
   /** SP05 §3 `favorites.set`: replaces the ordered list whole (SP04 §4). */

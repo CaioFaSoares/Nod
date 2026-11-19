@@ -23,6 +23,28 @@ carry the historical parity rounds.
 `test/helpers/sqlite-bun.ts` adapts `bun:sqlite` to the backend's `SqlDb`, so `backend/repo.ts` runs
 under Bun.
 
+## Atrius UI regression coverage (0.9.0)
+
+- `ui-driver.ts`, `checkCustomSidebar`: drives the real category-to-folder menu, creates and folds
+  a folder, quick-adds a tool, moves a newly arrived tool with Alt+Up, locks with a folder prompt
+  pending, checks cleanup and persistence after unlock, and resets to the category order.
+- `tabs-driver.ts`, `checkMenuOverNativeTab`: uses the runner's trusted OS click on a sidebar menu
+  over a docked native tool view and checks that it opens the folder prompt. A hidden screen remains
+  a declared block, not a pass; any blocked step makes the release smoke exit non-zero.
+- `sidebar-layout.test.ts`: pure layout parsing, ordering, folder edits, moves and boundary cases.
+- `settings-navigation.test.ts`: stable destinations, member/admin filtering, advanced separation,
+  unique actions and old searchable aliases. This is pure metadata proof, not DOM execution.
+- Task-based UI regressions live in `ui-driver.ts`: navigation and explicit disclosure expansion are
+  exercised on the real page; assertions and run results are distinct from static source review.
+- Native click proof captures the sole main window's PID + CGWindowNumber before tools open. Missing,
+  ambiguous or locked readings are refused; later lists never recapture a tool as main. Trusted clicks
+  require the exact captured pair and the topmost layer-0 window, not an optional title. The driver
+  raises only this smoke's main window before mapping a trusted click; an unrelated window covering
+  the point is still a block, never clicked through. CG titles can be empty without invalidating that
+  identity. The input helper preflights macOS event-posting authorization without requesting it and
+  refuses absent authorization or failed event creation instead of claiming a click was posted.
+  The Swift helpers rebuild when their source is newer.
+
 ## Rules
 
 - **Behavior, not wording.** Tests assert outcomes, boundaries and errors, not message text or

@@ -144,7 +144,7 @@ export function mountJoinFlow(
         };
       case 'setup':
         return {
-          head: 'Create a guild',
+          head: 'Set up a guild',
           hint: 'The address of your host, the setup code it printed, and the account of its first admin.',
         };
       default:
@@ -154,8 +154,8 @@ export function mountJoinFlow(
 
   /**
    * Step 1 of the invite of RF-59: one field, the link. An address and a code are accepted for the
-   * person whose admin sent them apart, and the two other ways in — sign in, an access code — plus
-   * creating a guild sit under it.
+   * person whose admin sent them apart. Sign-in and guild setup stay secondary; the code path
+   * detects invite, access and setup codes without asking the person to choose a type.
    */
   function startCard(): HTMLElement {
     const linkField = input('join-link', { value: draft.link, placeholder: 'nod://join?host=…' });
@@ -169,8 +169,7 @@ export function mountJoinFlow(
       el(
         'p',
         { class: 'muted' },
-        'Paste the invite link your admin sent you. You choose your own name, email and password — ' +
-          'the invite decides the roles you start with.',
+        'Paste the invite link your admin sent you.',
       ),
       el('div', { class: 'row' }, field('Invite link', linkField), button('Continue', () => void fromLink(), { kind: 'primary' })),
     );
@@ -182,7 +181,7 @@ export function mountJoinFlow(
         el(
           'div',
           { class: 'row' },
-          button('Have an address and a code instead?', () => {
+          button('Use a code', () => {
             draft.manual = true;
             status = null;
             render();
@@ -195,9 +194,8 @@ export function mountJoinFlow(
       el(
         'div',
         { class: 'row join-secondary' },
-        button('Already in this guild? Sign in', () => openMode('signin'), { kind: 'ghost' }),
-        button('Got a code from your admin?', () => openMode('access'), { kind: 'ghost' }),
-        button('Create a guild', () => openMode('setup'), { kind: 'ghost' }),
+        button('Sign in', () => openMode('signin'), { kind: 'ghost' }),
+        button('Set up a guild', () => openMode('setup'), { kind: 'ghost' }),
       ),
     );
     return card;
@@ -220,7 +218,7 @@ export function mountJoinFlow(
       el(
         'p',
         { class: 'muted' },
-        'An invite link, a code for an account that exists and a setup code of a new guild all work here.',
+        'Use an invite, access or setup code with the guild address.',
       ),
       el('div', { class: 'row' }, button('Continue with the code', () => void fromTyped(), { kind: 'primary' })),
     );

@@ -1,37 +1,103 @@
 /* Nod — the single stylesheet of the main window (docs/arquitetura.md §5).
-   Sober dark theme, monospace, high contrast, visible focus, no UI dependency.
+   Skin: the Atrius design system (tokens and rules mirrored from the Atrius project:
+   tokens.css, README "Diretrizes", components.md). Black floor, white ink, ANSI states, 1px strokes,
+   square corners, monospace everywhere, sizes counted in 4px steps and 24px cells.
    Consumed by index.html, src/app.ts, src/palette.ts, src/settings.ts and src/tabs.ts.
    Classes required by src/ui.ts: .button .button-primary .button-danger .button-ghost .field
    .field-label .field-hint .input .message .message-error .message-ok .message-info.
    Generic classes any view may use: .tabs .tab .tab-active .table .muted .chip .row .stack
    .card .grid .empty. */
 
-:root {
-  --font: ui-monospace, 'JetBrains Mono', 'IBM Plex Mono', Menlo, monospace;
-  --sidebar-width: 68px;
-  /* 0.5.0: one geometry for every round item of a rail — the entry screen's tiles, the sidebar's
-     mark, tools and actions — so the two rails read as the same column. */
-  --rail-item: 44px;
-  --rail-glyph: 28px;
-  --rail-round: 22px;
-  --rail-square: 12px;
-  --rail-gap: 8px;
-  --bg: #101215;
-  --bg-sidebar: #0b0d10;
-  --bg-raised: #171a1f;
-  --bg-hover: #1f242b;
-  --line: #2a3038;
-  --line-strong: #3a424e;
-  --fg: #e7eaf0;
-  --muted: #9aa4b2;
-  --accent: #6ea8fe;
-  --accent-strong: #8fbaff;
-  --accent-fg: #0b1524;
-  --danger: #ff6b6b;
-  --ok: #5ad19b;
-  --info: #d9c46a;
-  --radius: 6px;
+/* ------------------------------------------------------------------ tokens */
+
+/* Atrius colour tokens. `noite` is the default; `papel` keeps the same names with values darkened to
+   pass contrast on white, for a light context (set data-theme="papel" on <html>). */
+:root,
+[data-theme='noite'] {
+  --ink-100: #000000; /* floor: the window */
+  --ink-200: #0c0c0c; /* surface: panels, rows, cards */
+  --ink-300: #161616; /* sunken: selected row, field, hover */
+  --ink-400: #333333; /* rule: panel borders and dividers, never meaning on its own */
+  --ink-500: #666666; /* dimmed: disabled, always with a word */
+  --ink-600: #888888; /* control border */
+  --ink-700: #aaaaaa; /* muted text: metadata, labels */
+  --ink-800: #cccccc; /* soft text: secondary body */
+  --ink-900: #eeeeee; /* text */
+  --ink-1000: #ffffff; /* strong ink: titles, selection, focus, primary button */
+  --brand: #ff5555; /* authority and failure, always with × and a word */
+  --on-brand: #000000;
+  --state-wait: #ffff55; /* waits for you / caution */
+  --state-run: #55ffff; /* running, open */
+  --state-ok: #55ff55; /* verified, connected */
+  --on-state: #000000;
+  --selection: var(--ink-1000);
+  --focus-ring: var(--ink-1000);
+  --atmos-dot: #2a2a2a;
+  --overlay: rgb(0 0 0 / 82%);
+  --shadow-float: 4px 4px 0 0 #333333;
+  color-scheme: dark;
 }
+
+[data-theme='papel'] {
+  --ink-100: #ffffff;
+  --ink-200: #f7f7f7;
+  --ink-300: #efefef;
+  --ink-400: #d6d6d6;
+  --ink-500: #8a8a8a;
+  --ink-600: #6e6e6e;
+  --ink-700: #5c5c5c;
+  --ink-800: #333333;
+  --ink-900: #1a1a1a;
+  --ink-1000: #000000;
+  --brand: #b00000;
+  --on-brand: #ffffff;
+  --state-wait: #7a6200;
+  --state-run: #00727a;
+  --state-ok: #1e7a1e;
+  --on-state: #ffffff;
+  --atmos-dot: #d9d9d9;
+  --overlay: rgb(255 255 255 / 86%);
+  --shadow-float: 4px 4px 0 0 #000000;
+  color-scheme: light;
+}
+
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 48px;
+  --cell: 24px; /* grid-cell: every bar is one cell tall */
+  --stroke-hair: 1px;
+  --stroke-strong: 2px;
+  --dur-4f: 67ms; /* hover, press, state change */
+  --dur-8f: 133ms; /* opening a layer, toast */
+  --z-chrome: 10;
+  --z-popover: 20;
+  --z-modal: 30;
+  --z-toast: 40;
+  --font-mono: 'Obel Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --text-title: 700 14px/20px var(--font-mono);
+  --text-node-title: 700 13px/18px var(--font-mono);
+  --text-body: 400 13px/20px var(--font-mono);
+  --text-label: 500 12px/16px var(--font-mono);
+  --text-state: 700 11.5px/16px var(--font-mono);
+  --text-meta: 400 11px/16px var(--font-mono);
+  --text-display-m: 800 17px/1.25 var(--font-mono);
+
+  /* Nod's own geometry, in Atrius cells. The rail is `shell-rail` (48px, two cells): every item of
+     both rails — the entry screen's tiles, the sidebar's mark, tools and actions — is one 2×2 cell
+     square, its glyph one cell. */
+  --sidebar-width: 48px;
+  --rail-item: 48px;
+  --rail-glyph: 24px;
+  --control: 28px; /* buttons and fields in a form */
+  --control-tight: 24px; /* buttons in a bar or a row: one cell */
+  --page-pad: var(--space-5);
+}
+
+/* ------------------------------------------------------------------- base */
 
 *,
 *::before,
@@ -46,11 +112,10 @@ body {
 }
 
 body {
-  background: var(--bg);
-  color: var(--fg);
-  font-family: var(--font);
-  font-size: 13px;
-  line-height: 1.45;
+  background: var(--ink-100);
+  color: var(--ink-900);
+  font: var(--text-body);
+  font-variant-ligatures: none;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
 }
@@ -59,186 +124,305 @@ body {
   display: none !important;
 }
 
+/* Atrius: keyboard focus is a 2px ring of ink-1000 with 2px offset, never a stage colour. */
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--stroke-strong) solid var(--focus-ring);
   outline-offset: 2px;
-  border-radius: 3px;
 }
 
 :focus:not(:focus-visible) {
   outline: none;
 }
 
+::selection {
+  color: var(--ink-100);
+  background: var(--ink-1000);
+}
+
 h1,
 h2,
 h3 {
   margin: 0;
-  font-weight: 600;
+  color: var(--ink-1000);
 }
 
 h1 {
-  font-size: 16px;
+  font: var(--text-title);
 }
 
 h2 {
-  font-size: 13px;
+  font: var(--text-node-title);
 }
 
 h3 {
-  font-size: 12px;
+  font: var(--text-label);
+  font-weight: 700;
 }
 
 p {
   margin: 0;
 }
 
-button {
+strong {
+  color: var(--ink-1000);
+  font-weight: 700;
+}
+
+button,
+select {
   font: inherit;
 }
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--line);
-  border-radius: 6px;
+  background: var(--ink-400);
 }
 
-::-webkit-scrollbar-track {
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-600);
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
 /* ---------------------------------------------------------------- controls */
 
+/* Atrius Button. Default = `outline` (secondary act); `primary` = inverted ink, the expected next
+   step; `ghost` = `quiet`, the label in brackets for local, reversible acts; `danger` = brand, for
+   what removes or revokes. */
 .button {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 6px 12px;
-  font-size: 12px;
-  color: var(--fg);
-  background: var(--bg-raised);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  gap: var(--space-2);
+  height: var(--control);
+  padding: 0 var(--space-3);
+  color: var(--ink-900);
+  font: var(--text-label);
+  white-space: nowrap;
+  background: transparent;
+  border: var(--stroke-hair) solid var(--ink-600);
+  border-radius: 0;
   cursor: pointer;
+  transition:
+    background-color var(--dur-4f) linear,
+    color var(--dur-4f) linear,
+    border-color var(--dur-4f) linear;
 }
 
 .button:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border-color: var(--accent);
+  color: var(--ink-1000);
+  background: var(--ink-300);
+  border-color: var(--ink-1000);
+}
+
+.button:active:not(:disabled) {
+  transform: translate(1px, 1px);
 }
 
 .button:disabled {
-  opacity: 0.45;
-  cursor: default;
+  color: var(--ink-500);
+  border-color: var(--ink-500);
+  background: transparent;
+  cursor: not-allowed;
 }
 
 .button-primary {
-  color: var(--accent-fg);
-  background: var(--accent);
-  border-color: var(--accent);
-  font-weight: 600;
+  color: var(--ink-100);
+  font-weight: 700;
+  background: var(--ink-1000);
+  border-color: var(--ink-1000);
 }
 
 .button-primary:hover:not(:disabled) {
-  background: var(--accent-strong);
-  border-color: var(--accent-strong);
+  color: var(--ink-100);
+  background: var(--ink-800);
+  border-color: var(--ink-800);
 }
 
 .button-danger {
-  color: var(--danger);
-  background: transparent;
-  border-color: var(--danger);
+  color: var(--brand);
+  border-color: var(--brand);
+}
+
+.button-danger::before {
+  content: '×';
 }
 
 .button-danger:hover:not(:disabled) {
-  background: rgb(255 107 107 / 12%);
-  border-color: var(--danger);
+  color: var(--on-brand);
+  background: var(--brand);
+  border-color: var(--brand);
 }
 
 .button-ghost {
-  color: var(--muted);
-  background: transparent;
+  padding: 0 var(--space-1);
+  color: var(--ink-800);
   border-color: transparent;
 }
 
-.button-ghost:hover:not(:disabled) {
-  color: var(--fg);
-  background: var(--bg-hover);
-  border-color: var(--line);
+.button-ghost::before {
+  content: '[';
+  margin-right: calc(var(--space-2) * -1);
 }
 
+.button-ghost::after {
+  content: ']';
+  margin-left: calc(var(--space-2) * -1);
+}
+
+.button-ghost:hover:not(:disabled) {
+  color: var(--ink-1000);
+  background: var(--ink-300);
+  border-color: transparent;
+}
+
+.button-ghost:disabled {
+  border-color: transparent;
+}
+
+/* Atrius Field: the label above in `meta`, the note under it, one line each. */
 .field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
+  min-width: 0;
 }
 
 .field-label {
-  font-size: 11px;
-  color: var(--muted);
+  color: var(--ink-700);
+  font: var(--text-meta);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
 }
 
 .field-hint {
-  font-size: 11px;
-  color: var(--muted);
+  color: var(--ink-700);
+  font: var(--text-meta);
 }
 
 .input {
   width: 100%;
-  padding: 6px 9px;
-  font: inherit;
-  color: var(--fg);
-  background: var(--bg);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  height: var(--control);
+  padding: 0 var(--space-3);
+  color: var(--ink-900);
+  font: var(--text-body);
+  background: var(--ink-300);
+  border: var(--stroke-hair) solid var(--ink-600);
+  border-radius: 0;
+  outline: none;
+  transition: border-color var(--dur-4f) linear;
+}
+
+textarea.input {
+  height: auto;
+  padding: var(--space-1) var(--space-3);
+}
+
+select.input {
+  padding-right: var(--space-5);
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink-700) 50%),
+    linear-gradient(135deg, var(--ink-700) 50%, transparent 50%);
+  background-position:
+    calc(100% - 13px) 50%,
+    calc(100% - 9px) 50%;
+  background-size: 4px 4px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+.input:hover:not(:disabled) {
+  border-color: var(--ink-800);
+}
+
+.input:focus-visible,
+.input:focus {
+  border-color: var(--ink-1000);
+  box-shadow: 0 0 0 1px var(--ink-1000);
 }
 
 .input::placeholder {
-  color: var(--muted);
+  color: var(--ink-500);
 }
 
 .input:disabled {
-  opacity: 0.5;
+  color: var(--ink-500);
+  border-color: var(--ink-500);
 }
 
+.input[aria-invalid='true'] {
+  border-color: var(--brand);
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--ink-1000);
+}
+
+/* A status line: glyph + word, never colour alone. × failed (brand), ✓ done (ok), ! note (wait). */
 .message {
-  padding: 6px 9px;
-  font-size: 12px;
-  border: 1px solid transparent;
-  border-radius: var(--radius);
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  color: var(--ink-900);
+  font: var(--text-body);
+  background: var(--ink-200);
+  border: var(--stroke-hair) solid var(--ink-400);
+}
+
+.message::before {
+  flex: none;
+  font-weight: 700;
 }
 
 .message-error {
-  color: #ffdcdc;
-  background: rgb(255 107 107 / 10%);
-  border-color: rgb(255 107 107 / 45%);
+  border-color: var(--brand);
+}
+
+.message-error::before {
+  content: '×';
+  color: var(--brand);
 }
 
 .message-ok {
-  color: #d8f8e8;
-  background: rgb(90 209 155 / 10%);
-  border-color: rgb(90 209 155 / 45%);
+  border-color: var(--state-ok);
+}
+
+.message-ok::before {
+  content: '✓';
+  color: var(--state-ok);
 }
 
 .message-info {
-  color: #f4eed6;
-  background: rgb(217 196 106 / 10%);
-  border-color: rgb(217 196 106 / 40%);
+  border-color: var(--state-wait);
+}
+
+.message-info::before {
+  content: '!';
+  color: var(--state-wait);
 }
 
 /* 0.5.5a: Settings' status line is a toast — fixed at the bottom of the window, out of the flow,
-   so a message never moves the buttons under it. The tint of .message-* sits on an opaque base. */
+   so a message never moves the buttons under it. Atrius Toast: one line, hard shadow, opens in
+   dur-8f and never covers the focus. */
 .toast-region {
   position: fixed;
   left: 50%;
-  bottom: 16px;
-  z-index: 30;
+  bottom: var(--space-4);
+  z-index: var(--z-toast);
   transform: translateX(-50%);
   width: max-content;
   max-width: min(560px, calc(100vw - 32px));
@@ -246,54 +430,79 @@ button {
 
 .toast-region .message {
   margin: 0;
+  padding: var(--space-2) var(--space-3);
   cursor: pointer;
-  background-color: var(--bg-raised);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  background: var(--ink-200);
+  box-shadow: var(--shadow-float);
+  animation: nod-layer-in var(--dur-8f) steps(2, end);
 }
 
-.toast-region .message-error {
-  background-image: linear-gradient(rgb(255 107 107 / 10%), rgb(255 107 107 / 10%));
-}
+@keyframes nod-layer-in {
+  from {
+    opacity: 0;
+  }
 
-.toast-region .message-ok {
-  background-image: linear-gradient(rgb(90 209 155 / 10%), rgb(90 209 155 / 10%));
-}
-
-.toast-region .message-info {
-  background-image: linear-gradient(rgb(217 196 106 / 10%), rgb(217 196 106 / 10%));
+  to {
+    opacity: 1;
+  }
 }
 
 /* --------------------------------------------------------- generic pieces */
 
 .muted {
-  color: var(--muted);
+  color: var(--ink-700);
 }
 
 .row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
+}
+
+/* A row of labelled fields and its button: the button lines up with the fields, not their labels. */
+.row:has(> .field) {
+  align-items: flex-end;
 }
 
 .stack {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
+/* Atrius panel: ink-200 on the floor, a 1px ink-400 rule around it, square. Nod's cards keep it
+   tighter than a canvas panel (space-4, not space-5): they are forms and lists, not documents. */
 .card {
-  padding: 14px;
-  background: var(--bg-raised);
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  min-width: 0;
+  padding: var(--space-4);
+  background: var(--ink-200);
+  border: var(--stroke-hair) solid var(--ink-400);
   overflow-wrap: anywhere;
+}
+
+/* Inside a card the lines of one record sit closer than the blocks of a page. */
+.card.stack {
+  gap: var(--space-2);
+}
+
+/* Atrius SectionHeader: a card's first heading carries the rule under it. */
+.card > h2:first-child {
+  padding-bottom: var(--space-2);
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
+}
+
+.card h3 {
+  color: var(--ink-700);
+  font: var(--text-meta);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-3);
   align-items: start;
 }
 
@@ -302,83 +511,111 @@ button {
   grid-column: 1 / -1;
 }
 
+/* Atrius empty state: a dotted field (atmos-dot, never behind the words) and one direction. */
 .empty {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 24px;
-  color: var(--muted);
+  gap: var(--space-1);
+  padding: var(--space-4);
+  color: var(--ink-700);
   text-align: center;
-  border: 1px dashed var(--line-strong);
-  border-radius: 8px;
+  border: var(--stroke-hair) dashed var(--ink-400);
+  background-image: radial-gradient(var(--atmos-dot) 1px, transparent 1px);
+  background-size: var(--cell) var(--cell);
+  background-position: center;
 }
 
+.empty > * {
+  align-self: center;
+  padding: 0 var(--space-2);
+  background: var(--ink-100);
+}
+
+span.empty {
+  display: inline-flex;
+  padding: 0 var(--space-2);
+  background-image: none;
+}
+
+/* A tag: label + border, one line. */
 .chip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 24px;
-  height: 22px;
-  padding: 0 7px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  background: var(--bg-hover);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  min-width: 20px;
+  height: 20px;
+  padding: 0 var(--space-1);
+  color: var(--ink-800);
+  font: var(--text-meta);
+  font-weight: 700;
+  white-space: nowrap;
+  background: transparent;
+  border: var(--stroke-hair) solid var(--ink-400);
 }
 
 .mono {
-  font-family: var(--font);
+  font-family: var(--font-mono);
 }
 
+/* Atrius list: compact rows, values aligned, the header in `meta`. */
 .table {
   width: 100%;
-  font-size: 12px;
+  font: var(--text-body);
   border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
 }
 
 .table th {
-  padding: 6px 8px;
-  font-size: 11px;
-  color: var(--muted);
+  padding: var(--space-1) var(--space-2);
+  color: var(--ink-700);
+  font: var(--text-meta);
+  letter-spacing: 0.12em;
   text-align: left;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  border-bottom: 1px solid var(--line-strong);
+  white-space: nowrap;
+  border-bottom: var(--stroke-hair) solid var(--ink-600);
 }
 
 .table td {
-  padding: 6px 8px;
+  padding: var(--space-1) var(--space-2);
   vertical-align: top;
   overflow-wrap: anywhere;
-  border-bottom: 1px solid var(--line);
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
 }
 
+.table tbody tr:hover td {
+  background: var(--ink-300);
+}
+
+/* Atrius Tabs: one cell tall, the active tab in inverted ink. */
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  border-bottom: 1px solid var(--line);
+  gap: var(--space-1);
+  padding-bottom: var(--space-2);
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
 }
 
 .tab {
-  padding: 6px 10px;
-  font-size: 12px;
-  color: var(--muted);
+  height: var(--cell);
+  padding: 0 var(--space-2);
+  color: var(--ink-700);
+  font: var(--text-label);
   background: transparent;
   border: 0;
-  border-bottom: 2px solid transparent;
   cursor: pointer;
 }
 
 .tab:hover {
-  color: var(--fg);
+  color: var(--ink-1000);
+  background: var(--ink-300);
 }
 
-.tab-active {
-  color: var(--fg);
-  border-bottom-color: var(--accent);
+.tab-active,
+.tab-active:hover {
+  color: var(--ink-100);
+  font-weight: 700;
+  background: var(--ink-1000);
 }
 
 /* ------------------------------------------------------------------ layout */
@@ -405,93 +642,152 @@ button {
    placed on its own row, which the hidden ones leave alone. */
 .notice-slot {
   grid-row: 1;
-  padding: 0 22px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--page-pad) 0;
 }
 
 .notice-slot:empty {
   display: none;
 }
 
+/* A notice is a bar: glyph, one sentence, its act at the right. */
 .notice {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 12px;
-  padding: 8px 12px;
-  border: 1px solid var(--line-strong);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--radius);
-  background: var(--bg-raised);
+  gap: var(--space-3);
+  min-height: 32px;
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  background: var(--ink-200);
+  border: var(--stroke-hair) solid var(--ink-600);
+}
+
+.notice::before {
+  content: '▸';
+  flex: none;
+  color: var(--state-run);
+  font-weight: 700;
 }
 
 .notice-text {
+  flex: 1;
+  min-width: 0;
   margin: 0;
 }
 
 .notice-actions {
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-1);
+}
+
+.notice .button {
+  height: var(--control-tight);
 }
 
 .notice-dismiss {
-  padding: 2px 6px;
-  border: 0;
-  border-radius: var(--radius);
+  width: var(--cell);
+  height: var(--cell);
+  padding: 0;
+  color: var(--ink-700);
+  font: var(--text-body);
   background: transparent;
-  color: var(--muted);
-  font-family: inherit;
-  font-size: 15px;
-  line-height: 1;
+  border: 0;
   cursor: pointer;
 }
 
 .notice-dismiss:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
+  color: var(--ink-1000);
+  background: var(--ink-300);
 }
 
 .banner {
   grid-row: 2;
-  padding: 0 22px;
+  padding: var(--space-2) var(--page-pad) 0;
 }
 
 .banner:empty {
   display: none;
 }
 
-.banner .message {
-  margin-top: 12px;
-}
-
 .content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
   min-width: 0;
-  padding: 18px 22px 28px;
+  padding: var(--space-4) var(--page-pad) var(--space-5);
   overflow: auto;
   /* E03: the containing block of the tab view, which is placed on the panel's own box (RF-49). */
   position: relative;
   grid-row: 3;
 }
 
+/* Atrius SectionHeader at the top of a screen: label in `meta`, its acts beside it, a rule under. */
 .content-header {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 32px;
+  padding-bottom: var(--space-1);
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
+}
+
+.content-header .button {
+  height: var(--control-tight);
 }
 
 .content-title {
-  font-size: 14px;
-  color: var(--muted);
+  color: var(--ink-700);
+  font: var(--text-meta);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
 }
 
 .settings-view {
   min-width: 0;
+}
+
+/* Settings follows tasks, with advanced destinations secondary. Content keeps DOM reading order. */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+.settings-navigation.tabs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  border: 0;
+  min-width: 0;
+}
+.settings-links { display: flex; flex-direction: column; gap: var(--space-1); }
+.settings-navigation .tab { text-align: left; height: auto; min-height: var(--cell); padding: var(--space-1) var(--space-2); }
+.settings-group-title { padding: var(--space-1) var(--space-2); color: var(--ink-700); font: var(--text-meta); }
+.settings-panel { min-width: 0; }
+.disclosure { border: var(--stroke-hair) solid var(--ink-400); }
+.disclosure > summary { padding: var(--space-2) var(--space-3); cursor: pointer; font: var(--text-label); }
+.disclosure > summary:hover { background: var(--ink-300); }
+.disclosure > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.disclosure-body { padding: var(--space-3); border-top: var(--stroke-hair) solid var(--ink-400); }
+.settings-navigation .disclosure { border: 0; }
+.settings-navigation .disclosure > summary { padding: var(--space-1) var(--space-2); color: var(--ink-700); }
+.settings-navigation .disclosure-body { padding: var(--space-1) 0 0; border: 0; }
+@media (max-width: 760px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+  .settings-navigation.tabs { flex-direction: row; flex-wrap: wrap; gap: var(--space-3); }
+  .settings-navigation .settings-links { flex-direction: row; flex-wrap: wrap; }
+}
+
+/* Space: a list of like cards inside a tab (the People tab's members) is a grid of columns once the
+   panel is wide. */
+.settings-view section.stack > div.stack:not(:has(> :not(.card))) {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: var(--space-3);
+  align-items: start;
 }
 
 /* --------------------------------------------------------- tab view (E03) */
@@ -499,7 +795,8 @@ button {
 /* RF-49: in docked mode the center panel is the tab view — the strip and the toolbar on top, and
    the slot, the element the backend lays the active docked tab on, filling the rest. It is placed
    on the panel's own box (`.content` is its containing block), so the docked window meets the
-   panel's edges. */
+   panel's edges. Atrius TabStrip: one cell tall, a rule between tabs, the active tab on the panel's
+   surface with a 1px ink rule on top. */
 .tab-view {
   position: absolute;
   inset: 0;
@@ -512,9 +809,12 @@ button {
   display: flex;
   flex: none;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 10px 22px 0;
-  border-bottom: 1px solid var(--line);
+  align-items: stretch;
+  min-height: var(--cell);
+  padding: 0;
+  font: var(--text-label);
+  background: var(--ink-100);
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
 }
 
 /* One tab: its mark, its title, what it is (not saved, detached, failed) and the ×. */
@@ -522,27 +822,30 @@ button {
   display: flex;
   flex: none;
   align-items: center;
-  gap: 6px;
-  max-width: 220px;
-  padding: 5px 4px 5px 8px;
-  color: var(--muted);
-  background: var(--bg-raised);
-  border: 1px solid var(--line);
-  border-radius: var(--radius) var(--radius) 0 0;
+  gap: var(--space-2);
+  max-width: 240px;
+  height: var(--cell);
+  padding: 0 var(--space-1) 0 var(--space-3);
+  color: var(--ink-700);
+  background: transparent;
+  border: 0;
+  border-top: var(--stroke-hair) solid transparent;
+  border-right: var(--stroke-hair) solid var(--ink-400);
   cursor: pointer;
 }
 
 .tab-item:hover {
-  color: var(--fg);
-  background: var(--bg-hover);
-  border-color: var(--line-strong);
+  color: var(--ink-1000);
+  background: var(--ink-300);
 }
 
 /* The tab on the slot: the one the panel is showing. */
-.tab-item-active {
-  color: var(--fg);
-  border-color: var(--line-strong);
-  border-top-color: var(--accent);
+.tab-item-active,
+.tab-item-active:hover {
+  color: var(--ink-1000);
+  font-weight: 700;
+  background: var(--ink-200);
+  border-top-color: var(--ink-1000);
 }
 
 .tab-title {
@@ -559,18 +862,20 @@ button {
 }
 
 .tab-mark .glyph-img {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
 .tab-mark .chip {
   min-width: 16px;
-  height: 16px;
-  padding: 0 3px;
+  height: 14px;
+  padding: 0 2px;
   font-size: 9px;
+  line-height: 1;
 }
 
 .tab-mark-link {
+  color: var(--ink-700);
   font-size: 11px;
   line-height: 1;
 }
@@ -578,98 +883,103 @@ button {
 .tab-flag {
   flex: none;
   font-size: 11px;
+  font-weight: 700;
   line-height: 1;
 }
 
+/* Atrius TabStrip: `*` is a local draft not saved yet. */
 .tab-unsaved {
-  color: var(--info);
+  color: var(--state-wait);
 }
 
 .tab-detached {
-  color: var(--accent);
+  color: var(--ink-1000);
 }
 
 .tab-failed {
-  color: var(--danger);
-  font-weight: 700;
+  color: var(--brand);
 }
 
 .tab-loading {
-  color: var(--muted);
+  color: var(--state-run);
 }
 
 /* The per-row buttons: the × that closes the tab, and the ⤓ that docks a detached one back. */
 .tab-close,
 .tab-dock {
   flex: none;
-  padding: 0 2px;
-  color: inherit;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  color: var(--ink-700);
+  font: var(--text-label);
+  font-weight: 400;
+  line-height: 16px;
   background: transparent;
   border: 0;
-  border-radius: 4px;
   cursor: pointer;
 }
 
 .tab-close:hover,
 .tab-dock:hover {
-  color: var(--fg);
-  background: var(--bg-hover);
+  color: var(--ink-100);
+  background: var(--ink-1000);
 }
 
 .tab-dock {
-  color: var(--accent);
+  color: var(--ink-1000);
 }
 
 /* ⌘T: another tab of the tool the active tab shows; 0.7.0c: the "close all" that opens the strip. */
 .tab-new,
 .tab-close-all {
   flex: none;
-  align-self: center;
-  width: 24px;
-  height: 24px;
-  margin-left: 2px;
-  color: var(--muted);
-  font-family: inherit;
-  font-size: 15px;
+  width: var(--cell);
+  height: var(--cell);
+  padding: 0;
+  color: var(--ink-700);
+  font: var(--text-body);
   line-height: 1;
   background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border: 0;
+  border-right: var(--stroke-hair) solid var(--ink-400);
   cursor: pointer;
 }
 
-.tab-close-all {
-  margin-right: 4px;
-  margin-left: 0;
+.tab-new {
+  border-right: 0;
 }
 
-.tab-new:hover:not(:disabled),
-.tab-close-all:hover:not(:disabled) {
-  color: var(--fg);
-  background: var(--bg-hover);
-  border-color: var(--line-strong);
+.tab-new:hover:not(:disabled) {
+  color: var(--ink-1000);
+  background: var(--ink-300);
 }
 
 .tab-close-all:hover:not(:disabled) {
-  color: var(--danger);
-  border-color: var(--danger);
+  color: var(--on-brand);
+  background: var(--brand);
 }
 
 .tab-new:disabled,
 .tab-close-all:disabled {
-  opacity: 0.45;
-  cursor: default;
+  color: var(--ink-500);
+  cursor: not-allowed;
 }
 
+/* The toolbar under the strip: one bar of quiet acts. */
 .tab-toolbar {
   display: flex;
   flex: none;
-  gap: 8px;
-  padding: 8px 22px;
-  border-bottom: 1px solid var(--line);
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  padding: var(--space-1) var(--space-2);
+  background: var(--ink-200);
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
+}
+
+.tab-toolbar .button {
+  height: var(--control-tight);
 }
 
 /* RF-49: the slot the backend lays the active docked tab on. It carries nothing of the page's own:
@@ -678,23 +988,23 @@ button {
 .tab-slot {
   flex: 1;
   min-height: 0;
-  background: var(--bg);
+  background: var(--ink-100);
 }
 
 /* ------------------------------------------------------------------- rails */
 
-/* The sidebar of the unlocked window and the entry screen's rail are the same column: background,
-   padding, gap, item size, separators and the active pill are shared below. */
+/* The sidebar of the unlocked window and the entry screen's rail are the same column — Atrius
+   ActivityRail: 48px wide, one 2×2-cell square per item, no gap, a 1px rule on the right. */
 .sidebar,
 .entry-rail {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: var(--rail-gap);
+  align-items: stretch;
+  gap: 0;
   min-height: 0;
-  padding: 12px 0;
-  background: var(--bg-sidebar);
-  border-right: 1px solid var(--line);
+  padding: 0;
+  background: var(--ink-100);
+  border-right: var(--stroke-hair) solid var(--ink-400);
 }
 
 .entry-rail {
@@ -705,28 +1015,34 @@ button {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  align-items: center;
-  gap: var(--rail-gap);
+  align-items: stretch;
+  gap: 0;
   width: 100%;
   min-height: 0;
-  padding: 2px 0;
+  padding: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.sidebar-tools::-webkit-scrollbar {
+  display: none;
 }
 
 .sidebar-footer {
   display: flex;
   flex: none;
   flex-direction: column;
-  align-items: center;
-  gap: var(--rail-gap);
+  align-items: stretch;
+  gap: 0;
 }
 
-/* One rail item: round at rest, rounded square when hovered or open, like a server icon. */
+/* One rail item: a square cell, its glyph one cell in the middle. */
 .mark,
 .tile,
 .tool-icon,
-.sidebar-action {
+.sidebar-action,
+.sidebar-add {
   position: relative;
   display: grid;
   flex: none;
@@ -735,72 +1051,72 @@ button {
   height: var(--rail-item);
   margin: 0;
   padding: 0;
-  color: var(--muted);
-  font-family: var(--font);
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 1;
-  background: var(--bg-raised);
-  border: 1px solid var(--line);
-  border-radius: var(--rail-round);
+  color: var(--ink-700);
+  font: 400 17px/1 var(--font-mono);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   cursor: pointer;
   transition:
-    border-radius 120ms ease,
-    border-color 120ms ease,
-    background 120ms ease,
-    color 120ms ease;
+    background-color var(--dur-4f) linear,
+    color var(--dur-4f) linear;
 }
 
 .mark:hover,
 .tile:hover,
 .tool-icon:hover,
-.sidebar-action:hover {
-  color: var(--fg);
-  background: var(--bg-hover);
-  border-color: var(--line-strong);
-  border-radius: var(--rail-square);
+.sidebar-action:hover,
+.sidebar-add:hover {
+  color: var(--ink-1000);
+  background: var(--ink-300);
 }
 
-/* Selected: the tile picked on the entry screen, the mark of the session's guild, an open tool. */
-.mark,
+/* Where you are: the mark of the session is in strong ink. */
+.mark {
+  color: var(--ink-1000);
+}
+
+/* Selected — the tile picked on the entry screen, the tool on the panel, the tab view while it is
+   the panel's face: Atrius' pressed rail button, a 1px ink outline inside the cell. */
 .tile-active,
-.tool-icon.open {
-  color: var(--fg);
-  border-color: var(--accent);
-  border-radius: var(--rail-square);
+.tool-icon.current,
+.mark-tabs.current {
+  color: var(--ink-1000);
+  outline: var(--stroke-hair) solid var(--selection);
+  outline-offset: -8px;
 }
 
-/* The pill on the rail's left edge, Discord's language: tall where you are (the selected tile, the
-   mark of the session), short for an open tool, and it grows on hover. */
+.mark:focus-visible,
+.tile:focus-visible,
+.tool-icon:focus-visible,
+.sidebar-action:focus-visible,
+.sidebar-add:focus-visible {
+  outline: var(--stroke-strong) solid var(--focus-ring);
+  outline-offset: -4px;
+}
+
+/* The tick on the rail's left edge, square: short for an open tool, one cell where you are. */
 .mark::before,
 .tile::before,
 .tool-icon::before {
   content: '';
   position: absolute;
   top: 50%;
-  left: calc((var(--rail-item) - var(--sidebar-width)) / 2 - 1px);
-  width: 4px;
+  left: 0;
+  width: var(--stroke-strong);
   height: 0;
-  background: var(--fg);
-  border-radius: 0 4px 4px 0;
+  background: var(--ink-1000);
   transform: translateY(-50%);
-  transition: height 120ms ease;
 }
 
 .tool-icon.open::before {
   height: 8px;
-  background: var(--accent);
-}
-
-.tile:hover::before,
-.tool-icon:hover::before {
-  height: 20px;
 }
 
 .mark::before,
-.tile-active::before {
-  height: 36px;
-  background: var(--accent);
+.tile-active::before,
+.tool-icon.current::before {
+  height: var(--cell);
 }
 
 /* Every glyph of a rail item has the same box: an icon, the two-letter initials or a symbol. */
@@ -810,10 +1126,11 @@ button {
   width: var(--rail-glyph);
   height: var(--rail-glyph);
   object-fit: contain;
-  border-radius: 8px;
+  border-radius: 0;
+  background: transparent;
 }
 
-/* Initials sit on the item itself: the item is already the ring, so the chip drops its own. */
+/* Initials: a one-cell square in the control border. */
 .mark .chip,
 .tile-mark .chip,
 .tool-icon .chip {
@@ -824,11 +1141,16 @@ button {
   height: var(--rail-glyph);
   padding: 0;
   color: inherit;
-  font-size: 12px;
-  line-height: 1;
+  font: 700 10px/1 var(--font-mono);
   text-align: center;
   background: transparent;
-  border: 0;
+  border: var(--stroke-hair) solid var(--ink-600);
+}
+
+.tool-icon:hover .chip,
+.tool-icon.current .chip,
+.tool-icon.open .chip {
+  border-color: var(--ink-1000);
 }
 
 .tile-mark {
@@ -836,39 +1158,23 @@ button {
   place-items: center;
 }
 
-/* E03: the way back to the strip, right under the guild mark — the mark's own box and size, with
-   the accent ring and the rail pill only while the tab view is the panel's face. */
+/* E03: the way back to the strip, right under the guild mark — the mark's own cell. */
 .mark-tabs {
-  color: var(--muted);
-  border-color: var(--line);
-  border-radius: var(--rail-round);
+  color: var(--ink-700);
 }
 
 .mark-tabs::before {
   height: 0;
 }
 
-.mark-tabs.current {
-  color: var(--fg);
-  border-color: var(--accent);
-  border-radius: var(--rail-square);
-}
-
 .mark-tabs.current::before {
-  height: 20px;
-  background: var(--accent);
+  height: var(--cell);
 }
 
 .mark-tabs:disabled {
-  color: var(--muted);
-  background: var(--bg-raised);
-  border-color: var(--line);
-  border-radius: var(--rail-round);
-  cursor: default;
-}
-
-.mark-tabs:disabled::before {
-  height: 0;
+  color: var(--ink-500);
+  background: transparent;
+  cursor: not-allowed;
 }
 
 .mark-tabs-glyph {
@@ -876,92 +1182,110 @@ button {
   line-height: 1;
 }
 
-/* E03: the count of open tabs sits where the Settings action's inbox badge sits. */
-.tabs-badge {
-  color: var(--info);
-  background: var(--bg-sidebar);
-  border-color: var(--info);
-}
-
 /* The one separator of both rails: under the mark, between Offline and the guilds, above the
    footer. A category divider reuses the rule and adds its name above it. */
 .rail-separator,
 .sidebar-divider-rule {
   flex: none;
-  width: 28px;
-  height: 2px;
-  background: var(--line-strong);
-  border-radius: 1px;
+  align-self: stretch;
+  height: var(--stroke-hair);
+  margin: var(--space-1) var(--space-3);
+  background: var(--ink-400);
 }
 
-/* RF-62: the rule that opens a category group of the sidebar, with the name in small caps. */
+/* RF-62: the rule that opens a category group of the sidebar, with the name in `meta`. */
 .sidebar-divider {
   display: flex;
   flex: none;
   flex-direction: column;
-  align-items: center;
-  gap: 3px;
+  align-items: stretch;
+  gap: 0;
   width: 100%;
-  padding: 4px 6px 0;
+  padding: var(--space-2) 0 0;
+}
+
+.sidebar-divider .sidebar-divider-rule {
+  margin-top: 2px;
 }
 
 .sidebar-divider-label {
   max-width: 100%;
+  padding: 0 2px;
   overflow: hidden;
-  color: var(--muted);
-  font-size: 8px;
-  letter-spacing: 0.04em;
+  color: var(--ink-700);
+  font: 400 9px/12px var(--font-mono);
+  letter-spacing: 0.08em;
+  text-align: center;
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
 }
 
-.tool-icon.error {
-  border-color: var(--danger);
-}
-
-.tool-icon.loading {
-  animation: nod-pulse 1.4s ease-in-out infinite;
-}
-
-/* The corner marks share one geometry: the digit top right, a status or warning bottom right, each
-   a small disc cut out of the rail's background. */
+/* The corner marks: the digit (⌘N) top right as plain `meta` text, a state glyph bottom right. */
 .digit {
   position: absolute;
-  top: -3px;
-  right: -3px;
-  display: grid;
-  place-items: center;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 3px;
-  font-size: 9px;
-  font-weight: 400;
-  line-height: 1;
-  color: var(--muted);
-  background: var(--bg-sidebar);
-  border: 1px solid var(--line-strong);
-  border-radius: 7px;
+  top: 3px;
+  right: 4px;
+  color: var(--ink-700);
+  font: 400 10px/12px var(--font-mono);
+  pointer-events: none;
 }
 
-@keyframes nod-pulse {
-  0%,
-  100% {
+.tool-icon:hover .digit,
+.tool-icon.current .digit {
+  color: var(--ink-1000);
+}
+
+/* A favorite's shortcut reads in strong ink: favorites lead the rail and own the low digits. */
+.tool-icon.favorite .digit {
+  color: var(--ink-1000);
+  font-weight: 700;
+}
+
+/* B7/canonico §22: a tool that did not come from the org — `!`, the caution glyph. */
+.tool-icon.personal::after,
+.tool-icon.error::after {
+  position: absolute;
+  right: 4px;
+  bottom: 3px;
+  font: 700 11px/12px var(--font-mono);
+  pointer-events: none;
+}
+
+.tool-icon.personal::after {
+  content: '!';
+  color: var(--state-wait);
+}
+
+/* A failure is × in brand, and wins the corner over the personal mark. */
+.tool-icon.error::after {
+  content: '×';
+  color: var(--brand);
+}
+
+/* Loading: a running bar under the glyph, in the running colour. */
+.tool-icon.loading img,
+.tool-icon.loading .chip {
+  box-shadow: 0 4px 0 -2px var(--state-run);
+  animation: nod-blink 800ms steps(2, jump-none) infinite;
+}
+
+@keyframes nod-blink {
+  from {
     opacity: 1;
   }
 
-  50% {
+  to {
     opacity: 0.4;
   }
 }
 
-.sidebar-action .glyph {
-  font-size: 17px;
-  font-weight: 400;
-  line-height: 1;
+.sidebar-action .glyph,
+.sidebar-add .glyph {
+  font: 400 17px/1 var(--font-mono);
 }
 
-/* The label stays for screen readers and the smoke; the title shows it on hover, as a server name. */
+/* The label stays for screen readers and the smoke; the title shows it on hover. */
 .sidebar-action-label {
   position: absolute;
   width: 1px;
@@ -971,82 +1295,653 @@ button {
   white-space: nowrap;
 }
 
+/* ------------------------------------------------- the person's own rail */
+
+/* The quick add: the rail's last cell, a plain + until the pointer reaches it. */
+.sidebar-add {
+  color: var(--ink-500);
+}
+
+.sidebar-add:hover {
+  color: var(--ink-1000);
+}
+
+/* A rail item can be dragged: no text selection, no image drag of the browser's own. */
+.sidebar {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.sidebar img {
+  -webkit-user-drag: none;
+}
+
+/* A folder: closed, one cell with up to four of its tools in small; open, a band — its name on a
+   one-cell head, then its tools — set off from the rail by its surface and two rules. */
+.rail-folder {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.rail-folder-open {
+  background: var(--ink-200);
+  box-shadow:
+    inset 0 var(--stroke-hair) 0 var(--ink-400),
+    inset 0 calc(var(--stroke-hair) * -1) 0 var(--ink-400);
+}
+
+.folder-head {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: var(--rail-item);
+  height: var(--rail-item);
+  margin: 0;
+  padding: 0;
+  color: var(--ink-700);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: background-color var(--dur-4f) linear;
+}
+
+.folder-head:hover {
+  color: var(--ink-1000);
+  background: var(--ink-300);
+}
+
+.folder-head:focus-visible {
+  outline: var(--stroke-strong) solid var(--focus-ring);
+  outline-offset: -4px;
+}
+
+/* Closed and holding the tool on the panel: the pressed outline; holding an open tool: the tick. */
+.folder-head.current {
+  outline: var(--stroke-hair) solid var(--selection);
+  outline-offset: -8px;
+}
+
+.folder-head::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: var(--stroke-strong);
+  height: 0;
+  background: var(--ink-1000);
+  transform: translateY(-50%);
+}
+
+.folder-head.open::before {
+  height: 8px;
+}
+
+.folder-head.current::before {
+  height: var(--cell);
+}
+
+.folder-grid {
+  display: grid;
+  grid-template-columns: 11px 11px;
+  grid-template-rows: 11px 11px;
+  gap: 2px;
+  width: var(--rail-glyph);
+  height: var(--rail-glyph);
+  padding: 2px;
+  border: var(--stroke-hair) solid var(--ink-600);
+  box-sizing: content-box;
+}
+
+.folder-head:hover .folder-grid {
+  border-color: var(--ink-1000);
+}
+
+.folder-grid .glyph-img,
+.folder-grid .chip {
+  width: 11px;
+  height: 11px;
+  min-width: 0;
+  padding: 0;
+  font-size: 0;
+  border-color: var(--ink-600);
+}
+
+.rail-folder-open > .folder-head {
+  height: var(--cell);
+}
+
+.folder-name {
+  max-width: 100%;
+  padding: 0 2px;
+  overflow: hidden;
+  color: var(--ink-800);
+  font: 700 9px/12px var(--font-mono);
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.folder-name::before {
+  content: '▾';
+  margin-right: 1px;
+  color: var(--ink-700);
+  letter-spacing: 0;
+}
+
+.folder-empty {
+  display: grid;
+  place-items: center;
+  height: var(--cell);
+  color: var(--ink-500);
+}
+
+/* Dragging: the item being moved fades, the place it would land is a 2px ink line across the rail,
+   a folder or tool it would go into is outlined. */
+.dragging {
+  opacity: 0.35;
+}
+
+body.rail-dragging,
+body.rail-dragging * {
+  cursor: grabbing !important;
+}
+
+.rail-drop {
+  position: fixed;
+  z-index: var(--z-popover);
+  height: var(--stroke-strong);
+  background: var(--ink-1000);
+  pointer-events: none;
+}
+
+.drop-into {
+  outline: var(--stroke-hair) dashed var(--ink-1000) !important;
+  outline-offset: -4px !important;
+  background: var(--ink-300) !important;
+}
+
+/* ------------------------------------------------------------------- menu */
+
+/* Atrius Menu: a floating list, one cell per act — its mark, its words, its key — the active one in
+   inverted ink; groups named in `meta`, rules between blocks. */
+.menu {
+  position: fixed;
+  z-index: var(--z-popover);
+  display: flex;
+  flex-direction: column;
+  min-width: 240px;
+  max-width: min(360px, calc(100vw - 12px));
+  max-height: calc(100vh - 12px);
+  overflow-y: auto;
+  padding: var(--space-1) 0;
+  color: var(--ink-900);
+  font: var(--text-label);
+  background: var(--ink-200);
+  border: var(--stroke-hair) solid var(--ink-600);
+  box-shadow: var(--shadow-float);
+  animation: nod-layer-in var(--dur-8f) steps(2, end);
+}
+
+.menu-group {
+  padding: var(--space-2) var(--space-3) var(--space-1);
+  color: var(--ink-700);
+  font: var(--text-meta);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.menu-item {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--cell);
+  padding: 0 var(--space-3);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.menu-item:hover,
+.menu-item:focus {
+  color: var(--ink-100);
+  background: var(--ink-1000);
+  outline: none;
+}
+
+.menu-item:disabled {
+  color: var(--ink-500);
+  background: transparent;
+  cursor: default;
+}
+
+.menu-item-danger {
+  color: var(--brand);
+}
+
+.menu-item-danger:hover,
+.menu-item-danger:focus {
+  color: var(--on-brand);
+  background: var(--brand);
+}
+
+.menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.menu-key {
+  color: var(--ink-700);
+  font-size: 11px;
+}
+
+.menu-item:hover .menu-key,
+.menu-item:focus .menu-key {
+  color: inherit;
+}
+
+.menu-sep {
+  height: var(--stroke-hair);
+  margin: var(--space-1) 0;
+  background: var(--ink-400);
+}
+
 /* -------------------------------------------------------------------- home */
 
+/* Space: Home is a list, not a grid of cards — one row per tool (the Atrius list: name, value
+   aligned, act per row). Every row of every block uses the same fixed columns, counted in cells, so
+   states, sign-ins and acts line up down the whole screen; only the name column flexes. */
 .home {
+  --col-state: 168px; /* 7 cells */
+  --col-login: 168px; /* 7 cells */
+  --col-acts: calc(var(--cell) * 6 + var(--space-1) * 5); /* six icon slots */
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
   min-width: 0;
 }
 
-/* RF-62: one category of Home — the name the guild gave it, then its tools. */
+.home .grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  align-items: stretch;
+  background: var(--ink-200);
+  border: var(--stroke-hair) solid var(--ink-400);
+}
+
+/* RF-62: one category of Home — its name in `meta`, its count at the right, then its rows. */
 .home-section {
-  margin-top: 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  row-gap: var(--space-1);
+  margin: 0;
+}
+
+.home-section > .grid {
+  grid-column: 1 / -1;
 }
 
 .home-section-title {
-  margin: 0 0 8px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  margin: 0;
+  color: var(--ink-700);
+  font: var(--text-meta);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
+.home-section-count {
+  padding-right: var(--space-2);
+  color: var(--ink-700);
+  font: var(--text-meta);
+  font-variant-numeric: tabular-nums;
+}
+
 .tool-card {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.tool-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: var(--cell) minmax(0, 1fr) var(--col-state) var(--col-login) var(--col-acts);
   align-items: center;
-  gap: 10px;
+  column-gap: var(--space-3);
+  min-height: 40px;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  background: transparent;
+  border: 0;
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
 }
 
-.tool-head .chip {
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  font-size: 12px;
+.tool-card:last-child {
+  border-bottom: 0;
 }
 
-.glyph-img {
-  width: 24px;
-  height: 24px;
-  object-fit: contain;
-  background: var(--bg-hover);
-  border-radius: 5px;
+.tool-card:hover {
+  background: var(--ink-300);
+}
+
+/* The head's pieces sit in the row's own columns. */
+.tool-head {
+  display: contents;
+}
+
+.tool-head > .glyph-img,
+.tool-head > .chip {
+  grid-row: 1;
+  grid-column: 1;
 }
 
 .tool-titles {
+  grid-row: 1;
+  grid-column: 2;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
   min-width: 0;
+  overflow: hidden;
+}
+
+.tool-head .chip {
+  width: var(--cell);
+  height: var(--cell);
+  min-width: 0;
+  padding: 0;
+  font-size: 10px;
+  border-color: var(--ink-600);
+}
+
+.glyph-img {
+  width: var(--cell);
+  height: var(--cell);
+  object-fit: contain;
+  background: transparent;
+  border-radius: 0;
 }
 
 .tool-title {
-  font-size: 13px;
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ink-1000);
+  font: var(--text-node-title);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tool-host {
-  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-700);
+  font: var(--text-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Atrius StateTag: glyph + word. ▸ open (running), ┆ loading, × failed, · not open. */
+.tool-state {
+  grid-row: 1;
+  grid-column: 3;
+  min-width: 0;
+  overflow: hidden;
+  font: var(--text-state);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-state::before {
+  margin-right: var(--space-1);
+}
+
+.tool-state[data-state='open'] {
+  color: var(--state-run);
+}
+
+.tool-state[data-state='open']::before {
+  content: '▸';
+}
+
+.tool-state[data-state='loading'] {
+  color: var(--ink-700);
+}
+
+.tool-state[data-state='loading']::before {
+  content: '┆';
+}
+
+.tool-state[data-state='failed'] {
+  color: var(--brand);
+}
+
+.tool-state[data-state='failed']::before {
+  content: '×';
+}
+
+.tool-state[data-state='closed'] {
+  color: var(--ink-700);
+  font-weight: 400;
+}
+
+.tool-state[data-state='closed']::before {
+  content: '·';
+}
+
+/* The login cascade's answer: ✓ signed in, ◆ waits for you (manual), × failed. */
+.tool-login {
+  grid-row: 1;
+  grid-column: 4;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-700);
+  font: var(--text-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-login::before {
+  margin-right: var(--space-1);
+}
+
+.tool-login[data-login='session']::before,
+.tool-login[data-login='filled']::before,
+.tool-login[data-login='provider']::before {
+  content: '✓';
+  color: var(--state-ok);
+}
+
+.tool-login[data-login='manual'] {
+  color: var(--state-wait);
+}
+
+.tool-login[data-login='manual']::before {
+  content: '◆';
+}
+
+.tool-login[data-login='failed'] {
+  color: var(--brand);
+}
+
+.tool-login[data-login='failed']::before {
+  content: '×';
+}
+
+.tool-card > .tool-actions {
+  grid-row: 1;
+  grid-column: 5;
+}
+
+/* canonico §22: the warning of a tool that did not come from the org, on its own line of the row,
+   under the name — caution (`!`, state-wait), not a failure. */
+.tool-warning {
+  grid-row: 2;
+  grid-column: 2 / -1;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  color: var(--state-wait);
+  font: var(--text-meta);
+  background: transparent;
+  border: 0;
+}
+
+.tool-warning::before {
+  content: '!';
+  margin-right: var(--space-2);
+  font-weight: 700;
+}
+
+.tool-card-personal {
+  box-shadow: inset var(--stroke-strong) 0 0 var(--state-wait);
+}
+
+/* ------------------------------------------------------------- icon acts */
+
+/* A row's acts: one-cell icon slots, always the same slots in the same order, right-aligned. An act
+   that does not apply leaves its slot empty (`.icon-slot`), so a column holds one act all the way
+   down. */
+.tool-actions {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: var(--cell);
+  justify-content: end;
+  gap: var(--space-1);
+}
+
+.icon-slot {
+  width: var(--cell);
+  height: var(--cell);
+}
+
+/* The glyph comes from `data-icon`; the button's words stay its text (read aloud, and the tooltip)
+   but take no room on screen. */
+.icon-button {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: var(--cell);
+  height: var(--cell);
+  padding: 0;
+  color: var(--ink-800);
+  font-size: 0;
+  line-height: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  background: transparent;
+  border: var(--stroke-hair) solid transparent;
+  border-radius: 0;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-4f) linear,
+    color var(--dur-4f) linear,
+    border-color var(--dur-4f) linear;
+}
+
+.icon-button::before {
+  content: attr(data-icon);
+  font: 400 14px/1 var(--font-mono);
+}
+
+.icon-button:hover:not(:disabled) {
+  color: var(--ink-1000);
+  background: var(--ink-300);
+  border-color: var(--ink-600);
+}
+
+.icon-button:active:not(:disabled) {
+  transform: translate(1px, 1px);
+}
+
+.icon-button:disabled {
+  color: var(--ink-500);
+  cursor: not-allowed;
+}
+
+/* The row's next step: framed, inverted under the pointer. */
+.icon-button-primary {
+  color: var(--ink-1000);
+  border-color: var(--ink-600);
+}
+
+.icon-button-primary:hover:not(:disabled) {
+  color: var(--ink-100);
+  background: var(--ink-1000);
+  border-color: var(--ink-1000);
+}
+
+.icon-button-danger {
+  color: var(--brand);
+}
+
+.icon-button-danger:hover:not(:disabled) {
+  color: var(--on-brand);
+  background: var(--brand);
+  border-color: var(--brand);
+}
+
+.icon-button[aria-expanded='true'] {
+  color: var(--ink-100);
+  background: var(--ink-1000);
+}
+
+/* --------------------------------------------------------- settings tools */
+
+/* Settings → Tools in the same list language as Home: one panel per group, one row per tool, fixed
+   columns — name, address, roles, views, then three icon acts. */
+.settings-view .tool-group {
+  --col-acts3: calc(var(--cell) * 3 + var(--space-1) * 2);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.settings-view .tool-group > .home-section-title {
+  margin-bottom: var(--space-1);
+}
+
+.settings-view .tool-group > .tool-item {
+  border-top-width: 0;
+}
+
+.settings-view .tool-group > .home-section-title + .tool-item {
+  border-top-width: var(--stroke-hair);
+}
+
+.tool-item.card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px 168px 96px var(--col-acts3, 80px);
+  align-items: center;
+  column-gap: var(--space-3);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+}
+
+.tool-item:hover {
+  background: var(--ink-300);
+}
+
+.tool-item > .row {
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tool-item > .row > strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.tool-state {
-  font-size: 12px;
-}
-
-.tool-login {
-  font-size: 11px;
-}
-
-/* The views select sits in the card's action row: as tall as the buttons, never full width. */
-.tool-views {
-  width: auto;
-  max-width: 160px;
-  padding: 4px 8px;
-  font-size: 11px;
+.tool-item > p {
+  min-width: 0;
+  overflow: hidden;
+  font: var(--text-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --------------------------------------------------------- locked screen */
@@ -1055,16 +1950,16 @@ button {
   display: grid;
   place-items: center;
   height: 100vh;
-  padding: 24px;
+  padding: var(--space-5);
   overflow: auto;
 }
 
 .auth-card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
   width: min(420px, 100%);
-  padding: 22px;
+  padding: var(--space-5);
 }
 
 /* The error line and the wait countdown of the entry screen's forms hold no space when empty. */
@@ -1075,7 +1970,7 @@ button {
 
 /* ----------------------------------------------------- entry screen (0.5.0) */
 
-/* RF-60: a Discord-like rail of tiles on the left, the pane of the selected one beside it. */
+/* RF-60: the rail of tiles on the left, the pane of the selected one beside it. */
 .entry {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
@@ -1083,55 +1978,58 @@ button {
   overflow: hidden;
 }
 
-/* The rail itself, its tiles, separators and pill are the shared rail rules above. */
+/* The rail itself, its tiles, separators and tick are the shared rail rules above. */
 
-/* A status dot sits in the same bottom-right corner as the sidebar's personal-tool mark. */
+/* A state dot — one of the three places Atrius allows a circle — in the tile's bottom-right. */
 .tile-dot {
   position: absolute;
-  right: -3px;
-  bottom: -3px;
-  width: 14px;
-  height: 14px;
-  background: var(--muted);
-  border: 3px solid var(--bg-sidebar);
+  right: 8px;
+  bottom: 8px;
+  width: 8px;
+  height: 8px;
+  background: var(--ink-500);
+  border: 0;
   border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--ink-100);
 }
 
-/* The `+` tile reads as an action, not a place: Discord's green "add a server". */
+.tile-dot-on {
+  background: var(--state-ok);
+}
+
+.tile-dot-stale {
+  background: var(--state-wait);
+}
+
+.tile-dot-out {
+  background: var(--ink-500);
+}
+
+.tile-dot-update {
+  background: var(--brand);
+}
+
+/* The `+` tile is an act, not a place. */
 .tile[data-tile='join'] {
-  color: var(--ok);
+  color: var(--ink-700);
 }
 
 .tile[data-tile='join']:hover,
 .tile[data-tile='join'].tile-active {
-  color: var(--accent-fg);
-  background: var(--ok);
-  border-color: var(--ok);
+  color: var(--ink-1000);
 }
 
-.tile-dot-on {
-  background: var(--ok);
-}
-
-.tile-dot-stale {
-  background: var(--info);
-}
-
-.tile-dot-out {
-  background: var(--muted);
-}
-
-.tile-dot-update {
-  background: var(--danger);
-}
-
+/* Atrius atmosphere: the opening screen sits on a dotted floor; the card covers the dots under its
+   words. */
 .entry-pane {
   display: flex;
   justify-content: center;
   align-items: flex-start;
   min-height: 0;
-  padding: 32px 24px;
+  padding: var(--space-6) var(--space-5);
   overflow: auto;
+  background-image: radial-gradient(var(--atmos-dot) 1px, transparent 1px);
+  background-size: var(--cell) var(--cell);
 }
 
 /* 0.5.0: the banner above the selected tile's card, both centred in one column. */
@@ -1139,98 +2037,95 @@ button {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 20px;
-  width: min(460px, 100%);
+  gap: var(--space-5);
+  width: min(440px, 100%);
 }
 
+/* Nod's ASCII mark, monochrome in strong ink like Atrius' AsciiMark inside an app. */
 .entry-banner {
-  margin: 8px 0 0;
-  color: var(--accent);
-  font-family: var(--font);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.15;
+  margin: 0;
+  padding: 0 var(--space-2);
+  color: var(--ink-1000);
+  font: 700 13px/1.15 var(--font-mono);
   white-space: pre;
   user-select: none;
+  background: var(--ink-100);
 }
 
 .entry-card,
 .entry-join {
-  width: min(460px, 100%);
+  width: min(440px, 100%);
+}
+
+.entry-card {
+  box-shadow: var(--shadow-float);
 }
 
 .entry-mark,
 .entry-avatar {
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
-  font-size: 16px;
-  font-weight: 700;
-  background: var(--bg-hover);
-  border: 1px solid var(--line-strong);
-  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  color: var(--ink-1000);
+  font: 700 15px/1 var(--font-mono);
+  background: transparent;
+  border: var(--stroke-hair) solid var(--ink-600);
 }
 
 .entry-title {
-  font-size: 17px;
+  font: var(--text-display-m);
+  text-transform: uppercase;
 }
 
 .entry-guild-icon {
-  width: 52px;
-  height: 52px;
+  width: 48px;
+  height: 48px;
   object-fit: contain;
-  border-radius: 12px;
 }
 
 .entry-signed-in {
-  font-size: 12px;
+  font: var(--text-meta);
 }
 
 /* The invite card of the join flow (RF-59) and the secondary paths under it. */
 .invite-head {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .invite-icon {
-  width: 46px;
-  height: 46px;
+  width: 48px;
+  height: 48px;
   object-fit: contain;
-  border-radius: 10px;
 }
 
 .invite-initials {
   display: grid;
   place-items: center;
-  width: 46px;
-  height: 46px;
+  width: 48px;
+  height: 48px;
+  color: var(--ink-1000);
   font-weight: 700;
-  background: var(--bg-hover);
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-}
-
-.invite-roles .chip {
-  font-size: 11px;
+  background: transparent;
+  border: var(--stroke-hair) solid var(--ink-600);
 }
 
 .join-secondary {
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-1);
 }
 
 /* Settings → People: the invite just created, and one row per open invite (RF-59). */
 .invite-created {
-  padding: 10px;
-  background: var(--bg-raised);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius);
+  padding: var(--space-3);
+  background: var(--ink-300);
+  border: var(--stroke-hair) solid var(--ink-1000);
 }
 
 .invite-row {
-  padding: 10px;
+  padding: var(--space-3);
 }
 
 /* ----------------------------------------------------------------- palette */
@@ -1238,30 +2133,45 @@ button {
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  z-index: var(--z-modal);
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  padding: 10vh 16px 16px;
-  background: rgb(6 8 10 / 62%);
+  padding: 12vh var(--space-4) var(--space-4);
+  background: var(--overlay);
 }
 
+/* Atrius CommandPalette: a floating layer — 1px ink border, the hard shadow, no padding; the field
+   on top with a rule under it, the results under that. */
 .palette {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
   width: min(560px, 100%);
   max-height: 70vh;
-  padding: 12px;
-  background: var(--bg-raised);
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  box-shadow: 0 18px 48px rgb(0 0 0 / 50%);
+  padding: 0;
+  background: var(--ink-200);
+  border: var(--stroke-hair) solid var(--ink-1000);
+  box-shadow: var(--shadow-float);
+  animation: nod-layer-in var(--dur-8f) steps(2, end);
 }
 
-.palette-input {
-  padding: 9px 11px;
-  font-size: 14px;
+.palette-input,
+.palette-input:focus,
+.palette-input:focus-visible {
+  flex: none;
+  height: 40px;
+  padding: 0 var(--space-3);
+  color: var(--ink-1000);
+  font: var(--text-body);
+  background: transparent;
+  border: 0;
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
+  box-shadow: none;
+}
+
+.palette-message {
+  padding: var(--space-2) var(--space-3) 0;
 }
 
 .palette-message:empty {
@@ -1271,86 +2181,151 @@ button {
 .palette-list {
   min-height: 0;
   margin: 0;
-  padding: 0;
+  padding: var(--space-1) 0;
   overflow-y: auto;
   list-style: none;
 }
 
+.palette .empty {
+  margin: var(--space-3);
+}
+
+/* One result: one cell tall; the selected one in inverted ink. */
 .palette-item {
-  padding: 7px 10px;
-  border-radius: var(--radius);
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-height: var(--cell);
+  padding: var(--space-1) var(--space-3);
+  color: var(--ink-900);
   cursor: pointer;
 }
 
 /* RF-62: the row's label and, beside it, the category the tool is filed under. */
 .palette-item-label {
-  margin-right: 8px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .palette-item-hint {
-  color: var(--muted);
-  font-size: 11px;
+  margin-left: auto;
+  color: var(--ink-700);
+  font: var(--text-meta);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 .palette-item:hover {
-  background: var(--bg-hover);
+  background: var(--ink-300);
 }
 
-.palette-item-active {
-  background: var(--bg-hover);
-  box-shadow: inset 2px 0 0 var(--accent);
+.palette-item-active,
+.palette-item-active:hover {
+  color: var(--ink-100);
+  background: var(--ink-1000);
+}
+
+.palette-item-active .palette-item-hint {
+  color: inherit;
+}
+
+/* The dialog of `personal.saveTool`, and E03's "Open link…": the palette's layer, a form inside. */
+.dialog-title {
+  margin: 0;
+  padding-bottom: var(--space-2);
+  font: var(--text-display-m);
+  text-transform: uppercase;
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
+}
+
+#personal-tool-dialog .palette,
+#open-link-dialog .palette,
+.palette.dialog {
+  width: min(440px, 100%);
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+#personal-tool-dialog .field,
+#open-link-dialog .field,
+.palette.dialog .field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
 }
 
 /* ----------------------------------------------------------------- connected mode */
 
-/* SP05 §4: the offline badge of the sidebar, while the last sync failed. */
+/* SP05 §4: a short state label — the offline badge of the sidebar, while the last sync failed. */
 .badge {
   display: inline-flex;
   align-items: center;
-  height: 18px;
-  padding: 0 6px;
-  font-size: 10px;
-  font-weight: 600;
+  justify-content: center;
+  height: 16px;
+  padding: 0 3px;
+  color: var(--ink-700);
+  font: 700 9px/16px var(--font-mono);
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  color: var(--muted);
+  border: var(--stroke-hair) solid var(--ink-400);
 }
 
 .badge-offline {
-  color: var(--info);
-  border-color: var(--info);
+  align-self: center;
+  margin: var(--space-1) 0;
+  color: var(--state-wait);
+  border-color: var(--state-wait);
 }
 
-/* K4: the count of shares waiting in the vault inbox, on the Settings action of the sidebar. */
+/* K4: the count of shares waiting in the vault inbox, on the Settings action — waits for you, so
+   it is the hot state-wait fill (Atrius rail badge). */
 .sidebar-action-badge {
   position: absolute;
-  top: -4px;
-  right: -6px;
+  top: 4px;
+  right: 4px;
+  min-width: 16px;
   height: 16px;
-  padding: 0 5px;
-  color: var(--info);
-  background: var(--bg-sidebar);
-  border-color: var(--info);
+  padding: 0 3px;
+  color: var(--on-state);
+  font: 700 10px/16px var(--font-mono);
+  background: var(--state-wait);
+  border: 0;
 }
 
-/* SP04 §3: the signed-out notice, next to the update one. */
+/* E03: the count of open tabs is a count, not a request: it stays in ink. */
+.tabs-badge {
+  color: var(--ink-1000);
+  background: var(--ink-300);
+  box-shadow: inset 0 0 0 1px var(--ink-600);
+}
+
+/* SP04 §3: the signed-out notice waits for the person. */
+.notice-warn::before {
+  content: '◆';
+  color: var(--state-wait);
+}
+
 .notice-warn {
-  border-left-color: var(--info);
+  border-color: var(--state-wait);
 }
 
 /* O2: the out-of-date Nod — a state, not a notice to dismiss, so it is the loudest of the three. */
-.notice-danger {
-  border-left-color: var(--danger);
+.notice-danger::before {
+  content: '×';
+  color: var(--brand);
 }
 
-/* K2/RF-45: a colleague's key changed — a chip that has to read as a warning, not as a label. */
+.notice-danger {
+  border-color: var(--brand);
+}
+
+/* K2/RF-45: a colleague's key changed — a tag that reads as a warning, not as a label. */
 .chip-warn {
-  color: var(--danger);
-  border-color: var(--danger);
+  color: var(--brand);
+  border-color: var(--brand);
 }
 
 /* SP05 §4: one labelled line of the host card. */
@@ -1360,10 +2335,15 @@ button {
 
 .host-label {
   min-width: 110px;
+  color: var(--ink-700);
+  font: var(--text-meta);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 /* SP04 §1.1's fingerprint is read out loud: keep it selectable and evenly spaced. */
 .fingerprint {
+  color: var(--ink-1000);
   letter-spacing: 0.08em;
 }
 
@@ -1372,9 +2352,8 @@ button {
   width: 48px;
   height: 48px;
   object-fit: contain;
-  background: var(--bg-raised);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  background: var(--ink-300);
+  border: var(--stroke-hair) solid var(--ink-400);
 }
 
 /* The join flow draws its own sections; inside the auth card they are sections, not cards. */
@@ -1388,29 +2367,29 @@ button {
 
 /* K5: the revealed value and its countdown, on one line of the credential's card. */
 .reveal {
-  gap: 10px;
+  gap: var(--space-2);
 }
 
 .reveal .secret {
-  padding: 2px 8px;
-  font-family: var(--font);
-  background: var(--bg);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  padding: 0 var(--space-2);
+  color: var(--ink-1000);
+  font-family: var(--font-mono);
+  background: var(--ink-300);
+  border: var(--stroke-hair) solid var(--ink-1000);
   user-select: all;
 }
 
 .reveal-count {
+  color: var(--state-wait);
   font-variant-numeric: tabular-nums;
 }
 
 /* K5: the inline password prompt of an action that waits for its gate. */
 .gate {
-  gap: 8px;
-  padding: 8px;
-  background: var(--bg);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--ink-300);
+  border: var(--stroke-hair) solid var(--state-wait);
 }
 
 /* K7/RF-54: the holders of one credential — 'Alice, Bob' with the date and the scope of each. */
@@ -1421,76 +2400,72 @@ button {
 }
 
 .holder {
-  gap: 8px;
+  gap: var(--space-2);
   padding: 2px 0;
 }
 
 /* K4: the send dialog hangs under the credential it sends, so it reads as part of it. */
-.send-dialog {
-  gap: 8px;
-  background: var(--bg);
+.send-dialog,
+.assign-dialog {
+  gap: var(--space-2);
+  background: var(--ink-300);
 }
 
-.send-dialog h3 {
+.send-dialog h3,
+.inbox-row h3 {
   margin: 0;
-  font-size: 13px;
+  color: var(--ink-1000);
+  font: var(--text-node-title);
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .recipient {
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 /* K4: one share in the inbox — a card of its own, with its own answer. */
 .inbox-row {
-  gap: 8px;
-}
-
-.inbox-row h3 {
-  margin: 0;
-  font-size: 13px;
+  gap: var(--space-2);
 }
 
 /* ------------------------------------------------------------------ personal (B7) */
 
-/* SP05 §4: the star of a favorite, on the card's head. A sidebar tool carries `favorite` too, as a
-   state, so the star's box must not reach it (it shifted and flattened the rail item). */
-.favorite:not(.tool-icon) {
-  margin-left: auto;
-  padding: 2px 8px;
-  font-size: 16px;
-  line-height: 1;
-  color: var(--muted);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius);
+/* SP05 §4: the star of a favorite, the last icon slot of the row. A sidebar tool carries `favorite`
+   too, as a state, so these rules name the row's button only. */
+.favorite.icon-button {
+  color: var(--ink-500);
 }
 
-.favorite:not(.tool-icon):hover {
-  background: var(--bg-hover);
-  border-color: var(--line-strong);
+.favorite-on.icon-button {
+  color: var(--ink-1000);
 }
 
-.favorite-on {
-  color: var(--info);
-}
-
-/* RF-58: Home's "Online now" card. */
+/* RF-58: Home's "Online now" panel. */
 .presence-card {
-  margin-top: 16px;
+  margin-top: 0;
 }
 
 .presence-title {
-  margin: 0 0 8px;
-  font-size: 14px;
+  margin: 0 0 var(--space-2);
+  padding-bottom: var(--space-2);
+  color: var(--ink-1000);
+  font: var(--text-node-title);
+  border-bottom: var(--stroke-hair) solid var(--ink-400);
 }
 
 .presence-subtitle {
-  margin: 12px 0 6px;
-  font-size: 12px;
-  font-weight: 500;
+  margin: var(--space-3) 0 var(--space-1);
+  color: var(--ink-700);
+  font: var(--text-meta);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .presence-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1499,117 +2474,75 @@ button {
 .presence-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 2px 0;
+  gap: var(--space-2);
+  padding: 0;
 }
 
 .presence-dot {
   width: 8px;
   height: 8px;
+  background: var(--state-ok);
   border-radius: 50%;
-  background: var(--ok);
-}
-
-/* canonico §22: the warning a tool that did not come from the org carries. */
-.tool-warning {
-  margin: 0;
-  padding: 6px 8px;
-  font-size: 12px;
-  color: var(--fg);
-  background: rgb(255 107 107 / 12%);
-  border: 1px solid var(--danger);
-  border-radius: var(--radius);
-}
-
-.tool-card-personal {
-  border-color: var(--line-strong);
-}
-
-/* The sidebar marks the same tools: a personal one, and a favorite. */
-.tool-icon.personal::after {
-  content: '!';
-  position: absolute;
-  right: -3px;
-  bottom: -3px;
-  width: 14px;
-  height: 14px;
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 12px;
-  text-align: center;
-  color: var(--danger);
-  background: var(--bg-sidebar);
-  border: 1px solid var(--danger);
-  border-radius: 50%;
-}
-
-.tool-icon.favorite:not(.open) {
-  border-color: var(--info);
-}
-
-/* E03 (RF-49): the tool whose tab is on the center panel. `.open` says the tool has a window
-   somewhere; this says it is the one the panel is showing. */
-.tool-icon.current {
-  border-color: var(--accent);
-  border-radius: var(--rail-square);
-}
-
-.tool-icon.current::before {
-  height: 20px;
-  background: var(--accent);
-}
-
-/* The dialog of `personal.saveTool`, and E03's "Open link…": the palette's box, a form's width. */
-.dialog-title {
-  margin: 0;
-  font-size: 14px;
-}
-
-#personal-tool-dialog .palette,
-#open-link-dialog .palette {
-  width: min(440px, 100%);
-}
-
-#personal-tool-dialog .field,
-#open-link-dialog .field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
 }
 
 /* ------------------------------------------------------------ small window */
 
 @media (max-width: 900px) {
   :root {
-    --sidebar-width: 64px;
+    --page-pad: var(--space-4);
   }
 
-  .content {
-    padding: 14px 16px 22px;
+  /* Space: the login column goes first; the other columns keep their widths. */
+  .tool-card {
+    grid-template-columns: var(--cell) minmax(0, 1fr) var(--col-state) var(--col-acts);
   }
 
-  /* E03: the tab view sits on the panel's box, so its own chrome follows the padding the content
-     just took (`.tab-view` is absolutely placed and ignores it). */
-  .tab-strip,
-  .tab-toolbar {
-    padding-right: 16px;
-    padding-left: 16px;
+  .tool-login {
+    display: none;
+  }
+
+  .tool-card > .tool-actions {
+    grid-column: 4;
+  }
+
+  .tool-item.card {
+    grid-template-columns: minmax(0, 1fr) 168px var(--col-acts3, 80px);
+  }
+
+  .tool-item > p:nth-of-type(2),
+  .tool-item > p:nth-of-type(3) {
+    display: none;
   }
 
   .tab-item {
     max-width: 160px;
   }
 
-  .banner {
-    padding: 0 16px;
-  }
-
-  .notice-slot {
-    padding: 0 16px;
-  }
-
   .grid {
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .tool-host,
+  .tool-state {
+    display: none;
+  }
+
+  .tool-card {
+    grid-template-columns: var(--cell) minmax(0, 1fr) var(--col-acts);
+  }
+
+  .tool-card > .tool-actions {
+    grid-column: 3;
+  }
+
+  .tool-item.card {
+    grid-template-columns: minmax(0, 1fr) var(--col-acts3, 80px);
+  }
+
+  .tool-item > p {
+    display: none;
   }
 }
 
@@ -1623,6 +2556,7 @@ button {
   }
 }
 
+/* Atrius: with reduced motion nothing moves and nothing blinks. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -1630,5 +2564,9 @@ button {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
+  }
+
+  .button:active:not(:disabled) {
+    transform: none;
   }
 }

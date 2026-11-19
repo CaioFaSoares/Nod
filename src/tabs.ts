@@ -141,7 +141,7 @@ export function mountTabs(root: HTMLElement, ctx: TabsViewCtx): TabsHandle {
     if (document.visibilityState === 'hidden') return null;
     const active = activeTab(state);
     if (active === null) return null;
-    if (document.querySelector('.overlay') !== null) return null;
+    if (document.querySelector('.overlay, .menu, .rail-drop') !== null) return null;
     if (!active.docked) return null;
     const box = slot.getBoundingClientRect();
     if (box.width === 0 || box.height === 0) return null;

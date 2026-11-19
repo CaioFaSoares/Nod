@@ -209,7 +209,27 @@ async function waitForControl(label: string, root: ParentNode = document): Promi
   );
 }
 
-/** Settings → the tab; the app's own `go`/`selectTab` path, driven by the sidebar and the tabs. */
+/** Open real disclosures through their summary, never by assigning `open` or clicking hidden inputs. */
+async function openDetails(node: HTMLDetailsElement): Promise<void> {
+  const parent = node.parentElement?.closest<HTMLDetailsElement>('details');
+  if (parent !== null && parent !== undefined) await openDetails(parent);
+  if (!node.open) {
+    const summary = node.querySelector<HTMLElement>(':scope > summary');
+    expect(summary !== null, 'the disclosure has no summary');
+    summary.click();
+  }
+  await waitForValue('the disclosure to open', () => node.isConnected && node.open ? true : null);
+}
+
+async function openDisclosure(section: string): Promise<HTMLDetailsElement> {
+  const node = await waitForValue(`the ${section} disclosure`, () =>
+    document.querySelector<HTMLDetailsElement>(`details[data-section="${section}"]`),
+  );
+  await openDetails(node);
+  return node;
+}
+
+/** Settings → the destination; the app's own `go`/`selectTab` path, driven by real navigation. */
 async function openSettingsTab(label: string): Promise<void> {
   const settings = all<HTMLButtonElement>('.sidebar-action').find((button) =>
     text(button).includes('Settings'),
@@ -220,9 +240,11 @@ async function openSettingsTab(label: string): Promise<void> {
   const tab = await waitForValue(`the ${label} tab`, () =>
     all<HTMLButtonElement>('.tabs .tab').find(textIs(label)) ?? null,
   );
+  const disclosure = tab.closest<HTMLDetailsElement>('details');
+  if (disclosure !== null) await openDetails(disclosure);
   tab.click();
-  await waitForValue(`the active ${label} tab`, () => {
-    const active = document.querySelector('.tabs .tab-active');
+  await waitForValue(`the active ${label} destination`, () => {
+    const active = document.querySelector('.settings-view nav.tabs .tab[aria-current="page"]');
     return active !== null && text(active) === label ? active : null;
   });
 }
@@ -367,7 +389,7 @@ async function personOfEmail(email: string): Promise<PersonLite> {
 /**
  * 0.5.0 (RF-60): the page opens on the entry screen, and its default entry is Offline. Every check
  * below needs the **guild** session, so this drives the real screen: the guild tile of the rail, the
- * password, "Enter <guild>".
+ * password, "Unlock".
  */
 async function unlock(email: string): Promise<void> {
   const tile = await waitForValue('the guild tile of the entry rail', () => {
@@ -500,8 +522,61 @@ async function setupAdmin(): Promise<void> {
 
 // ------------------------------------------------------------- phase: person join
 
+async function openSavedLoginsShortcut(pending = false): Promise<void> {
+  const shortcut = await waitForValue('the Saved logins sidebar action', () => {
+    const button = all<HTMLButtonElement>('.sidebar-footer .sidebar-action').find((node) =>
+      text(node.querySelector('.sidebar-action-label')) === 'Saved logins',
+    );
+    if (button === undefined) return null;
+    if (pending) {
+      const count = Number(text(button.querySelector('.sidebar-action-badge')));
+      if (!Number.isInteger(count) || count < 1) return null;
+      expect(button.getAttribute('aria-label')?.includes(`${count} ${count === 1 ? 'share' : 'shares'} waiting`) === true,
+        'the pending-share count has no accessible label');
+    }
+    return button;
+  });
+  shortcut.click();
+  await waitForValue('Saved logins opened by the sidebar', () => {
+    const active = document.querySelector('nav.tabs .tab[aria-current="page"]');
+    return active !== null && text(active) === 'Saved logins' && document.getElementById('vault-inbox') !== null ? true : null;
+  });
+}
+
+async function checkMemberNavigation(): Promise<string> {
+  await openSettingsTab('Account');
+  const nav = document.querySelector('nav.settings-navigation');
+  expect(nav !== null, 'Settings is not exposed as navigation');
+  const labels = all<HTMLElement>('.tab', nav).map(text);
+  expect(labels.length === 3 && ['Saved logins', 'Account', 'Guild connection'].every((label) => labels.includes(label)),
+    `the member destinations are ${JSON.stringify(labels)}`);
+  for (const label of ['Tools', 'Access', 'People', 'Activity', 'Setup files']) {
+    expect(!labels.includes(label), `the member can see the admin destination ${label}`);
+  }
+  const groups = all<HTMLElement>('.settings-group-title', nav).map(text);
+  expect(groups.includes('Your Nod') && groups.includes('Your guild'), 'the task groups are missing');
+  expect(nav.querySelector('[data-section="advanced-navigation"]') === null, 'the member sees Advanced');
+  await openSavedLoginsShortcut();
+  return 'member navigation exposes only three destinations in Your Nod/Your guild; sidebar opens Saved logins';
+}
+
+async function checkAdminAdvancedNavigation(): Promise<string> {
+  await openSettingsTab('Account');
+  const advanced = await waitForValue('the Advanced navigation disclosure', () =>
+    document.querySelector<HTMLDetailsElement>('nav.tabs details[data-section="advanced-navigation"]'),
+  );
+  expect(!advanced.open, 'Advanced navigation is expanded on entry');
+  expect(['Activity', 'Setup files'].every((label) =>
+    all<HTMLElement>('.tab', advanced).some(textIs(label))), 'Advanced destinations are missing');
+  await openSettingsTab('Activity');
+  await openSettingsTab('Setup files');
+  expect(document.querySelector<HTMLDetailsElement>('nav.tabs details[data-section="advanced-navigation"]')?.open === true,
+    'the selected Advanced destination is hidden');
+  return 'Advanced starts collapsed; summary reveals Activity and Setup files through real navigation';
+}
+
 async function checkKeepLocalTools(): Promise<string> {
-  await openSettingsTab('Hosts');
+  await openSettingsTab('Guild connection');
   const boxes = await waitForValue('the leftover checkboxes', () => {
     const card = cardHeading('Keep your local tools');
     if (card === null) return null;
@@ -537,8 +612,8 @@ async function checkKeepLocalTools(): Promise<string> {
   for (const card of personal) {
     const warning = card.querySelector('.tool-warning');
     expect(
-      warning !== null && text(warning).includes('Not from your org'),
-      'a kept tool has no "Not from your org" warning',
+      warning !== null && text(warning) === 'Personal tool · Not managed by your guild. Camera and microphone require your permission.',
+      'a kept tool has no personal provenance and media-permission warning',
     );
   }
   return `${personal.length} kept tools are personal and warn they are not from the org`;
@@ -560,6 +635,7 @@ async function checkPersonDevices(): Promise<string> {
 }
 
 async function checkFingerprint(): Promise<string> {
+  await openDisclosure('verify-people');
   const shown = await waitForValue('the key fingerprint', () => {
     const card = cardHeading('Your key fingerprint');
     const value = card?.querySelector('.fingerprint');
@@ -632,8 +708,8 @@ async function checkSidebarOrder(): Promise<string> {
   );
   const warning = card.querySelector('.tool-warning');
   expect(
-    warning !== null && text(warning).includes('Not from your org'),
-    'the personal card has no "Not from your org" warning',
+    warning !== null && text(warning) === 'Personal tool · Not managed by your guild. Camera and microphone require your permission.',
+    'the personal card has no personal provenance and media-permission warning',
   );
   const favorite = card.querySelector<HTMLButtonElement>('button.favorite');
   expect(favorite !== null, 'the personal card has no favorite toggle');
@@ -717,6 +793,16 @@ async function fileToolUnderCategory(id: string, title: string, category: string
   const add = await waitForControl('Add tool');
   add.click();
   const card = await waitForValue('the new tool card', () => cardHeading('New tool'));
+  const options = card.querySelector<HTMLDetailsElement>('details[data-section="tool-options"]');
+  expect(options !== null && !options.open, 'tool More options is not collapsed by default');
+  const initialUrl = card.querySelector<HTMLInputElement>('input[name=url]');
+  const initialTitle = card.querySelector<HTMLInputElement>('input[name=title]');
+  expect(initialUrl !== null && initialTitle !== null, 'the essential tool fields are missing');
+  setValue(initialUrl, `${CONFIG.originC}/${id}`);
+  setValue(initialTitle, title);
+  await openDisclosure('tool-options');
+  expect(initialUrl.value === `${CONFIG.originC}/${id}` && initialTitle.value === title,
+    'opening More options lost the tool draft');
   const url = card.querySelector<HTMLInputElement>('input[name=url]');
   const idField = card.querySelector<HTMLInputElement>('input[name=id]');
   const titleField = card.querySelector<HTMLInputElement>('input[name=title]');
@@ -729,6 +815,10 @@ async function fileToolUnderCategory(id: string, title: string, category: string
   setValue(idField, id);
   setValue(titleField, title);
   setValue(categoryField, category);
+  // Return the optional fields to their collapsed state; the entered ID must still be saved.
+  options.querySelector<HTMLElement>(':scope > summary')!.click();
+  await waitForValue('More options collapsed with the draft retained', () => !options.open ? true : null);
+  expect(idField.value === id && titleField.value === title, 'collapsing More options lost the tool draft');
   const save = await waitForControl('Save', card);
   save.click();
   await waitForStatus(`Tool "${title}" saved`);
@@ -774,7 +864,7 @@ async function prepareShares(): Promise<void> {
 }
 
 async function checkBlockedAndSend(): Promise<string> {
-  await openSettingsTab('Vault');
+  await openSettingsTab('Saved logins');
   const blocked = await waitForValue('the blocked credential card', () =>
     vaultCard('Tool B', BLOCKED_USERNAME),
   );
@@ -824,9 +914,17 @@ async function checkSecondCredential(): Promise<string> {
   const list = (await call('catalog.list')) as unknown as EntryLite[];
   const a = list.find((entry) => entry.title === 'Tool A');
   expect(a !== undefined, 'the published tool left the catalog');
-  await openSettingsTab('Vault');
+  await openSettingsTab('Saved logins');
 
-  const form = await waitForValue('the Save credential card', () => cardHeading('Save credential'));
+  await waitForValue('the existing logins before adding', () => vaultCards('Tool A').length > 0 ? true : null);
+  const add = await waitForValue('the collapsed add-login disclosure with saved logins', () =>
+    document.querySelector<HTMLDetailsElement>('details[data-section="add-login"]'),
+  );
+  expect(vaultCards('Tool A').length > 0, 'the existing logins are not visible before adding');
+  expect(!add.open, 'adding a login is expanded by default despite existing logins');
+  await openDisclosure('add-login');
+  const form = await waitForValue('the New login card', () => cardHeading('New login'));
+  expect(form.closest<HTMLDetailsElement>('details')?.open === true, 'the login form is hidden');
   const tool = form.querySelector<HTMLSelectElement>('select[name=tool]');
   const username = form.querySelector<HTMLInputElement>('input[name=username]');
   const secret = form.querySelector<HTMLInputElement>('input[name=secret]');
@@ -834,7 +932,7 @@ async function checkSecondCredential(): Promise<string> {
   setValue(tool, a.id);
   setValue(username, SECOND_USERNAME);
   setValue(secret, SECOND_SECRET);
-  (await waitForControl('Save credential', form)).click();
+  (await waitForControl('Save login', form)).click();
 
   const cards = await waitForValue('the two credentials of Tool A', () => {
     const found = vaultCards('Tool A');
@@ -877,7 +975,7 @@ async function checkSecondCredential(): Promise<string> {
 }
 
 async function checkHolders(): Promise<string> {
-  await openSettingsTab('Vault');
+  await openSettingsTab('Saved logins');
   const lines = await waitForValue('the holders list', () => {
     const card = vaultCard('Tool A', ROLE_USERNAME);
     if (card === null) return null;
@@ -892,6 +990,7 @@ async function checkHolders(): Promise<string> {
     `no holder row carries "Role · since <date>": ${JSON.stringify(lines)}`,
   );
 
+  await openDisclosure('login-access');
   const adminText = await waitForValue('the admin credential holders card', () => {
     const admin = document.getElementById('credential-holders');
     if (admin === null) return null;
@@ -930,7 +1029,7 @@ async function adminWork(): Promise<void> {
 // ------------------------------------------------------------- phase: person inbox
 
 async function acceptShare(): Promise<string> {
-  await openSettingsTab('Vault');
+  await openSavedLoginsShortcut(true);
   const row = await waitForValue('the incoming share', () => {
     const inbox = document.getElementById('vault-inbox');
     if (inbox === null) return null;
@@ -952,7 +1051,7 @@ async function acceptShare(): Promise<string> {
   await passGate();
   await waitForValue('the share to leave the inbox', () => {
     const inbox = document.getElementById('vault-inbox');
-    return inbox !== null && text(inbox).includes('No share is waiting.') ? true : null;
+    return inbox !== null && text(inbox).includes('No shared logins to review.') ? true : null;
   });
   await waitForValue('the accepted credential', () => vaultCard('Tool A', ROLE_USERNAME));
   expect(document.body.textContent?.includes(SHARED_SECRET) !== true, 'accepting put the secret in the DOM');
@@ -1014,6 +1113,9 @@ async function confirmChangedKey(): Promise<string> {
       (node) => text(node).includes(CONFIG.personName) && text(node).includes('key changed'),
     ) ?? null;
   });
+  expect(row.closest<HTMLDetailsElement>('details[data-section="verify-people"]')?.open === true,
+    'a changed colleague key did not automatically expand Verify people');
+  await openDisclosure('verify-people');
   const confirm = await waitForControl('Confirm', row);
   confirm.click();
   await waitForStatus('key confirmed');
@@ -1105,7 +1207,7 @@ async function offlineEntry(): Promise<string> {
     document.querySelector<HTMLInputElement>('.entry-pane input[name=password]'),
   );
   setValue(password, PASSWORD);
-  const enter = await waitForValue('the Enter offline button', () =>
+  const enter = await waitForValue('the offline Unlock button', () =>
     document.querySelector<HTMLButtonElement>('.entry-pane [data-action=enter-offline]'),
   );
   enter.click();
@@ -1280,7 +1382,7 @@ async function inviteJoinThroughUi(): Promise<string> {
 
 /**
  * #38 (RF-61), on a Nod with no account, no host and no tool of its own: the optional seed import of
- * the first run. The check clicks "Import a seed file" on the Offline pane. **The file picker itself
+ * the first run. The check clicks "Import setup file" on the Offline pane. **The file picker itself
  * is not driven** — a native dialog cannot be answered headlessly, so `tiny.dialog.openFile` is
  * answered here with the runner's fake seed file (`.gerado/import-seed.json`, version 2); the call,
  * the re-read of `session.profiles`, the pane and the account that follows are the page's own.
@@ -1299,7 +1401,7 @@ async function seedImport(): Promise<string> {
     document.querySelector('.entry-pane input[name=code]') === null,
     'a fresh Nod already asks for an invite code',
   );
-  const importButton = await waitForControl('Import a seed file');
+  const importButton = await waitForControl('Import setup file');
 
   // The picker is the one thing this smoke cannot drive: a native dialog has no headless answer. The
   // check answers `tiny.dialog.openFile` in place when the runtime lets it be replaced — so the
@@ -1534,7 +1636,7 @@ async function updateRequiredBanner(): Promise<string> {
   });
   expect(String(started.detail ?? '').includes('up'), `host start: ${String(started.detail)}`);
 
-  await openSettingsTab('Hosts');
+  await openSettingsTab('Guild connection');
   const sync = await waitForValue('the Sync now button', () => {
     const card = all<HTMLElement>('section.card').find(
       (node) => controlByText('Sync now', node) !== null,
@@ -1608,6 +1710,69 @@ async function adminFinal(): Promise<void> {
   }
 }
 
+// ------------------------------------------------------------- Atrius sidebar on the real page
+
+async function sidebarMenu(node: HTMLElement, label: string): Promise<void> {
+  node.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  const action = await waitForValue(`sidebar action ${label}`, () =>
+    all<HTMLButtonElement>('.menu-item').find((button) => text(button.querySelector('.menu-label')) === label) ?? null,
+  );
+  action.click();
+}
+
+async function checkCustomSidebar(): Promise<string> {
+  const tool = () => all<HTMLButtonElement>('.sidebar-tools .tool-icon').find((node) =>
+    (node.title ?? '').includes(PERSONAL_TITLE)) ?? null;
+  const personal = await waitForValue('the personal tool', tool);
+  // The first edit seeds categories. Its menu must use the very same folder ids it offered.
+  await sidebarMenu(personal, `Move to ${CATEGORY_A}`);
+  await waitForValue('the tool inside its category folder', () => {
+    const node = tool();
+    return node?.closest('.rail-folder')?.getAttribute('aria-label') === CATEGORY_A ? true : null;
+  });
+  await sidebarMenu(tool()!, 'New folder with this tool…');
+  const prompt = await waitForValue('folder name dialog', () => document.querySelector<HTMLElement>('.dialog'));
+  setValue(prompt.querySelector<HTMLInputElement>('input[name=name]')!, 'Smoke folder');
+  (await waitForControl('Create folder', prompt)).click();
+  const folder = () => all<HTMLElement>('.rail-folder').find((node) => node.getAttribute('aria-label') === 'Smoke folder') ?? null;
+  await waitForValue('the new folder with its tool', () => folder()?.querySelector('.tool-icon') ?? null);
+  folder()!.querySelector<HTMLButtonElement>('[data-folder-head]')!.click();
+  await waitForValue('the folder closed', () => folder()?.querySelector('.tool-icon') === null ? true : null);
+  folder()!.querySelector<HTMLButtonElement>('[data-folder-head]')!.click();
+  await waitForValue('the folder reopened', tool);
+  // A tool arriving after a saved layout must be movable, not just drawn at the end.
+  const rail = document.querySelector<HTMLElement>('.sidebar-tools')!;
+  await sidebarMenu(rail, 'Add tool…');
+  const addDialog = await waitForValue('quick add dialog', () => document.getElementById('personal-tool-dialog'));
+  setValue(addDialog.querySelector<HTMLInputElement>('input[name=title]')!, 'Sidebar newcomer');
+  setValue(addDialog.querySelector<HTMLInputElement>('input[name=url]')!, `${CONFIG.originC}/sidebar-new`);
+  (await waitForControl('Add', addDialog)).click();
+  const newcomer = () => all<HTMLButtonElement>('.sidebar-tools .tool-icon').find((node) => node.title.includes('Sidebar newcomer')) ?? null;
+  const arrived = await waitForValue('the newcomer in the rail', newcomer);
+  const before = all<HTMLElement>('.sidebar-tools .tool-icon').map((node) => node.dataset.tool);
+  arrived.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true, cancelable: true }));
+  await waitForValue('the newcomer moved up', () => {
+    const after = all<HTMLElement>('.sidebar-tools .tool-icon').map((node) => node.dataset.tool);
+    return after.indexOf(arrived.dataset.tool) < before.indexOf(arrived.dataset.tool) ? true : null;
+  });
+  // A folder prompt belongs to this unlocked shell and cannot survive a lock.
+  await sidebarMenu(newcomer()!, 'New folder with this tool…');
+  await waitForValue('the pending folder prompt', () => document.querySelector('.dialog'));
+  const lock = all<HTMLButtonElement>('.sidebar-action').find((node) => text(node).includes('Lock'))!;
+  lock.click();
+  await waitForValue('the shell locked and its prompt removed', () =>
+    document.querySelector('.sidebar') === null && document.querySelector('.dialog, .menu, .rail-drop') === null ? true : null,
+  );
+  await unlock(CONFIG.adminEmail);
+  await synced();
+  await waitForValue('the persisted folder after unlock', folder);
+  await sidebarMenu(document.querySelector<HTMLElement>('.sidebar-tools')!, 'Reset sidebar order');
+  await waitForValue('the default category dividers restored', () =>
+    document.querySelector('.rail-folder') === null && document.querySelector('.sidebar-divider') !== null ? true : null,
+  );
+  return 'category move, new folder, fold/unfold, quick add, keyboard move, lock cleanup, persistence and reset';
+}
+
 // ------------------------------------------------------------- harness
 
 type Steps = ReadonlyArray<readonly [string, () => Promise<string> | string]>;
@@ -1620,6 +1785,7 @@ const PHASES: Record<string, { setup?: () => Promise<void>; checks: Steps }> = {
   'person-join': {
     setup: joinPerson,
     checks: [
+      ['task navigation: member destinations and saved-logins shortcut', checkMemberNavigation],
       ['#25 keep local tools', checkKeepLocalTools],
       ['#27 account devices', checkPersonDevices],
       ['#29 key fingerprint', checkFingerprint],
@@ -1628,6 +1794,7 @@ const PHASES: Record<string, { setup?: () => Promise<void>; checks: Steps }> = {
   'admin-work': {
     setup: adminWork,
     checks: [
+      ['task navigation: admin Advanced disclosure', checkAdminAdvancedNavigation],
       ['#24 add personal tool dialog', addPersonalTool],
       ['#24 sidebar order and favorite', checkSidebarOrder],
       ['#34 blocked and role send', async () => {
@@ -1636,6 +1803,7 @@ const PHASES: Record<string, { setup?: () => Promise<void>; checks: Steps }> = {
       }],
       ['RF-65 second credential and the default chip', checkSecondCredential],
       ['RF-62 tools grouped by category', checkToolCategories],
+      ['Atrius personal sidebar', checkCustomSidebar],
     ],
   },
   'person-inbox': {
