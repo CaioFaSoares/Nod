@@ -1,0 +1,41 @@
+{
+  "createdAt": "2026-11-20T02:53:49.166Z",
+  "scope": "Isolated offline layout evidence, not native/auth/a11y acceptance; native smoke recorded separately in the handover",
+  "layout": {
+    "desktopCases": 20,
+    "desktopStagesPassed": 40,
+    "portalCasesPassed": 12,
+    "retainedScreenshots": 8
+  },
+  "fixtureReproductionMatches": true,
+  "sourceSHA256": {
+    "src/app.ts": "9966e684e2621e67285747307ae6e48ca50d429ad128bab42886d6dd3a1a1f20",
+    "src/style.css": "a9416fc6c53ce3497730f376e317bb7ea1911de07b5ae5c97106c8126ce5d1d8",
+    "shared/library.ts": "20892e722e8958d63f62c8f7380c2449af78e81d5a405ed6f7a2ffc5daa229b8",
+    "shared/library.css": "44d4f25b3581aa938671899d6e51a854e799a9ce8cd7051822efceae16b34c79",
+    "web/main.ts": "6900b62817000dd6074c7f9b6eb816b07ed1551982c0b3af87766740ee9fefd0",
+    "web/style.css": "f4c293a3b84ca6399decef0da1bf2a3dc675deb8886cff20f8b45688b8e9e7dc",
+    "test/library.test.ts": "a77a0e0599564c1e9728605a0606dd4a6eae5a878c970889956d8a2e80d485f0",
+    "test/smoke/ui-driver.ts": "fb8a29ba9243f04078c0cc0596fa0fd287d40ec062cce7de77347d7d91e6daf9",
+    "host/public/app.js": "b952609133d860a8b1180ec50dced80f746ed767de4877d8366f39aa9dd3117f",
+    "host/public/style.css": "77a0885d81d93ac4d459987b08ae715be6b952979e4955d3e8631ab5e65ed7d2"
+  },
+  "artifactSHA256": {
+    "docs/evidence/ui-cleanup/desktop.swift": "00b07fac295c438fc94149992488c4c5861b021f566d0ad3504295a6988b1120",
+    "docs/evidence/ui-cleanup/portal.swift": "5f60922686ee2d175faf16b7ebdc80ac95b1a884ebc5c4342ded950274684959",
+    "docs/evidence/ui-cleanup/tiny-fixture.js": "966b27c13b53ac75767474c1705ad2500c2d4f8320500b8833bb5b1d11a6f350",
+    "docs/evidence/ui-cleanup/measure.js": "8c081754fbe84ad39fff260efaae22de9d678295c8d5c7ddc2deaf8b6d3bb1bd",
+    "docs/evidence/ui-cleanup/build-desktop-fixture.ts": "96c509a13816af3f774e18f5a437d1a595348470a028ffa755e604c55eb552b3",
+    "docs/evidence/ui-cleanup/desktop-provenance.json": "db66f7f9933b540ff7b2d96c96fe0284fbd11666b6bb9367d00f9cc5bb2106bb",
+    "docs/evidence/ui-cleanup/desktop-results.json": "ff5995c72f6cfe1b5c48a4b90b44f1aa8e72a4cbcb531315dd4b014cc06d59f8",
+    "docs/evidence/ui-cleanup/portal-results.json": "d44012c8f61dbfcf7afa56ad846d5566259cfaa63da59b4455b3eb5309c6ad23",
+    "docs/evidence/ui-cleanup/sober-dark-cards-740-initial.png": "92da3f6743729238ad9fea46dfe695240f6ab850eaba3644302b219aba13ca3c",
+    "docs/evidence/ui-cleanup/sober-dark-cards-1280-initial.png": "e7ea5fb97f06b0ad6309eac0b092f5b13dad5d155799350e7db119f29646432a",
+    "docs/evidence/ui-cleanup/sober-dark-list-740-initial.png": "67e8fa02dcd4cd2fbfc84aeaeceb49df10a90796ca16eda749921efd934c5a44",
+    "docs/evidence/ui-cleanup/atrius-light-org-740-initial.png": "069e5157c086f67f0ec02df70b630c95c70a7aa0794e28577c53cb927f09f566",
+    "docs/evidence/ui-cleanup/sober-light-settings-740-initial.png": "d9d1037dfecf23db828c6d92f99ef3851fe3ca089b3e6add0fbddcfd97a3ae0a",
+    "docs/evidence/ui-cleanup/cards-360.png": "3d04ed4aa1adfad7b324b863c88f2bccfac2d5c63c9f3bdf5fd55b4c90866922",
+    "docs/evidence/ui-cleanup/entry-360.png": "bbfd798bfcea85190c9b17d4be78b2dcc746540c59dc66ba3d7bda92150052dd",
+    "docs/evidence/ui-cleanup/list-740.png": "1ca0a1848b6b15986ccf1624cb61cf9cfe250adb68caa389ed0adba581de0f61"
+  }
+}

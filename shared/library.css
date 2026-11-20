@@ -1,97 +1,117 @@
 /*
- * The library's views (RF-79, `shared/library.ts`'s models): the classes both surfaces draw with —
- * the app's Home and the web portal — so a group, a card, a node and an isometric stack read the
- * same way wherever the person is. Skin-neutral on purpose: every colour comes from the `--lb-*`
- * variables the surface's own stylesheet defines (Atrius' ink, Sober's zinc, the portal's own).
- *
- * No id, no tag selector: the classes are the contract, and both surfaces import this file once.
+ * Shared catalog geometry (RF-79): desktop Home and the web portal use the same search, categories,
+ * cards, compact list and org chart. Colours and radii belong to each surface's --lb-* tokens.
+ * Keep every track shrinkable: a featured card or a long account must never widen the window.
  */
 
-/* ---------------------------------------------------------------- the toolbar */
+/* ---------------------------------------------------------------- toolbar */
 
 .lb-toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
   align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
   padding: 0.5rem 0;
 }
 
 .lb-search {
   flex: 1 1 16rem;
-  min-width: 12rem;
+  min-width: 0;
 }
 
 .lb-search input {
   width: 100%;
+  min-width: 0;
+  min-height: 2.25rem;
   box-sizing: border-box;
-  padding: 0.45rem 0.6rem;
+  padding: 0.5rem 0.75rem;
   color: var(--lb-ink);
   background: var(--lb-field);
   border: 1px solid var(--lb-line);
-  border-radius: 2px;
+  border-radius: var(--lb-control-radius, 4px);
   font: inherit;
 }
 
 .lb-views {
   display: flex;
-  gap: 2px;
   flex: none;
+  gap: 0.25rem;
+  max-width: 100%;
+  padding: 0.2rem;
+  border: 1px solid var(--lb-line);
+  border-radius: var(--lb-control-radius, 4px);
+  background: var(--lb-field);
 }
 
 .lb-view {
-  padding: 0.4rem 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
   color: var(--lb-muted);
   background: transparent;
-  border: 1px solid var(--lb-line);
-  border-left-width: 0;
-  border-radius: 0;
-  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: var(--lb-control-radius, 4px);
   font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.lb-view:first-child {
-  border-left-width: 1px;
+.lb-view:hover {
+  color: var(--lb-ink);
+  background: var(--lb-hover);
 }
 
 .lb-view[aria-pressed='true'] {
   color: var(--lb-ink);
-  font-weight: 700;
   background: var(--lb-active);
+  border-color: var(--lb-line);
+  font-weight: 600;
 }
 
-/* ---------------------------------------------------------------- the cards view */
+/* ---------------------------------------------------------------- cards */
 
 .lb-groups {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  min-width: 0;
+  container: library / inline-size;
 }
 
 .lb-group {
-  margin: 0 0 1rem;
+  min-width: 0;
+  margin: 0;
 }
 
-/* A category head is its own collapse control (RF-79): the triangle says the state. */
 .lb-group-head {
   display: flex;
+  align-items: center;
   gap: 0.5rem;
-  align-items: baseline;
   width: 100%;
-  padding: 0.3rem 0;
+  min-height: 2.5rem;
+  padding: 0.4rem 0;
   color: var(--lb-ink);
   background: transparent;
   border: 0;
   border-bottom: 1px solid var(--lb-line);
-  cursor: pointer;
   font: inherit;
   text-align: left;
+  cursor: pointer;
 }
 
-.lb-group-head .lb-caret {
+.lb-group-head:hover {
+  color: var(--lb-accent);
+}
+
+.lb-caret {
   display: inline-block;
-  width: 1em;
   flex: none;
+  width: 1em;
   color: var(--lb-muted);
-  transition: transform 120ms ease;
   transform: rotate(90deg);
 }
 
@@ -104,66 +124,73 @@
 }
 
 .lb-group-title {
-  font-weight: 700;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
 }
 
 .lb-group-count {
+  flex: none;
+  margin-left: auto;
   color: var(--lb-muted);
   font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
 }
 
 .lb-group-cards {
-  /* The Steam library's own trick: the cards take the width they are given, and the featured ones
-   * take two cells of it (RF-79's "cards in different proportions"). */
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
-  gap: 0.5rem;
-  padding-top: 0.5rem;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+}
+
+/* Only a genuinely wide library has room for a two-column feature. Never create implicit tracks. */
+@container library (min-width: 72rem) {
+  .lb-group-cards > [data-featured='true'] {
+    grid-column: span 2;
+  }
 }
 
 .lb-card {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.75rem;
   min-width: 0;
-  padding: 0.6rem;
+  min-height: 9rem;
+  padding: 1rem;
   color: var(--lb-ink);
   background: var(--lb-panel);
   border: 1px solid var(--lb-line);
-  border-left: 3px solid var(--lb-line);
-  border-radius: 2px;
+  border-radius: var(--lb-radius, 6px);
   text-decoration: none;
   cursor: pointer;
 }
 
 .lb-card:hover {
-  border-left-color: var(--lb-accent);
   background: var(--lb-hover);
-}
-
-.lb-card[data-featured='true'] {
-  grid-column: span 2;
+  border-color: var(--lb-accent);
 }
 
 .lb-card-top {
   display: flex;
-  gap: 0.5rem;
   align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
 }
 
 .lb-card-glyph {
-  flex: none;
   display: flex;
+  flex: none;
   align-items: center;
   justify-content: center;
   width: 2rem;
   height: 2rem;
   overflow: hidden;
-  color: var(--lb-accent);
+  color: var(--lb-ink);
   background: var(--lb-field);
   border: 1px solid var(--lb-line);
-  border-radius: 2px;
-  font-weight: 700;
+  border-radius: var(--lb-control-radius, 4px);
+  font-weight: 600;
 }
 
 .lb-card-glyph img {
@@ -173,132 +200,203 @@
 }
 
 .lb-card-titles {
-  min-width: 0;
+  display: flex;
   flex: 1;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
 }
 
 .lb-card-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 700;
-}
-
-.lb-card-host {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--lb-muted);
-  font-size: 0.85em;
-}
-
-.lb-card-account {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--lb-muted);
-  font-size: 0.85em;
-}
-
-/* RF-78: the account the whole guild uses — information, never a secret. */
-.lb-card-account b {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--lb-ink);
   font-weight: 600;
+  line-height: 1.4;
+}
+
+.lb-card-host,
+.lb-card-account {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--lb-muted);
+  font-size: 0.85em;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* RF-78: the account is information, never a secret. */
+.lb-card-account b {
+  color: var(--lb-ink);
+  font-weight: 500;
 }
 
 .lb-card-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem;
+  gap: 0.3rem;
+  min-width: 0;
 }
 
 .lb-tag {
-  flex: none;
-  padding: 0.05rem 0.4rem;
+  max-width: 100%;
+  padding: 0.15rem 0.45rem;
+  overflow-wrap: anywhere;
   color: var(--lb-muted);
   background: var(--lb-field);
   border: 1px solid var(--lb-line);
-  border-radius: 2px;
-  font-size: 0.75em;
+  border-radius: var(--lb-control-radius, 4px);
+  font-size: 0.8em;
+  line-height: 1.4;
 }
 
 .lb-card-star {
   flex: none;
   color: var(--lb-accent);
-  font-size: 0.9em;
+  font-size: 0.95em;
 }
 
-/* ---------------------------------------------------------------- the list view */
+/* ---------------------------------------------------------------- compact list */
 
 .lb-list {
-  display: block;
+  min-width: 0;
+  border: 1px solid var(--lb-line);
+  border-radius: var(--lb-radius, 6px);
 }
 
 .lb-list-row {
-  display: flex;
-  gap: 0.6rem;
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) minmax(0, 0.7fr) auto;
   align-items: center;
-  padding: 0.35rem 0.4rem;
+  gap: 0.5rem 0.75rem;
+  width: 100%;
+  min-width: 0;
+  min-height: 4.5rem;
+  box-sizing: border-box;
+  padding: 0.75rem 1rem;
   color: var(--lb-ink);
-  background: transparent;
+  background: var(--lb-panel);
+  border: 0;
   border-bottom: 1px solid var(--lb-line);
+  font: inherit;
+  text-align: left;
   text-decoration: none;
   cursor: pointer;
+}
+
+.lb-list-row:first-child {
+  border-radius: var(--lb-radius, 6px) var(--lb-radius, 6px) 0 0;
+}
+
+.lb-list-row:last-child {
+  border-bottom: 0;
+  border-radius: 0 0 var(--lb-radius, 6px) var(--lb-radius, 6px);
+}
+
+.lb-list-row:only-child {
+  border-radius: var(--lb-radius, 6px);
 }
 
 .lb-list-row:hover {
   background: var(--lb-hover);
 }
 
-.lb-list-row .lb-card-title {
-  flex: 1;
+.lb-list-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
   min-width: 0;
-  text-align: left;
 }
 
-.lb-list-row .lb-card-host {
-  flex: none;
-  max-width: 12rem;
+.lb-list-end {
+  display: flex;
+  align-items: center;
+  justify-content: end;
+  gap: 0.75rem;
 }
 
-/* ---------------------------------------------------------------- the org chart view */
+.lb-list-launch {
+  color: var(--lb-muted);
+  font-size: 1.1rem;
+}
+
+@media (max-width: 640px) {
+  .lb-list-row {
+    grid-template-columns: 2rem minmax(0, 1fr) auto;
+    padding: 0.75rem;
+  }
+
+  .lb-list-meta {
+    grid-row: 2;
+    grid-column: 2;
+  }
+
+  .lb-list-meta:empty {
+    display: none;
+  }
+
+  .lb-list-end {
+    grid-row: 1;
+    grid-column: 3;
+  }
+}
+
+/* ---------------------------------------------------------------- org chart */
 
 .lb-org {
   display: grid;
-  gap: 0.75rem;
-  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
-  padding-top: 0.5rem;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 19rem), 1fr));
+  align-items: start;
+  gap: 1rem;
+  min-width: 0;
 }
 
 .lb-org-node {
-  padding: 0.6rem;
+  min-width: 0;
+  padding: 1rem;
   background: var(--lb-panel);
   border: 1px solid var(--lb-line);
-  border-left: 3px solid var(--lb-accent);
-  border-radius: 2px;
+  border-top: 2px solid var(--lb-accent);
+  border-radius: var(--lb-radius, 6px);
 }
 
 .lb-org-role {
-  margin: 0 0 0.4rem;
+  margin: 0 0 1rem;
+  overflow-wrap: anywhere;
   color: var(--lb-ink);
-  font-weight: 700;
+  font: inherit;
+  font-weight: 600;
+}
+
+.lb-org-people,
+.lb-org-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  min-width: 0;
 }
 
 .lb-org-people {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem;
-  margin: 0 0 0.4rem;
+  margin: 0 0 0.75rem;
+}
+
+.lb-person,
+.lb-reach {
+  max-width: 100%;
+  padding: 0.25rem 0.5rem;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--lb-line);
+  border-radius: var(--lb-control-radius, 4px);
+  font-size: 0.85em;
+  line-height: 1.5;
 }
 
 .lb-person {
-  flex: none;
-  padding: 0.1rem 0.5rem;
   color: var(--lb-ink);
   background: var(--lb-field);
-  border: 1px solid var(--lb-line);
-  border-radius: 2px;
-  font-size: 0.85em;
 }
 
 .lb-person[data-admin='true'] {
@@ -306,137 +404,17 @@
   font-weight: 600;
 }
 
-.lb-org-categories {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem;
-}
-
-/* "Who reaches what": the categories the node's people reach, the group order's own names. */
 .lb-reach {
-  flex: none;
-  padding: 0.1rem 0.5rem;
   color: var(--lb-muted);
   background: transparent;
-  border: 1px dashed var(--lb-line);
-  border-radius: 2px;
-  font-size: 0.8em;
-}
-
-/* ---------------------------------------------------------------- the isometric blocks view */
-
-/*
- * RF-79: "usando projecao mesmo" — a real projection, not a bitmap and not a skew. The stage is a
- * 3D box turned to the camera (rotateX + rotateZ with `preserve-3d`), the stacks are its tiles, and
- * each tile's plate is lifted by its own height with `translateZ` — the browser's own perspective
- * does the isometric drawing, so a stack with more tools stands taller on the same ground.
- */
-
-.lb-blocks {
-  overflow: auto;
-  padding: 2rem 1rem 6rem;
-  perspective: 1800px;
-  perspective-origin: 50% 30%;
-}
-
-.lb-stage {
-  display: grid;
-  grid-template-columns: repeat(4, var(--lb-tile, 9rem));
-  grid-auto-rows: var(--lb-tile, 9rem);
-  gap: 1.25rem;
-  width: max-content;
-  margin: 0 auto;
-  transform-style: preserve-3d;
-  transform: rotateX(58deg) rotateZ(-45deg);
-}
-
-.lb-stack {
-  position: relative;
-  transform-style: preserve-3d;
-}
-
-/* The plate a stack's tools stand on: lifted by its own height. */
-.lb-plate {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  padding: 0.5rem;
-  box-sizing: border-box;
-  overflow: hidden;
-  background: var(--lb-panel);
-  border: 1px solid var(--lb-line);
-  transform: translateZ(calc(var(--lb-height, 1) * 0.6rem));
-}
-
-/* The two visible sides of the stack, drawn by the same rotation the stage already has. */
-.lb-plate::before,
-.lb-plate::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  background: var(--lb-side);
-}
-
-.lb-plate::before {
-  left: 0;
-  width: 100%;
-  height: calc(var(--lb-height, 1) * 0.6rem);
-  transform-origin: bottom;
-  transform: rotateX(-90deg);
-}
-
-.lb-plate::after {
-  right: 0;
-  width: calc(var(--lb-height, 1) * 0.6rem);
-  height: 100%;
-  transform-origin: right;
-  transform: rotateY(90deg);
-}
-
-.lb-plate-title {
-  color: var(--lb-ink);
-  font-weight: 700;
-  font-size: 0.9em;
-}
-
-.lb-plate-tools {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem;
-}
-
-.lb-plate-tool {
-  padding: 0.05rem 0.35rem;
-  color: var(--lb-muted);
-  background: var(--lb-field);
-  border: 1px solid var(--lb-line);
-  border-radius: 2px;
-  font-size: 0.7em;
-}
-
-/* A person standing on the stack: counter-rotated to face the camera, a billboard on the ground
- * the projection already drew ("quem tá onde", RF-79). */
-.lb-standing {
-  position: absolute;
-  top: 0;
-  left: 0;
-  display: flex;
-  gap: 0.2rem;
-  transform: translateZ(calc(var(--lb-height, 1) * 0.6rem + 0.2rem)) rotateZ(45deg) rotateX(-58deg);
-  transform-origin: top left;
-}
-
-.lb-standing .lb-person {
-  transform: rotate(0deg);
-  box-shadow: var(--lb-shadow, 0 1px 0 var(--lb-line));
 }
 
 /* ---------------------------------------------------------------- empty answers */
 
 .lb-empty {
-  padding: 2rem 1rem;
+  padding: 3rem 1rem;
   color: var(--lb-muted);
+  border: 1px dashed var(--lb-line);
+  border-radius: var(--lb-radius, 6px);
   text-align: center;
 }

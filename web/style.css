@@ -1,5 +1,5 @@
 /*
- * The portal's own chrome (E04 M1): the sign-in card, the header, the palette. The views' own
+ * The portal's own chrome (E04 M1): the sign-in card, the header, the toolbar. The views' own
  * styles live in `shared/library.css` — the same file the app's Home imports — and every colour
  * they read is a `--lb-*` variable defined here, so the two surfaces share the drawing and keep
  * their own skin.
@@ -9,108 +9,210 @@
 
 :root {
   color-scheme: dark;
-  /* The portal's palette: the Atrius ink the app wears, on its own terms. */
-  --lb-ink: #f2f2f0;
-  --lb-muted: #9aa0a6;
-  --lb-accent: #7ab8ff;
-  --lb-panel: #191b1e;
-  --lb-field: #121315;
-  --lb-hover: #202327;
-  --lb-active: #24272b;
-  --lb-line: #33373c;
-  --lb-side: #0d0e10;
-  --lb-shadow: 0 1px 0 #33373c;
-  background: #0e0f11;
-  font: 14px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* Quiet chrome; the shared views consume the same palette and shape tokens. */
+  --lb-ink: #eef0f2;
+  --lb-muted: #a6adb7;
+  --lb-accent: #9bbce6;
+  --lb-panel: #191c20;
+  --lb-field: #13161a;
+  --lb-hover: #24292f;
+  --lb-active: #2b323b;
+  --lb-line: #3c434d;
+  --lb-side: #101215;
+  --lb-radius: 8px;
+  --lb-control-radius: 6px;
+  background: var(--lb-side);
+  font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100svh;
   color: var(--lb-ink);
-  background: #0e0f11;
+  background: var(--lb-side);
+  overflow-wrap: break-word;
 }
 
 #root {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 100vh;
+  min-height: 100svh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  min-height: 36px;
+}
+
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--lb-accent);
+  outline-offset: 3px;
+}
+
+input::placeholder {
+  color: var(--lb-muted);
+  opacity: 1;
 }
 
 /* ---------------------------------------------------------------- the header */
 
 .lb-header {
   display: flex;
+  flex: none;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 0.6rem 1rem;
+  gap: 24px;
+  min-width: 0;
+  padding: 16px clamp(16px, 2.5vw, 32px);
+  background: var(--lb-panel);
   border-bottom: 1px solid var(--lb-line);
 }
 
 .lb-brand {
   display: flex;
+  flex: 1 1 0;
   align-items: center;
-  gap: 0.5rem;
+  gap: 10px;
   min-width: 0;
 }
 
 .lb-logo {
   display: flex;
+  flex: none;
   align-items: center;
   justify-content: center;
-  width: 1.6rem;
-  height: 1.6rem;
-  color: #0e0f11;
-  background: var(--lb-accent);
-  border-radius: 2px;
-  font-weight: 800;
+  width: 32px;
+  height: 32px;
+  color: var(--lb-accent);
+  background: var(--lb-field);
+  border: 1px solid var(--lb-line);
+  border-radius: var(--lb-control-radius);
+  font-size: 1rem;
+  font-weight: 700;
 }
 
 .lb-guild {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 700;
+  font-size: 1rem;
+  font-weight: 600;
 }
 
 .lb-who {
   display: flex;
+  flex: 0 1 auto;
   align-items: center;
-  gap: 0.6rem;
+  gap: 12px;
+  min-width: 0;
+  max-width: 60%;
+}
+
+/* A signed-in name is header text, not one of the org chart's people chips. */
+.lb-who .lb-person {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 22rem;
+  overflow: hidden;
+  padding: 0;
+  color: var(--lb-muted);
+  background: transparent;
+  border: 0;
+  font-size: 0.875rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lb-signout {
-  padding: 0.3rem 0.7rem;
-  color: var(--lb-muted);
+  flex: none;
+  min-height: 40px;
+  padding: 8px 12px;
+  color: var(--lb-ink);
   background: transparent;
   border: 1px solid var(--lb-line);
-  border-radius: 2px;
+  border-radius: var(--lb-control-radius);
   cursor: pointer;
-  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
 }
 
 .lb-signout:hover {
-  color: var(--lb-ink);
-  border-color: var(--lb-accent);
+  background: var(--lb-hover);
+  border-color: var(--lb-muted);
 }
 
 /* ---------------------------------------------------------------- the body */
 
 .lb-toolbar {
-  padding: 0.5rem 1rem;
+  flex: none;
+  gap: 12px 16px;
+  min-width: 0;
+  padding: 16px clamp(16px, 2.5vw, 32px);
   border-bottom: 1px solid var(--lb-line);
+}
+
+.lb-toolbar .lb-search {
+  flex: 1 1 22rem;
+  min-width: 0;
+}
+
+.lb-toolbar .lb-views {
+  gap: 4px;
+  max-width: 100%;
+  padding: 3px;
+  background: var(--lb-field);
+  border: 1px solid var(--lb-line);
+  border-radius: var(--lb-radius);
+}
+
+.lb-toolbar .lb-view {
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--lb-control-radius);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.lb-toolbar .lb-view:hover {
+  color: var(--lb-ink);
+  background: var(--lb-hover);
+}
+
+.lb-toolbar .lb-view[aria-pressed='true'] {
+  color: var(--lb-ink);
+  background: var(--lb-active);
+  border-color: var(--lb-line);
+  font-weight: 600;
 }
 
 .lb-body {
   flex: 1;
+  min-width: 0;
   min-height: 0;
-  overflow: auto;
-  padding: 1rem;
+  padding: 24px clamp(16px, 2.5vw, 32px) 32px;
+}
+
+/* Keep document scrolling natural; shared grids own their responsive tracks. */
+.lb-body > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* ---------------------------------------------------------------- the sign-in card */
@@ -118,66 +220,91 @@ body {
 .lb-entry {
   display: flex;
   flex-direction: column;
-  gap: 0.8rem;
-  width: min(22rem, calc(100vw - 2rem));
-  margin: 12vh auto 0;
-  padding: 1.4rem;
+  gap: 20px;
+  width: min(400px, calc(100% - 32px));
+  min-width: 0;
+  margin: clamp(24px, 10vh, 96px) auto 32px;
+  padding: clamp(24px, 5vw, 32px);
   background: var(--lb-panel);
   border: 1px solid var(--lb-line);
-  border-radius: 3px;
+  border-radius: var(--lb-radius);
 }
 
 .lb-brand-entry {
-  justify-content: center;
+  flex: none;
 }
 
 .lb-entry-title {
-  margin: 0;
-  text-align: center;
+  margin: 0 0 4px;
+  font-size: 1.6rem;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1.25;
 }
 
 .lb-field {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 8px;
+  min-width: 0;
 }
 
 .lb-field-label {
-  color: var(--lb-muted);
-  font-size: 0.85em;
+  color: var(--lb-ink);
+  font-size: 0.875rem;
+  font-weight: 500;
 }
 
-.lb-entry input {
-  padding: 0.45rem 0.6rem;
+.lb-entry input,
+.lb-toolbar .lb-search input {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 9px 12px;
   color: var(--lb-ink);
   background: var(--lb-field);
-  border: 1px solid var(--lb-line);
-  border-radius: 2px;
-  font: inherit;
+  border: 1px solid color-mix(in srgb, var(--lb-muted) 60%, var(--lb-field));
+  border-radius: var(--lb-control-radius);
+  /* At least 16px also prevents focus zoom on mobile Safari. */
+  font-size: max(1rem, 16px);
+  line-height: 1.5;
+}
+
+.lb-entry input:focus,
+.lb-toolbar .lb-search input:focus {
+  border-color: var(--lb-accent);
 }
 
 .lb-submit {
-  padding: 0.5rem;
-  color: #0e0f11;
+  min-height: 44px;
+  padding: 10px 16px;
+  color: var(--lb-field);
   background: var(--lb-accent);
-  border: 0;
-  border-radius: 2px;
-  font: inherit;
-  font-weight: 700;
+  border: 1px solid transparent;
+  border-radius: var(--lb-control-radius);
+  font-weight: 600;
   cursor: pointer;
 }
 
+.lb-submit:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--lb-accent) 85%, var(--lb-ink));
+}
+
 .lb-submit:disabled {
-  opacity: 0.6;
+  opacity: 0.65;
   cursor: wait;
 }
 
 .lb-message {
-  min-height: 1.2em;
   margin: 0;
-  color: #ff8f8f;
-  font-size: 0.9em;
-  text-align: center;
+  padding: 10px 12px;
+  color: #ffaaaa;
+  background: var(--lb-field);
+  border-inline-start: 2px solid currentColor;
+  border-radius: var(--lb-control-radius);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
 }
 
 .lb-message:empty {
@@ -186,7 +313,43 @@ body {
 
 .lb-note {
   margin: 0;
+  padding-top: 16px;
   color: var(--lb-muted);
-  font-size: 0.8em;
-  text-align: center;
+  border-top: 1px solid var(--lb-line);
+  font-size: 0.8125rem;
+  line-height: 1.65;
+}
+
+@media (max-width: 600px) {
+  .lb-header {
+    gap: 12px;
+  }
+
+  .lb-who {
+    gap: 8px;
+  }
+
+  .lb-who .lb-person {
+    max-width: 7rem;
+  }
+
+  .lb-toolbar .lb-search,
+  .lb-toolbar .lb-views {
+    flex: 1 1 100%;
+  }
+
+  .lb-toolbar .lb-view {
+    flex: 1 1 0;
+    padding-inline: 8px;
+  }
+
+  .lb-body {
+    padding-top: 16px;
+  }
+}
+
+@media (max-height: 600px) {
+  .lb-entry {
+    margin-block: 24px;
+  }
 }

@@ -1,7 +1,7 @@
 // The portal's page (E04 M1, RF-73–RF-79): sign in with the guild account, see the catalog
 // granted to you, open each tool in a new browser tab. The models and the styles are the ones the
 // app's own Home uses (`shared/library.ts`, `shared/library.css`), so the two surfaces cannot
-// drift about what a group is or how the isometric stage projects.
+// drift about what a group is or what the org chart shows.
 //
 // RF-75: the password never travels. The page asks the host for the salt, derives `authKey` with
 // the same `shared/auth.ts` the app runs, and sends only that; the session the host answers is an
@@ -13,7 +13,6 @@ import {
   hostOf,
   libraryGroups,
   libraryViewOf,
-  blockStacks,
   orgChart,
   LIBRARY_VIEWS,
   type LibraryInput,
@@ -56,6 +55,8 @@ function h<K extends keyof HTMLElementTagNameMap>(
     role?: string;
     ariaLabel?: string;
     ariaPressed?: string;
+    ariaExpanded?: string;
+    ariaLive?: 'polite' | 'assertive' | 'off';
   } = {},
   ...children: (Node | null | undefined)[]
 ): HTMLElementTagNameMap[K] {
@@ -70,6 +71,8 @@ function h<K extends keyof HTMLElementTagNameMap>(
   if (options.role !== undefined) node.setAttribute('role', options.role);
   if (options.ariaLabel !== undefined) node.setAttribute('aria-label', options.ariaLabel);
   if (options.ariaPressed !== undefined) node.setAttribute('aria-pressed', options.ariaPressed);
+  if (options.ariaExpanded !== undefined) node.setAttribute('aria-expanded', options.ariaExpanded);
+  if (options.ariaLive !== undefined) node.setAttribute('aria-live', options.ariaLive);
   node.append(...children.filter((child): child is Node => child !== null && child !== undefined));
   return node;
 }
@@ -101,7 +104,7 @@ function initials(title: string): string {
 }
 
 /** The card both the cards view and the list draw, as one anchor that opens a new tab (RF-73). */
-function cardAnchor(entry: Entry, featured: boolean): HTMLAnchorElement {
+function cardAnchor(entry: Entry, featured: boolean, layout: 'cards' | 'list' = 'cards'): HTMLAnchorElement {
   const glyph = h('span', { class: 'lb-card-glyph' });
   if (entry.icon !== null && entry.icon !== '') {
     const image = document.createElement('img');
@@ -111,49 +114,64 @@ function cardAnchor(entry: Entry, featured: boolean): HTMLAnchorElement {
   } else {
     glyph.textContent = initials(entry.title);
   }
+  const titles = h(
+    'div',
+    { class: 'lb-card-titles' },
+    h('div', { class: 'lb-card-title', text: entry.title }),
+    h('div', { class: 'lb-card-host', text: hostOf(entry.url) }),
+  );
   const node = h(
     'a',
     {
-      class: 'lb-card',
+      class: layout === 'list' ? 'lb-list-row' : 'lb-card',
       href: entry.url,
       target: '_blank',
       rel: 'noopener noreferrer',
       title: `${entry.title} — ${hostOf(entry.url)} (opens in a new tab)`,
     },
-    h(
-      'div',
-      { class: 'lb-card-top' },
-      glyph,
-      h(
-        'div',
-        { class: 'lb-card-titles' },
-        h('div', { class: 'lb-card-title', text: entry.title }),
-        h('div', { class: 'lb-card-host', text: hostOf(entry.url) }),
-      ),
-    ),
+    ...(layout === 'list' ? [glyph, titles] : [h('div', { class: 'lb-card-top' }, glyph, titles)]),
   );
   if (featured) node.dataset.featured = 'true';
   return node;
 }
 
+/** A denied storage read must not prevent the catalog from opening. */
+function preference(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function storePreference(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* The current screen still keeps the choice, even if the browser cannot persist it. */
+  }
+}
+
 function view(): LibraryView {
-  return libraryViewOf(window.localStorage.getItem(VIEW_KEY));
+  // The retired `blocks` preference is read as Cards; only a new choice writes to storage.
+  return libraryViewOf(preference(VIEW_KEY));
 }
 
 function collapsed(): Set<string> {
   try {
-    return new Set(JSON.parse(window.localStorage.getItem(COLLAPSED_KEY) ?? '[]') as string[]);
+    const stored: unknown = JSON.parse(preference(COLLAPSED_KEY) ?? '[]');
+    return new Set(Array.isArray(stored) ? stored.filter((key): key is string => typeof key === 'string') : []);
   } catch {
     return new Set();
   }
 }
 
 function storeCollapsed(set: Set<string>): void {
-  window.localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]));
+  storePreference(COLLAPSED_KEY, JSON.stringify([...set]));
 }
 
-/** The four views, each fed by the same models (`shared/library.ts`). */
-function drawViews(input: Catalog, query: string, chosen: LibraryView): HTMLElement {
+/** The three views, each fed by the same models (`shared/library.ts`). */
+function drawViews(input: Catalog, query: string, chosen: LibraryView, closed: Set<string>): HTMLElement {
   if (chosen === 'org') {
     const area = h('div', { class: 'lb-org' });
     for (const node of orgChart(input, query)) {
@@ -171,62 +189,32 @@ function drawViews(input: Catalog, query: string, chosen: LibraryView): HTMLElem
         h('div', { class: 'lb-org-node' }, h('h3', { class: 'lb-org-role', text: node.role?.name ?? 'No role' }), people, categories),
       );
     }
-    return area.childElementCount > 0 ? area : h('p', { class: 'lb-empty', text: 'Nothing matches.' });
-  }
-
-  if (chosen === 'blocks') {
-    const stage = h('div', { class: 'lb-stage' });
-    for (const stack of blockStacks(input, query)) {
-      const plate = h(
-        'div',
-        { class: 'lb-plate', title: stack.category ?? 'Your tools' },
-        h('div', { class: 'lb-plate-title', text: stack.category ?? (stack.kind === 'personal' ? 'Your tools' : 'Other tools') }),
-        h('div', { class: 'lb-plate-tools' }),
-      );
-      const tools = plate.querySelector('.lb-plate-tools') as HTMLElement;
-      for (const card of stack.cards) {
-        tools.append(h('span', { class: 'lb-plate-tool', text: card.entry.title }));
-      }
-      const standing = h('div', { class: 'lb-standing' });
-      for (const person of stack.people) {
-        const chip = h('span', { class: 'lb-person', text: person.name });
-        chip.dataset.admin = person.admin ? 'true' : 'false';
-        standing.append(chip);
-      }
-      const tile = h('div', { class: 'lb-stack' });
-      tile.style.setProperty('--lb-height', String(Math.min(6, stack.cards.length)));
-      plate.style.setProperty('--lb-height', String(Math.min(6, stack.cards.length)));
-      plate.style.transform = `translateZ(calc(${Math.min(6, stack.cards.length)} * 0.6rem))`;
-      standing.style.transform =
-        `translateZ(calc(${Math.min(6, stack.cards.length)} * 0.6rem + 0.2rem)) rotateZ(45deg) rotateX(-58deg)`;
-      tile.append(plate, standing);
-      stage.append(tile);
-    }
-    if (stage.childElementCount === 0) return h('p', { class: 'lb-empty', text: 'Nothing matches.' });
-    return h('div', { class: 'lb-blocks' }, stage);
+    return area.childElementCount > 0 ? area : h('p', { class: 'lb-empty', text: 'Nothing matches.', role: 'status', ariaLive: 'polite' });
   }
 
   if (chosen === 'list') {
     const rows = h('div', { class: 'lb-list' });
     for (const group of libraryGroups(input, query)) {
       for (const card of group.cards) {
-        const row = cardAnchor(card.entry, false);
-        row.className = 'lb-list-row';
-        if (card.favorite) {
-          row.append(h('span', { class: 'lb-card-star', text: '★' }));
-        }
+        const row = cardAnchor(card.entry, false, 'list');
+        const meta = h('div', { class: 'lb-list-meta' });
         if (card.orgAccount !== null) {
-          row.append(h('span', { class: 'lb-card-account', text: card.orgAccount }));
+          meta.append(h('span', { class: 'lb-card-account', text: card.orgAccount }));
         }
-        for (const tag of card.tags) row.append(h('span', { class: 'lb-tag', text: tag }));
+        for (const tag of card.tags) meta.append(h('span', { class: 'lb-tag', text: tag }));
+        const launch = h('span', { class: 'lb-list-launch', text: '↗' });
+        launch.setAttribute('aria-hidden', 'true');
+        row.append(
+          meta,
+          h('div', { class: 'lb-list-end' }, card.favorite ? h('span', { class: 'lb-card-star', text: '★' }) : null, launch),
+        );
         rows.append(row);
       }
     }
-    return rows.childElementCount > 0 ? rows : h('p', { class: 'lb-empty', text: 'Nothing matches.' });
+    return rows.childElementCount > 0 ? rows : h('p', { class: 'lb-empty', text: 'Nothing matches.', role: 'status', ariaLive: 'polite' });
   }
 
   const groups = h('div', { class: 'lb-groups' });
-  const closed = collapsed();
   libraryGroups(input, query).forEach((group, index) => {
     const label = group.category ?? (group.kind === 'personal' ? 'Your tools' : 'Other tools');
     const body = h('div', { class: 'lb-group-cards' });
@@ -243,47 +231,50 @@ function drawViews(input: Catalog, query: string, chosen: LibraryView): HTMLElem
       node.append(tags);
       body.append(node);
     });
-    const section = h(
-      'section',
-      { class: 'lb-group' },
-      h(
-        'button',
-        { class: 'lb-group-head', title: group.category === null ? label : `Collapse ${label}` },
-        h('span', { class: 'lb-caret', text: '▸' }),
-        h('span', { class: 'lb-group-title', text: label }),
-        h('span', { class: 'lb-group-count', text: String(group.cards.length) }),
-      ),
-      body,
-    );
     const key = group.kind === 'personal' ? '\u0000personal' : group.category ?? '\u0000other';
+    const head = h(
+      'button',
+      {
+        class: 'lb-group-head',
+        title: `${closed.has(key) ? 'Expand' : 'Collapse'} ${label}`,
+        ariaExpanded: closed.has(key) ? 'false' : 'true',
+      },
+      h('span', { class: 'lb-caret', text: '▸' }),
+      h('span', { class: 'lb-group-title', text: label }),
+      h('span', { class: 'lb-group-count', text: String(group.cards.length) }),
+    );
+    const section = h('section', { class: 'lb-group' }, head, body);
     section.dataset.collapsed = closed.has(key) ? 'true' : 'false';
-    section.querySelector('.lb-group-head')?.addEventListener('click', () => {
+    head.addEventListener('click', () => {
       const now = section.dataset.collapsed !== 'true';
       section.dataset.collapsed = now ? 'true' : 'false';
-      const set = collapsed();
-      if (now) set.add(key);
-      else set.delete(key);
-      storeCollapsed(set);
+      head.setAttribute('aria-expanded', now ? 'false' : 'true');
+      head.title = `${now ? 'Expand' : 'Collapse'} ${label}`;
+      if (now) closed.add(key);
+      else closed.delete(key);
+      storeCollapsed(closed);
     });
     groups.append(section);
   });
-  return groups.childElementCount > 0 ? groups : h('p', { class: 'lb-empty', text: 'Nothing matches.' });
+  return groups.childElementCount > 0 ? groups : h('p', { class: 'lb-empty', text: 'Nothing matches.', role: 'status', ariaLive: 'polite' });
 }
 
 /** The signed-in screen: the header, the toolbar, the view. */
 function drawPortal(me: Me, catalog: Catalog): void {
   let query = '';
   let chosen = view();
+  const closed = collapsed();
 
   const redraw = (): void => {
     const area = document.getElementById('lb-area');
-    if (area !== null) area.replaceChildren(drawViews(catalog, query, chosen));
+    if (area !== null) area.replaceChildren(drawViews(catalog, query, chosen, closed));
   };
 
   const search = document.createElement('input');
   search.type = 'search';
   search.placeholder = 'Search title, category, tag, account…';
   search.autocomplete = 'off';
+  search.setAttribute('aria-label', 'Search the library');
   search.addEventListener('input', () => {
     query = search.value;
     redraw();
@@ -296,7 +287,7 @@ function drawPortal(me: Me, catalog: Catalog): void {
     button.setAttribute('aria-pressed', chosen === option.id ? 'true' : 'false');
     button.addEventListener('click', () => {
       chosen = option.id;
-      window.localStorage.setItem(VIEW_KEY, chosen);
+      storePreference(VIEW_KEY, chosen);
       for (const other of views.querySelectorAll('.lb-view')) {
         other.setAttribute('aria-pressed', other === button ? 'true' : 'false');
       }
@@ -339,8 +330,9 @@ function drawSignIn(): void {
   password.type = 'password';
   password.autocomplete = 'current-password';
   password.placeholder = 'Password';
-  const message = h('p', { class: 'lb-message' });
+  const message = h('p', { class: 'lb-message', role: 'status', ariaLive: 'polite' });
   const submit = h('button', { class: 'lb-submit', text: 'Sign in' });
+  submit.type = 'submit';
 
   const signIn = async (): Promise<void> => {
     submit.disabled = true;
@@ -367,24 +359,24 @@ function drawSignIn(): void {
     }
   };
 
-  submit.addEventListener('click', () => void signIn());
-  password.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') void signIn();
-  });
-
-  root.replaceChildren(
-    h(
-      'div',
-      { class: 'lb-entry' },
-      h('div', { class: 'lb-brand lb-brand-entry' }, h('span', { class: 'lb-logo', text: 'N' }), h('span', { class: 'lb-guild', text: 'Nod' })),
-      h('h1', { class: 'lb-entry-title', text: 'Sign in' }),
-      h('label', { class: 'lb-field' }, h('span', { class: 'lb-field-label', text: 'Email' }), email),
-      h('label', { class: 'lb-field' }, h('span', { class: 'lb-field-label', text: 'Password' }), password),
-      message,
-      submit,
-      h('p', { class: 'lb-note', text: 'The password stays in this page: only the key it derives travels to the host.' }),
-    ),
+  const form = h(
+    'form',
+    { class: 'lb-entry' },
+    h('div', { class: 'lb-brand lb-brand-entry' }, h('span', { class: 'lb-logo', text: 'N' }), h('span', { class: 'lb-guild', text: 'Nod' })),
+    h('h1', { class: 'lb-entry-title', text: 'Sign in' }),
+    h('label', { class: 'lb-field' }, h('span', { class: 'lb-field-label', text: 'Email' }), email),
+    h('label', { class: 'lb-field' }, h('span', { class: 'lb-field-label', text: 'Password' }), password),
+    message,
+    submit,
+    h('p', { class: 'lb-note', text: 'The password stays in this page: only the key it derives travels to the host.' }),
   );
+  // Keep the existing sign-in path; the form adds Enter from either field and prevents duplicate submits.
+  form.noValidate = true;
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (!submit.disabled) void signIn();
+  });
+  root.replaceChildren(form);
   email.focus();
 }
 

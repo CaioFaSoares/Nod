@@ -83,13 +83,14 @@ implementation map, not an additional requirement or an execution report.
 
 ## 1.0.0 (RF-79, the library and its two fields)
 
-- Home is the library: a search field and four view buttons ride the content header
-  (`libraryToolbar`, `src/app.ts`), the body draws from `shared/library.ts`'s models with
-  `shared/library.css`'s classes — the categories as collapsible groups (the machine's own choice,
-  kept in `localStorage`), the first group's first tools featured, one compact list row per tool,
-  the org chart of the guild's roles (`roster.list` and `roles.list`, fetched when the view needs
-  them) and the isometric stacks on a real CSS 3D projection. The card keeps its six acts and wears
-  the guild's tags and the org account (RF-77/RF-78).
+- Home is the library: a search field and three labeled view buttons (Cards, List, Org chart) ride
+  the content header (`libraryToolbar`, `src/app.ts`). Models live in `shared/library.ts`; responsive
+  geometry lives in `shared/library.css`. Categories are collapsible groups (a machine-local choice
+  in `localStorage`), with featured cards only when the library has room. List uses one native button
+  per tool; filtering keeps each view's wrapper intact. The org chart draws the guild's roles
+  (`roster.list` and `roles.list`, fetched when the view needs them). Cards retain their six actions,
+  tags and org account (RF-77/RF-78), without fixed title tracks. The UI cleanup removes the isometric
+  view; an old `blocks` preference reads as Cards without writing on boot (RF-79, `docs/canonico.md`).
 - The tool editor (Settings → Tools) carries Tags (comma-separated; the validator trims, drops
   empties, keeps twelve) and the Guild account label beside the category — org tools only, exactly
   like the category's own rule.
