@@ -98,7 +98,7 @@ under Bun.
   own bearer, the granted catalog, the refused foreign origin (with the live cookie, so the origin
   check answers, not the caller guard) and the revoked sign-out.
 - The ui smoke's `admin-work` gains the library stage (the search filters and comes back, a group
-  collapses and stays collapsed through the four views) and the RF-72 stage (the Style card drives
+  collapses and stays collapsed through the three views (Cards, List, Org chart)) and the RF-72 stage (the Style card drives
   the window; a custom accent repaints the solid button and the reset returns the skin's own colour;
   the machine is left in Sober/dark so the next launch's **locked** entry screen must open dressed
   in it — `admin-final` reads it before it unlocks).

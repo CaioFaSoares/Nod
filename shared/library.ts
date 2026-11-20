@@ -1,6 +1,6 @@
 // The library (RF-79, canonico §22 "The library (app + web)"): the org catalog's one model home —
-// what a card carries, what the search reads, what a group is, and the two organization views'
-// models. The app's Home and the web portal assemble their own DOM over these; what they cannot
+// what a card carries, what the search reads, what a group is, and the org chart's model.
+// The app's Home and the web portal assemble their own DOM over these; what they cannot
 // disagree about is here.
 //
 // Pure (`shared/context.md`): no `tjs`, no `tiny`, no DOM, no Bun. `URL` only, and the readers of
@@ -9,7 +9,7 @@
 import { byOrderAndTitle, categoryOf, groupByCategory, orgAccountOf, tagsOf } from './catalog';
 import type { Entry, Id, Role } from './types';
 
-/** One person of the roster as the organization views draw them — a name and the roles they hold. */
+/** One person of the roster as the org chart draws them — a name and the roles they hold. */
 export interface LibraryPerson {
   id: Id;
   name: string;
@@ -36,20 +36,19 @@ export interface LibraryCard {
   orgAccount: string | null;
 }
 
-/** The four views of the strip's control, in the order the person reads them. */
-export type LibraryView = 'cards' | 'list' | 'org' | 'blocks';
+/** The three views of the strip's control, in the order the person reads them. */
+export type LibraryView = 'cards' | 'list' | 'org';
 
 export const LIBRARY_VIEWS: ReadonlyArray<{ id: LibraryView; label: string }> = [
   { id: 'cards', label: 'Cards' },
   { id: 'list', label: 'List' },
   { id: 'org', label: 'Org chart' },
-  { id: 'blocks', label: 'Blocks' },
 ];
 
 /** The view a machine never chose — and what an unread stored choice reads as. */
 export const DEFAULT_LIBRARY_VIEW: LibraryView = 'cards';
 
-/** A stored view that is not one of the four reads as the default (RF-79's acceptance). */
+/** Unknown choices, including the retired `blocks`, read as Cards without rewriting the preference. */
 export function libraryViewOf(raw: string | null | undefined): LibraryView {
   return LIBRARY_VIEWS.some((view) => view.id === raw) ? (raw as LibraryView) : DEFAULT_LIBRARY_VIEW;
 }
@@ -180,56 +179,8 @@ export function orgChart(input: LibraryInput, query: string): OrgNode[] {
   return nodes.filter((node) => node.people.length > 0 || node.categories.length > 0);
 }
 
-// ---------------------------------------------------------------- the isometric blocks view (RF-79)
-
-/** One stack of the isometric stage: a category (the owner's "project"), the tools inside it, and the people who reach it standing on it. */
-export interface BlockStack {
-  category: string | null;
-  /** the guild's stack, or the person's own — the stage labels the two differently */
-  kind: 'org' | 'personal';
-  cards: LibraryCard[];
-  /** who reaches this category: the people a granted role belongs to, an admin always (RF-79's "who is where") */
-  people: LibraryPerson[];
-  /** the stack's place on the stage's grid, counted from zero */
-  col: number;
-  row: number;
-}
-
 /**
- * RF-79: the isometric blocks — the categories as the projects, one stack each, the tools inside
- * and the people who reach a category standing on it. The stacks take the group order
- * (`groupByCategory`), and the stage lays them on a four-wide grid: the projection is the surface's
- * (a rotated stage), the places are decided here so the two surfaces stand the same blocks on the
- * same ground.
- */
-export function blockStacks(input: LibraryInput, query: string): BlockStack[] {
-  const stacks = libraryGroups(input, query);
-  const answer: BlockStack[] = [];
-  stacks.forEach((group, index) => {
-    const rolesGranted = new Set<Id>();
-    for (const card of group.cards) {
-      for (const role of card.entry.roles) rolesGranted.add(role);
-    }
-    // A personal stack is the viewer's own — no role and no admin flag reaches another person's
-    // tools (SP05 §2), so the surface labels the stack "yours" and nobody stands on it here.
-    const people =
-      group.kind === 'personal' || group.cards.length === 0
-        ? []
-        : input.people.filter((person) => person.admin || person.roles.some((role) => rolesGranted.has(role)));
-    answer.push({
-      category: group.category,
-      kind: group.kind,
-      cards: group.cards,
-      people,
-      col: index % 4,
-      row: Math.floor(index / 4),
-    });
-  });
-  return answer;
-}
-
-/**
- * RF-79: the roster as the organization views read it — nothing of a person row but the name and
+ * RF-79: the roster as the org chart reads it — nothing of a person row but the name and
  * the roles, and the admin flag resolved through the guild's own roles (the host's `SnapshotPerson`
  * carries no email and no flag on purpose, SP04 §2). A person whose roles name no role of the list
  * reads as roleless, exactly as the chart's last node draws them.

@@ -1729,7 +1729,7 @@ async function sidebarMenu(node: HTMLElement, label: string): Promise<void> {
 
 /**
  * RF-79's real-surface half: the library on Home — the search filters what is drawn, a category
- * collapses and stays collapsed (the machine's own choice), and the four views answer the same
+ * collapses and stays collapsed (the machine's own choice), and the three views answer the same
  * catalog. The cards keep the app's own acts (open, close, favorite), so what this stage proves is
  * the library's own half: the toolbar, the groups, the views.
  */
@@ -1738,10 +1738,30 @@ async function checkLibrary(): Promise<string> {
   const search = await waitForValue('the library search', () =>
     document.querySelector<HTMLInputElement>('.lb-search-input'));
   const groups = (): HTMLElement[] => all<HTMLElement>('.home .lb-group');
+  const views = (): HTMLButtonElement[] => all<HTMLButtonElement>('.content-header .lb-view');
+  expect(views().map(text).join('|') === 'Cards|List|Org chart', 'the library must offer exactly Cards, List and Org chart');
 
   // The search reads the title, the category, the tags and the account (the model's one rule).
   const before = groups().length;
   expect(before > 0, 'the library draws no group at all');
+
+  // Measure the Cards that this fixture actually draws, before the collapse below hides a group.
+  const cards = all<HTMLElement>('.home .lb-group-cards .tool-card');
+  for (const card of cards) {
+    const title = card.querySelector<HTMLElement>('.tool-title');
+    expect(title !== null && title.getBoundingClientRect().width > 0, 'a Cards tool title has no visible width');
+    const actions = card.querySelector<HTMLElement>('.tool-actions');
+    expect(actions !== null, 'a Cards tool has no action group');
+    if (actions !== null) {
+      expect(actions.getBoundingClientRect().right <= card.getBoundingClientRect().right + 1, 'Cards actions overflow the tool card');
+    }
+  }
+  const content = document.querySelector<HTMLElement>('.content');
+  expect(content !== null, 'the library has no content container');
+  if (content !== null) {
+    expect(content.scrollWidth <= content.clientWidth + 1, 'the library content has horizontal overflow');
+  }
+
   search.value = PERSONAL_TITLE;
   search.dispatchEvent(new Event('input', { bubbles: true }));
   await waitForValue('the search to filter the groups', () => {
@@ -1760,19 +1780,44 @@ async function checkLibrary(): Promise<string> {
   const first = groups()[0];
   const key = first.querySelector<HTMLElement>('.lb-group-title')?.textContent ?? '';
   expect(key !== '', 'the first group has no name');
-  first.querySelector<HTMLButtonElement>('.lb-group-head')?.click();
+  const head = first.querySelector<HTMLButtonElement>('.lb-group-head');
+  expect(head?.getAttribute('aria-expanded') === 'true', 'the open group must announce that it is expanded');
+  head?.click();
   await waitForValue('the group collapsed', () => first.dataset.collapsed === 'true' ? true : null);
+  expect(head?.getAttribute('aria-expanded') === 'false', 'the collapsed group must announce that it is collapsed');
 
-  // The four views answer the same catalog: list rows, org nodes (the roster), isometric stacks.
+  // The three views answer the same catalog: grouped cards, list rows and org nodes (the roster).
   const pick = async (label: string, area: () => HTMLElement | null): Promise<void> => {
     const view = await waitForValue(`the ${label} view button`, () =>
-      all<HTMLButtonElement>('.content-header .lb-view').find((node) => text(node) === label) ?? null);
+      views().find((node) => text(node) === label) ?? null);
     view.click();
     await waitForValue(`the ${label} view drawn`, () => (area() !== null ? true : null));
+    await waitForValue(`only the ${label} view pressed`, () => {
+      const pressed = views().filter((node) => node.getAttribute('aria-pressed') === 'true');
+      return pressed.length === 1 && text(pressed[0]) === label ? true : null;
+    });
+  };
+  const filterKeepsWrapper = async (label: 'List' | 'Org chart', selector: string): Promise<void> => {
+    const field = await waitForValue(`the ${label} search`, () =>
+      document.querySelector<HTMLInputElement>('.lb-search-input'));
+    for (const query of [PERSONAL_TITLE, '']) {
+      field.value = query;
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      await waitForValue(`the ${label} wrapper retained after ${query === '' ? 'clearing' : 'filtering'}`, () => {
+        const area = document.querySelector<HTMLElement>(selector);
+        if (area === null || area.getAttribute('aria-busy') === 'true') return null;
+        if (label === 'List') {
+          const titles = all<HTMLElement>('.lb-card-title', area).map(text);
+          return titles.length > 0 && titles.every((name) => name.includes(query)) ? true : null;
+        }
+        return area.querySelector('.lb-org-node') !== null ? true : null;
+      });
+    }
   };
   await pick('List', () => document.querySelector('.home .lb-list-row'));
+  await filterKeepsWrapper('List', '.home > .lb-list');
   await pick('Org chart', () => document.querySelector('.home .lb-org-node'));
-  await pick('Blocks', () => document.querySelector('.home .lb-stack'));
+  await filterKeepsWrapper('Org chart', '.home > .lb-org');
   await pick('Cards', () => document.querySelector('.home .lb-group'));
   // And the collapse survived the round trip.
   await openHome();
@@ -1781,7 +1826,9 @@ async function checkLibrary(): Promise<string> {
 
   return (
     `the search filtered (down to "${PERSONAL_TITLE}", then the empty answer) and came back; ` +
-    `"${key}" collapsed and stayed collapsed through the four views`
+    `"${key}" collapsed and stayed collapsed through the three views, each with one pressed control; ` +
+    `${cards.length} Cards titles had width and their action groups fit; the content had no horizontal overflow; ` +
+    'List and Org chart retained their direct wrappers after filtering and clearing'
   );
 }
 

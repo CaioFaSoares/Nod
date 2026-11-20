@@ -53,7 +53,6 @@ import { categoryOf, orgAccountOf, tagsOf } from '../shared/catalog';
 import {
   DEFAULT_LIBRARY_VIEW,
   LIBRARY_VIEWS,
-  blockStacks,
   libraryGroups,
   libraryViewOf,
   orgChart,
@@ -1009,9 +1008,8 @@ function renderHome(content: HTMLElement): void {
     body.append(libraryBody());
   }
   const card = presenceCard();
-  // RF-79's bar stays one row at the window's smallest width: the acts are marks, and their words
-  // — the button's own text, the tooltip and the name the screen reader reads — are the whole
-  // label. The palette also answers ⌘K / Ctrl+K.
+  // The library bar can wrap without squeezing the search or hiding the view names. The palette
+  // remains a separate shortcut to tools and actions, also available with ⌘K / Ctrl+K.
   const searchTools = iconButton('⌕', 'Search tools', () => openPaletteNow(), {
     title: 'Search tools or actions (⌘K / Ctrl+K)',
   });
@@ -1021,7 +1019,7 @@ function renderHome(content: HTMLElement): void {
   content.replaceChildren(
     el(
       'header',
-      { class: 'content-header' },
+      { class: 'content-header library-header' },
       el('h1', { class: 'content-title' }, 'Tools'),
       libraryToolbar(),
       el(
@@ -1043,7 +1041,7 @@ function renderHome(content: HTMLElement): void {
 
 /**
  * The library (RF-79): the Steam-like catalog of both surfaces. The models are `shared/library.ts`'s
- * — what a group is, what the search reads, what the org chart and the isometric blocks draw — and
+ * — what a group is, what the search reads, and what the org chart draws — and
  * the styles are `shared/library.css`'s, imported by `src/style.css`; what stays here is the app's
  * own half: the search field, the view buttons, and the card with its six acts.
  */
@@ -1055,10 +1053,15 @@ const LIBRARY_COLLAPSED_KEY = 'nod-library-collapsed';
 let libraryQuery = '';
 let libraryViewLoaded = false;
 let libraryView: LibraryView = DEFAULT_LIBRARY_VIEW;
+let collapsedLibraryGroups: Set<string> | null = null;
 
 function currentLibraryView(): LibraryView {
   if (!libraryViewLoaded) {
-    libraryView = libraryViewOf(window.localStorage.getItem(LIBRARY_VIEW_KEY));
+    try {
+      libraryView = libraryViewOf(window.localStorage.getItem(LIBRARY_VIEW_KEY));
+    } catch {
+      libraryView = DEFAULT_LIBRARY_VIEW;
+    }
     libraryViewLoaded = true;
   }
   return libraryView;
@@ -1075,14 +1078,18 @@ function chooseLibraryView(next: LibraryView): void {
 }
 
 function libraryCollapsed(): Set<string> {
+  if (collapsedLibraryGroups !== null) return collapsedLibraryGroups;
   try {
-    return new Set(JSON.parse(window.localStorage.getItem(LIBRARY_COLLAPSED_KEY) ?? '[]') as string[]);
+    const raw: unknown = JSON.parse(window.localStorage.getItem(LIBRARY_COLLAPSED_KEY) ?? '[]');
+    collapsedLibraryGroups = new Set(Array.isArray(raw) ? raw.filter((value): value is string => typeof value === 'string') : []);
   } catch {
-    return new Set();
+    collapsedLibraryGroups = new Set();
   }
+  return collapsedLibraryGroups;
 }
 
 function storeLibraryCollapsed(set: Set<string>): void {
+  collapsedLibraryGroups = set;
   try {
     window.localStorage.setItem(LIBRARY_COLLAPSED_KEY, JSON.stringify([...set]));
   } catch {
@@ -1102,18 +1109,15 @@ function libraryInput(roles: Role[] = [], people: RosterPerson[] = []): LibraryI
 }
 
 /**
- * The mark each view takes in Home's strip. `iconButton` keeps the view's label as the button's
- * own text — the tooltip, the name a screen reader reads and what the smoke matches — so the mark
- * is the only thing the eye loses.
+ * The marks supplement visible view names; the pressed state is also exposed to assistive tech.
  */
 const LIBRARY_VIEW_GLYPHS: Record<LibraryView, string> = {
   cards: '▦',
   list: '☰',
   org: '┬',
-  blocks: '⬔',
 };
 
-/** The search field and the four views, beside the title (RF-79's "a busca e as categorias"). */
+/** The search field and the three views, beside the title (RF-79's "a busca e as categorias"). */
 function libraryToolbar(): HTMLElement {
   const search = el(
     'input',
@@ -1128,17 +1132,26 @@ function libraryToolbar(): HTMLElement {
     libraryQuery = search.value;
     refreshLibrary();
   });
+  search.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || search.value === '') return;
+    event.stopPropagation();
+    search.value = '';
+    libraryQuery = '';
+    refreshLibrary();
+  });
 
   const views = el('div', { class: 'lb-views', role: 'group', aria: { label: 'Library views' } });
   for (const option of LIBRARY_VIEWS) {
-    const node = iconButton(LIBRARY_VIEW_GLYPHS[option.id], option.label, () => {
+    const node = button(option.label, () => {
       chooseLibraryView(option.id);
       renderHomeNow();
-    }, {
-      title: `The library as ${option.label.toLowerCase()}`,
-      pressed: currentLibraryView() === option.id,
-    });
+      shell?.content.querySelector<HTMLButtonElement>(`.lb-view[data-view="${option.id}"]`)?.focus();
+    }, { title: `The library as ${option.label.toLowerCase()}` });
     node.classList.add('lb-view');
+    node.dataset.icon = LIBRARY_VIEW_GLYPHS[option.id];
+    node.dataset.view = option.id;
+    node.setAttribute('aria-label', option.label);
+    node.setAttribute('aria-pressed', currentLibraryView() === option.id ? 'true' : 'false');
     views.append(node);
   }
 
@@ -1154,34 +1167,33 @@ function renderHomeNow(): void {
 function refreshLibrary(): void {
   const area = document.querySelector('.home');
   if (area === null) return;
-  const next = libraryBody();
-  area.replaceChildren(...next.childNodes);
+  area.replaceChildren(libraryBody());
 }
 
-/** The library's body for the view this machine chose (RF-79): cards, list, org chart or blocks. */
+/** The library's body for the view this machine chose (RF-79): cards, list or org chart. */
 function libraryBody(): HTMLElement {
   const chosen = currentLibraryView();
   const input = libraryInput();
   if (chosen === 'list') return libraryList(input);
   if (chosen === 'cards') return libraryCards(input);
-  // The two organization views read the roster too; they fill in when the answers arrive.
-  const area = chosen === 'org' ? el('div', { class: 'lb-org' }) : el('div', { class: 'lb-blocks' });
-  void fillOrganizationViews(area, chosen);
+  const area = el('div', { class: 'lb-org', aria: { busy: 'true' } }, el('p', { class: 'muted' }, 'Loading people…'));
+  void fillOrganizationView(area);
   return area;
 }
 
-/** The roster and the roles of the two organization views, fetched once per draw. */
-async function fillOrganizationViews(area: HTMLElement, chosen: LibraryView): Promise<void> {
+/** The roster and roles of the org chart, fetched once per draw. */
+async function fillOrganizationView(area: HTMLElement): Promise<void> {
   let roles: Role[] = [];
   let people: RosterPerson[] = [];
   try {
     [roles, people] = await Promise.all([call('roles.list'), call('roster.list')]);
   } catch {
-    /* a guild that cannot answer leaves the two views their empty drawing */
+    /* a guild that cannot answer leaves the chart its empty drawing */
   }
-  const input = libraryInput(roles, people);
-  const redraw = chosen === 'org' ? orgChartArea(input) : blocksArea(input);
+  const redraw = orgChartArea(libraryInput(roles, people));
+  area.className = redraw.className;
   area.replaceChildren(...redraw.childNodes);
+  area.setAttribute('aria-busy', 'false');
 }
 
 /** RF-79's cards: the categories as collapsible groups, the guild's favorites kept inside them. */
@@ -1205,7 +1217,8 @@ function libraryCards(input: LibraryInput): HTMLElement {
         'button',
         {
           class: 'lb-group-head',
-          title: `Collapse ${label}`,
+          title: `${closed.has(key) ? 'Expand' : 'Collapse'} ${label}`,
+          attrs: { type: 'button' },
           aria: { expanded: closed.has(key) ? 'false' : 'true' },
         },
         el('span', { class: 'lb-caret', aria: { hidden: 'true' } }, '▸'),
@@ -1220,6 +1233,7 @@ function libraryCards(input: LibraryInput): HTMLElement {
       section.dataset.collapsed = now ? 'true' : 'false';
       const head = section.querySelector('.lb-group-head');
       head?.setAttribute('aria-expanded', now ? 'false' : 'true');
+      head?.setAttribute('title', `${now ? 'Expand' : 'Collapse'} ${label}`);
       const set = libraryCollapsed();
       if (now) set.add(key);
       else set.delete(key);
@@ -1238,38 +1252,37 @@ function libraryList(input: LibraryInput): HTMLElement {
   const rows = el('div', { class: 'lb-list' });
   for (const group of libraryGroups(input, libraryQuery)) {
     for (const card of group.cards) {
-      const open = iconButton('↗', 'Open', () => openTool(card.entry.id), {
-        kind: 'primary',
-        title: `Open ${card.entry.title}`,
-      });
       const row = el(
-        'div',
+        'button',
         {
           class: 'lb-list-row',
-          role: 'button',
-          attrs: { tabindex: '0' },
+          title: `Open ${card.entry.title}`,
+          attrs: { type: 'button' },
           aria: { label: `Open ${card.entry.title}` },
         },
         glyph(card.entry.title, entryIcon(card.entry, tools.find((tool) => tool.id === card.entry.id) ?? null)),
-        el('span', { class: 'lb-card-title' }, card.entry.title),
-        el('span', { class: 'lb-card-host muted' }, hostOfLibrary(card.entry.url)),
         el(
           'span',
-          { class: 'lb-card-tags' },
-          ...card.tags.map((tag) => el('span', { class: 'lb-tag' }, tag)),
+          { class: 'lb-card-titles' },
+          el('span', { class: 'lb-card-title' }, card.entry.title),
+          el('span', { class: 'lb-card-host muted' }, hostOfLibrary(card.entry.url)),
         ),
-        card.orgAccount === null
-          ? null
-          : el('span', { class: 'lb-card-account muted' }, card.orgAccount),
-        card.favorite ? el('span', { class: 'lb-card-star', aria: { hidden: 'true' } }, '★') : null,
-        open,
+        el(
+          'span',
+          { class: 'lb-list-meta' },
+          el('span', { class: 'lb-card-tags' }, ...card.tags.map((tag) => el('span', { class: 'lb-tag' }, tag))),
+          card.orgAccount === null
+            ? null
+            : el('span', { class: 'lb-card-account muted', title: `Guild account: ${card.orgAccount}` }, card.orgAccount),
+        ),
+        el(
+          'span',
+          { class: 'lb-list-end', aria: { hidden: 'true' } },
+          card.favorite ? el('span', { class: 'lb-card-star' }, '★') : null,
+          el('span', { class: 'lb-list-launch' }, '↗'),
+        ),
       );
       row.addEventListener('click', () => openTool(card.entry.id));
-      row.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        openTool(card.entry.id);
-      });
       rows.append(row);
     }
   }
@@ -1316,56 +1329,6 @@ function orgChartArea(input: LibraryInput): HTMLElement {
     return el('div', { class: 'lb-empty' }, el('p', { class: 'muted' }, 'Nothing matches.'));
   }
   return area;
-}
-
-/** RF-79's isometric blocks: a real projection — the rotated stage, the stacks, who stands where. */
-function blocksArea(input: LibraryInput): HTMLElement {
-  const stage = el('div', { class: 'lb-stage' });
-  for (const stack of blockStacks(input, libraryQuery)) {
-    const plate = el(
-      'div',
-      {
-        class: 'lb-plate',
-        title: stack.category ?? (stack.kind === 'personal' ? 'Your tools' : 'Other tools'),
-      },
-      el('div', { class: 'lb-plate-title' }, stack.category ?? (stack.kind === 'personal' ? 'Your tools' : 'Other tools')),
-      el('div', { class: 'lb-plate-tools' }),
-    );
-    const height = Math.min(6, stack.cards.length);
-    for (const style of [plate]) {
-      style.style.setProperty('--lb-height', String(height));
-    }
-    const standing = el('div', { class: 'lb-standing' });
-    standing.style.setProperty('--lb-height', String(height));
-    const toolsNode = plate.querySelector('.lb-plate-tools') as HTMLElement;
-    for (const card of stack.cards) {
-      const chip = el(
-        'span',
-        { class: 'lb-plate-tool', role: 'button', attrs: { tabindex: '0' } },
-        card.entry.title,
-      );
-      chip.addEventListener('click', () => openTool(card.entry.id));
-      chip.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        openTool(card.entry.id);
-      });
-      toolsNode.append(chip);
-    }
-    for (const person of stack.people) {
-      const chip = el('span', { class: 'lb-person' }, person.name);
-      chip.dataset.admin = person.admin ? 'true' : 'false';
-      standing.append(chip);
-    }
-    const tile = el('div', { class: 'lb-stack' });
-    tile.style.setProperty('--lb-height', String(height));
-    tile.append(plate, standing);
-    stage.append(tile);
-  }
-  if (stage.childElementCount === 0) {
-    return el('div', { class: 'lb-empty' }, el('p', { class: 'muted' }, 'Nothing matches.'));
-  }
-  return el('div', { class: 'lb-blocks' }, stage);
 }
 
 /** RF-58: how long ago, in words a person reads at a glance. */
@@ -1622,8 +1585,8 @@ function toolCard(entry: Entry): HTMLElement {
       el(
         'div',
         { class: 'tool-titles' },
-        el('h2', { class: 'tool-title' }, entry.title),
-        el('p', { class: 'tool-host muted' }, hostOf(entry.url)),
+        el('h2', { class: 'tool-title', title: entry.title }, entry.title),
+        el('p', { class: 'tool-host muted', title: hostOf(entry.url) }, hostOf(entry.url)),
       ),
     ),
     // canonico §22: the warning the owner asked for, beside the tool in the window that opens it.
@@ -1635,12 +1598,16 @@ function toolCard(entry: Entry): HTMLElement {
         )
       : null,
     // Atrius: the state is glyph + word; `data-state` picks the glyph and its colour (style.css).
-    el('p', { class: 'tool-state', title: stateText(tool), data: { state: stateKey(tool) } }, stateText(tool)),
+    el(
+      'div',
+      { class: 'tool-status' },
+      el('p', { class: 'tool-state', title: stateText(tool), data: { state: stateKey(tool) } }, stateText(tool)),
+    ),
   );
 
   const login = tool === null || tool.login === null ? null : LOGIN_TEXT[tool.login];
   if (login !== null && tool !== null && tool.login !== null) {
-    card.append(el('p', { class: 'tool-login muted', data: { login: tool.login } }, login));
+    card.querySelector('.tool-status')?.append(el('p', { class: 'tool-login muted', data: { login: tool.login } }, login));
   }
 
   // RF-77: the tags the guild gave the tool — the library's search reads them, so the card wears

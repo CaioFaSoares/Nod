@@ -1,12 +1,12 @@
 // Proves the library's models (RF-79, `shared/library.ts`): what the search reads, the cards'
-// order, the groups, the org chart's nodes and the isometric stacks' ground. The two surfaces'
+// order, the groups, the org chart's nodes and the three view choices. The two surfaces'
 // DOM is not this module's business — the models they both feed on are.
 // Run with `bun test test/`.
 
 import { describe, expect, test } from 'bun:test';
 import {
   DEFAULT_LIBRARY_VIEW,
-  blockStacks,
+  LIBRARY_VIEWS,
   hostOf,
   libraryCards,
   libraryGroups,
@@ -64,11 +64,24 @@ const INPUT: LibraryInput = {
 };
 
 describe('the library (RF-79)', () => {
+  test('the control offers exactly Cards, List and Org chart, and each stored choice is preserved', () => {
+    expect(LIBRARY_VIEWS).toEqual([
+      { id: 'cards', label: 'Cards' },
+      { id: 'list', label: 'List' },
+      { id: 'org', label: 'Org chart' },
+    ]);
+    for (const choice of LIBRARY_VIEWS) expect(libraryViewOf(choice.id)).toBe(choice.id);
+  });
+
   test('the view a machine never chose is cards, and an unread choice reads as the default', () => {
     expect(DEFAULT_LIBRARY_VIEW).toBe('cards');
-    expect(libraryViewOf(null)).toBe('cards');
-    expect(libraryViewOf('bogus')).toBe('cards');
-    expect(libraryViewOf('blocks')).toBe('blocks');
+    for (const choice of [null, undefined, '', 'bogus', 'Cards', 'org-chart']) {
+      expect(libraryViewOf(choice)).toBe('cards');
+    }
+  });
+
+  test('a stored Blocks preference passively falls back to Cards', () => {
+    expect(libraryViewOf('blocks')).toBe('cards');
   });
 
   test('the host of an address, for the search and the card', () => {
@@ -98,8 +111,9 @@ describe('the library (RF-79)', () => {
 
   test('a query filters every view the same way', () => {
     expect(libraryCards(INPUT, 'wiki').map((card) => card.entry.id)).toEqual(['wiki']);
-    expect(libraryGroups(INPUT, 'wiki')).toHaveLength(1);
-    expect(blockStacks(INPUT, 'wiki')).toHaveLength(1);
+    const groups = libraryGroups(INPUT, 'wiki');
+    expect(groups).toHaveLength(1);
+    expect(groups.flatMap((group) => group.cards.map((card) => card.entry.id))).toEqual(['wiki']);
     // The chart follows: `team` reaches nothing (the wiki is granted to nobody), and the admin
     // still carries the one category the match is filed nowhere under.
     const chart = orgChart(INPUT, 'wiki');
@@ -144,36 +158,5 @@ describe('the library (RF-79)', () => {
     expect(rosterOf(INPUT.people, ROLES).find((person) => person.id === 'p-bob')?.admin).toBe(false);
     // A role the list no longer carries reads as roleless (the host deletes roles, never people).
     expect(rosterOf([{ id: 'p-x', name: 'X', roles: ['gone'] }], ROLES)[0]?.roles).toEqual([]);
-  });
-
-  test('the isometric stacks: one per category on a four-wide grid, with who reaches them on top', () => {
-    const stacks = blockStacks(INPUT, '');
-    expect(stacks.map((stack) => [stack.category, stack.kind])).toEqual([
-      ['Boards', 'org'],
-      ['Calls', 'org'],
-      [null, 'org'],
-      [null, 'personal'],
-    ]);
-    // The grid: four wide, the second row below the first.
-    expect(stacks.map((stack) => [stack.col, stack.row])).toEqual([[0, 0], [1, 0], [2, 0], [3, 0]]);
-    // Kanban and Jitsi are granted to `team`: Bob stands on both, Ada (an admin) on every one,
-    // Eva on none.
-    expect(stacks[0]?.people.map((person) => person.name).sort()).toEqual(['Ada', 'Bob']);
-    expect(stacks[1]?.people.map((person) => person.name).sort()).toEqual(['Ada', 'Bob']);
-    // Wiki is granted to nobody: only an admin stands on it.
-    expect(stacks[2]?.people.map((person) => person.name)).toEqual(['Ada']);
-    // The personal stack is the person's own: nobody reaches it by a role.
-    expect(stacks[3]?.people.map((person) => person.name)).toEqual([]);
-    // More than four categories wrap to the next row.
-    const many: LibraryInput = {
-      ...INPUT,
-      orgTools: ['a', 'b', 'c', 'd', 'e'].map((id, index) =>
-        tool(id, { category: `Cat ${id}`, order: index }),
-      ),
-      personalTools: [],
-      favorites: [],
-    };
-    const wide = blockStacks(many, '');
-    expect(wide[4]).toMatchObject({ col: 0, row: 1 });
   });
 });

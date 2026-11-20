@@ -1,0 +1,828 @@
+[
+  {
+    "bodyWidth" : 360,
+    "clientWidth" : 360,
+    "controls" : [
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 278,
+        "x" : 41,
+        "y" : 232.6875
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 278,
+        "x" : 41,
+        "y" : 324.375
+      },
+      {
+        "class" : "lb-submit",
+        "h" : 44.5,
+        "text" : "Sign in",
+        "w" : 278,
+        "x" : 41,
+        "y" : 467.75
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "entry",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+
+    ],
+    "scrollWidth" : 360,
+    "viewport" : 360,
+    "width" : 360
+  },
+  {
+    "bodyWidth" : 343,
+    "clientWidth" : 343,
+    "controls" : [
+      {
+        "class" : "lb-signout",
+        "h" : 40,
+        "text" : "Sign out",
+        "w" : 77.59375,
+        "x" : 249.40625,
+        "y" : 16
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 311,
+        "x" : 16,
+        "y" : 89
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Cards",
+        "w" : 98.328125,
+        "x" : 20,
+        "y" : 149
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "List",
+        "w" : 98.328125,
+        "x" : 122.328125,
+        "y" : 149
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Org chart",
+        "w" : 98.328125,
+        "x" : 224.65625,
+        "y" : 149
+      },
+      {
+        "class" : "lb-group-head",
+        "h" : 37.5,
+        "text" : "▸Categoria de teste com título extenso4",
+        "w" : 311,
+        "x" : 16,
+        "y" : 222
+      },
+      {
+        "class" : "lb-group-head",
+        "h" : 37.5,
+        "text" : "▸Outros testes2",
+        "w" : 311,
+        "x" : 16,
+        "y" : 1042.8125
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "cards",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+      {
+        "class" : "",
+        "h" : 15.01611328125,
+        "text" : "conta-de-teste-com-nome-longo@example.test",
+        "w" : 294.3848876953125,
+        "x" : 121.6297607421875,
+        "y" : 409.554443359375
+      },
+      {
+        "class" : "",
+        "h" : 15.01611328125,
+        "text" : "conta-de-teste-com-nome-longo@example.test",
+        "w" : 294.3848876953125,
+        "x" : 121.6297607421875,
+        "y" : 586.351318359375
+      },
+      {
+        "class" : "",
+        "h" : 15.01611328125,
+        "text" : "conta-de-teste-com-nome-longo@example.test",
+        "w" : 294.3848876953125,
+        "x" : 121.6297607421875,
+        "y" : 763.148193359375
+      },
+      {
+        "class" : "",
+        "h" : 15.01611328125,
+        "text" : "conta-de-teste-com-nome-longo@example.test",
+        "w" : 294.3848876953125,
+        "x" : 121.6297607421875,
+        "y" : 939.945068359375
+      },
+      {
+        "class" : "",
+        "h" : 15.01611328125,
+        "text" : "conta-de-teste-com-nome-longo@example.test",
+        "w" : 294.3848876953125,
+        "x" : 121.6297607421875,
+        "y" : 1176.741943359375
+      },
+      {
+        "class" : "",
+        "h" : 15.01611328125,
+        "text" : "conta-de-teste-com-nome-longo@example.test",
+        "w" : 294.3848876953125,
+        "x" : 121.6297607421875,
+        "y" : 1353.538818359375
+      }
+    ],
+    "scrollWidth" : 343,
+    "viewport" : 360,
+    "width" : 360
+  },
+  {
+    "bodyWidth" : 343,
+    "clientWidth" : 343,
+    "controls" : [
+      {
+        "class" : "lb-signout",
+        "h" : 40,
+        "text" : "Sign out",
+        "w" : 77.59375,
+        "x" : 249.40625,
+        "y" : 16
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 311,
+        "x" : 16,
+        "y" : 89
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Cards",
+        "w" : 98.328125,
+        "x" : 20,
+        "y" : 149
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "List",
+        "w" : 98.328125,
+        "x" : 122.328125,
+        "y" : 149
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Org chart",
+        "w" : 98.328125,
+        "x" : 224.65625,
+        "y" : 149
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "list",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+
+    ],
+    "scrollWidth" : 343,
+    "viewport" : 360,
+    "width" : 360
+  },
+  {
+    "bodyWidth" : 360,
+    "clientWidth" : 360,
+    "controls" : [
+      {
+        "class" : "lb-signout",
+        "h" : 40,
+        "text" : "Sign out",
+        "w" : 77.59375,
+        "x" : 266.40625,
+        "y" : 16
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 328,
+        "x" : 16,
+        "y" : 89
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Cards",
+        "w" : 104,
+        "x" : 20,
+        "y" : 149
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "List",
+        "w" : 104,
+        "x" : 128,
+        "y" : 149
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Org chart",
+        "w" : 104,
+        "x" : 236,
+        "y" : 149
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "org",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+
+    ],
+    "scrollWidth" : 360,
+    "viewport" : 360,
+    "width" : 360
+  },
+  {
+    "bodyWidth" : 740,
+    "clientWidth" : 740,
+    "controls" : [
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 334,
+        "x" : 203,
+        "y" : 240.6875
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 334,
+        "x" : 203,
+        "y" : 332.375
+      },
+      {
+        "class" : "lb-submit",
+        "h" : 44.5,
+        "text" : "Sign in",
+        "w" : 334,
+        "x" : 203,
+        "y" : 475.75
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "entry",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+
+    ],
+    "scrollWidth" : 740,
+    "viewport" : 740,
+    "width" : 740
+  },
+  {
+    "bodyWidth" : 723,
+    "clientWidth" : 723,
+    "controls" : [
+      {
+        "class" : "lb-signout",
+        "h" : 40,
+        "text" : "Sign out",
+        "w" : 77.59375,
+        "x" : 626.90625,
+        "y" : 16
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 454.21875,
+        "x" : 18.5,
+        "y" : 89
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Cards",
+        "w" : 63.71875,
+        "x" : 492.71875,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "List",
+        "w" : 49.359375,
+        "x" : 560.4375,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Org chart",
+        "w" : 86.703125,
+        "x" : 613.796875,
+        "y" : 93
+      },
+      {
+        "class" : "lb-group-head",
+        "h" : 37.5,
+        "text" : "▸Categoria de teste com título extenso4",
+        "w" : 686,
+        "x" : 18.5,
+        "y" : 174
+      },
+      {
+        "class" : "lb-group-head",
+        "h" : 37.5,
+        "text" : "▸Outros testes2",
+        "w" : 686,
+        "x" : 18.5,
+        "y" : 641.21875
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "cards",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+      {
+        "class" : "",
+        "h" : 15.01611328125,
+        "text" : "conta-de-teste-com-nome-longo@example.test",
+        "w" : 294.3848876953125,
+        "x" : 472.7547607421875,
+        "y" : 307.929443359375
+      },
+      {
+        "class" : "",
+        "h" : 15.01611328125,
+        "text" : "conta-de-teste-com-nome-longo@example.test",
+        "w" : 294.3848876953125,
+        "x" : 472.7547607421875,
+        "y" : 538.351318359375
+      },
+      {
+        "class" : "",
+        "h" : 15.01611328125,
+        "text" : "conta-de-teste-com-nome-longo@example.test",
+        "w" : 294.3848876953125,
+        "x" : 472.7547607421875,
+        "y" : 775.148193359375
+      }
+    ],
+    "scrollWidth" : 723,
+    "viewport" : 740,
+    "width" : 740
+  },
+  {
+    "bodyWidth" : 723,
+    "clientWidth" : 723,
+    "controls" : [
+      {
+        "class" : "lb-signout",
+        "h" : 40,
+        "text" : "Sign out",
+        "w" : 77.59375,
+        "x" : 626.90625,
+        "y" : 16
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 454.21875,
+        "x" : 18.5,
+        "y" : 89
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Cards",
+        "w" : 63.71875,
+        "x" : 492.71875,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "List",
+        "w" : 49.359375,
+        "x" : 560.4375,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Org chart",
+        "w" : 86.703125,
+        "x" : 613.796875,
+        "y" : 93
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "list",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+
+    ],
+    "scrollWidth" : 723,
+    "viewport" : 740,
+    "width" : 740
+  },
+  {
+    "bodyWidth" : 740,
+    "clientWidth" : 740,
+    "controls" : [
+      {
+        "class" : "lb-signout",
+        "h" : 40,
+        "text" : "Sign out",
+        "w" : 77.59375,
+        "x" : 643.90625,
+        "y" : 16
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 471.21875,
+        "x" : 18.5,
+        "y" : 89
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Cards",
+        "w" : 63.71875,
+        "x" : 509.71875,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "List",
+        "w" : 49.359375,
+        "x" : 577.4375,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Org chart",
+        "w" : 86.703125,
+        "x" : 630.796875,
+        "y" : 93
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "org",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+
+    ],
+    "scrollWidth" : 740,
+    "viewport" : 740,
+    "width" : 740
+  },
+  {
+    "bodyWidth" : 1280,
+    "clientWidth" : 1280,
+    "controls" : [
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 334,
+        "x" : 473,
+        "y" : 240.6875
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 334,
+        "x" : 473,
+        "y" : 332.375
+      },
+      {
+        "class" : "lb-submit",
+        "h" : 44.5,
+        "text" : "Sign in",
+        "w" : 334,
+        "x" : 473,
+        "y" : 475.75
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "entry",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+
+    ],
+    "scrollWidth" : 1280,
+    "viewport" : 1280,
+    "width" : 1280
+  },
+  {
+    "bodyWidth" : 1263,
+    "clientWidth" : 1263,
+    "controls" : [
+      {
+        "class" : "lb-signout",
+        "h" : 40,
+        "text" : "Sign out",
+        "w" : 77.59375,
+        "x" : 1153.40625,
+        "y" : 16
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 967.21875,
+        "x" : 32,
+        "y" : 89
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Cards",
+        "w" : 63.71875,
+        "x" : 1019.21875,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "List",
+        "w" : 49.359375,
+        "x" : 1086.9375,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Org chart",
+        "w" : 86.703125,
+        "x" : 1140.296875,
+        "y" : 93
+      },
+      {
+        "class" : "lb-group-head",
+        "h" : 37.5,
+        "text" : "▸Categoria de teste com título extenso4",
+        "w" : 1199,
+        "x" : 32,
+        "y" : 174
+      },
+      {
+        "class" : "lb-group-head",
+        "h" : 37.5,
+        "text" : "▸Outros testes2",
+        "w" : 1199,
+        "x" : 32,
+        "y" : 620.21875
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "cards",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+
+    ],
+    "scrollWidth" : 1263,
+    "viewport" : 1280,
+    "width" : 1280
+  },
+  {
+    "bodyWidth" : 1263,
+    "clientWidth" : 1263,
+    "controls" : [
+      {
+        "class" : "lb-signout",
+        "h" : 40,
+        "text" : "Sign out",
+        "w" : 77.59375,
+        "x" : 1153.40625,
+        "y" : 16
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 967.21875,
+        "x" : 32,
+        "y" : 89
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Cards",
+        "w" : 63.71875,
+        "x" : 1019.21875,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "List",
+        "w" : 49.359375,
+        "x" : 1086.9375,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Org chart",
+        "w" : 86.703125,
+        "x" : 1140.296875,
+        "y" : 93
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "list",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+
+    ],
+    "scrollWidth" : 1263,
+    "viewport" : 1280,
+    "width" : 1280
+  },
+  {
+    "bodyWidth" : 1280,
+    "clientWidth" : 1280,
+    "controls" : [
+      {
+        "class" : "lb-signout",
+        "h" : 40,
+        "text" : "Sign out",
+        "w" : 77.59375,
+        "x" : 1170.40625,
+        "y" : 16
+      },
+      {
+        "class" : "",
+        "h" : 44,
+        "text" : "",
+        "w" : 984.21875,
+        "x" : 32,
+        "y" : 89
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Cards",
+        "w" : 63.71875,
+        "x" : 1036.21875,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "List",
+        "w" : 49.359375,
+        "x" : 1103.9375,
+        "y" : 93
+      },
+      {
+        "class" : "lb-view",
+        "h" : 36,
+        "text" : "Org chart",
+        "w" : 86.703125,
+        "x" : 1157.296875,
+        "y" : 93
+      }
+    ],
+    "errors" : [
+
+    ],
+    "focus" : {
+      "class" : "",
+      "offset" : "0px",
+      "outline" : "3px none rgb(238, 240, 242)"
+    },
+    "geometryPassed" : true,
+    "hasFocus" : false,
+    "mode" : "org",
+    "rawOutOfViewportRectsIncludingClippedDescendants" : [
+
+    ],
+    "scrollWidth" : 1280,
+    "viewport" : 1280,
+    "width" : 1280
+  }
+]
