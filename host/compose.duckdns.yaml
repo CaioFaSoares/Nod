@@ -1,0 +1,65 @@
+# Host + Caddy (DuckDNS DNS-01) for machines without a custom domain and with only specific
+# ports open (no port 80/443 required). DuckDNS only provides DNS; Caddy issues a valid Let's
+# Encrypt HTTPS certificate automatically via DNS-01 using DUCKDNS_TOKEN.
+#
+# Required env vars:
+#   NOD_DOMAIN       e.g. advteam-nod.duckdns.org
+#   NOD_PUBLIC_URL   e.g. https://advteam-nod.duckdns.org:8443 (omit :port if NOD_HTTPS_PORT=443)
+#   NOD_GUILD_NAME   guild name served by GET /.well-known/nod
+#   DUCKDNS_TOKEN    token from https://www.duckdns.org
+#
+# Optional env vars:
+#   NOD_HTTPS_PORT   external/Caddy TLS port (default 8443)
+#   NOD_BIND         host interface to bind (default 0.0.0.0)
+#   NOD_PORT         internal host HTTP port (default 8080)
+#
+# Local check:
+#   NOD_DOMAIN=nod.advteam.duckdns.org NOD_PUBLIC_URL=https://nod.advteam.duckdns.org:8443 \
+#   NOD_GUILD_NAME=AdvTeam DUCKDNS_TOKEN=example docker compose -f host/compose.duckdns.yaml config
+
+services:
+  host:
+    build:
+      context: ..
+      dockerfile: host/Dockerfile
+    environment:
+      NOD_PUBLIC_URL: ${NOD_PUBLIC_URL:?NOD_PUBLIC_URL is required (e.g. https://nod.advteam.duckdns.org:8443)}
+      NOD_GUILD_NAME: ${NOD_GUILD_NAME:?NOD_GUILD_NAME is required}
+      NOD_MIN_APP_VERSION: ${NOD_MIN_APP_VERSION:-0.3.0}
+      NOD_BACKUP_EVERY_HOURS: ${NOD_BACKUP_EVERY_HOURS:-24}
+      NOD_BACKUP_KEEP: ${NOD_BACKUP_KEEP:-14}
+      PORT: ${NOD_PORT:-8080}
+      WEB_UI: ${WEB_UI:-true}
+    expose:
+      - "${NOD_PORT:-8080}"
+    volumes:
+      - nod-data:/data
+    healthcheck:
+      test: [ "CMD", "bun", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT ?? '8080') + '/health').then(r => process.exit(r.ok ? 0 : 1))" ]
+      interval: 30s
+    restart: unless-stopped
+
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy-duckdns
+    depends_on:
+      host:
+        condition: service_healthy
+    environment:
+      NOD_DOMAIN: ${NOD_DOMAIN:?NOD_DOMAIN is required (e.g. nod.advteam.duckdns.org)}
+      NOD_HTTPS_PORT: ${NOD_HTTPS_PORT:-8443}
+      NOD_PORT: ${NOD_PORT:-8080}
+      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:?DUCKDNS_TOKEN is required}
+    ports:
+      - "${NOD_BIND:-0.0.0.0}:${NOD_HTTPS_PORT:-8443}:${NOD_HTTPS_PORT:-8443}"
+    volumes:
+      - ./Caddyfile.duckdns:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  nod-data:
+  caddy-data:
+  caddy-config:

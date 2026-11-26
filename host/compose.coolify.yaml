@@ -43,6 +43,11 @@ services:
       # until the flag is set; the compose turns it on, and a deployment that wants the host
       # API-only sets `WEB_UI=false`.
       WEB_UI: ${WEB_UI:-true}
+      # Set NOD_DEV=1 only when exposing the host over plain HTTP (e.g. a temporary Coolify URL
+      # without TLS or a local tunnel). This lets `NOD_PUBLIC_URL` use `http://` and drops the
+      # `Secure` flag on the web portal cookie; note that the Nod desktop app itself still refuses
+      # non-loopback `http://` hosts (`shared/catalog.ts`).
+      NOD_DEV: ${NOD_DEV:-0}
     # No `ports`: the container claims no host port. Coolify's proxy joins the compose network and
     # reaches the port there; the process listens on every interface of the container (`host/main.ts`
     # passes no hostname to `listen`), so no bind address is needed either.

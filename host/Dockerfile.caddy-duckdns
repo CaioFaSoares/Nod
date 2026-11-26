@@ -1,0 +1,7 @@
+# Official Caddy image with the DuckDNS DNS-01 module so TLS certificates can be issued
+# without opening ports 80 or 443 on the host.
+FROM caddy:2-builder AS builder
+RUN xcaddy build --with github.com/caddy-dns/duckdns
+
+FROM caddy:2-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
