@@ -12,13 +12,23 @@
 #              varredura e leitura.
 
 modelRoles:
-  default: anthropic/claude-opus-5-5
-  plan: anthropic/claude-opus-5-5
+  default: openai-codex/gpt-6.1-sol:medium
+  plan: openai-codex/gpt-6-astra:medium
   advisor: anthropic/claude-sonnet-5-5:high
   task: opencode-go/deepseek-v4.1-flash
+  # Judge: Jev (TypeSafe System One), nativo, como no EnochDB. Alimenta o
+  # `judge()`/`judgeBatch()` do eval. Sem fallback para chat model: se a chave
+  # do typesafe falhar, o julgamento falha. A chave vive na credencial
+  # `typesafe` do omp, nunca em arquivo do repositório. Pinar
+  # `typesafe/jev-1.13.0` só depois de calibrar algum limiar; o catálogo hoje
+  # só expõe `jev-latest`.
+  judge: typesafe/jev-latest
+  think: openai-codex/gpt-6-astra:medium
+  code: openai-codex/gpt-6-luna:medium
+  slow: openai-codex/gpt-6.1-sol:high
 
 advisor:
-  enabled: true
+  enabled: false
 
 task:
   agentModelOverrides:

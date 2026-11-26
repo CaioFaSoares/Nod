@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8" /><title>Entry screen preview</title>
+<link rel="stylesheet" href="../dist/assets/index-CR6-0G03.css" />
+<style>
+  body { margin:0; padding:12px; background:#222; font-family:system-ui; display:flex; gap:16px; }
+  .frame { width: 820px; height: 700px; overflow:hidden; border:2px solid #555; position:relative; background: var(--ink-100); color: var(--ink-900); font: var(--text-body); }
+  .frame-label { position:absolute; z-index:9; top:0; right:0; padding:2px 8px; background:#000; color:#fff; font:600 11px/18px system-ui; }
+</style></head>
+<body>
+<script>
+const frames = [['atrius','dark','Atrius · Dark'],['sober','light','Sober · Light']];
+const tile = (glyph, active, dot) => `
+  <button class="tile ${active ? 'tile-active' : ''}" type="button" title="Guild">
+    <span class="tile-mark"><span class="chip">${glyph}</span></span>
+    ${dot ? '<span class="tile-dot tile-dot-on"></span>' : ''}
+  </button>`;
+for (const [skin, theme, label] of frames) {
+  const f = document.createElement('div');
+  f.className = 'frame'; f.dataset.skin = skin; f.dataset.theme = theme;
+  f.innerHTML = `
+    <span class="frame-label">${label}</span>
+    <div class="entry">
+      <aside class="entry-rail">
+        ${tile('OF', false, false)}
+        <div class="rail-separator"></div>
+        ${tile('CO', true, true)}
+        <button class="tile" type="button" title="Join a guild" data-tile="join"><span class="glyph">+</span></button>
+      </aside>
+      <div class="entry-pane">
+        <div class="entry-column">
+          <pre class="entry-banner">╭────────╮
+│  nod   │
+╰────────╯</pre>
+          <section class="card entry-card stack">
+            <div class="row" style="align-items:center">
+              <span class="entry-mark">CO</span>
+              <div class="stack" style="gap:2px">
+                <h1 class="entry-title">Copland</h1>
+                <p class="entry-signed-in muted">copland.example.test · admin</p>
+              </div>
+            </div>
+            <label class="field"><span class="field-label">Email</span>
+              <input class="input" value="caio@copland.test" /></label>
+            <label class="field"><span class="field-label">Password</span>
+              <input class="input" type="password" value="secret" /></label>
+            <div class="row">
+              <button class="button button-primary" type="button">Unlock</button>
+              <button class="button button-ghost" type="button">Sign in again</button>
+            </div>
+            <p class="message message-error">Wrong password. Try again in 30 s.</p>
+          </section>
+        </div>
+      </div>
+    </div>`;
+  document.body.append(f);
+}
+</script></body></html>

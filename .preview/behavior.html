@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en" data-skin="atrius" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <style>*,*::before,*::after{transition:none !important;animation:none !important}</style>
+    <link rel="stylesheet" href="../dist/assets/index-CR6-0G03.css" />
+  </head>
+  <body>
+    <button class="button button-primary" id="primary" type="button">Add tool</button>
+    <pre id="out"></pre>
+    <script type="module">
+      import { applyAppearance, colorOfSlot, offeredColorSlots, resolvedTheme } from './appearance.js';
+      const root = document.documentElement;
+      const results = [];
+      const check = (name, got, want) => {
+        const pass = JSON.stringify(got) === JSON.stringify(want);
+        results.push([pass ? 'PASS' : 'FAIL', name, 'got ' + JSON.stringify(got), 'want ' + JSON.stringify(want)]);
+      };
+      const token = (name) => getComputedStyle(root).getPropertyValue(name).trim();
+      const settle = () => new Promise((resolve) => setTimeout(resolve, 260));
+      const button = document.getElementById('primary');
+      const shortHex = (hex) => (/^#[0-9a-f]{6}$/i.test(hex) && hex[1] === hex[2] && hex[3] === hex[4] && hex[5] === hex[6] ? '#' + hex[1] + hex[3] + hex[5] : hex);
+
+      applyAppearance({ skin: 'atrius', theme: 'dark', colors: { light: {}, dark: {} } });
+      await settle();
+      check('default skin', root.dataset.skin, 'atrius');
+      check('default palette', root.dataset.theme, 'dark');
+      check('atrius solid', shortHex(token('--solid-bg')), '#fff');
+      check('atrius radius', getComputedStyle(button).borderRadius, '0px');
+
+      applyAppearance({ skin: 'sober', theme: 'light', colors: { light: { accent: '#ff0000' }, dark: {} } });
+      await settle();
+      check('skin switch', root.dataset.skin, 'sober');
+      check('palette switch', root.dataset.theme, 'light');
+      check('resolved palette', resolvedTheme(), 'light');
+      check('accent token', token('--solid-bg'), '#ff0000');
+      check('primary painted', getComputedStyle(button).backgroundColor, 'rgb(255, 0, 0)');
+      check('sober radius', getComputedStyle(button).borderRadius, '6px');
+      check('sober face', getComputedStyle(document.body).fontFamily.includes('Rubik'), true);
+      await document.fonts.ready;
+      check('rubik file loaded', document.fonts.check('14px Rubik'), true);
+      check('sober slots', offeredColorSlots('sober').map((s) => s.slot).join(','), 'accent,info,warning,error');
+      check('picker colour', colorOfSlot('accent').toLowerCase(), '#ff0000');
+
+      applyAppearance({ skin: 'sober', theme: 'dark', colors: { light: { accent: '#ff0000' }, dark: {} } });
+      await settle();
+      check('light override not in dark', token('--solid-bg'), '#00dc82');
+
+      applyAppearance({ skin: 'atrius', theme: 'light', colors: { light: {}, dark: { warning: '#123456' } } });
+      await settle();
+      check('palette keeps its own colours', token('--state-wait'), '#7a6200');
+      applyAppearance({ skin: 'atrius', theme: 'dark', colors: { light: {}, dark: { warning: '#123456' } } });
+      await settle();
+      check('dark override applies', token('--state-wait'), '#123456');
+
+      applyAppearance({ skin: 'atrius', theme: 'dark', colors: { light: {}, dark: {} } });
+      check('atrius accent picker', colorOfSlot('accent').toLowerCase(), '#ff5555');
+      check('atrius error picker follows brand', colorOfSlot('error').toLowerCase(), '#ff5555');
+      check('atrius success picker', colorOfSlot('success').toLowerCase(), '#55ff55');
+      applyAppearance({ skin: 'sober', theme: 'dark', colors: { light: {}, dark: {} } });
+      check('sober error picker', colorOfSlot('error').toLowerCase().length, 7);
+
+      document.title = results.every(([pass]) => pass === 'PASS') ? 'PASS' : 'FAIL';
+      document.getElementById('out').textContent = results.map((row) => row.join(' | ')).join('\n');
+    </script>
+  </body>
+</html>

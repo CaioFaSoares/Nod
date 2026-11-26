@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Nod style preview</title>
+    <link rel="stylesheet" href="../dist/assets/index-CR6-0G03.css" id="app-css" />
+    <style>
+      /* Host page only: four frames side by side, each wearing one skin/palette. */
+      body {
+        margin: 0;
+        background: #222;
+        padding: 12px;
+        font-family: system-ui, sans-serif;
+      }
+      .previews {
+        display: grid;
+        grid-template-columns: repeat(2, 820px);
+        gap: 16px;
+      }
+      .frame {
+        width: 820px;
+        height: 760px;
+        overflow: hidden;
+        border: 2px solid #555;
+        position: relative;
+        background: var(--ink-100);
+        color: var(--ink-900);
+        font: var(--text-body);
+      }
+      .frame-label {
+        position: absolute;
+        z-index: 99;
+        top: 0;
+        right: 0;
+        padding: 2px 8px;
+        background: #000;
+        color: #fff;
+        font: 600 11px/18px system-ui;
+        letter-spacing: 0.04em;
+      }
+      .frame .shell {
+        display: grid;
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+        height: 100%;
+      }
+      .frame .main {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        min-width: 0;
+      }
+      .frame .content {
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="previews" id="previews"></div>
+    <script>
+      const frames = [
+        ['atrius', 'dark', 'Atrius · Dark'],
+        ['atrius', 'light', 'Atrius · Light'],
+        ['sober', 'light', 'Sober · Light'],
+        ['sober', 'dark', 'Sober · Dark'],
+      ];
+
+      const rail = (label) => `
+        <aside class="sidebar">
+          <button class="mark" type="button" title="Copland"><span class="chip">CO</span></button>
+          <div class="rail-separator"></div>
+          <div class="sidebar-tools">
+            <button class="tool-icon current favorite" type="button" title="Open Kanban">
+              <span class="chip">KA</span><span class="digit">1</span>
+            </button>
+            <button class="tool-icon open" type="button" title="Open Affine">
+              <span class="chip">AF</span><span class="digit">2</span>
+            </button>
+            <button class="tool-icon personal error" type="button" title="Open Planka">
+              <span class="chip">PL</span><span class="digit">3</span>
+            </button>
+            <div class="folder-head open">
+              <span class="folder-grid"><span class="chip">A</span><span class="chip">B</span></span>
+            </div>
+          </div>
+          <div class="sidebar-footer">
+            <button class="sidebar-action" type="button" title="Saved logins">
+              <span class="glyph">✷</span><span class="sidebar-action-badge">3</span>
+            </button>
+            <button class="sidebar-action" type="button" title="Settings"><span class="glyph">⚙</span></button>
+            <button class="sidebar-add" type="button" title="Add tool"><span class="glyph">+</span></button>
+          </div>
+        </aside>`;
+
+      const rows = [
+        ['KA', 'Kanban', 'kanban.example.test', 'open', 'session', 'Open'],
+        ['AF', 'Affine', 'notes.example.test', 'failed', 'failed', 'Failed'],
+        ['PL', 'Planka', 'boards.example.test', 'closed', 'manual', 'Not open'],
+      ]
+        .map(
+          ([glyph, name, host, state, login, word]) => `
+        <article class="card tool-card">
+          <div class="tool-head">
+            <span class="chip">${glyph}</span>
+            <div class="tool-titles">
+              <h2 class="tool-title">${name}</h2>
+              <p class="tool-host muted">${host}</p>
+            </div>
+          </div>
+          <p class="tool-state" data-state="${state}">${word}</p>
+          <p class="tool-login muted" data-login="${login}">${
+            login === 'session' ? 'Signed in' : login === 'failed' ? 'Sign-in failed' : 'Sign in manually'
+          }</p>
+          <div class="tool-actions" role="group">
+            <button class="icon-button icon-button-primary" type="button" data-icon="↗" title="Open">Open</button>
+            <span class="icon-slot"></span>
+            <span class="icon-slot"></span>
+            <span class="icon-slot"></span>
+            <span class="icon-slot"></span>
+            <button class="icon-button" type="button" data-icon="★" title="Favorite">Favorite</button>
+          </div>
+        </article>`,
+        )
+        .join('');
+
+      const view = (label) => `
+        <span class="frame-label">${label}</span>
+        <div class="shell">
+          ${rail(label)}
+          <div class="main">
+            <div class="content">
+              <div class="content-header">
+                <h1 class="content-title">Tools</h1>
+                <span class="muted">3 of 6 tools</span>
+                <span class="chip">admin</span>
+                <div style="margin-left:auto" class="row">
+                  <button class="button button-ghost" type="button">Lock</button>
+                  <button class="button button-primary" type="button">Add tool</button>
+                  <button class="button button-danger" type="button">Remove</button>
+                </div>
+              </div>
+              <div class="stack" style="margin-top:16px">
+                <section class="card stack">
+                  <h2>Guild connection</h2>
+                  <p class="muted">Connected to copland.example.test · synced 14:02</p>
+                  <div class="row">
+                    <label class="field" style="flex:1">
+                      <span class="field-label">Address</span>
+                      <input class="input" value="https://copland.example.test" />
+                      <span class="field-hint">The guild this Nod joined.</span>
+                    </label>
+                    <label class="field">
+                      <span class="field-label">Scope</span>
+                      <select class="input"><option>Role</option><option>Org</option></select>
+                    </label>
+                    <button class="button" type="button">Sync now</button>
+                  </div>
+                  <p class="message message-ok">Saved</p>
+                  <p class="message message-info">Waiting for your key</p>
+                  <p class="message message-error">Wrong password. Try again in 30 s.</p>
+                </section>
+                <section class="card stack">
+                  <h2>Style</h2>
+                  <p class="muted">How this machine’s window looks. It is local to this machine and never shared with the guild.</p>
+                  <div class="row">
+                    <label class="field"><span class="field-label">Skin</span>
+                      <select class="input"><option>Atrius</option><option>Nod Sober</option></select></label>
+                    <label class="field"><span class="field-label">Theme</span>
+                      <select class="input"><option>Automatic</option><option>Light</option><option>Dark</option></select></label>
+                  </div>
+                  <p class="field-hint">Colours of the light theme — Automatic follows your system, which is light right now.</p>
+                  <div class="color-grid">
+                    <div class="color-cell"><span class="field-label">Accent</span>
+                      <div class="row"><input class="color-input" type="color" value="#007f45" /></div>
+                      <span class="field-hint">Sober's one green: the solid button, the focus ring, the open tool and the current item's bar.</span></div>
+                    <div class="color-cell"><span class="field-label">Info</span>
+                      <div class="row"><input class="color-input" type="color" value="#2b6bd4" /><span class="muted">skin default</span></div>
+                      <span class="field-hint">Loading and queued states, and plain notices.</span></div>
+                    <div class="color-cell"><span class="field-label">Caution</span>
+                      <div class="row"><input class="color-input" type="color" value="#a1610a" /></div>
+                      <span class="field-hint">What waits for you: a manual sign-in, a personal tool, offline.</span></div>
+                    <div class="color-cell"><span class="field-label">Failure</span>
+                      <div class="row"><input class="color-input" type="color" value="#c23636" /><span class="muted">skin default</span></div>
+                      <span class="field-hint">Failures, and the acts that remove or revoke.</span></div>
+                  </div>
+                  <div class="row"><button class="button button-ghost" type="button">Reset colours</button></div>
+                </section>
+                <div class="home">
+                  <section class="home-section">
+                    <h2 class="home-section-title">Favorites</h2>
+                    <span class="home-section-count">3 tools</span>
+                    <div class="grid">${rows}</div>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>`;
+
+      const host = document.getElementById('previews');
+      for (const [skin, theme, label] of frames) {
+        const frame = document.createElement('div');
+        frame.className = 'frame';
+        frame.dataset.skin = skin;
+        frame.dataset.theme = theme;
+        frame.innerHTML = view(label);
+        host.append(frame);
+      }
+    </script>
+  </body>
+</html>
