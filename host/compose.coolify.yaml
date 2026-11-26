@@ -22,12 +22,12 @@
 #
 # Local check of the file itself from the repo root:
 #
-#   NOD_PUBLIC_URL=https://nod.example docker compose -f host/compose.coolify.yaml config
+#   NOD_PUBLIC_URL=https://nod.example docker compose --project-directory . -f host/compose.coolify.yaml config
 
 services:
   host:
     build:
-      context: ..
+      context: .
       dockerfile: host/Dockerfile
     environment:
       NOD_PUBLIC_URL: ${NOD_PUBLIC_URL:?NOD_PUBLIC_URL is required (the https address the proxy exposes)}

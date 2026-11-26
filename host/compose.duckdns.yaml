@@ -13,14 +13,18 @@
 #   NOD_BIND         host interface to bind (default 0.0.0.0)
 #   NOD_PORT         internal host HTTP port (default 8080)
 #
-# Local check:
-#   NOD_DOMAIN=nod.advteam.duckdns.org NOD_PUBLIC_URL=https://nod.advteam.duckdns.org:8443 \
-#   NOD_GUILD_NAME=AdvTeam DUCKDNS_TOKEN=example docker compose -f host/compose.duckdns.yaml config
+# Coolify sets `--project-directory` to the repo root, so every path in this file is relative
+# to the repo root, not to `host/`.
+#
+# Local check (from the repo root):
+#   NOD_DOMAIN=advteam-nod.duckdns.org NOD_PUBLIC_URL=https://advteam-nod.duckdns.org:8443 \
+#   NOD_GUILD_NAME=AdvTeam DUCKDNS_TOKEN=example \
+#   docker compose --project-directory . -f host/compose.duckdns.yaml config
 
 services:
   host:
     build:
-      context: ..
+      context: .
       dockerfile: host/Dockerfile
     environment:
       NOD_PUBLIC_URL: ${NOD_PUBLIC_URL:?NOD_PUBLIC_URL is required (e.g. https://nod.advteam.duckdns.org:8443)}
@@ -42,7 +46,7 @@ services:
   caddy:
     build:
       context: .
-      dockerfile: Dockerfile.caddy-duckdns
+      dockerfile: host/Dockerfile.caddy-duckdns
     depends_on:
       host:
         condition: service_healthy
@@ -54,7 +58,7 @@ services:
     ports:
       - "${NOD_BIND:-0.0.0.0}:${NOD_HTTPS_PORT:-8443}:${NOD_HTTPS_PORT:-8443}"
     volumes:
-      - ./Caddyfile.duckdns:/etc/caddy/Caddyfile:ro
+      - ./host/Caddyfile.duckdns:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
     restart: unless-stopped
