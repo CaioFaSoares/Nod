@@ -7,7 +7,7 @@
 // tab list and the geometry calls; this module only decides ids, order, link acceptance and the
 // screen rect, so page, backend and tests cannot disagree about any of them.
 
-import { originOf } from './catalog';
+import { entryOriginOf } from './catalog';
 import { TOOL_WINDOW_PREFIX, type Id, type SlotRect } from './types';
 
 // ---------------------------------------------------------------- window ids
@@ -328,7 +328,7 @@ export function parsePersistedTabs(raw: unknown): PersistedTab[] {
  */
 export function saveTarget(
   url: string,
-  entries: Array<{ id: Id; url: string }>,
+  entries: Array<{ id: Id; url: string; allowHttp?: boolean; scope?: 'org' | 'personal' }>,
 ): { kind: 'view'; entryId: Id } | { kind: 'tool' } | null {
   let parsed: URL;
   try {
@@ -342,7 +342,7 @@ export function saveTarget(
   for (const entry of entries) {
     let entryOrigin: string;
     try {
-      entryOrigin = originOf(entry.url);
+      entryOrigin = entryOriginOf(entry);
     } catch {
       continue;
     }

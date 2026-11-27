@@ -14,12 +14,14 @@ import type { Database } from 'bun:sqlite';
 import { HOST_ROUTES, type AppMeta } from '../shared/host-api';
 import { createAuthService, type AuthService } from './auth';
 import type { HostConfig } from './config';
+import type { Gateway } from './gateway';
 import { loadOrCreateHostSecret } from './keys';
 import { RepoError, createRepo, type Repo } from './repo';
 import { adminRoutes } from './routes/admin';
 import { assignmentRoutes } from './routes/assignments';
 import { authRoutes } from './routes/auth';
 import { eventRoutes } from './routes/events';
+import { gatewayRoutes } from './routes/gateway';
 import { guildRoutes } from './routes/guild';
 import { metaRoutes } from './routes/meta';
 import { personRoutes } from './routes/person';
@@ -44,6 +46,11 @@ export type AppDeps = {
    * `web/` — and a test passes its own directory, so no test reads or writes the real one.
    */
   webDir?: string;
+  /**
+   * RF-80: the gateway service `host/main.ts` built from `config.gateway` (or a test's, over a fake
+   * Caddy socket). Absent or `null` is a deployment without the gateway: its routes answer 404.
+   */
+  gateway?: Gateway | null;
 };
 
 /** SP03 §1: 256 KB for every body; a body that carries a tool icon may reach 512 KB. */
@@ -95,7 +102,7 @@ export function createApp(deps: AppDeps) {
     // All of them land on the request context, so the routes of H4 onward read the resolved
     // configuration, the open connection, the repo, the auth service and the app metadata of SP03 §3
     // instead of deriving them again.
-    .decorate({ config: deps.config, db: deps.db, repo, auth, appMeta: deps.appMeta })
+    .decorate({ config: deps.config, db: deps.db, repo, auth, appMeta: deps.appMeta, gateway: deps.gateway ?? null })
 
     // SP03 §1: the size limit, decided before the body is parsed.
     .onRequest(async ({ request }) => {
@@ -125,6 +132,7 @@ export function createApp(deps: AppDeps) {
     // access rules and the levels of the groups above stay inside them (H4's regression test).
     .use(authRoutes)
     .use(adminRoutes)
+    .use(gatewayRoutes)
     .use(stateRoutes)
     .use(eventRoutes)
     .use(guildRoutes)

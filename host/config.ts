@@ -20,7 +20,43 @@ export type HostConfig = {
    * deployment sets `WEB_UI`; the compose files turn it on as the deployment's own default.
    */
   webUi?: boolean;
+  /**
+   * RF-80: the gateway — the host drives the Caddy sidecar's admin socket to serve one name per
+   * route. `null`/absent unless the deployment sets `GATEWAY=true` (SP07 §7).
+   */
+  gateway?: GatewayConfig | null;
 };
+
+/** RF-80, SP07 §7: where the Caddy admin socket is, the names' domain and port, and the base file. */
+export type GatewayConfig = {
+  /** `CADDY_ADMIN_SOCKET`: the unix socket Caddy's `admin` listens on, shared through a volume. */
+  socket: string;
+  /** `NOD_GATEWAY_DOMAIN`: every route is `<id>.<domain>`; defaults to `NOD_PUBLIC_URL`'s host. */
+  domain: string;
+  /** `NOD_GATEWAY_PORT`: the port Caddy publishes; defaults to `NOD_PUBLIC_URL`'s port. */
+  port: number;
+  /** `NOD_GATEWAY_BASE`: the path of the Caddyfile Caddy boots with, mounted read-only here too. */
+  basePath: string;
+};
+
+const DOMAIN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+
+function parseGateway(env: Record<string, string | undefined>, publicUrl: string): GatewayConfig | null {
+  const flag = env.GATEWAY?.trim();
+  if (flag !== '1' && flag !== 'true') return null;
+  const socket = env.CADDY_ADMIN_SOCKET?.trim();
+  if (!socket) throw new ConfigError('GATEWAY is on but CADDY_ADMIN_SOCKET is not set (the Caddy admin socket)');
+  const basePath = env.NOD_GATEWAY_BASE?.trim();
+  if (!basePath) throw new ConfigError('GATEWAY is on but NOD_GATEWAY_BASE is not set (the base Caddyfile)');
+  const url = new URL(publicUrl);
+  const domain = (env.NOD_GATEWAY_DOMAIN?.trim() || url.hostname).toLowerCase();
+  if (!DOMAIN.test(domain)) throw new ConfigError(`invalid NOD_GATEWAY_DOMAIN: ${domain}`);
+  const rawPort = env.NOD_GATEWAY_PORT?.trim() || url.port || (url.protocol === 'https:' ? '443' : '80');
+  if (!/^[0-9]+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535) {
+    throw new ConfigError(`invalid NOD_GATEWAY_PORT: ${rawPort}`);
+  }
+  return { socket, domain, port: Number(rawPort), basePath };
+}
 
 export const DEFAULT_PORT = 8080;
 
@@ -58,12 +94,14 @@ export function loadConfig(env: Record<string, string | undefined>): HostConfig 
     throw new ConfigError('NOD_DATA is required (the directory holding the database and key files)');
   }
   const dev = env.NOD_DEV === '1' || env.NOD_DEV === 'true';
+  const publicUrl = parsePublicUrl(env.NOD_PUBLIC_URL?.trim(), dev);
   return {
     dataDir,
-    publicUrl: parsePublicUrl(env.NOD_PUBLIC_URL?.trim(), dev),
+    publicUrl,
     port: parsePort(env.PORT?.trim()),
     dev,
     webUi: env.WEB_UI === '1' || env.WEB_UI === 'true',
+    gateway: parseGateway(env, publicUrl),
   };
 }
 

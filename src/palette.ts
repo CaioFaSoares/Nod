@@ -66,6 +66,8 @@ export function openPalette(ctx: {
   tools: ToolStatus[];
   entries: Entry[];
   isAdmin: boolean;
+  /** A guild answers: the Settings tabs that are the host's own (RF-80's gateway) are offered. */
+  guildConnected: boolean;
   go: (target: 'home' | SettingsTab) => void;
   lock: () => void;
   /** B7: "Add personal tool" — the dialog of `src/app.ts`, opened from the palette. */
@@ -189,7 +191,7 @@ export function openPalette(ctx: {
     const inbox = 'Review shared logins';
     items.push({ label: inbox, key: matchKey(`${inbox} vault inbox`), run: () => openInbox() });
   }
-  for (const tab of settingsTabs(ctx.isAdmin)) {
+  for (const tab of settingsTabs(ctx.isAdmin, ctx.guildConnected)) {
     const label = tab.action;
     items.push({ label, key: matchKey(`${label} settings ${tab.label} ${tab.aliases}`), run: () => ctx.go(tab.id) });
   }

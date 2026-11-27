@@ -13,7 +13,16 @@ import {
 } from '../shared/auth';
 import { BUILD_MODE_STAMP, stampMode } from '../shared/build-mode';
 import { APPEARANCE_KEY, normalizeAppearance } from '../shared/appearance';
-import { auditUrl, catalogMode, exportSeed, originOf, validateEntry, validateSeed, visibleEntries } from '../shared/catalog';
+import {
+  auditUrl,
+  catalogMode,
+  entryOriginOf,
+  exportSeed,
+  originOf,
+  validateEntry,
+  validateSeed,
+  visibleEntries,
+} from '../shared/catalog';
 import { fromBase64url, toBase64url } from '../shared/encoding';
 import { HOST_ROUTES, codeKindOf, isPng } from '../shared/host-api';
 import { leftoverLocalTools, parseSnapshot } from '../shared/host-merge';
@@ -68,6 +77,8 @@ import type {
   CreateInviteRequest,
   Device,
   DeviceSession,
+  GatewayRouteRequest,
+  GatewayStatus,
   GuildInvite,
   InvitePreview,
   PresenceEntry,
@@ -948,6 +959,10 @@ const ADMIN_ONLY: Partial<Record<Method, true>> = {
   'guildInvites.list': true,
   'guildInvites.create': true,
   'guildInvites.revoke': true,
+  // RF-80: the gateway is the host's, and the admin's to manage.
+  'gateway.status': true,
+  'gateway.save': true,
+  'gateway.remove': true,
   'host.bootstrap': true,
   'host.setGuildIcon': true,
   'host.clearGuildIcon': true,
@@ -1026,6 +1041,9 @@ const HOST_WRITES: Partial<Record<Method, true>> = {
   // as a security action; a disconnected guild reaches no route, so it is refused like the rest.
   'host.revokeSession': true,
   'invites.issue': true,
+  // RF-80: the gateway routes are rows on the host's side.
+  'gateway.save': true,
+  'gateway.remove': true,
   // 0.5.0 (RF-59): both invite writes are rows on the host's side.
   'guildInvites.create': true,
   'guildInvites.revoke': true,
@@ -1072,6 +1090,8 @@ const HOST_READS: Partial<Record<Method, true>> = {
   'people.sessions': true,
   // 0.5.0 (RF-59): the guild's invites are only the host's to list.
   'guildInvites.list': true,
+  // RF-80: the gateway status is only the host's to answer.
+  'gateway.status': true,
 };
 
 /**
@@ -1183,7 +1203,7 @@ function requireToolOrigin(toolId: Id, origin: string | undefined): void {
   // same `repo.entry` it always was.
   const entry = catalogEntryOf(toolId);
   if (entry === null) throw new Error('unknown tool');
-  if (origin !== originOf(entry.url)) throw new Error('login.report only comes from the tool origin');
+  if (origin !== entryOriginOf(entry)) throw new Error('login.report only comes from the tool origin');
 }
 
 function unlockedPerson(where: string): Person {
@@ -2783,6 +2803,41 @@ const methods: { [M in Method]: Handler<M> } = {
     return await admin.revokeInvite(id);
   },
 
+  // -------------------------------------------------------------- gateway (RF-80)
+  /** The host's gateway as the Settings → Gateway tab shows it; `{ enabled: false }` when it has none. */
+  'gateway.status': async (): Promise<GatewayStatus> => {
+    const admin = hostAdminFor(guildConnection());
+    if (admin === null) throw new Error('Nod is not connected to a host');
+    return await admin.gatewayStatus();
+  },
+
+  /**
+   * One route: the upstream the host validates, and optionally the guild tool of the same id. A
+   * tool write changes the catalog, so the sync runs after it like any other admin tool write.
+   */
+  'gateway.save': async (params): Promise<GatewayStatus> => {
+    const admin = hostAdminFor(guildConnection());
+    if (admin === null) throw new Error('Nod is not connected to a host');
+    unlockedPerson('gateway.save');
+    const p = parameters(params, 'invalid route');
+    const id = text(p.id, 'invalid route');
+    const body: GatewayRouteRequest = { upstream: text(p.upstream, 'invalid upstream') };
+    if (p.tool !== undefined && p.tool !== null) {
+      const tool = parameters(p.tool, 'invalid tool');
+      body.tool = { title: text(tool.title, 'invalid title'), roles: textList(tool.roles, 'invalid roles') };
+    }
+    const status = await admin.gatewaySave(id, body);
+    if (body.tool !== undefined) await afterHostWrite();
+    return status;
+  },
+
+  'gateway.remove': async (params): Promise<true> => {
+    const admin = hostAdminFor(guildConnection());
+    if (admin === null) throw new Error('Nod is not connected to a host');
+    unlockedPerson('gateway.remove');
+    return await admin.gatewayRemove(text(parameters(params, 'invalid route').id, 'invalid route'));
+  },
+
   'host.remove': async (params) => {
     const r = required(repo, 'host.remove');
     const p = parameters(params, 'invalid removal');
@@ -3156,7 +3211,8 @@ const methods: { [M in Method]: Handler<M> } = {
 
   'catalog.probe': (params) => {
     const p = parameters(params, 'invalid address');
-    return probe(text(p.url, 'invalid address'));
+    // RF-81: the admin's Tools form probes a private-network HTTP address it is about to mark.
+    return probe(text(p.url, 'invalid address'), { allowHttp: p.allowHttp === true });
   },
 
   'catalog.save': async (params) => {

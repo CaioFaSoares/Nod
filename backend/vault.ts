@@ -22,7 +22,7 @@
 // it with the same key. Values without the `bv1.` prefix are legacy plaintext: `read` still opens
 // them so an upgrade never loses a credential. Since RF-63 the store never hands one back — the
 // keychain import of `backend/main.ts` (`importLegacy`) seals them on the way into the `secret` table.
-import { originOf } from '../shared/catalog';
+import { entryOriginOf } from '../shared/catalog';
 import { exportVault, importVault } from '../shared/vault-export';
 import {
   decryptVaultBytes,
@@ -175,7 +175,7 @@ export function createVault(deps: VaultDeps): Vault {
     // RF-38: the origin is taken before the keychain write, so a refused write leaves no trace of
     // it either. It is the entry's own canonical origin — the same value the tool window compares
     // its address against.
-    const origin = originOf(entry.url);
+    const origin = entryOriginOf(entry);
 
     const label = p.label === undefined || p.label.trim().length === 0 ? username : p.label;
     // RF-65: an item keeps the key it was created with, so replacing a credential rewrites the value

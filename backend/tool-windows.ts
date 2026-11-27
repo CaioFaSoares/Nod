@@ -20,7 +20,7 @@
 // the tool state the sidebar reads (docs/arquitetura.md §2, §4).
 
 import { adapterScript } from './login-adapter';
-import { auditUrl, originOf } from '../shared/catalog';
+import { auditUrl, entryOriginOf, shouldAutofill } from '../shared/catalog';
 import { newCascade, stepCascade } from '../shared/login-cascade';
 import { isIdentityPath } from '../shared/probe';
 import { combo, ctrlCombo, digits, shiftCombo } from '../shared/shortcuts';
@@ -259,8 +259,8 @@ interface SpawnSpec {
   address: string;
   /** the window title */
   title: string;
-  /** the address whose origin the tab belongs to; '' for an ad-hoc tab */
-  entryUrl: string;
+  /** the origin the tab belongs to (`entryOrigin`); '' for an ad-hoc tab */
+  entryOrigin: string;
   foreign: boolean;
   /** insert right after this tab (a link, an adopted popup); null appends at the end */
   after: string | null;
@@ -434,10 +434,14 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     }
   }
 
-  /** Canonical origin of an address: '' when the address is outside the catalog contract. */
-  function entryOrigin(url: string): string {
+  /**
+   * Canonical origin of an entry: '' when its address is outside the catalog contract. RF-81's
+   * private-network HTTP counts only for the guild tool the admin marked.
+   */
+  function entryOrigin(entry: Pick<Entry, 'url' | 'allowHttp' | 'scope'> | null): string {
+    if (entry === null) return '';
     try {
-      return originOf(url);
+      return entryOriginOf(entry);
     } catch {
       return '';
     }
@@ -856,7 +860,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
       return false;
     }
     if (spec.toolId !== null) failures.delete(spec.toolId);
-    const origin = spec.entryUrl === '' ? '' : entryOrigin(spec.entryUrl);
+    const origin = spec.entryOrigin;
     const tab: TabWindow = {
       windowId: spec.windowId,
       toolId: spec.toolId,
@@ -913,7 +917,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
         view: null,
         address,
         title: entry.title,
-        entryUrl: entry.url,
+        entryOrigin: entryOrigin(entry),
         foreign: entry.scope === 'personal',
         after: null,
         detached: !docked,
@@ -979,7 +983,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
         view: null,
         address: entry.url,
         title: entry.title,
-        entryUrl: entry.url,
+        entryOrigin: entryOrigin(entry),
         foreign: entry.scope === 'personal',
         after: null,
         detached: !docked,
@@ -1017,7 +1021,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
         view: index,
         address,
         title,
-        entryUrl: entry.url,
+        entryOrigin: entryOrigin(entry),
         foreign: isForeign(entry, index),
         after: null,
         detached: !docked,
@@ -1061,7 +1065,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
           view: null,
           address: href,
           title: hostOf(href),
-          entryUrl: '',
+          entryOrigin: '',
           foreign: false,
           after: active, // right after the tab the person is on (RF-66)
           detached: !docked,
@@ -1095,7 +1099,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     const tab = tabs.get(id);
     if (tab !== undefined && tab.adhoc && tab.toolId === null) {
       const entry = entryOf(toolId);
-      const origin = entryOrigin(entry?.url ?? '');
+      const origin = entryOrigin(entry);
       tab.toolId = toolId;
       tab.adhoc = false;
       tab.origin = origin;
@@ -1123,7 +1127,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     if (entry === null) return null;
     const audit = auditUrl(tab.url);
     if (audit === null || audit === '') return null;
-    return urlOrigin(audit) === entryOrigin(entry.url) ? audit : null;
+    return urlOrigin(audit) === entryOrigin(entry) ? audit : null;
   }
 
   /** Rewrites `open_tools` from the live tabs: every open, close, dock and detach lands here. */
@@ -1327,6 +1331,13 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     let fill = action.fill;
     let username: string | undefined;
     let secret: string | undefined;
+    // RF-81: over plain HTTP (a private-network guild tool) the adapter never types a password into
+    // the page; the card still offers to copy it. The attempt the step counted goes back, exactly as
+    // when the keychain has nothing (below), so the cascade reads `session`/`manual`.
+    if (fill && !shouldAutofill(tab.origin)) {
+      fill = false;
+      if (tab.cascade === stepped) tab.cascade = { ...stepped, attempts: stepped.attempts - 1 };
+    }
     if (fill) {
       let credential: { username: string; secret: string } | null = null;
       try {
@@ -1427,8 +1438,11 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
     if (tab === undefined) return undefined;
     const scheme = schemeOf(ev.url);
     if (ev.kind === 'policy') {
-      if (scheme === 'http:' && !isLoopback(ev.url)) {
-        // A20: plain http outside loopback never loads.
+      // A20: plain http outside loopback never loads — except RF-81's grant: the tab's own entry
+      // origin, which `entryOrigin` makes an `http:` origin only for a guild tool the admin marked
+      // and only on a private-network host. Any other http address stays denied, in that tab too.
+      const granted = tab.origin !== '' && tab.origin.startsWith('http:') && urlOrigin(ev.url) === tab.origin;
+      if (scheme === 'http:' && !isLoopback(ev.url) && !granted) {
         record(tab.toolId, 'navigation_blocked', auditUrl(ev.url), 'denied', scheme);
         return 'deny';
       }
@@ -2084,7 +2098,7 @@ export function createToolWindows(app: TinyApp, deps: ToolWindowsDeps): ToolWind
           view,
           address,
           title,
-          entryUrl: entry.url,
+          entryOrigin: entryOrigin(entry),
           foreign: isForeign(entry, view),
           after: null,
           detached,

@@ -70,11 +70,12 @@ describe('boot', () => {
     const version = host.db
       .query<{ value: string }, [string]>('SELECT value FROM meta WHERE key = ?')
       .get(SCHEMA_VERSION_KEY);
-    // Migration 7 landed with the guild owner (RF-64), on top of migration 6's org tool display
-    // category (RF-62), migration 5's guild invites (RF-59), migration 4's rotation signal (RF-48),
-    // migration 3's one-pair-per-person rule (`docs/canonico.md` §22) and migration 2's block 2 tables
-    // (SP01 §3–§4): a fresh `/data` now reports 7.
-    expect(version?.value).toBe('8');
+    // Migration 9 landed with RF-81's HTTP flag and RF-80's gateway routes, on top of migration 8's
+    // library fields, migration 7's guild owner (RF-64), migration 6's org tool display category
+    // (RF-62), migration 5's guild invites (RF-59), migration 4's rotation signal (RF-48), migration
+    // 3's one-pair-per-person rule (`docs/canonico.md` §22) and migration 2's block 2 tables
+    // (SP01 §3–§4): a fresh `/data` now reports 9.
+    expect(version?.value).toBe('9');
 
     host.close();
   });
@@ -109,7 +110,25 @@ describe('environment', () => {
       dev: false,
       // E04/RF-73: the portal stays off until the deployment turns it on.
       webUi: false,
+      // RF-80: so does the gateway.
+      gateway: null,
     });
+  });
+
+  test('GATEWAY needs the admin socket and the base file, and defaults to the public address (RF-80)', () => {
+    const on = { NOD_DATA: '/data', NOD_PUBLIC_URL: 'https://guild.duckdns.example:12027', GATEWAY: 'true' };
+    expect(() => loadConfig(on)).toThrow(ConfigError);
+    expect(() => loadConfig({ ...on, CADDY_ADMIN_SOCKET: '/run/caddy/admin.sock' })).toThrow(ConfigError);
+    const config = loadConfig({ ...on, CADDY_ADMIN_SOCKET: '/run/caddy/admin.sock', NOD_GATEWAY_BASE: '/etc/nod/Caddyfile.base' });
+    expect(config.gateway).toEqual({
+      socket: '/run/caddy/admin.sock',
+      domain: 'guild.duckdns.example',
+      port: 12027,
+      basePath: '/etc/nod/Caddyfile.base',
+    });
+    expect(() =>
+      loadConfig({ ...on, CADDY_ADMIN_SOCKET: '/s', NOD_GATEWAY_BASE: '/b', NOD_GATEWAY_PORT: '70000' }),
+    ).toThrow(ConfigError);
   });
 
   test('a non-https public URL is refused outside dev', () => {

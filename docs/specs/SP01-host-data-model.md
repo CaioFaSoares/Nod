@@ -78,6 +78,7 @@ CREATE TABLE entries (
   title       TEXT NOT NULL,
   category    TEXT,                               -- RF-62: display category of an org tool, or null
   url         TEXT NOT NULL,
+  allow_http  INTEGER NOT NULL DEFAULT 0,         -- RF-81: admin's private-network HTTP grant; 0 on personal rows
   icon        TEXT,                               -- data URI or null
   ord         INTEGER NOT NULL,
   auth        TEXT,                               -- JSON AuthOverride or null
@@ -226,8 +227,20 @@ edits an earlier one. The block 1 schema is migration 1; block 2 tables are migr
 `person_keys.private_sealed` (one key pair per person across machines, `docs/canonico.md` §22) is
 migration 3; `credential_holders.rotated_at` (the owner's explicit rotation signal, RF-48) is
 migration 4; `guild_invites` (the guild invites of RF-59, read by the preview and the join) is
-migration 5; `entries.category` (RF-62's display category of an org tool) is migration 6; and the
-guild owner's `meta` key `owner_id` (RF-64) is migration 7.
+migration 5; `entries.category` (RF-62's display category of an org tool) is migration 6; the
+guild owner's `meta` key `owner_id` (RF-64) is migration 7; and `entries.allow_http` (RF-81) with the
+`gateway_routes` table (RF-80) is migration 9.
+
+```sql
+-- migration 9 (RF-80): the names the Caddy sidecar serves; admin-only rows, outside the snapshot
+CREATE TABLE gateway_routes (
+  id          TEXT PRIMARY KEY,                   -- slug; also the subdomain label (<id>.<domain>)
+  upstream    TEXT NOT NULL,                      -- scheme://host:port, validated by host/gateway.ts
+  entry_id    TEXT REFERENCES entries(id) ON DELETE SET NULL,  -- the guild tool created with it
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+```
 
 Migration 7 (RF-64) writes the `meta` key `owner_id` and backfills it with the earliest-created
 person (`ORDER BY created_at, id LIMIT 1`) — the setup code always creates the first person, so that

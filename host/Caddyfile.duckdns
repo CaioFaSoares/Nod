@@ -1,6 +1,11 @@
 {
 	# Do not bind port 80 for HTTP->HTTPS redirects; the host may only have a specific port open.
 	auto_https disable_redirects
+	# RF-80 (SP07 §7): the admin API listens on a unix socket in the `caddy-admin` volume, which only
+	# this container and the host mount. Caddy runs as root and the host as `bun` (host/Dockerfile), so
+	# 0660 would lock the host out: the mode is 0666 and the volume is the boundary. The host loads
+	# this same file plus one block per gateway route through it; with GATEWAY off nothing calls it.
+	admin unix//run/caddy/admin.sock|0666
 }
 
 {$NOD_DOMAIN}:{$NOD_HTTPS_PORT:8443} {

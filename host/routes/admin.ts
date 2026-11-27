@@ -21,6 +21,7 @@
 
 import { Elysia, status, t } from 'elysia';
 
+import { entryOriginOf } from '../../shared/catalog';
 import { fromBase64url, sha256Hex } from '../../shared/encoding';
 import {
   HOST_ROUTES,
@@ -43,6 +44,7 @@ import { entryOf } from '../snapshot';
 import {
   ForbiddenError,
   NotFoundError,
+  RepoError,
   type HostPerson,
   type SessionRecord,
   type ToolInput,
@@ -104,6 +106,8 @@ const toolBody = t.Object({
    */
   orgAccount: t.Optional(t.Union([t.String({ maxLength: 120 }), t.Null()])),
   url: textSchema,
+  /** RF-81: plain HTTP to a private-network host; absent is `false`. */
+  allowHttp: t.Optional(t.Boolean()),
   icon: nullableText,
   order: t.Number(),
   roles: roleIds,
@@ -175,6 +179,20 @@ function unknown(what: string): never {
   throw new NotFoundError(`unknown ${what}`);
 }
 
+/**
+ * RF-81: the flag opens plain HTTP to a private-network host and nothing else — the same rule the
+ * Nod's validator applies (`entryOriginOf`), checked here too because the flag is what every Nod of
+ * the guild trusts. A write without the flag keeps the host's earlier contract: the URL is the Nod's.
+ */
+function assertHttpGrant(tool: Entry): void {
+  if (tool.allowHttp !== true) return;
+  try {
+    entryOriginOf({ url: tool.url, allowHttp: true, scope: 'org' });
+  } catch {
+    throw new RepoError('invalid body: url must be https or a private-network http address', 400);
+  }
+}
+
 /** SP02 §3: what the host stores is the hex SHA-256 of the normalized code, never the code. */
 async function storedCodeHash(code: string): Promise<string> {
   const normalized = normalizeCode(code);
@@ -189,6 +207,7 @@ async function storedCodeHash(code: string): Promise<string> {
  * id; the host always decides `scope`, `owner_id` and `updated_at` (SP01 §2).
  */
 function toToolInput(id: string, tool: Entry): ToolInput {
+  assertHttpGrant(tool);
   const category = tool.category ?? null;
   return {
     id,
@@ -202,6 +221,7 @@ function toToolInput(id: string, tool: Entry): ToolInput {
     orgAccount:
       typeof tool.orgAccount !== 'string' || tool.orgAccount.trim() === '' ? null : tool.orgAccount.trim(),
     url: tool.url,
+    allowHttp: tool.allowHttp === true,
     icon: tool.icon ?? null,
     order: tool.order,
     roles: tool.roles,

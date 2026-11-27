@@ -2,7 +2,7 @@
 // The seed carries no secret and never overwrites what already exists: `planSeed` returns only what
 // the database is missing (RF-27). `importSeedFile` is the same core, shared with the manual import
 // of `catalog.importFromFile`.
-import { originOf, planSeed, validateSeed } from '../shared/catalog';
+import { entryOriginOf, planSeed, validateSeed } from '../shared/catalog';
 import { bytesToBase64, typeOfMime, typeOfPath } from './icons';
 import type { Entry, Id, InviteSeed, RawIcon, Role, Seed } from '../shared/types';
 import type { Icons } from './icons';
@@ -133,7 +133,7 @@ export function gateOrigins(seed: Seed | null): string[] {
   const origins: string[] = [];
   const seen = new Set<string>();
   for (const entry of seed.entries) {
-    const origin = originOf(entry.url);
+    const origin = entryOriginOf(entry);
     if (seen.has(origin)) continue;
     seen.add(origin);
     origins.push(origin);

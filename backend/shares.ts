@@ -23,7 +23,7 @@
 // the connection arrive through `deps`, so `bun test` drives the whole module against a real
 // database, real crypto and the real host app. No secret, username, sealed body or key reaches an
 // error message, a log or a row.
-import { originOf } from '../shared/catalog';
+import { entryOriginOf } from '../shared/catalog';
 import { fromBase64url } from '../shared/encoding';
 import { open as openSealed, seal, SEAL_VERSION } from '../shared/seal';
 import type { SealPayload } from '../shared/seal';
@@ -621,7 +621,7 @@ export function createShares(deps: SharesDeps): Shares {
         v: SEAL_VERSION,
         credentialId,
         toolId: item.toolId,
-        toolOrigin: originOf(entry.url),
+        toolOrigin: entryOriginOf(entry),
         label: item.label,
         username: credential.username,
         secret: credential.secret,
@@ -718,7 +718,7 @@ export function createShares(deps: SharesDeps): Shares {
         v: SEAL_VERSION,
         credentialId,
         toolId: item.toolId,
-        toolOrigin: originOf(entry.url),
+        toolOrigin: entryOriginOf(entry),
         label: item.label,
         username: credential.username,
         secret: credential.secret,
@@ -1077,7 +1077,7 @@ export function createShares(deps: SharesDeps): Shares {
       }) ||
       entry === null ||
       entry.scope === 'personal' ||
-      originOf(entry.url) !== payload.toolOrigin
+      entryOriginOf(entry) !== payload.toolOrigin
     ) {
       return await declineInvalid(me, connection, id);
     }
@@ -1293,7 +1293,7 @@ export function createShares(deps: SharesDeps): Shares {
         v: SEAL_VERSION,
         credentialId: target.credentialId,
         toolId: item.toolId,
-        toolOrigin: originOf(tool.url),
+        toolOrigin: entryOriginOf(tool),
         label: item.label,
         username: credential.username,
         secret: credential.secret,

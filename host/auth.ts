@@ -16,6 +16,8 @@ import { Elysia, status } from 'elysia';
 import { PBKDF2_ITERATIONS } from '../shared/auth';
 import { sha256Hex, toBase64url } from '../shared/encoding';
 import { normalizeEmail, type SaltResponse } from '../shared/host-api';
+import type { HostConfig } from './config';
+import type { Gateway } from './gateway';
 import type { HostPerson, Repo, SessionRecord } from './repo';
 
 // ---------------------------------------------------------------- constants
@@ -272,6 +274,9 @@ export type HostContext = {
   request: Request;
   repo: Repo;
   auth: AuthService;
+  config: HostConfig;
+  /** RF-80: the gateway service, `null` on a deployment without `GATEWAY=true`. */
+  gateway: Gateway | null;
 };
 
 export function hostOf(ctx: unknown): HostContext {

@@ -6,7 +6,7 @@
 // keychain, and the local password is a verifier — the v1 PBKDF2 `PasswordHash` or the V2 `check`
 // of SP02 §6 — never the password or a derived key.
 import { PASSWORD_V2_ALGORITHM } from '../shared/auth';
-import { originOf } from '../shared/catalog';
+import { entryOriginOf } from '../shared/catalog';
 import type { PasswordHashV2, StoredPassword } from '../shared/auth';
 import type { ShareScope } from '../shared/host-api';
 import type {
@@ -84,7 +84,8 @@ CREATE TABLE IF NOT EXISTS tool (
   owner_id TEXT,
   category TEXT,
   tags TEXT,
-  org_account TEXT
+  org_account TEXT,
+  allow_http INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tool_view (
   tool_id TEXT NOT NULL REFERENCES tool (id) ON DELETE CASCADE,
@@ -230,11 +231,15 @@ CREATE TABLE IF NOT EXISTS secret (
  * email may exist in two guilds — the entry target, never the email alone, names the row
  * (`backend/session.ts`). Each change is guarded by the shape itself, so `migrate()` stays
  * idempotent, and no *value* a `8` database holds moves.
+ *
+ * `11` is RF-81's private-network HTTP flag of a local org tool: `tool.allow_http`, `0` on every row
+ * a `10` database holds (HTTPS-only, which is what those rows were) and on every personal row. One
+ * column of an existing table, so `addColumns` gives it.
  */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 /** The versions `migrate` completes and re-stamps: before the versioning (`0`), v2–v8, current. */
-const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION];
+const KNOWN_VERSIONS: readonly number[] = [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, SCHEMA_VERSION];
 
 /**
  * The database was created by an older Nod (v1, in Portuguese). `migrate` throws this and touches
@@ -289,6 +294,8 @@ interface ToolRow {
   tags: string | null;
   /** RF-78: the org's default account label; `null` while the guild wrote none (a personal row always). */
   org_account: string | null;
+  /** RF-81: 1 when the admin let this org row use plain HTTP on a private network (a personal row: 0). */
+  allow_http: number;
 }
 
 interface ViewRow {
@@ -933,6 +940,9 @@ export function createRepo(db: SqlDb): Repo {
     // tagless and label-less, which is what `NULL` means; a personal row stays `NULL` in both.
     addColumn('tool', 'tags', 'TEXT');
     addColumn('tool', 'org_account', 'TEXT');
+    // RF-81: the private-network HTTP flag of an org row. Every row a `10` database holds is
+    // HTTPS-only, which is what `0` means; a personal row stays `0`.
+    addColumn('tool', 'allow_http', 'INTEGER NOT NULL DEFAULT 0');
     // E07/RF-71: the guild a pending write belongs to. A `8` database's rows are all of its one
     // guild, and `backfillOutboxAddress` gives them that row's address.
     addColumn('host_outbox', 'address', "TEXT NOT NULL DEFAULT ''");
@@ -1621,6 +1631,8 @@ CREATE TABLE person_rebuilt (
       ...(l.tags === null ? {} : { tags: JSON.parse(l.tags) as string[] }),
       // RF-78: the org's default account label, `null` on a row written before the column.
       orgAccount: l.org_account,
+      // RF-81: present only when granted, so a row written before the column reads as it did.
+      ...(l.allow_http === 1 && l.scope !== 'personal' ? { allowHttp: true } : {}),
       url: l.url,
       // The icon does not leave here: the backend serves the bytes by `iconHash` (data URI, §4).
       icon: null,
@@ -1677,10 +1689,13 @@ CREATE TABLE person_rebuilt (
         : e.orgAccount !== undefined
           ? e.orgAccount
           : (previous?.org_account ?? null);
+    // RF-81: a value, not a presence — the admin's form always says it, and a validated entry that
+    // omits it is HTTPS-only. A personal row never carries it.
+    const allowHttp = scope !== 'personal' && e.allowHttp === true;
     transaction(() => {
       db.run(
-        `INSERT INTO tool (id, title, url, origin, icon_hash, sort_order, active, auth_json, probe_json, scope, owner_id, category, tags, org_account)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO tool (id, title, url, origin, icon_hash, sort_order, active, auth_json, probe_json, scope, owner_id, category, tags, org_account, allow_http)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -1694,12 +1709,13 @@ CREATE TABLE person_rebuilt (
            owner_id = excluded.owner_id,
            category = excluded.category,
            tags = excluded.tags,
-           org_account = excluded.org_account`,
+           org_account = excluded.org_account,
+           allow_http = excluded.allow_http`,
         [
           e.id,
           e.title,
           e.url,
-          originOf(e.url),
+          entryOriginOf({ url: e.url, allowHttp, scope }),
           iconHash,
           e.order,
           e.active ? 1 : 0,
@@ -1710,6 +1726,7 @@ CREATE TABLE person_rebuilt (
           category,
           tags,
           orgAccount,
+          allowHttp ? 1 : 0,
         ],
       );
       // Views and grants are rewritten wholesale: whatever did not come in the entry is gone.

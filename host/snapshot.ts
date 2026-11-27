@@ -147,6 +147,8 @@ export function entryOf(row: HostTool): Entry {
     ...(row.tags === null || row.tags === undefined ? {} : { tags: row.tags }),
     ...(row.orgAccount === null || row.orgAccount === undefined ? {} : { orgAccount: row.orgAccount }),
     url: row.url,
+    // RF-81: present only when granted, so a Nod of an older build reads every other entry unchanged.
+    ...(row.allowHttp === true ? { allowHttp: true } : {}),
     icon: row.icon,
     order: row.order,
     roles: row.roles,

@@ -5,6 +5,9 @@ import { describe, expect, test } from 'bun:test';
 import {
   auditUrl,
   categoryOf,
+  entryOriginOf,
+  isPrivateHost,
+  shouldAutofill,
   catalogMode,
   exportSeed,
   groupByCategory,
@@ -691,5 +694,80 @@ describe('the catalog a Nod older than its guild serves (O2)', () => {
     // whole of what restores the connected catalog — and the run re-reads it every time.
     expect(catalogMode(true, true)).toBe('local');
     expect(catalogMode(true, false)).toBe('connected');
+  });
+});
+
+describe('private-network HTTP (RF-81)', () => {
+  test('isPrivateHost knows the private ranges and the LAN names, and nothing public', () => {
+    const cases: Array<[string, boolean]> = [
+      ['10.0.0.5', true],
+      ['172.16.0.1', true],
+      ['172.31.255.255', true],
+      ['172.32.0.1', false],
+      ['172.15.0.1', false],
+      ['192.168.1.20', true],
+      ['192.169.1.20', false],
+      ['100.64.0.1', true],
+      ['100.127.255.254', true],
+      ['100.128.0.1', false],
+      ['8.8.8.8', false],
+      ['nas', true],
+      ['nas.local', true],
+      ['wiki.lan', true],
+      ['svc.internal', true],
+      ['printer.home.arpa', true],
+      ['example.com', false],
+      ['local', true],
+      ['evil.local.example.com', false],
+    ];
+    for (const [host, expected] of cases) expect([host, isPrivateHost(host)]).toEqual([host, expected]);
+  });
+
+  test('the flag opens HTTP to a private host only, and only for a guild tool', () => {
+    const wiki = { url: 'http://192.168.1.20:8080/start', allowHttp: true, scope: 'org' as const };
+    expect(entryOriginOf(wiki)).toBe('http://192.168.1.20:8080');
+    // A public host stays refused, flag or not.
+    expect(() => entryOriginOf({ ...wiki, url: 'http://8.8.8.8:8080' })).toThrow();
+    // A personal tool ignores the flag: HTTPS only, as before.
+    expect(() => entryOriginOf({ ...wiki, scope: 'personal' })).toThrow();
+    // Without the flag nothing changes, and `originOf` (the host address, the update URL) stays strict.
+    expect(() => entryOriginOf({ ...wiki, allowHttp: false })).toThrow();
+    expect(() => originOf('http://192.168.1.20:8080')).toThrow();
+  });
+
+  test('validateEntry reads the flag, validates the views with it, and omits it when off', () => {
+    const granted = validateEntry({
+      ...entry({ url: 'http://nas.local:5000' }),
+      allowHttp: true,
+      views: [{ label: 'Files', url: 'http://nas.local:5000/files' }],
+    });
+    expect(granted.allowHttp).toBe(true);
+    expect(granted.views.map((view) => view.url)).toEqual(['http://nas.local:5000/files']);
+    expect(() =>
+      validateEntry({
+        ...entry({ url: 'http://nas.local:5000' }),
+        allowHttp: true,
+        views: [{ label: 'Other', url: 'http://other.local:5000' }],
+      }),
+    ).toThrow('view outside the tool origin');
+    expect(() => validateEntry({ ...entry({ url: 'http://example.com' }), allowHttp: true })).toThrow();
+    expect(() => validateEntry({ ...entry(), allowHttp: 'yes' })).toThrow('invalid allowHttp');
+    expect(() =>
+      validateEntry({ ...entry({ url: 'http://nas.local:5000' }), allowHttp: true, scope: 'personal' }),
+    ).toThrow();
+    expect('allowHttp' in validateEntry(entry())).toBe(false);
+  });
+
+  test('the login adapter fills over HTTPS and loopback only', () => {
+    expect(shouldAutofill('http://10.0.0.5')).toBe(false);
+    expect(shouldAutofill('http://nas.local:5000')).toBe(false);
+    expect(shouldAutofill('https://kanban.example.com')).toBe(true);
+    expect(shouldAutofill('http://localhost:3000')).toBe(true);
+    expect(shouldAutofill('http://127.0.0.1:3000')).toBe(true);
+    expect(shouldAutofill('')).toBe(false);
+  });
+
+  test('an event describes a private HTTP address without granting it', () => {
+    expect(auditUrl('http://192.168.1.20:8080/a?token=x')).toBe('http://192.168.1.20:8080/a');
   });
 });

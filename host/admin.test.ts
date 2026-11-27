@@ -955,6 +955,53 @@ describe('org tools', () => {
     expect(clearedAnswer.orgAccount).toBeUndefined();
   });
 
+  test('PUT grants private-network HTTP only with the flag and only to a private host (RF-81)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+    const path = HOST_ROUTES.adminTool.replace(':id', 'wiki');
+
+    const granted = await put(host, path, tool('wiki', { url: 'http://192.168.1.20:8080', allowHttp: true }), admin.token);
+    expect(granted.status).toBe(200);
+    expect((await body<{ allowHttp?: boolean }>(granted)).allowHttp).toBe(true);
+    expect(host.repo.listOrgTools()[0]?.allowHttp).toBe(true);
+
+    // The signed snapshot carries the grant, so every Nod of the guild opens the tool over HTTP.
+    const state = await get(host, HOST_ROUTES.state, admin.token);
+    const snapshot = await body<{ orgTools: Array<{ id: string; allowHttp?: boolean }> }>(state);
+    expect(snapshot.orgTools.find((entry) => entry.id === 'wiki')?.allowHttp).toBe(true);
+
+    // A public host stays refused with the flag, and nothing is written.
+    const publicHttp = await put(host, path, tool('wiki', { url: 'http://8.8.8.8:8080', allowHttp: true }), admin.token);
+    expect(publicHttp.status).toBe(400);
+    expect(host.repo.listOrgTools()[0]?.url).toBe('http://192.168.1.20:8080');
+
+    // A write without the flag clears it: the wire omits a grant the row no longer carries.
+    const cleared = await put(host, path, tool('wiki', { url: 'https://wiki.example.test' }), admin.token);
+    expect(cleared.status).toBe(200);
+    expect((await body<{ allowHttp?: boolean }>(cleared)).allowHttp).toBeUndefined();
+  });
+
+  test('a personal tool never carries the HTTP grant (RF-81)', async () => {
+    const host = await startHost();
+    const admin = await setupAdmin(host);
+    // The personal write statement names no `allow_http` column, whatever the input says.
+    host.repo.savePersonalTool(
+      admin.personId,
+      {
+        id: PERSONAL_ID,
+        title: 'Mine',
+        url: 'http://192.168.1.20:8080',
+        allowHttp: true,
+        icon: null,
+        order: 0,
+        auth: null,
+        active: true,
+      },
+      instant(),
+    );
+    expect(host.repo.personalTool(admin.personId, PERSONAL_ID)?.allowHttp).toBe(false);
+  });
+
   test('DELETE refuses a tool a share still names, and removes an unshared one (F2)', async () => {
     const host = await startHost();
     const admin = await setupAdmin(host);

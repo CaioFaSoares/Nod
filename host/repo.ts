@@ -166,6 +166,8 @@ export interface HostEntry {
    */
   orgAccount: string | null;
   url: string;
+  /** RF-81: the admin let this org tool use plain HTTP on a private network; a personal entry: false. */
+  allowHttp: boolean;
   icon: string | null;
   /** `Entry.order`; the column is `ord`. */
   order: number;
@@ -178,6 +180,18 @@ export interface HostEntry {
 
 export interface HostTool extends HostEntry {
   views: HostView[];
+}
+
+/** RF-80: one row of `gateway_routes` — a name the Caddy sidecar serves and where it proxies. */
+export interface GatewayRouteRecord {
+  /** slug; also the subdomain label (`<id>.<domain>`) */
+  id: string;
+  /** validated `scheme://host:port` (`host/gateway.ts`'s `validateUpstream`) */
+  upstream: string;
+  /** the guild tool created with the route; `null` without one or after it was removed */
+  entryId: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** A view a `PUT` carries: `View` plus the id the Nod generates (SP04 §2). */
@@ -209,6 +223,11 @@ export interface EntryInput {
    * the column alone.
    */
   orgAccount?: string | null;
+  /**
+   * RF-81: the private-network HTTP flag. Optional for the same reason as the category — a personal
+   * write's statement names no `allow_http` column, so a value here is ignored for a personal tool.
+   */
+  allowHttp?: boolean;
   url: string;
   icon: string | null;
   order: number;
@@ -564,6 +583,14 @@ export interface Repo {
   saveOrgTool(tool: ToolInput, now: string): HostTool;
   removeOrgTool(id: string): void;
 
+  // gateway routes (RF-80): the names the Caddy sidecar serves; admin only
+  listGatewayRoutes(): GatewayRouteRecord[];
+  gatewayRoute(id: string): GatewayRouteRecord | null;
+  /** Upsert by id; `entryId` replaces the link (null unlinks). `404` when it names no org tool. */
+  saveGatewayRoute(route: { id: string; upstream: string; entryId: string | null }, now: string): GatewayRouteRecord;
+  /** `404` when the id is unknown. The linked tool stays (the admin removes it if they want). */
+  removeGatewayRoute(id: string): void;
+
   // personal tools and views: always filtered by owner
   listPersonalTools(personId: string): HostTool[];
   personalTool(personId: string, id: string): HostTool | null;
@@ -719,6 +746,7 @@ interface PersonRow {
 
 const ENTRY_COLUMNS = `e.id AS id, e.scope AS scope, e.owner_id AS ownerId, e.title AS title,
   e.category AS category, e.tags AS tags, e.org_account AS orgAccount, e.url AS url, e.icon AS icon,
+  e.allow_http AS allowHttp,
   e.ord AS "order", e.auth AS auth, e.active AS active, e.updated_at AS updatedAt, g.role_id AS roleId`;
 
 interface EntryRow {
@@ -730,6 +758,7 @@ interface EntryRow {
   tags: string | null;
   orgAccount: string | null;
   url: string;
+  allowHttp: number;
   icon: string | null;
   order: number;
   auth: string | null;
@@ -1095,6 +1124,7 @@ export function createRepo(db: Database): Repo {
           tags: row.tags === null ? null : (JSON.parse(row.tags) as string[]),
           orgAccount: row.orgAccount,
           url: row.url,
+          allowHttp: row.allowHttp === 1 && row.scope === 'org',
           icon: row.icon,
           order: row.order,
           roles: [],
@@ -1724,11 +1754,11 @@ export function createRepo(db: Database): Repo {
       if (existing !== null && existing.scope !== 'org') throw new ForbiddenError('not yours');
 
       db.query(
-        `INSERT INTO entries (id, scope, owner_id, title, category, tags, org_account, url, icon, ord, auth, active, updated_at)
-         VALUES (?, 'org', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO entries (id, scope, owner_id, title, category, tags, org_account, url, allow_http, icon, ord, auth, active, updated_at)
+         VALUES (?, 'org', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET title = excluded.title, category = excluded.category,
            tags = excluded.tags, org_account = excluded.org_account,
-           url = excluded.url, icon = excluded.icon,
+           url = excluded.url, allow_http = excluded.allow_http, icon = excluded.icon,
            ord = excluded.ord, auth = excluded.auth, active = excluded.active, updated_at = excluded.updated_at`,
       ).run(
         tool.id,
@@ -1737,6 +1767,7 @@ export function createRepo(db: Database): Repo {
         tool.tags === undefined || tool.tags.length === 0 ? null : JSON.stringify(tool.tags),
         tool.orgAccount ?? null,
         tool.url,
+        tool.allowHttp === true ? 1 : 0,
         tool.icon,
         tool.order,
         tool.auth === null ? null : JSON.stringify(tool.auth),
@@ -1787,6 +1818,44 @@ export function createRepo(db: Database): Repo {
     // As in `removeRole`: the cascade of views, grants and favorites is counted too.
     const changes = db.query("DELETE FROM entries WHERE id = ? AND scope = 'org'").run(id).changes;
     if (changes < 1) throw new NotFoundError('unknown tool');
+  }
+
+  // ---------------------------------------------------------------- gateway routes (RF-80)
+
+  const GATEWAY_COLUMNS = `id, upstream, entry_id AS entryId, created_at AS createdAt, updated_at AS updatedAt`;
+
+  function listGatewayRoutes(): GatewayRouteRecord[] {
+    return db.query<GatewayRouteRecord, []>(`SELECT ${GATEWAY_COLUMNS} FROM gateway_routes ORDER BY id`).all();
+  }
+
+  function gatewayRoute(id: string): GatewayRouteRecord | null {
+    return (
+      db.query<GatewayRouteRecord, [string]>(`SELECT ${GATEWAY_COLUMNS} FROM gateway_routes WHERE id = ?`).get(id) ??
+      null
+    );
+  }
+
+  function saveGatewayRoute(
+    route: { id: string; upstream: string; entryId: string | null },
+    now: string,
+  ): GatewayRouteRecord {
+    return runInTransaction(() => {
+      if (route.entryId !== null) {
+        const entry = readEntryState(route.entryId);
+        if (entry === null || entry.scope !== 'org') throw new NotFoundError('unknown tool');
+      }
+      db.query(
+        `INSERT INTO gateway_routes (id, upstream, entry_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET upstream = excluded.upstream, entry_id = excluded.entry_id,
+           updated_at = excluded.updated_at`,
+      ).run(route.id, route.upstream, route.entryId, now, now);
+      return gatewayRoute(route.id) as GatewayRouteRecord;
+    });
+  }
+
+  function removeGatewayRoute(id: string): void {
+    const changes = db.query('DELETE FROM gateway_routes WHERE id = ?').run(id).changes;
+    if (changes < 1) throw new NotFoundError('unknown route');
   }
 
   function bootstrap(input: { roles: Role[]; tools: ToolInput[] }, now: string): void {
@@ -2761,6 +2830,10 @@ export function createRepo(db: Database): Repo {
     orgToolsFor,
     saveOrgTool,
     removeOrgTool,
+    listGatewayRoutes,
+    gatewayRoute,
+    saveGatewayRoute,
+    removeGatewayRoute,
     listPersonalTools,
     personalTool,
     savePersonalTool,

@@ -255,7 +255,10 @@ The recipe is the same for any HTTP service behind a restricted port range; only
    the app service `expose` its port (no `ports`). The Caddyfile reaches the app by the **service name
    `host`** — name the new service `host`, or change that name in the Caddyfile.
 3. **New DuckDNS subdomain per project**, and a **distinct `NOD_HTTPS_PORT` per project** from the
-   allowed range (one Caddy per port; two projects cannot share one).
+   allowed range (one Caddy per port; two projects cannot share one). To serve several projects on
+   **one** port instead, give each a sub-name (`<name>.<domain>:<port>`) on a single gateway: the
+   Nod host's own (§7), or the generic kit `development/deploy/caddy-gateway/` of the public Machina
+   Gygax repository, of which these files are one concrete instance.
 4. Keep the rule: **app address = `https://<name>.duckdns.org:<port>`**, with the port, everywhere
    it is configured or shared.
 
@@ -270,3 +273,48 @@ docker compose --project-directory . -f host/compose.duckdns.yaml config
 
 Limits: DuckDNS is a third-party service (a dependency of certificate issuance and renewal, not of
 requests); the port in the link is unavoidable without 443.
+
+## 7. Gateway (RF-80)
+
+With `GATEWAY=true` the host drives the Caddy sidecar of §6 so the guild admin exposes other
+containers of the same server as `https://<id>.<domain>:<port>` — the same open port, routed by
+name — from Settings → Gateway, without a new port or a Caddy per app. Caddy does the proxy and the
+TLS; the host keeps the route table (SP01 migration 9) and reconciles. The token never reaches the
+host: each block carries the literal `{$DUCKDNS_TOKEN}`, which Caddy expands from its own
+environment.
+
+| Variable (host service) | Default | Meaning |
+| --- | --- | --- |
+| `GATEWAY` | `false` | `true` or `1` turns the gateway on |
+| `CADDY_ADMIN_SOCKET` | `/run/caddy/admin.sock` (compose) | Caddy's admin API, a unix socket in the `caddy-admin` volume |
+| `NOD_GATEWAY_BASE` | `/etc/nod/Caddyfile.base` (compose) | the same `host/Caddyfile.duckdns` Caddy boots with, mounted read-only |
+| `NOD_GATEWAY_DOMAIN` | `NOD_PUBLIC_URL`'s host | the routes are `<id>.<domain>` |
+| `NOD_GATEWAY_PORT` | `NOD_PUBLIC_URL`'s port | the port Caddy publishes |
+
+With the flag on and no socket or base path, the host refuses to start with one line; an
+unreadable base file does the same.
+
+What `host/compose.duckdns.yaml` adds:
+
+- the `caddy-admin` volume at `/run/caddy`, mounted by `caddy` and `host` only. `host/Caddyfile.duckdns`
+  sets `admin unix//run/caddy/admin.sock|0666`: Caddy runs as root and the host as `bun`, so the mode
+  is open and the volume is the boundary;
+- `extra_hosts: host.docker.internal:host-gateway` on `caddy`, for an upstream that is a port
+  published on the server (`http://host.docker.internal:<port>`);
+- the external `coolify` network on `caddy`, for an upstream that is a container name
+  (`http://<container>:<port>`); that app turns on "Connect to Predefined Network" in Coolify.
+
+Every write loads the base plus one block per route through `POST /load`; every minute, and on each
+`GET /v1/admin/gateway`, the host reads `GET /config/` and reloads when a route name is missing — so
+after a restart of `caddy` (which boots with the base only) the routes are back within 60 s. The
+timer writes no event (an event names a person); its failures go to the host log, one line per
+change, never the file it sent.
+
+On the server: redeploy with `GATEWAY=true`; Settings → Gateway shows "Caddy reachable"; add a route
+(for a service that already publishes a port, `http://host.docker.internal:<port>`) with "Add to
+catalog"; open `https://<id>.<domain>:<port>`. The DNS needs nothing: a DuckDNS sub-subdomain resolves
+to the base domain's address, and its TXT record serves DNS-01 for every sub-name.
+
+Limits: the routes are as public as their upstreams already are — v1 puts no Nod login in front
+(`docs/canonico.md` §23); an upstream on a public host is refused so the gateway is never an open
+proxy.

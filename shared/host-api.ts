@@ -72,6 +72,10 @@ export const HOST_ROUTES = {
   /** `PUT` stores a PNG and answers its digest; `DELETE` clears it with `204` (SP03 §2). */
   adminGuildIcon: '/v1/admin/guild/icon',
   adminEvents: '/v1/admin/events',
+  /** `GatewayStatus` (RF-80): `{ enabled: false }` while the deployment has no gateway. */
+  adminGateway: '/v1/admin/gateway',
+  /** `PUT` saves a route (`GatewayRouteRequest`) and answers `GatewayStatus`; `DELETE` → `204`. */
+  adminGatewayRoute: '/v1/admin/gateway/routes/:id',
   // block 2 (SP03 §3)
   /** `204`; replaces the caller's public keys, which is what a reset does (SP06 §2). */
   keys: '/v1/keys',
@@ -257,6 +261,46 @@ export interface CreateInviteRequest {
 export interface CreateInviteResponse {
   invite: GuildInvite;
   code: string;
+}
+
+/**
+ * RF-80: one name the host's Caddy sidecar serves — `url` is `https://<id>.<domain>:<port>`, and
+ * `upstream` the `scheme://host:port` it proxies to (a container name, `host.docker.internal` or a
+ * private IP). `entryId` is the guild tool created with it, `null` without one.
+ */
+export interface GatewayRoute {
+  id: Id;
+  upstream: string;
+  url: string;
+  entryId: Id | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * `GET /v1/admin/gateway` (RF-80). `enabled: false` is a deployment without `GATEWAY=true`. With it,
+ * `caddyReachable` is the last admin-API read, and `lastError` the last failure (at most 300
+ * characters, never the config the host sent).
+ */
+export type GatewayStatus =
+  | { enabled: false }
+  | {
+      enabled: true;
+      domain: string;
+      port: number;
+      caddyReachable: boolean;
+      lastAppliedAt: string | null;
+      lastError: string | null;
+      routes: GatewayRoute[];
+    };
+
+/**
+ * `PUT /v1/admin/gateway/routes/:id` (RF-80). With `tool`, the guild tool of the same id is created
+ * or updated with the route's URL, that title and those roles, and linked to the route.
+ */
+export interface GatewayRouteRequest {
+  upstream: string;
+  tool?: { title: string; roles: Id[] };
 }
 
 /** `POST /v1/auth/login` (SP03 §2). The salt came from `/v1/auth/salt` (SP02 §4). */

@@ -117,13 +117,16 @@ the personal tool and view writes and the favorites write are B7. The Nod method
 | `PUT /v1/admin/roles/:id` | `{ name, admin }` | `Role`; demoting the owner's only admin role is `403 the owner keeps an admin role`, then `409` if it would leave no admin |
 | `DELETE /v1/admin/roles/:id` | — | `204`; deleting the owner's only admin role is `403 the owner keeps an admin role`, then `409` if it would leave no admin |
 | `PUT /v1/admin/grants` | `{ roleId, entryId, granted }` | `204` |
-| `PUT /v1/admin/tools/:id` | `OrgTool` (Entry + views) | `OrgTool`; RF-62's `category` (a name of ≤ 40 characters, or `null`) travels in and out, and a body's name is trimmed |
+| `PUT /v1/admin/tools/:id` | `OrgTool` (Entry + views) | `OrgTool`; RF-62's `category` (a name of ≤ 40 characters, or `null`) travels in and out, and a body's name is trimmed; RF-81's `allowHttp` (boolean, absent = `false`) is accepted only with an `http://` address on a private-network host — `400` otherwise |
 | `DELETE /v1/admin/tools/:id` | — | `204`; `409` while a share still names the tool (`a shared credential keeps the tool`) |
 | `POST /v1/admin/tools/:id/promote` | `{ personalId }` | `OrgTool`; copies a personal tool to org, owner keeps theirs |
 | `POST /v1/admin/bootstrap` | `{ tools: OrgTool[], roles: Role[] }` | `{ created }`; only while the host has no org tools (B8a) |
 | `PUT /v1/admin/guild/icon` | `{ png }` — base64url of the PNG bytes, ≤ 512 KB decoded | `{ sha256 }`, lowercase hex of those bytes; `400` when they are not a PNG |
 | `DELETE /v1/admin/guild/icon` | — | `204`, and the next snapshot carries `guildIcon: null` |
 | `GET /v1/admin/events` | `?person&tool&from&to&limit` | `HostEvent[]` |
+| `GET /v1/admin/gateway` | — | `GatewayStatus` (RF-80): `{ enabled: false }` without `GATEWAY=true`; otherwise domain, port, `caddyReachable`, `lastAppliedAt`, `lastError` (≤ 300 characters) and `GatewayRoute[]`. The read reconciles Caddy first |
+| `PUT /v1/admin/gateway/routes/:id` | `{ upstream, tool?: { title, roles } }` | `GatewayStatus`; `upstream` is `http(s)://<container>\|host.docker.internal\|<private IPv4>:<port>`, nothing else (`400`); with `tool`, the org tool `:id` gets `url = https://<id>.<domain>:<port>`, that title and those roles. Writes `gateway_applied` or `gateway_apply_failed`; `404` without `GATEWAY=true` |
+| `DELETE /v1/admin/gateway/routes/:id` | — | `204`; the linked org tool stays. `404` for an unknown id or without `GATEWAY=true` |
 
 `POST /v1/admin/people` — the email-bound "create person + one access code" — is gone in 0.5.0: a
 guild invite creates a person (RF-59). `POST /v1/admin/people/:id/code` stays: it is the reissue for

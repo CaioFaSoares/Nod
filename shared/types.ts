@@ -12,6 +12,8 @@
 import type {
   CreateInviteRequest,
   DeviceSession,
+  GatewayRouteRequest,
+  GatewayStatus,
   GuildInvite,
   Holder,
   PresenceEntry,
@@ -76,8 +78,15 @@ export interface Entry {
    * the password stays only in the app's vault (SP06 §6).
    */
   orgAccount?: string | null;
-  /** https URL (http only on loopback); no user:password@ */
+  /** https URL (http on loopback, or on a private network with `allowHttp`); no user:password@ */
   url: string;
+  /**
+   * RF-81: the admin lets this guild tool use plain `http://` because its host is on a
+   * private network (`shared/catalog.ts`'s `isPrivateHost`). Optional so data written before the
+   * field reads as HTTPS-only; a personal tool never carries it and the host ignores it on a
+   * personal write. Over HTTP the login adapter never fills a credential (`shouldAutofill`).
+   */
+  allowHttp?: boolean;
   /** seed: path relative to resources/ or data URI; runtime: data URI or null */
   icon: string | null;
   order: number;
@@ -885,6 +894,12 @@ export interface ApiContract {
   'guildInvites.create': [CreateInviteRequest, { invite: GuildInvite; code: string; link: string }];
   /** 0.5.0 (RF-59), admin: revokes an invite; a person who already joined keeps their account. */
   'guildInvites.revoke': [{ id: Id }, true];
+  /** RF-80, admin of a connected guild: the host's gateway — `{ enabled: false }` when it has none. */
+  'gateway.status': [void, GatewayStatus];
+  /** RF-80, admin: saves one route (and with `tool`, the guild tool of the same id); the new status. */
+  'gateway.save': [{ id: Id } & GatewayRouteRequest, GatewayStatus];
+  /** RF-80, admin: removes one route; its guild tool stays. */
+  'gateway.remove': [{ id: Id }, true];
   'host.syncNow': [void, HostState];
   /**
    * `keepPersonal` is SP05 §3's choice about the local personal tools (block 2). E07/RF-71: `address`
@@ -1010,7 +1025,8 @@ export interface ApiContract {
 
   'catalog.list': [void, Entry[]];
   'catalog.get': [{ id: Id }, EntryDetails];
-  'catalog.probe': [{ url: string }, Probe];
+  /** `allowHttp` (RF-81): the admin probes a private-network `http://` address it is about to mark. */
+  'catalog.probe': [{ url: string; allowHttp?: boolean }, Probe];
   'catalog.save': [{ entry: Entry; icon?: RawIcon | null; probe?: Probe | null }, Entry];
   'catalog.remove': [{ id: Id }, true];
   'catalog.exportToFile': [{ path: string }, true];

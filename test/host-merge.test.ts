@@ -92,6 +92,23 @@ describe('parseSnapshot', () => {
     expect(rows.orgTools.map((tool) => tool.category)).toEqual(['Support', null]);
   });
 
+  test('a private-network HTTP entry never takes the rest of the snapshot with it (RF-81)', () => {
+    // The snapshot's reader checks the shape, never the address: a Nod built before RF-81 reads the
+    // same document and lists the tool, and its navigation guard (A20) refuses to load it — every
+    // other entry stays exactly as it was.
+    const rows = parseSnapshot(
+      snapshot({
+        orgTools: [
+          entry('wiki', { roles: ['team'], scope: 'org', ownerId: null, url: 'http://192.168.1.20:8080', allowHttp: true }),
+          entry('jitsi', { roles: ['team'], scope: 'org', ownerId: null }),
+        ],
+      }),
+    );
+    expect(rows.orgTools.map((tool) => tool.id)).toEqual(['wiki', 'jitsi']);
+    expect(rows.orgTools[0]?.allowHttp).toBe(true);
+    expect(rows.orgTools[1]?.allowHttp).toBeUndefined();
+  });
+
   test('refuses a category that is not a string, and never one on a personal tool', () => {
     expect(() =>
       parseSnapshot(snapshot({ orgTools: [entry('jitsi', { category: 7 } as unknown as Partial<Entry>)] })),

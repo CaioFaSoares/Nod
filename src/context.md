@@ -117,3 +117,4 @@ implementation map, not an additional requirement or an execution report.
 Block 2 review fixes: the Vault tab carries a "Credential holders" card for an admin (M7)
 — every guild credential from `holders.list`, with its holders, date, scope and revoked marker — and
 the reveal countdown is a wall-clock deadline that the page clears on `visibilitychange` (L5).
+- **RF-80/RF-81 (Settings)**: the Tools editor has an "Allow plain HTTP (private network only)" box (`allowHttp`, enabled only for a private `http://` address, sent to `catalog.probe` and `catalog.save`); Settings → Gateway (admin, connected; `gateway.status/save/remove`) lists routes and adds one, optionally with its catalog tool. `settingsTabs(admin, connected)` hides it without a guild.

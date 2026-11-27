@@ -4,7 +4,7 @@
 // timer, so the tests run the same boot on a temp data dir; only the last lines of this file touch
 // the process.
 
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Database } from 'bun:sqlite';
 
@@ -12,8 +12,10 @@ import type { AppMeta } from '../shared/host-api';
 import { createApp } from './app';
 import { loadBackupSettings, startBackupTimer, type BackupSettings } from './backup';
 import { ConfigError, loadAppMeta, loadConfig, type HostConfig } from './config';
+import { createGateway, type Gateway } from './gateway';
 import { loadOrCreateHostSecret, loadOrCreateSigningKey, type SigningKey } from './keys';
 import { applyMigrations, migrations, openDatabase } from './migrations';
+import { createRepo } from './repo';
 
 export const DATABASE_FILE = 'host.db';
 
@@ -54,20 +56,42 @@ async function start(): Promise<void> {
   }
 
   const host = await bootHost(config);
-  const app = createApp({ config, db: host.db, appMeta });
+  // RF-80, SP07 §7: the gateway reads the base Caddyfile once, here — a missing file stops the boot
+  // with one line, like a bad environment, instead of failing the first admin write.
+  let gateway: Gateway | null = null;
+  if (config.gateway) {
+    let base: string;
+    try {
+      base = readFileSync(config.gateway.basePath, 'utf8');
+    } catch {
+      console.error(`GATEWAY is on but NOD_GATEWAY_BASE cannot be read: ${config.gateway.basePath}`);
+      process.exit(1);
+    }
+    const routes = createRepo(host.db);
+    gateway = createGateway({
+      settings: { socket: config.gateway.socket, domain: config.gateway.domain, port: config.gateway.port, base },
+      routes: () => routes.listGatewayRoutes(),
+      now: () => new Date().toISOString(),
+    });
+  }
+  const app = createApp({ config, db: host.db, appMeta, gateway });
   // No hostname hardcoded: inside the container the proxy reaches the process on every interface
   // (SP07 §2).
   app.listen({ port: config.port });
   // The scheduled pass of SP07 §4 lives with the serving process; `bun run backup-now` is the
   // same pass on demand (§3).
   const timer = startBackupTimer({ db: host.db, dataDir: config.dataDir }, backups);
+  // Reconciles now and every minute: a Caddy that restarted with only its base gets the routes back.
+  const stopGateway = gateway?.start() ?? (() => undefined);
   console.info(
     `nod host listening on :${config.port} (schema ${migrations.length}); ` +
-      `backups every ${backups.everyHours} h, keeping ${backups.keep}`,
+      `backups every ${backups.everyHours} h, keeping ${backups.keep}` +
+      (config.gateway ? `; gateway on ${config.gateway.domain}:${config.gateway.port}` : ''),
   );
 
   const shutdown = () => {
     timer.stop();
+    stopGateway();
     host.close();
     process.exit(0);
   };

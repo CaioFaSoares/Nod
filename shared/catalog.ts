@@ -22,12 +22,36 @@ const CATEGORY_CONTROL = /[\u0000-\u001f\u007f]/;
 
 // ---------------------------------------------------------------- address
 
+/** RF-81: the private IPv4 ranges a guild tool may be reached over plain HTTP. */
+const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+/** RF-81: the name suffixes no public resolver answers (RFC 6762, RFC 8375, common LAN usage). */
+const PRIVATE_SUFFIXES = ['.local', '.lan', '.internal', '.home.arpa'];
+
+/**
+ * RF-81: a host that only a private network reaches — 10/8, 172.16/12, 192.168/16, 100.64/10
+ * (the carrier-grade range Tailscale hands out), a `.local`/`.lan`/`.internal`/`.home.arpa` name, or
+ * a single-label name (a LAN machine's own name). Everything else is public, and stays HTTPS-only.
+ */
+export function isPrivateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  const ip = IPV4.exec(host);
+  if (ip !== null) {
+    const [a, b, c, d] = ip.slice(1).map(Number);
+    if ([a, b, c, d].some((octet) => octet > 255)) return false;
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (!HOST.test(host) || host.startsWith('.') || host.endsWith('.')) return false;
+  if (!host.includes('.')) return host !== '';
+  return PRIVATE_SUFFIXES.some((suffix) => host.endsWith(suffix) && host.length > suffix.length);
+}
+
 /**
  * Parses an address and asserts it may host a tool. The WHATWG parser accepts hosts the app must
  * never trust — `*` (wildcards) and `_` — so the host is checked on its own; credentials in the
- * address would end up in events and in the store, so they are refused outright.
+ * address would end up in events and in the store, so they are refused outright. `allowHttp` is
+ * RF-81's: plain HTTP to a private-network host, which only `entryOriginOf` grants.
  */
-function parseAddress(url: string): URL {
+function parseAddress(url: string, opts?: { allowHttp?: boolean }): URL {
   let parsed: URL | null;
   try {
     parsed = new URL(url);
@@ -45,6 +69,11 @@ function parseAddress(url: string): URL {
     hostname === IPV6_LOOPBACK ||
     LOOPBACK_IPV4.test(hostname);
   if (parsed.protocol === 'http:' && loopback) return parsed;
+  if (parsed.protocol === 'http:' && opts?.allowHttp === true) {
+    // RF-81: the flag opens HTTP on a private network only; a public host stays refused with it.
+    if (isPrivateHost(hostname)) return parsed;
+    throw new Error('plain http is only allowed on a private network');
+  }
   throw new Error('address must be https');
 }
 
@@ -53,10 +82,44 @@ export function originOf(url: string): string {
   return parseAddress(url).origin;
 }
 
-/** Canonical URL for events: origin + pathname, never query or fragment. `null` when invalid. */
+/**
+ * RF-81: HTTP is granted only to a guild tool (`scope` other than `personal`) the admin marked with
+ * `allowHttp`. A personal tool, the host address and the update URL go through `originOf`.
+ */
+export function allowsHttp(entry: { allowHttp?: boolean; scope?: 'org' | 'personal' }): boolean {
+  return entry.allowHttp === true && entry.scope !== 'personal';
+}
+
+/** Canonical origin of a catalog entry: `originOf`, plus RF-81's private-network HTTP when granted. */
+export function entryOriginOf(entry: { url: string; allowHttp?: boolean; scope?: 'org' | 'personal' }): string {
+  return parseAddress(entry.url, { allowHttp: allowsHttp(entry) }).origin;
+}
+
+/**
+ * RF-81: the login adapter fills a credential only over HTTPS or loopback HTTP. Over plain HTTP on
+ * a private network the password would cross the wire in the clear, so the card offers to copy it
+ * instead.
+ */
+export function shouldAutofill(origin: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === 'https:') return true;
+  if (parsed.protocol !== 'http:') return false;
+  const host = parsed.hostname;
+  return host === 'localhost' || host.endsWith('.localhost') || host === IPV6_LOOPBACK || LOOPBACK_IPV4.test(host);
+}
+
+/**
+ * Canonical URL for events: origin + pathname, never query or fragment. `null` when invalid. A
+ * private-network HTTP address (RF-81) is described too: describing an address grants it nothing.
+ */
 export function auditUrl(url: string): string | null {
   try {
-    const parsed = parseAddress(url);
+    const parsed = parseAddress(url, { allowHttp: true });
     return parsed.origin + parsed.pathname;
   } catch {
     return null;
@@ -111,12 +174,12 @@ function validateAuth(v: unknown): AuthOverride {
   return auth;
 }
 
-function validateView(v: unknown, origin: string): View {
+function validateView(v: unknown, origin: string, allowHttp: boolean): View {
   const raw = record(v, 'invalid view');
   const label = requiredText(raw.label, 'view label is required');
   const url = raw.url;
   if (typeof url !== 'string') throw new Error('invalid address');
-  if (originOf(url) !== origin) throw new Error('view outside the tool origin');
+  if (parseAddress(url, { allowHttp }).origin !== origin) throw new Error('view outside the tool origin');
   const mode = raw.mode === undefined ? 'window' : raw.mode;
   if (mode !== 'window' && mode !== 'navigate') throw new Error('invalid view mode');
   return { label, url, mode };
@@ -181,13 +244,19 @@ export function validateEntry(e: unknown): Entry {
   const title = requiredText(raw.title, 'title is required');
   const url = raw.url;
   if (typeof url !== 'string') throw new Error('invalid address');
-  const origin = originOf(url);
+  // RF-81: the admin's private-network HTTP flag. A personal tool never carries it: the flag is the
+  // guild's decision, so a personal entry is validated as HTTPS-only whatever it says.
+  if (raw.allowHttp !== undefined && raw.allowHttp !== null && typeof raw.allowHttp !== 'boolean') {
+    throw new Error('invalid allowHttp');
+  }
+  const allowHttp = raw.allowHttp === true && raw.scope !== 'personal';
+  const origin = parseAddress(url, { allowHttp }).origin;
 
   const views: View[] = [];
   if (raw.views !== undefined) {
     if (!Array.isArray(raw.views)) throw new Error('invalid views');
     const rawViews: unknown[] = raw.views;
-    for (const view of rawViews) views.push(validateView(view, origin));
+    for (const view of rawViews) views.push(validateView(view, origin, allowHttp));
   }
 
   let order = 0;
@@ -209,6 +278,8 @@ export function validateEntry(e: unknown): Entry {
     tags: validateTags(raw.tags),
     orgAccount: validateOrgAccount(raw.orgAccount),
     url,
+    // Present only when granted, so an entry written before RF-81 reads exactly as it did.
+    ...(allowHttp ? { allowHttp: true } : {}),
     icon: raw.icon === undefined || raw.icon === null ? null : requiredText(raw.icon, 'invalid icon'),
     order,
     roles: raw.roles === undefined ? [] : textList(raw.roles, 'invalid roles'),

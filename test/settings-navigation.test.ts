@@ -9,8 +9,10 @@ describe('task-based Settings navigation', () => {
 
   test('admins retain every stable destination and technical screens stay advanced', () => {
     expect(settingsTabs(true).map((tab) => tab.id)).toEqual([
-      'vault', 'account', 'hosts', 'tools', 'people', 'roles', 'activity', 'catalog',
+      'vault', 'account', 'hosts', 'tools', 'people', 'gateway', 'roles', 'activity', 'catalog',
     ]);
+    // RF-80: the gateway is the host's, so a Nod without a guild does not offer it.
+    expect(settingsTabs(true, false).map((tab) => tab.id)).not.toContain('gateway');
     expect(settingsTabs(true).filter((tab) => tab.group === 'advanced').map((tab) => tab.id))
       .toEqual(['activity', 'catalog']);
   });

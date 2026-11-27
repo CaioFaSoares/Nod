@@ -249,6 +249,25 @@ INSERT INTO meta (key, value)
 ALTER TABLE entries ADD COLUMN tags TEXT;
 ALTER TABLE entries ADD COLUMN org_account TEXT;
 `,
+
+  // 9 — private-network HTTP and the gateway (RF-81, RF-80). `entries.allow_http` is the admin's
+  // flag that lets a guild tool use plain `http://` to a private-network host; `0` is what every row
+  // written before it was (HTTPS-only) and what a personal entry always stays — the personal routes
+  // never name the column. `gateway_routes` is the host's table of the names the Caddy sidecar
+  // serves (`host/gateway.ts`): the id is the slug and the subdomain label at once, `upstream` the
+  // validated `scheme://host:port` the name proxies to, and `entry_id` the guild tool the admin
+  // created with it — a tool removed later leaves the route standing, so the reference empties.
+  `
+ALTER TABLE entries ADD COLUMN allow_http INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE gateway_routes (
+  id          TEXT PRIMARY KEY,                   -- slug; also the subdomain label
+  upstream    TEXT NOT NULL,                      -- scheme://host:port (host/gateway.ts)
+  entry_id    TEXT REFERENCES entries(id) ON DELETE SET NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+`,
 ];
 
 export const SCHEMA_VERSION_KEY = 'schema_version';

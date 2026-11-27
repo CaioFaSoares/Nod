@@ -8,9 +8,9 @@ import { applyAppearance, colorOfSlot, offeredColorSlots, resolvedTheme } from '
 import { mountJoinFlow } from './join';
 import { attemptGate, runGate } from './vault-gate';
 import { button, clear, el, field, iconButton, input, message } from './ui';
-import { categoryOf, groupByCategory, orgAccountOf, originOf, slug, tagsOf } from '../shared/catalog';
+import { categoryOf, entryOriginOf, groupByCategory, isPrivateHost, orgAccountOf, slug, tagsOf } from '../shared/catalog';
 import { toBase64url } from '../shared/encoding';
-import type { DeviceSession, GuildInvite, ShareKind, ShareScope } from '../shared/host-api';
+import type { DeviceSession, GatewayStatus, GuildInvite, ShareKind, ShareScope } from '../shared/host-api';
 import type {
   AppIconChoice,
   AppIconState,
@@ -174,10 +174,20 @@ function describeProbe(probe: Probe): string {
   return 'No sign-in detected';
 }
 
-/** Origin of the address, or null when it is not a valid entry address. */
-function originOrNull(url: string): string | null {
+/** RF-81: whether the address is plain `http://` on a private network — the only one `allowHttp` may mark. */
+function privateHttp(url: string): boolean {
   try {
-    return originOf(url);
+    const parsed = new URL(url.trim());
+    return parsed.protocol === 'http:' && isPrivateHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** The editor's origin check: a private http address counts when the box is on (RF-81). */
+function editorOriginOrNull(url: string, allowHttp: boolean): string | null {
+  try {
+    return entryOriginOf({ url: url.trim(), allowHttp, scope: 'org' });
   } catch {
     return null;
   }
@@ -267,6 +277,8 @@ export function mountSettings(
     active: boolean;
     views: View[];
     noFill: boolean;
+    /** RF-81: the guild tool may use plain http on a private network */
+    allowHttp: boolean;
     /** icon picked in this edition (probe or file); null means none was picked */
     icon: RawIcon | null;
     /** true when the icon differs from the saved one — removing it is a change too */
@@ -314,6 +326,10 @@ export function mountSettings(
      * below still renders; the card carries the reason instead of the create form.
      */
     invitesUnavailable: null as string | null,
+    /** RF-80, Gateway tab: the host's status, why it cannot be read (e.g. a host too old), and the new-route form. */
+    gateway: null as GatewayStatus | null,
+    gatewayUnavailable: null as string | null,
+    gatewayForm: { id: '', upstream: '', addTool: false, title: '', roles: [] as Id[] },
     /** B8a: set once the publish offer was answered — it is offered at most one time */
     publishClosed: false,
     /**
@@ -460,7 +476,7 @@ export function mountSettings(
   /** Tools and everything else needs `admin = true`; without it no admin method is ever called. */
   function canShow(tab: SettingsTab): boolean {
     const found = TABS.find((item) => item.id === tab);
-    return found !== undefined && (!found.admin || isAdmin());
+    return found !== undefined && (!found.admin || isAdmin()) && (found.connected !== true || hasHost());
   }
 
   function roleName(id: Id): string {
@@ -597,7 +613,7 @@ export function mountSettings(
     }
 
     const tabs = el('nav', { class: 'tabs settings-navigation', aria: { label: 'Settings' } });
-    const visible = settingsTabs(isAdmin());
+    const visible = settingsTabs(isAdmin(), hasHost());
     for (const group of SETTINGS_GROUPS) {
       const entries = visible.filter((tab) => tab.group === group.id);
       if (entries.length === 0) continue;
@@ -662,6 +678,8 @@ export function mountSettings(
         return viewVault();
       case 'tools':
         return viewTools();
+      case 'gateway':
+        return viewGateway();
       case 'roles':
         return viewRoles();
       case 'people':
@@ -748,6 +766,11 @@ export function mountSettings(
         case 'tools':
           state.entries = await call('catalog.list');
           state.roles = await call('roles.list');
+          break;
+        case 'gateway':
+          state.entries = await call('catalog.list');
+          state.roles = await call('roles.list');
+          await loadGateway();
           break;
         case 'roles':
           state.roles = await call('roles.list');
@@ -3059,6 +3082,7 @@ export function mountSettings(
       active: true,
       views: [],
       noFill: false,
+      allowHttp: false,
       icon: null,
       iconChanged: false,
       savedIcon: null,
@@ -3084,6 +3108,7 @@ export function mountSettings(
       active: entry.active,
       views: entry.views.map((view) => ({ ...view })),
       noFill: entry.auth?.noFill === true,
+      allowHttp: entry.allowHttp === true,
       icon: null,
       iconChanged: false,
       savedIcon: entry.icon,
@@ -3108,7 +3133,23 @@ export function mountSettings(
     });
     address.addEventListener('input', (event) => {
       editor.url = (event.target as HTMLInputElement).value;
+      // RF-81: the box follows the address — only a private http address can keep it on.
+      if (!privateHttp(editor.url)) editor.allowHttp = false;
+      syncHttp();
     });
+    // RF-81: guild tools only (this editor never edits a personal tool).
+    const httpBox = checkbox('allow-http', editor.allowHttp, (on) => {
+      editor.allowHttp = on;
+      syncHttp();
+    });
+    const httpNote = el('p', { class: 'muted' }, 'Credentials are not auto-filled over HTTP');
+    function syncHttp(): void {
+      const allowed = privateHttp(editor.url);
+      httpBox.disabled = !allowed;
+      httpBox.checked = allowed && editor.allowHttp;
+      httpNote.hidden = !httpBox.checked;
+    }
+    syncHttp();
     card.append(
       el(
         'div',
@@ -3116,6 +3157,8 @@ export function mountSettings(
         field('Address', address),
         button(editor.isNew ? 'Get details' : 'Refresh details', () => void probe(editor)),
       ),
+      checkboxField('Allow plain HTTP (private network only)', httpBox),
+      httpNote,
     );
     if (editor.probeNote !== '') card.append(el('p', { class: 'muted' }, editor.probeNote));
 
@@ -3291,7 +3334,7 @@ export function mountSettings(
     if (editor.usualLogin !== null) {
       card.append(el('p', { class: 'muted' }, `Usually signs in via: ${editor.usualLogin}`));
     }
-    const origin = originOrNull(editor.url);
+    const origin = editorOriginOrNull(editor.url, editor.allowHttp);
     if (origin !== null && !state.info.gateOrigins.includes(origin)) {
       card.append(
         el(
@@ -3434,7 +3477,10 @@ export function mountSettings(
     state.status = { kind: 'info', text: 'Probing…' };
     render();
     try {
-      const result = await call('catalog.probe', { url: address });
+      const result = await call('catalog.probe', {
+        url: address,
+        ...(privateHttp(address) && editor.allowHttp ? { allowHttp: true } : {}),
+      });
       editor.url = result.url;
       if (result.title !== null && result.title.trim() !== '') {
         editor.title = result.title;
@@ -3509,6 +3555,7 @@ export function mountSettings(
       auth: editor.noFill ? { noFill: true } : null,
       active: editor.active,
     };
+    if (editor.allowHttp && privateHttp(editor.url)) entry.allowHttp = true;
     const params: { entry: Entry; icon?: RawIcon | null; probe?: Probe | null } = { entry };
     if (editor.iconChanged) params.icon = editor.icon;
     if (editor.probe !== null) params.probe = editor.probe;
@@ -3948,6 +3995,145 @@ export function mountSettings(
     }
     if (state.invite !== null && state.inviteFor === target.id) card.append(inviteCodeBlock(state.invite));
     return card;
+  }
+
+  // ---------------------------------------------------------------- tab: gateway
+
+  async function loadGateway(): Promise<void> {
+    state.gateway = null;
+    state.gatewayUnavailable = null;
+    try {
+      state.gateway = await call('gateway.status');
+    } catch (e) {
+      // Same as the invites card: a host too old serves no route, and the tab carries the reason.
+      state.gatewayUnavailable = errorMessage(e);
+    }
+  }
+
+  function viewGateway(): HTMLElement {
+    const box = el('section', { class: 'stack' });
+    if (state.gatewayUnavailable !== null) {
+      const note = el('div');
+      message(note, 'error', state.gatewayUnavailable);
+      box.append(el('section', { class: 'card stack' }, el('h2', {}, 'Gateway'), note));
+      return box;
+    }
+    const status = state.gateway;
+    if (status === null) {
+      box.append(el('p', { class: 'empty' }, 'Loading…'));
+      return box;
+    }
+    if (!status.enabled) {
+      box.append(
+        el('section', { class: 'card stack' }, el('h2', {}, 'Gateway'),
+          el('p', { class: 'muted' }, 'Gateway is off on this host — set GATEWAY=true on the host deployment')),
+      );
+      return box;
+    }
+    const info = el('section', { class: 'card stack' },
+      el('h2', {}, 'Gateway'),
+      el('p', {}, `Domain: ${status.domain}`),
+      el('p', {}, `Port: ${status.port}`),
+      el('p', {}, status.caddyReachable ? '✓ Caddy reachable' : '× Caddy unreachable'),
+      el('p', { class: 'muted' }, `Last applied: ${status.lastAppliedAt ?? 'never'}`),
+    );
+    if (status.lastError !== null) {
+      const note = el('div');
+      message(note, 'error', status.lastError);
+      info.append(note);
+    }
+    box.append(info);
+
+    const routes = el('section', { class: 'card stack' }, el('h2', {}, 'Routes'));
+    if (status.routes.length === 0) routes.append(el('p', { class: 'empty' }, 'No routes.'));
+    for (const route of status.routes) {
+      const tool = state.entries.find((entry) => entry.id === route.entryId);
+      routes.append(
+        el('div', { class: 'row' },
+          el('span', {}, route.url),
+          el('span', { class: 'muted' }, route.upstream),
+          el('span', { class: 'muted' }, tool?.title ?? '—'),
+          button('Remove', () => void removeRoute(route.id), { kind: 'danger' })),
+      );
+    }
+    box.append(routes);
+
+    const form = state.gatewayForm;
+    const id = input('route-id', { value: form.id, placeholder: 'route-id' });
+    id.addEventListener('input', (event) => {
+      form.id = (event.target as HTMLInputElement).value;
+    });
+    const upstream = input('route-upstream', {
+      value: form.upstream,
+      placeholder: 'http://host.docker.internal:12012 or http://<container>:<port>',
+    });
+    upstream.addEventListener('input', (event) => {
+      form.upstream = (event.target as HTMLInputElement).value;
+    });
+    const add = el('section', { class: 'card stack' }, el('h2', {}, 'New route'),
+      field('Id', id, 'A short slug'),
+      field('Upstream', upstream, 'http://host.docker.internal:12012 or http://<container>:<port>'),
+      checkboxField('Add to catalog', checkbox('route-add-tool', form.addTool, (on) => {
+        form.addTool = on;
+        if (on && form.id.trim() === '' && form.title.trim() !== '') form.id = slug(form.title);
+        render();
+      })));
+    if (form.addTool) {
+      const title = input('route-title', { value: form.title });
+      title.addEventListener('input', (event) => {
+        form.title = (event.target as HTMLInputElement).value;
+        // Suggest the id from the title until the admin types one of their own.
+        if (form.id.trim() === '' || form.id === slug(previousTitle)) {
+          form.id = slug(form.title);
+          id.value = form.id;
+        }
+        previousTitle = form.title;
+      });
+      let previousTitle = form.title;
+      add.append(
+        field('Title', title),
+        el('div', { class: 'stack' }, label('Who can use this tool'),
+          roleCheckboxes(
+            (role) => `route-role-${role.id}`,
+            (role) => form.roles.includes(role.id),
+            (role, on) => toggleIn(form.roles, role.id, on),
+          )),
+      );
+    }
+    add.append(el('div', { class: 'row' }, button('Save', () => void saveRoute(), { kind: 'primary' })));
+    box.append(add);
+    return box;
+  }
+
+  async function saveRoute(): Promise<void> {
+    const form = state.gatewayForm;
+    state.status = null;
+    const id = form.id.trim() !== '' ? form.id.trim() : slug(form.title);
+    const params: Params<'gateway.save'> = { id, upstream: form.upstream.trim() };
+    if (form.addTool) params.tool = { title: form.title.trim(), roles: [...form.roles] };
+    try {
+      state.gateway = await call('gateway.save', params);
+      state.entries = await call('catalog.list');
+      state.gatewayForm = { id: '', upstream: '', addTool: false, title: '', roles: [] };
+      state.status = { kind: 'ok', text: `Route "${id}" saved` };
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
+  }
+
+  async function removeRoute(id: Id): Promise<void> {
+    if (!confirm(`Remove the gateway route "${id}"? Its tool stays in the catalog.`)) return;
+    state.status = null;
+    try {
+      await call('gateway.remove', { id });
+      state.status = { kind: 'ok', text: `Route "${id}" removed` };
+      await loadGateway();
+      state.entries = await call('catalog.list');
+    } catch (e) {
+      state.status = { kind: 'error', text: errorMessage(e) };
+    }
+    render();
   }
 
   function viewPeople(owner: Person): HTMLElement {

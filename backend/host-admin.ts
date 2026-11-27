@@ -23,6 +23,8 @@ import {
   type CreateInviteRequest,
   type CreateInviteResponse,
   type DeviceSession,
+  type GatewayRouteRequest,
+  type GatewayStatus,
   type GuildInvite,
   type HostEvent,
   type OrgTool,
@@ -109,6 +111,15 @@ export interface HostAdmin {
   createInvite(input: CreateInviteRequest, knownRoles: Id[]): Promise<CreateInviteResponse>;
   /** `DELETE /v1/admin/invites/:id` → `204`. A person who already joined keeps their account. */
   revokeInvite(id: Id): Promise<true>;
+  /**
+   * RF-80: `GET /v1/admin/gateway`. A host older than the gateway has no such route: its 404 is
+   * `HOST_TOO_OLD`, never "the gateway is off" (that answer is the host's own `{ enabled: false }`).
+   */
+  gatewayStatus(): Promise<GatewayStatus>;
+  /** RF-80: `PUT /v1/admin/gateway/routes/:id` → the new status. */
+  gatewaySave(id: Id, body: GatewayRouteRequest): Promise<GatewayStatus>;
+  /** RF-80: `DELETE /v1/admin/gateway/routes/:id` → `204`. */
+  gatewayRemove(id: Id): Promise<true>;
   /** O1/`GET /v1/admin/people/:id/sessions` → that person's devices and their instants (SP03 §2). */
   sessions(personId: Id): Promise<DeviceSession[]>;
   /** O1/`DELETE /v1/admin/sessions/:id` → `204`; the person signs out at their next sync (SP03 §2). */
@@ -182,6 +193,9 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
       id: tool.id,
       title: tool.title,
       url: tool.url,
+      // RF-81: the admin's private-network HTTP flag travels on every org write, a value the host
+      // stores as it comes (an unchecked box is `false`, not an absence).
+      allowHttp: tool.allowHttp === true,
       icon: tool.icon ?? null,
       // RF-62: the guild's category travels on every org write — the host route accepts it and the
       // snapshot reads it back. Dropping it here is what left every category set while connected
@@ -364,6 +378,24 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
         if (error instanceof HostError && error.status === 404) throw new Error(NOT_ON_HOST);
         throw error;
       }
+      return true;
+    },
+
+    async gatewayStatus() {
+      try {
+        return await connection.request<GatewayStatus>('GET', HOST_ROUTES.adminGateway);
+      } catch (error) {
+        if (error instanceof HostError && error.status === 404) throw new Error(HOST_TOO_OLD);
+        throw error;
+      }
+    },
+
+    async gatewaySave(id, body) {
+      return await connection.request<GatewayStatus>('PUT', path(HOST_ROUTES.adminGatewayRoute, id), body);
+    },
+
+    async gatewayRemove(id) {
+      await connection.request<void>('DELETE', path(HOST_ROUTES.adminGatewayRoute, id));
       return true;
     },
 

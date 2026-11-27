@@ -1068,6 +1068,8 @@ const LATER_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
   // RF-77/RF-78 (1.0.0): the library's tags and the org's default-account label.
   ['tool', 'tags'],
   ['tool', 'org_account'],
+  // RF-81: the admin's private-network HTTP grant of a local org tool.
+  ['tool', 'allow_http'],
   ['event', 'client_id'],
   ['event', 'sent_at'],
 ];
@@ -1082,13 +1084,13 @@ function dropVaultIndexes(db: SqlDb): void {
   db.exec('DROP INDEX IF EXISTS vault_item_default');
 }
 
-describe('schema version 10 — several guilds (E07/RF-71) and the library fields (RF-77/RF-78) over the connected and shared schema (SP05 §2, SP06)', () => {
-  test('a fresh database is v10, with the two host tables, `peer_keys`, `secret` and every column of SP05 §2, K4 and the library', () => {
+describe('schema version 11 — several guilds (E07/RF-71), the library fields (RF-77/RF-78) and the HTTP grant (RF-81) over the connected and shared schema (SP05 §2, SP06)', () => {
+  test('a fresh database is v11, with the two host tables, `peer_keys`, `secret` and every column of SP05 §2, K4, the library and RF-81', () => {
     const db = memorySqlite();
     createRepo(db).migrate();
 
-    expect(SCHEMA_VERSION).toBe(10);
-    expect(userVersion(db)).toBe(10);
+    expect(SCHEMA_VERSION).toBe(11);
+    expect(userVersion(db)).toBe(11);
     expect(tableNames(db)).toEqual([
       'event',
       'host',
@@ -1150,7 +1152,7 @@ describe('schema version 10 — several guilds (E07/RF-71) and the library field
     repo.migrate();
 
     // Stamped, completed, and every row of local mode still there, value for value.
-    expect(userVersion(db)).toBe(10);
+    expect(userVersion(db)).toBe(11);
     expect(tableNames(db)).toContain('host');
     expect(tableNames(db)).toContain('host_outbox');
     expect(repo.listPeople().map((p) => p.email)).toEqual(['ana@example.test']);
@@ -1177,7 +1179,7 @@ describe('schema version 10 — several guilds (E07/RF-71) and the library field
 
     // And migrate stays idempotent on the migrated database.
     repo.migrate();
-    expect(userVersion(db)).toBe(10);
+    expect(userVersion(db)).toBe(11);
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
   });
 
@@ -1262,10 +1264,10 @@ describe('schema version 10 — several guilds (E07/RF-71) and the library field
     createRepo(fresh).migrate();
     expect(tableNames(db)).toEqual(tableNames(fresh));
     for (const table of tableNames(db)) expect(shapeOf(db, table)).toEqual(shapeOf(fresh, table));
-    expect(userVersion(db)).toBe(10);
+    expect(userVersion(db)).toBe(11);
     // Idempotent: a second migrate rewrites nothing.
     createRepo(db).migrate();
-    expect(userVersion(db)).toBe(10);
+    expect(userVersion(db)).toBe(11);
     expect(repo.hostRecords()).toHaveLength(2);
   });
 
@@ -1276,7 +1278,7 @@ describe('schema version 10 — several guilds (E07/RF-71) and the library field
 
     createRepo(db).migrate();
 
-    expect(userVersion(db)).toBe(10);
+    expect(userVersion(db)).toBe(11);
     expect(tableNames(db)).toContain('host_outbox');
   });
 
@@ -1293,7 +1295,7 @@ describe('schema version 10 — several guilds (E07/RF-71) and the library field
 
     createRepo(db).migrate();
 
-    expect(userVersion(db)).toBe(10);
+    expect(userVersion(db)).toBe(11);
     // The row it held reads as tagless and label-less — what `NULL` means, never an invented value.
     expect(repo.listEntries()).toHaveLength(1);
     expect(repo.listEntries()[0]).toMatchObject({ id: 'alpha', category: null });
@@ -1318,7 +1320,30 @@ describe('schema version 10 — several guilds (E07/RF-71) and the library field
     expect(db.all('SELECT tags FROM tool WHERE id = ?', ['p-mine'])).toEqual([{ tags: null }]);
   });
 
-  test('a v3 database gains `peer_keys` and is stamped 10, keeping its rows (SP06 §2, K1–K2)', () => {
+  test('a v10 database gains the HTTP grant column, and every row it held stays HTTPS-only (RF-81)', () => {
+    const db = memorySqlite();
+    const repo = createRepo(db);
+    repo.migrate();
+    repo.saveEntry(entry('alpha', { url: 'https://alpha.example.test/app' }));
+
+    // Back to the shape a `10` build left: the column never existed.
+    db.exec('ALTER TABLE tool DROP COLUMN allow_http');
+    db.exec('PRAGMA user_version = 10');
+
+    createRepo(db).migrate();
+
+    expect(userVersion(db)).toBe(11);
+    expect('allowHttp' in (repo.entry('alpha') ?? {})).toBe(false);
+    // A guild tool the admin marks keeps the grant; a personal row never does.
+    repo.saveEntry({ ...entry('nas', { url: 'http://nas.local:5000' }), allowHttp: true });
+    expect(repo.entry('nas')?.allowHttp).toBe(true);
+    const person = repo.createPerson({ email: 'ana@example.test', name: 'Ana', password: PASSWORD, roles: [] });
+    expect(() =>
+      repo.saveEntry({ ...entry('p-mine', { url: 'http://nas.local:5000' }), scope: 'personal', ownerId: person.id, allowHttp: true }),
+    ).toThrow();
+  });
+
+  test('a v3 database gains `peer_keys` and is stamped 11, keeping its rows (SP06 §2, K1–K2)', () => {
     const db = memorySqlite();
     const v3 = createRepo(db);
     v3.migrate();
@@ -1331,7 +1356,7 @@ describe('schema version 10 — several guilds (E07/RF-71) and the library field
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(10);
+    expect(userVersion(db)).toBe(11);
     expect(tableNames(db)).toContain('peer_keys');
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
     expect(repo.meta('seed_version')).toBe('2');
@@ -1367,7 +1392,7 @@ describe('schema version 10 — several guilds (E07/RF-71) and the library field
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(10);
+    expect(userVersion(db)).toBe(11);
     const item = repo.vaultItemById(person.id, saved.id);
     expect(item).not.toBeNull();
     // SP06 §3–§5: an item that never travelled has no credential group and the default scope.
@@ -1409,7 +1434,7 @@ describe('schema version 10 — several guilds (E07/RF-71) and the library field
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(10);
+    expect(userVersion(db)).toBe(11);
     // Every row written before the column is uncategorized, and both scopes survive.
     expect(repo.listEntries().map((e) => [e.id, e.category])).toEqual([
       ['alpha', null],
@@ -1441,7 +1466,7 @@ describe('schema version 10 — several guilds (E07/RF-71) and the library field
     const repo = createRepo(db);
     repo.migrate();
 
-    expect(userVersion(db)).toBe(10);
+    expect(userVersion(db)).toBe(11);
     expect(repo.listEntries().map((e) => e.id)).toEqual(['alpha']);
     expect(repo.secret('nod.cred.p-ana.alpha')).toBeNull();
     repo.setSecret('nod.cred.p-ana.alpha', 'bv1.first');

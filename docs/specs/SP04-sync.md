@@ -61,7 +61,8 @@ interface Snapshot {
   me: { id: Id; email: string; name: string; roles: Id[]; admin: boolean; kind: 'member' | 'client' };
   roles: Role[];                 // all roles (names are not secret inside the guild)
   orgTools: Entry[];             // org entries granted to me (all, if admin), with org views; Entry.roles filled
-                                 // and RF-62's Entry.category filled (null while the guild filed it nowhere)
+                                 // and RF-62's Entry.category filled (null while the guild filed it nowhere);
+                                 // RF-81's Entry.allowHttp present (true) only on a granted org tool
   personalTools: Entry[];        // mine, scope 'personal'
   personalViews: PersonalView[]; // mine, under any entry I see
   favorites: Id[];               // ordered

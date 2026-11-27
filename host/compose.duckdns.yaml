@@ -12,6 +12,13 @@
 #   NOD_HTTPS_PORT   external/Caddy TLS port (default 8443)
 #   NOD_BIND         host interface to bind (default 0.0.0.0)
 #   NOD_PORT         internal host HTTP port (default 8080)
+#   GATEWAY          true to let the guild admin expose other containers of this server as
+#                    https://<name>.<NOD_DOMAIN>:<NOD_HTTPS_PORT> (RF-80, docs/specs/SP07 §7)
+#   NOD_GATEWAY_DOMAIN / NOD_GATEWAY_PORT
+#                    the gateway names' domain and port (default: NOD_PUBLIC_URL's host and port)
+#
+# The gateway needs the external `coolify` network (Coolify creates it on every server) so Caddy
+# can reach containers by name; `host.docker.internal` reaches ports published on the server.
 #
 # Coolify sets `--project-directory` to the repo root, so every path in this file is relative
 # to the repo root, not to `host/`.
@@ -34,10 +41,18 @@ services:
       NOD_BACKUP_KEEP: ${NOD_BACKUP_KEEP:-14}
       PORT: ${NOD_PORT:-8080}
       WEB_UI: ${WEB_UI:-true}
+      # RF-80: off unless the deployment says so; the socket and the base file are always mounted.
+      GATEWAY: ${GATEWAY:-false}
+      CADDY_ADMIN_SOCKET: /run/caddy/admin.sock
+      NOD_GATEWAY_BASE: /etc/nod/Caddyfile.base
+      NOD_GATEWAY_DOMAIN: ${NOD_GATEWAY_DOMAIN:-}
+      NOD_GATEWAY_PORT: ${NOD_GATEWAY_PORT:-}
     expose:
       - "${NOD_PORT:-8080}"
     volumes:
       - nod-data:/data
+      - caddy-admin:/run/caddy
+      - ./host/Caddyfile.duckdns:/etc/nod/Caddyfile.base:ro
     healthcheck:
       test: [ "CMD", "bun", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT ?? '8080') + '/health').then(r => process.exit(r.ok ? 0 : 1))" ]
       interval: 30s
@@ -57,13 +72,26 @@ services:
       DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:?DUCKDNS_TOKEN is required}
     ports:
       - "${NOD_BIND:-0.0.0.0}:${NOD_HTTPS_PORT:-8443}:${NOD_HTTPS_PORT:-8443}"
+    # RF-80: a route to a port published on this server goes to host.docker.internal:<port>.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./host/Caddyfile.duckdns:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+      - caddy-admin:/run/caddy
+    networks:
+      - default
+      - coolify
     restart: unless-stopped
+
+networks:
+  # RF-80: Coolify's own network, so a route can name a container that publishes no port.
+  coolify:
+    external: true
 
 volumes:
   nod-data:
   caddy-data:
   caddy-config:
+  caddy-admin:

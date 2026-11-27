@@ -1,7 +1,7 @@
 // Network side of assisted registration (canonico §8, RF-29; docs/arquitetura.md §4).
 // Only the network lives here: fetch the page, read the HTML up to 2 MiB and try the icons up to
 // 512 KiB. Interpreting what came back is `shared/probe.ts` (pure, no `fetch`, tested with bun).
-import { originOf } from '../shared/catalog';
+import { entryOriginOf } from '../shared/catalog';
 import { analyzeHtml, detectProvider, iconType } from '../shared/probe';
 import { bytesToBase64 } from './icons';
 import type { Probe, RawIcon } from '../shared/types';
@@ -10,9 +10,14 @@ const HTML_LIMIT = 2 * 1024 * 1024;
 const ICON_LIMIT = 512 * 1024;
 const TIMEOUT_MS = 10_000;
 
-export async function probe(url: string): Promise<Probe> {
-  // An address outside https (or loopback) fails here, with the message from `shared/catalog`.
-  const origin = originOf(url);
+/**
+ * Probes an address. `allowHttp` is RF-81's: the admin's Tools form probes a private-network
+ * `http://` address it is about to mark — the same rule `entryOriginOf` applies to a guild tool.
+ */
+export async function probe(url: string, opts?: { allowHttp?: boolean }): Promise<Probe> {
+  // An address outside https (or loopback, or RF-81's private network) fails here, with the message
+  // from `shared/catalog`.
+  const origin = entryOriginOf({ url, allowHttp: opts?.allowHttp === true, scope: 'org' });
   const page = await fetchPage(url);
   const analysis = analyzeHtml(page.html, page.url);
 

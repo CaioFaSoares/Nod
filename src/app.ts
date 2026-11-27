@@ -2207,6 +2207,7 @@ function openPaletteNow(): void {
     tools,
     entries: catalog,
     isAdmin: session.person !== null && session.person.admin,
+    guildConnected: guildConnected(),
     go: (target) => {
       go(target);
     },

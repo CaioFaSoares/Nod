@@ -195,3 +195,11 @@ pure half (ids, strip order, link parsing, the slot formula, the persisted list,
 the opener as its `parentId` and nests under it in the flat `order` (the family contiguous),
 `tabs.move` reorders one parent's children with the branch traveling, and a parent's `tabs.close`
 takes its whole family (`closeTab` builds the heir from the block's neighbours).
+
+**RF-81 — private-network HTTP.** Every origin of a catalog entry goes through `shared/catalog.ts`'s
+`entryOriginOf` (tool windows, the `login.report` gate, the vault, shares, the seed's gate origins,
+the local `tool.origin` column); the host address and the update URL stay on the strict `originOf`.
+`tool-windows.ts` lets a tab load plain http only on its own granted entry origin (A20 otherwise) and
+never fills a credential where `shouldAutofill` says no; the local `tool.allow_http` column is schema
+11. **RF-80 — the gateway.** `host-admin.ts`'s `gatewayStatus`/`gatewaySave`/`gatewayRemove` behind
+the admin RPCs `gateway.status`/`gateway.save`/`gateway.remove` of `main.ts`.
