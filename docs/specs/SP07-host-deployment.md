@@ -241,6 +241,7 @@ Evidence: the files below were read; the deploy was run by the owner, who report
 | Browser shows a certificate error | Certificate not issued yet; read the `caddy` logs |
 | The Nod app refuses the address | `NOD_PUBLIC_URL` without `https://`, or without the port people actually use |
 | App signs in, the browser portal answers `origin refused` (403) | Fixed in `host/routes/web.ts`: the check compared `Origin` with the request's own `http://`, while the browser sends the proxy's `https://` address. Now `NOD_PUBLIC_URL`'s origin is accepted too — so it must equal the address in the browser's bar, port included. Needs a redeploy of the image |
+| The account works in the app, the browser portal answers `invalid credentials` (401) | Fixed in `web/main.ts`: the page derived the key from the salt's **text** bytes, the app from its **decoded** base64url bytes (SP02 §1: the salt is 16 random bytes), so the two keys never matched. Needs a redeploy of the image; no account change |
 | Build fails with `host/Dockerfile` not found | Compose run without `--project-directory` on the repo root (§6.2 step 3) |
 
 ### 6.4 Replicating for another project

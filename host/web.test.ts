@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deriveKeys, randomSalt } from '../shared/auth';
-import { toBase64url } from '../shared/encoding';
+import { fromBase64url, toBase64url } from '../shared/encoding';
 import { GUILD_NAME_ENV } from './config';
 import { issueSetupCode } from './cli/setup-code';
 import { createApp } from './app';
@@ -120,7 +120,7 @@ async function saltOf(app: HttpApp, email: string): Promise<{ salt: string; iter
 /** `authKey` of a password over the host's salt, as the page derives it (RF-75). */
 async function derivedKey(app: HttpApp, email: string, password: string): Promise<string> {
   const { salt, iterations } = await saltOf(app, email);
-  const keys = await deriveKeys(password, new TextEncoder().encode(salt), iterations);
+  const keys = await deriveKeys(password, fromBase64url(salt), iterations);
   return toBase64url(keys.authKey);
 }
 
@@ -129,7 +129,7 @@ async function setupAdmin(host: TestHost): Promise<{ token: string; personId: st
   const issued = await issueSetupCode(host.repo, new Date().toISOString());
   if (!issued.issued) throw new Error('no setup code');
   const salt = randomSalt();
-  const keys = await deriveKeys(ADMIN_PASSWORD, new TextEncoder().encode(salt), 600_000);
+  const keys = await deriveKeys(ADMIN_PASSWORD, fromBase64url(salt), 600_000);
   const response = await post(host.app, '/v1/auth/setup', {
     email: ADMIN_EMAIL,
     name: 'Ada',
@@ -244,7 +244,7 @@ describe('the web portal (RF-73)', () => {
     expect(invite.status).toBe(200);
     const { code } = (await invite.json()) as { code: string };
     const memberSalt = randomSalt();
-    const memberKeys = await deriveKeys(MEMBER_PASSWORD, new TextEncoder().encode(memberSalt), 600_000);
+    const memberKeys = await deriveKeys(MEMBER_PASSWORD, fromBase64url(memberSalt), 600_000);
     const joined = await post(host.app, '/v1/auth/join', {
       email: MEMBER_EMAIL,
       name: 'Bob',
@@ -315,7 +315,7 @@ describe('the web portal (RF-73)', () => {
       new Date().toISOString(),
     );
     const guestSalt = randomSalt();
-    const guestKeys = await deriveKeys('guest-password-1', new TextEncoder().encode(guestSalt), 600_000);
+    const guestKeys = await deriveKeys('guest-password-1', fromBase64url(guestSalt), 600_000);
     host.repo.activatePerson(
       guest.id,
       { salt: guestSalt, authHash: await Bun.password.hash(toBase64url(guestKeys.authKey), { algorithm: 'argon2id' }) },

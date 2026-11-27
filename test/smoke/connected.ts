@@ -92,7 +92,7 @@ import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { GUILD_ICON_FILE } from '../../backend/guild-icon';
 import { deriveKeys, randomSalt } from '../../shared/auth';
-import { sha256Hex, toBase64url } from '../../shared/encoding';
+import { fromBase64url, sha256Hex, toBase64url } from '../../shared/encoding';
 import {
   appDataDir as dataDir,
   freePort,
@@ -619,7 +619,7 @@ async function checkWebPortal(address: string, deps: {
 
   // The member, through the real join route: the runner's own salt, only the derived key on the wire.
   const salt = randomSalt();
-  const keys = await deriveKeys(deps.password, new TextEncoder().encode(salt), 600_000);
+  const keys = await deriveKeys(deps.password, fromBase64url(salt), 600_000);
   const joined = await fetch(`${address}/v1/auth/join`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -652,7 +652,7 @@ async function checkWebPortal(address: string, deps: {
     body: JSON.stringify({ email: deps.email }),
   });
   const saltBody = (await salted.json()) as { salt: string; iterations: number };
-  const webKeys = await deriveKeys(deps.password, new TextEncoder().encode(saltBody.salt), saltBody.iterations);
+  const webKeys = await deriveKeys(deps.password, fromBase64url(saltBody.salt), saltBody.iterations);
   const login = await fetch(`${address}/web/api/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', origin: address },

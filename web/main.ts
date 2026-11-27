@@ -8,7 +8,7 @@
 // `HttpOnly` cookie this script cannot read.
 
 import { deriveKeys } from '../shared/auth';
-import { toBase64url } from '../shared/encoding';
+import { fromBase64url, toBase64url } from '../shared/encoding';
 import {
   hostOf,
   libraryGroups,
@@ -343,7 +343,7 @@ function drawSignIn(): void {
         body: JSON.stringify({ email: email.value }),
       });
       if (!salt.ok || salt.body === null) throw new Error('the host did not answer a salt');
-      const keys = await deriveKeys(password.value, new TextEncoder().encode(salt.body.salt), salt.body.iterations);
+      const keys = await deriveKeys(password.value, fromBase64url(salt.body.salt), salt.body.iterations);
       const response = await fetch('/web/api/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json', origin: window.location.origin },
