@@ -1,0 +1,67 @@
+# The host on Coolify (SP07 §2, §5.1): one compose, one replica, one volume.
+#
+# Why a second file instead of `host/compose.yaml`: that one publishes the port to the host's
+# loopback (`ports: "${NOD_BIND:-127.0.0.1}:8080:8080"`) for a deploy where the proxy lives outside
+# the compose network. On Coolify the proxy is what attaches to this service, so the service must not
+# claim a host port at all — it only *exposes* 8080 to the compose network, and Coolify's proxy
+# (Traefik) reaches it there. Point the Coolify resource at this file.
+#
+# What the owner sets in Coolify (values, never a file — `AGENTS.md`, `docs/canonico.md` §14):
+#
+#   NOD_PUBLIC_URL        required, no default: the https address the domain resolves to, exactly
+#                          what the Nod pins (SP04 §1). The host refuses to start without it.
+#   NOD_GUILD_NAME        the guild name `GET /.well-known/nod` serves.
+#   NOD_MIN_APP_VERSION   default 0.3.0.
+#   NOD_PORT              the port the process binds — also the `expose` below; default 8080.
+#   NOD_BACKUP_EVERY_HOURS / NOD_BACKUP_KEEP   defaults 24 and 14 (SP07 §4).
+#
+# The port of the domain is `NOD_PORT`, 8080 by default (the `expose` below, the `PORT` passed to
+# the container, and the image's own `EXPOSE` of `host/Dockerfile`). The names of Coolify's own
+# fields are the owner's to confirm; what this file fixes is the port and the absence of a host
+# bind. One replica only: SQLite has a single writer (SP01 §1).
+#
+# Local check of the file itself from the repo root:
+#
+#   NOD_PUBLIC_URL=https://nod.example docker compose --project-directory . -f host/compose.coolify.yaml config
+
+services:
+  host:
+    build:
+      context: .
+      dockerfile: host/Dockerfile
+    environment:
+      NOD_PUBLIC_URL: ${NOD_PUBLIC_URL:?NOD_PUBLIC_URL is required (the https address the proxy exposes)}
+      NOD_GUILD_NAME: ${NOD_GUILD_NAME}
+      NOD_MIN_APP_VERSION: ${NOD_MIN_APP_VERSION:-0.3.0}
+      # SP07 §4: a `VACUUM INTO` pass every N hours into `/data/backups`, keeping the newest N.
+      NOD_BACKUP_EVERY_HOURS: ${NOD_BACKUP_EVERY_HOURS:-24}
+      NOD_BACKUP_KEEP: ${NOD_BACKUP_KEEP:-14}
+      # The port the process binds (`host/config.ts` reads `PORT`); the healthcheck below reads it
+      # back from the container's own environment, so it follows whichever value a deploy gives.
+      PORT: ${NOD_PORT:-8080}
+      # E04/RF-73: the web portal this deployment serves on that same port. The code stays API-only
+      # until the flag is set; the compose turns it on, and a deployment that wants the host
+      # API-only sets `WEB_UI=false`.
+      WEB_UI: ${WEB_UI:-true}
+      # Set NOD_DEV=1 only when exposing the host over plain HTTP (e.g. a temporary Coolify URL
+      # without TLS or a local tunnel). This lets `NOD_PUBLIC_URL` use `http://` and drops the
+      # `Secure` flag on the web portal cookie; note that the Nod desktop app itself still refuses
+      # non-loopback `http://` hosts (`shared/catalog.ts`).
+      NOD_DEV: ${NOD_DEV:-0}
+    # No `ports`: the container claims no host port. Coolify's proxy joins the compose network and
+    # reaches the port there; the process listens on every interface of the container (`host/main.ts`
+    # passes no hostname to `listen`), so no bind address is needed either.
+    ports:
+      - "${NOD_PORT:-8080}"
+    volumes:
+      # One volume holds `host.db`, both key files and `backups/` (SP01 §1, SP07 §4). A restore into a
+      # fresh volume copies `host.db` plus the backup's key files: the same people sign in and a
+      # pinned Nod still accepts the host. Coolify keeps named volumes across redeploys.
+      - nod-data:/data
+    healthcheck:
+      test: [ "CMD", "bun", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT ?? '8080') + '/health').then(r => process.exit(r.ok ? 0 : 1))" ]
+      interval: 30s
+    restart: unless-stopped
+
+volumes:
+  nod-data:
