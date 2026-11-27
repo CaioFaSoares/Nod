@@ -301,6 +301,13 @@ describe('the web portal (RF-73)', () => {
     expect(foreign.status).toBe(403);
     expect(await foreign.json()).toEqual({ error: 'origin refused' });
 
+    // Behind the TLS proxy the host's request URL is plain `http://`, but the browser's `Origin` is
+    // the public `https://` address (SP07 §6): that one is the host's own, with or without a port.
+    const proxied = await post(host.app, '/web/api/login', { email: ADMIN_EMAIL, authKey }, { origin: 'https://nod.example' });
+    expect(proxied.status).toBe(204);
+    const otherPort = await post(host.app, '/web/api/login', { email: ADMIN_EMAIL, authKey }, { origin: 'https://nod.example:12027' });
+    expect(otherPort.status).toBe(403);
+
     // A disabled person is as dead here as in the app's routes (SP01 §2). The owner setup created is
     // never disabled (RF-64), so this one is a second person, activated the repo's own way.
     const guest = host.repo.createPerson(

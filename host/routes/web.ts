@@ -93,12 +93,17 @@ function cookieToken(request: Request): string | null {
  * RF-76: `Origin` must be this host's own address when the browser sends it. Absent is allowed —
  * a browser always sends `Origin` on a cross-site POST, so an attacker's request cannot lose the
  * header, and a non-browser caller has no cookie to ride (E04 §3's `SameSite` plus this check).
+ *
+ * "Own address" is two things: the request's own scheme and host (direct, and dev), and the origin
+ * of `NOD_PUBLIC_URL` — behind the TLS proxy (SP07 §2, §6) the host sees plain `http://` while the
+ * browser's `Origin` is the proxy's `https://` address, so the request's scheme alone refused every
+ * production sign-in with `origin refused`.
  */
-function originAllowed(request: Request): boolean {
+function originAllowed(request: Request, publicUrl: string): boolean {
   const origin = request.headers.get('origin');
   if (origin === null) return true;
   const url = new URL(request.url);
-  return origin === `${url.protocol}//${url.host}`;
+  return origin === `${url.protocol}//${url.host}` || origin === new URL(publicUrl).origin;
 }
 
 // ---------------------------------------------------------------- the routes
@@ -198,7 +203,7 @@ export function webRoutes(deps: { webDir?: string }) {
     // alone — no token in a body a script could read.
     .post('/web/api/login', { body: loginBody }, async (ctx) => {
       const { repo, auth, config, request } = webOf(ctx);
-      if (!originAllowed(request)) return status(403, { error: 'origin refused' });
+      if (!originAllowed(request, config.publicUrl)) return status(403, { error: 'origin refused' });
       const email = ctx.body.email.trim().toLowerCase();
       if (!auth.limiter.allowEmail(email)) return rateLimited();
 
@@ -229,7 +234,7 @@ export function webRoutes(deps: { webDir?: string }) {
     // RF-74: the portal's sign-out revokes this session row, exactly like the app's own logout.
     .post('/web/api/logout', (ctx) => {
       const { repo, auth, config, request } = webOf(ctx);
-      if (!originAllowed(request)) return status(403, { error: 'origin refused' });
+      if (!originAllowed(request, config.publicUrl)) return status(403, { error: 'origin refused' });
       const { session } = callerOf(ctx);
       repo.revokeOwnSession(session.personId, session.id, auth.now());
       return new Response(null, { status: 204, headers: { 'set-cookie': clearedCookie(config.dev) } });
