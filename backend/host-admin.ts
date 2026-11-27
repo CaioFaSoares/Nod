@@ -201,6 +201,10 @@ export function createHostAdmin(connection: HostConnection): HostAdmin {
       // snapshot reads it back. Dropping it here is what left every category set while connected
       // ungrouped on the host; `?? null` is "the guild filed it nowhere" (SP03 §2, host's own null).
       category: tool.category ?? null,
+      // RF-77/RF-78: the library's two fields travel the same way. Leaving them out made every
+      // connected save clear them on the host (its route reads an absent field as none).
+      tags: [...(tool.tags ?? [])],
+      orgAccount: tool.orgAccount ?? null,
       order: tool.order,
       roles: [...tool.roles],
       views: orgViewsOf(tool.views).map((view) => ({

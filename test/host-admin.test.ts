@@ -1268,6 +1268,26 @@ describe('the Tools form\'s category reaches the host (RF-62)', () => {
     expect((await admin.saveTool(tool('jitsi', { category: 'Support' }))).category).toBe('Support');
   });
 
+  test('saveTool sends the tags and the org account, and an edit that clears them clears them (RF-77/RF-78)', async () => {
+    const running = await startHost();
+    const { admin } = await adminOf(running);
+
+    const saved = await admin.saveTool(tool('jitsi', { tags: ['meetings', 'video'], orgAccount: 'team@guild.example' }));
+    expect(saved.tags).toEqual(['meetings', 'video']);
+    expect(saved.orgAccount).toBe('team@guild.example');
+
+    // An edit of another field keeps them, because the form sends what the tool carries.
+    const renamed = await admin.saveTool(
+      tool('jitsi', { title: 'Calls', tags: ['meetings', 'video'], orgAccount: 'team@guild.example' }),
+    );
+    expect(renamed.tags).toEqual(['meetings', 'video']);
+    expect(renamed.orgAccount).toBe('team@guild.example');
+
+    const cleared = await admin.saveTool(tool('jitsi', { tags: [], orgAccount: null }));
+    expect(cleared.tags).toBeUndefined();
+    expect(cleared.orgAccount).toBeUndefined();
+  });
+
   test('the category survives the snapshot a member reads', async () => {
     const running = await startHost();
     const { admin } = await adminOf(running);
